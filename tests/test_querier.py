@@ -4884,6 +4884,47 @@ def test_a_call_keeps_a_field_where_the_maps_reach_from_it_alone_assigns_it_no_o
     assert asked == 7
 
 
+def test_a_print_that_begins_with_a_hole_is_read_on_the_line_its_markless_logger_wrote(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "f.py").write_text(
+        "def finish(job):\n"
+        "    logger.debug(f\"{job.PandaID} Finisher : Kill\")\n"
+        "    logger.debug(f\"{job.PandaID}  Priority:{job.currentPriority} End:{job.endTime}\")\n"
+        "    logger.debug(\"Finisher : Kill all\")\n"
+        "    logger.debug(\"update\")\n"
+        "    job.jobStatus = 'failed'\n"
+    )
+    stamp = "2026-01-01 00:00:00,000 panda.log.datasetManager: DEBUG    {}\n"
+    (tmp_path / "f.log").write_text("".join(stamp.format(t) for t in [
+        "7392812614 Finisher : Kill", "7392812614  Priority:900 End:2026-10-31 12:45:38", "<PandaID=1> Finisher : Kill all",
+        "updateDatasetLocality_JEDI < taskID=1 insert"]))
+    code = """
+        import json
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/f.py", "finish", (6,))
+        log = read_log("f.log")
+        got = {}
+        for row in fn.rows:
+            got[row.line] = [[row.matches(rec, "outside")[0] > 0, row.capture(rec), len(row.texts(rec))] for rec in log.records]
+        print(json.dumps([[rec.token, rec.message] for rec in log.records]))
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code)).splitlines()
+    parsed, got = json.loads(out[-2]), {int(k): v for k, v in json.loads(out[-1]).items()}
+    # a logger with no mark: the parser takes the message's first word for the token; a mark that never closes, its name
+    assert parsed[0] == ["7392812614", "Finisher : Kill"] and parsed[3][0] == "updateDatasetLocality_JEDI"
+    # the print beginning with a hole finds its record on the line as written, and reads the hole there
+    kill, priority, literal, update = got[2], got[3], got[4], got[5]
+    assert kill[0][0] is True and kill[0][1] == {"job.PandaID": "7392812614"} and kill[0][2] == 2
+    assert priority[1][0] is True and priority[1][1].get("job.currentPriority") == "900"
+    assert kill[1][0] is False and priority[0][0] is False
+    # a print with no hole first is read on the message alone, as before: "update" is not found in a mark's name
+    assert literal[2][0] is True and literal[2][2] == 1
+    assert update[3][0] is False and update[3][2] == 1
+
+
 def test_a_call_leaves_the_path_knowing_nothing_of_what_it_changes(tmp_path):
     checker = (
         "\nclass Checker:\n    def __init__(self):\n        self.logger = logger\n        self.flag = None\n        self.result = None\n\n"

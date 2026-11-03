@@ -973,6 +973,30 @@ stop.
 
 ## `which_ran`
 
+### K53. A print that begins with a hole is read on the line its logger wrote
+
+A logger with no mark of its own writes a message whose first word is the print's first hole: datasetManager's
+FinisherThr.run prints `f"{job.PandaID} Finisher : Kill"`.  The log's parser (`records.PREFIX`) takes any first
+word for the instance token, so the record is token "7392812614" and message "Finisher : Kill".  The map's pattern
+begins at the space after the hole (`\ Finisher\ :\ Kill`), so it never found the message, and no run of the writer
+was readable.  `Row.texts` reads a print that begins with a hole on the message and, failing that, on token + " " +
+message, the line as written; `matches` and `capture` take both, and the hole's value is read there.
+
+- *Only a print that begins with a hole.*  On the line, a pattern can also find a mark's own words.  For example
+  `tmpLog.debug("update")` in updateDatasetLocality_JEDI found "update" in its never-closed mark's name
+  `updateDatasetLocality_JEDI < taskID=...`.  For a print beginning with a hole, the token is that hole's value.
+- *Measured by the records* (out/tk/tk_probe.py, every answer of records, records-cut, records-cut2 and
+  records-snap, the rotated files' included).  Of the map's 235 statements whose print begins with a hole, 8 rows in
+  52 records are misread, all datasetManager's: FinisherThr.run 696, 707, 709, 727, 730 and 753, ActivatorThr.run
+  863, and ActivatorWithRuleThr.run 963.  22 rows are read on the message, since their loggers have a mark.
+- *Measured by the walks* (tk1 against ck1).  Only MJ-transferring-stuck's text moves, in m-cut and m-cut2: its
+  datasetManager pass now reads its printed values, and run:735 is excluded with [730] not in the run, in place of
+  all four of its must rows.
+
+*Shows:* nothing of its own; the rows of such a print are found and captured.
+*Revisit:* when the map's pattern for a markless logger's print says where the message begins (the token split
+off), or the parser knows which loggers have a mark.
+
 ### K21. Runs of the key in several logs are one run only where one ran inside a call the other made
 
 H2 reads a run of another log as a part of the question's run (`which_ran.inside_call`) where both name the same

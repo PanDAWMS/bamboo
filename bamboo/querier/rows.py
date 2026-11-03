@@ -576,6 +576,8 @@ _MAP_HOLE = re.compile(
     re.S,
 )
 _UNESCAPED_META = re.compile(r"(?<!\\)[][(){}?*+|^$.]")
+#: a print whose text begins with a hole and a space (``f"{job.PandaID} Finisher : Kill"``): ``Row.texts``
+LEADING_HOLE = re.compile(r"f?[\"']\{[^}]+\}[ ]")
 
 
 def _map_literal(pattern: str) -> int:
@@ -685,13 +687,25 @@ class Row:
             return True
         return mode == "outside" and bool(self.shapes) and all(usable(s) for s in self.shapes)
 
+    def texts(self, record: Record) -> list[str]:
+        """What this row's patterns are read on in *record*: its message, and for a print that begins with a hole the
+        line as the logger wrote it.  A logger with no mark of its own writes that hole's value first, and the log's
+        parser takes it for the token (``records.PREFIX``): ``f"{job.PandaID} Finisher : Kill"`` is the token
+        ``7392812614`` and the message ``Finisher : Kill``, while the map's pattern begins at the space after the hole
+        (KNOWN_ISSUES.md K53)."""
+        if record.token and LEADING_HOLE.match(self.text):
+            return [record.text, f"{record.token} {record.text}"]
+        return [record.text]
+
     def matches(self, record: Record, mode: str) -> tuple[int, str]:
-        """``(literal, source)`` of the best pattern that finds the record; ``(0, "")`` when none does."""
+        """``(literal, source)`` of the best pattern that finds the record (:meth:`texts`); ``(0, "")`` when none
+        does."""
         best = (0, "")
         if not self.written_by(record):
             return best
+        texts = self.texts(record)
         for regex, literal, source in self.patterns(mode):
-            if literal > best[0] and regex.search(record.text):
+            if literal > best[0] and any(regex.search(t) for t in texts):
                 best = (literal, source)
         return best
 
@@ -711,9 +725,9 @@ class Row:
             if not usable(shape):
                 continue
             pattern, groups = _regex(shape, True)
-            m = re.search(pattern, record.text, re.S)
-            if m:
-                return {groups[g]: v for g, v in m.groupdict().items() if not groups[g].endswith("(appended)")}
+            for text in self.texts(record):
+                if m := re.search(pattern, text, re.S):
+                    return {groups[g]: v for g, v in m.groupdict().items() if not groups[g].endswith("(appended)")}
         return {}
 
 
