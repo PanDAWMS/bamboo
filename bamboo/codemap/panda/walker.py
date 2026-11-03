@@ -288,6 +288,15 @@ def deep_binds(stmt: ast.AST) -> set[str]:
     return {t for n in own_nodes(stmt) for t, _ in binds(n)}
 
 
+def text_of(node: ast.AST) -> str:
+    """``ast.unparse`` of *node*, kept on it: every path through a test reads it again."""
+    held = getattr(node, "_walker_text", None)
+    if held is None:
+        held = ast.unparse(node)
+        node._walker_text = held  # type: ignore[attr-defined]
+    return held
+
+
 def can_raise(node: ast.AST) -> bool:
     """Whether *node* calls anything but a logger."""
     return any(isinstance(n, ast.Call) and not is_log_call(n) for n in own_nodes(node))
@@ -689,6 +698,19 @@ class Path:
             sorted(self.facts.items()),
         )
 
+    def rough_key(self) -> tuple:
+        """A part of :meth:`key_parts`, cheap to read: paths it tells apart are not equal.  A reader's
+        :meth:`key_parts` extends the base's, so this stays a part of it."""
+        return (
+            self.arm,
+            self.left.split(" ")[0] if self.left else "",
+            self.seen,
+            len(self.state),
+            len(self.facts),
+            len(self.marks),
+            self.target_called,
+        )
+
     def agree(self, target: str) -> tuple:
         """What paths :func:`widen` joins must agree on: the arm, the rows passed, how they left and the target."""
         return (
@@ -752,10 +774,15 @@ def value_key(v: Any) -> str:
 
 
 def merge(paths: list[Path]) -> list[Path]:
-    """One of each set of equal paths, the first."""
-    kept: dict[str, Path] = {}
-    for p in paths:
-        kept.setdefault(p.key(), p)
+    """One of each set of equal paths, the first.  Paths are told apart first by what is cheap to read of them
+    (:meth:`Path.rough_key`), and only paths alike in that are compared whole (:meth:`Path.key`)."""
+    if len(paths) < 2:
+        return paths
+    rough = [p.rough_key() for p in paths]
+    alike = Counter(rough)
+    kept: dict[tuple, Path] = {}
+    for p, r in zip(paths, rough, strict=True):
+        kept.setdefault((r, p.key()) if alike[r] > 1 else (r,), p)
     return list(kept.values())
 
 
@@ -969,11 +996,11 @@ class Walker:
             if (
                 self.target
                 and self.target not in q.state
-                and affects(self.target, chains(ast.unparse(s.test)))
+                and affects(self.target, chains(text_of(s.test)))
             ):
                 q.prior += (
                     (
-                        ast.unparse(s.test),
+                        text_of(s.test),
                         outcome,
                         tuple(sorted(q.state.items(), key=lambda kv: kv[0])),
                     ),
@@ -989,7 +1016,7 @@ class Walker:
             return
         try:
             solved = evaluate.solve(
-                ast.unparse(test), outcome, self.env(q, with_holes=False)
+                text_of(test), outcome, self.env(q, with_holes=False)
             )
         except Exception:
             return
@@ -1081,11 +1108,12 @@ class Walker:
             if (
                 t != self.target
                 and v is not evaluate.UNKNOWN
+                and root(t) in roots
                 and changed(value_reading(t, v))
             ):
                 q.state[t] = evaluate.UNKNOWN
         for atom in facts:
-            if changed(readings(atom)):
+            if any(root(c) in roots for c in chains(atom)) and changed(readings(atom)):
                 del q.facts[atom]
         if (
             self.target_attr
