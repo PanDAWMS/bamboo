@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap.models import Anchor, Branch, JunctionNode
+from bamboo.codemap.models import OFF_ROW_NO_WRITE, Anchor, Branch, JunctionNode, OffRow
 
 PACKAGE = "pkg"
 
@@ -972,6 +972,33 @@ def test_the_arms_that_move_a_subject_off_a_value_leave_out_the_ones_writing_it_
     assert answer.holes == [
         "pkg/gone.py::vanished -- a write the record has no function for"
     ]
+
+
+
+def test_in_memory_the_arms_that_move_a_subject_off_a_value_leave_out_only_the_ones_writing_it(tmp_path):
+    """From ``running`` in memory: an arm whose row must hold ``activated``, or whose object is written to no row, still moves the object."""
+    record = _record(tmp_path, mod=("def update(job):\n    pass\n"))
+    junctions = [
+        _junction(
+            "pkg/mod.py::update",
+            2,
+            [
+                ("running", []),
+                ("failed", ["jobStatus=activated"]),
+                ("finished", ["jobStatus IN (activated,running)"]),
+                ("cancelled", []),
+            ],
+        ),
+        _junction("pkg/gone.py::vanished", 3, [("failed", [])]),
+    ]
+    junctions[0].branches[3].off_row = OffRow(why=OFF_ROW_NO_WRITE, functions=["pkg/mod.py::update"])
+
+    on_the_row = reach.moving_off(junctions, record, "JobSpec.jobStatus", "running")
+    in_memory = reach.moving_off_in_memory(junctions, record, "JobSpec.jobStatus", "running")
+
+    assert on_the_row.arms == {"pkg/mod.py::update": ["finished@2"]}
+    assert in_memory.arms == {"pkg/mod.py::update": ["failed@2", "finished@2", "cancelled@2"]}
+    assert in_memory.unmatched == ["pkg/gone.py::vanished"]
 
 
 def test_a_write_the_record_has_no_function_for_leaves_no_answer(tmp_path):

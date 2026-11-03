@@ -11,7 +11,8 @@ call somewhere below whose way on is not known (``None``).
 :func:`graph` records, per function, where each call it makes goes
 (:class:`ReachNode`); :class:`ReachGraph` answers from those rows alone.
 Nothing in a row depends on the subject or the value: those decide only
-where a closure ends, and the junctions say that (:func:`moving_off`).
+where a closure ends, and the junctions say that (:func:`moving_off`; in
+memory, :func:`moving_off_in_memory`).
 
 A call goes on into the definitions :meth:`calls.Calls.callees` places it
 at.  A method found by inheritance runs as the object's class
@@ -44,6 +45,7 @@ from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
+    Branch,
     JunctionNode,
     Reach,
     ReachCall,
@@ -3178,23 +3180,48 @@ def moving_off(
     nothing.
     """
     column = subject.rsplit(".", 1)[-1].lower()
+
+    def on_the_row(branch: Branch) -> bool:
+        return branch.off_row is None and not any(
+            (required := required_values(term)) is not None and required[0] == column and value not in required[1]
+            for term in branch.row_precondition
+        )
+
+    return _moving(junctions, record, subject, value, on_the_row)
+
+
+def moving_off_in_memory(
+    junctions: list[JunctionNode], record: ReachGraph, subject: str, value: str
+) -> Destination:
+    """The arms that can move *subject* off *value* in an object held in memory, per function of the record.
+
+    Every arm writing another value, as :func:`moving_off` reads one, with
+    the row left unread: an arm whose row precondition requires the row to
+    hold something else, or whose object the records prove is written to no
+    row, still moves the object it runs on, which need not hold what a row
+    holds, nor be one's.
+    """
+    return _moving(junctions, record, subject, value, lambda branch: True)
+
+
+def _moving(
+    junctions: list[JunctionNode],
+    record: ReachGraph,
+    subject: str,
+    value: str,
+    moves: Callable[[Branch], bool],
+) -> Destination:
+    """The arms of *subject*'s junctions writing another value than *value* that *moves* keeps, per function."""
     arms: dict[str, list[str]] = {}
     unmatched: list[str] = []
     for junction in junctions:
         if junction.subject != subject:
             continue
-        kept = []
-        for branch in junction.branches:
-            if branch.outcome == value or branch.off_row is not None:
-                continue
-            if any(
-                (required := required_values(term)) is not None
-                and required[0] == column
-                and value not in required[1]
-                for term in branch.row_precondition
-            ):
-                continue
-            kept.append(f"{branch.outcome}@{branch.line}")
+        kept = [
+            f"{branch.outcome}@{branch.line}"
+            for branch in junction.branches
+            if branch.outcome != value and moves(branch)
+        ]
         if not kept:
             continue
         owner = _junction_function(junction, record)
