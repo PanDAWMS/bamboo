@@ -27,8 +27,9 @@ What is read from a record:
   the strings) reads a file only up to its last record returned -- whichever string's it is, so a string cut earlier
   is read past its cut -- unless the record says where every string of the ask was read: ``searched``, closed
   stretches in the covers' form (one a cut ends stops the second before the cut string's last record's), a second of
-  the covers counted read only inside one.  A file with no margin (today's, read to the time it
-  was asked) is read up to a second before its end: a record stamped just before can be written after.  A file whose
+  the covers counted read only inside one.  A file with no margin (today's: read to the time it
+  was asked, or over the asks' windows to where its read stopped, ``covers_to``) is read up to a second before its
+  end: a record stamped just before can be written after.  A file whose
   start is not known (the oldest kept) covers every second before its end but makes none searched.  ``covers`` null
   (a tail holding no stamp) counts for nothing.  What of the window is not searched is :attr:`Log.holes`;
 * the service of each machine: a log from JEDI's machines says that their clocks were not all measured
@@ -171,9 +172,12 @@ class _Gathered:
         self.asked = False  # whether any record named a machine to ask
         self.fragments = 0
         self.rank: dict[tuple[str, str], datetime.datetime] = {}  # (machine, file) -> its end, to order the files
-        #: (machine, end) of the rotated files read whole: past such an end there is a file to widen into (today's
-        #: file, read to the time it was asked, has none: asking again only reads it later)
-        self.rotated_ends: set[tuple[str, datetime.datetime]] = set()
+        #: (machine, last second read) of the files that go on past it: a rotated file read whole (the next file
+        #: follows), or today's file whose read stopped before a record (``covers_to`` "end_stamp", the harness's
+        #: a02e8fd: it is read over the asks' windows); past such an end there is more to widen into.  Today's file
+        #: read to the time it was asked (``covers_to`` "asked", or no ``covers_to`` and no margin) has none: asking
+        #: again only reads it later
+        self.continued_ends: set[tuple[str, datetime.datetime]] = set()
 
     def add(self, record: dict) -> None:
         # a wider record read for a narrower ask (RecordedLogs._within): its records holding the ask's strings, each
@@ -215,14 +219,17 @@ class _Gathered:
                     read_to, stop = None, f"{name} was {f.get('status') or 'not read'}"
                 elif cut and searched is None:
                     read_to, stop = _t(last) if last else None, f"the answer of {name} was cut at 1 MB after its last record"
+                elif (to := f.get("covers_to") or ("rotation" if f.get("margin_s") else "asked")) == "list":
+                    read_to, stop = None, f"{name} was listed, not read"
                 else:
                     read_to = end if f.get("margin_s") else end - _SECOND
-                    stop = "" if f.get("margin_s") else f"{name} was read to the time it was asked"
+                    stop = ("" if to == "rotation" else f"{name} was read to the time it was asked" if to == "asked"
+                            else f"the read of {name} stopped at {_text(end)}, past the window asked")
                     if cut:
                         # a string of the ask was cut: the record says where every one of them was read
                         stop = f"the answer of {name} was cut at 1 MB, and its record says every string was read only so far"
-                    if f.get("margin_s"):
-                        self.rotated_ends.add((machine, end))
+                    if to in ("rotation", "end_stamp"):
+                        self.continued_ends.add((machine, read_to))
                 self.files.append(_File(machine, _t(start) if start else None, end, read_to, name, stop, searched))
 
     def log(self, name: str) -> Log:
@@ -461,10 +468,10 @@ class RecordedLogs:
                 continue
             again = set(asked) if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
-            # again), nor past today's file's end: the run is read as cut there
+            # again), nor past today's file's end where it was read to the time asked: the run is read as cut there
             if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
                 widen.setdefault((m, (_text(lo[0] - _SECOND), window[1])), set()).update(again)
-            if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in got.rotated_ends:
+            if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in got.continued_ends:
                 widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(again)
         why = f"a run within {int(EDGE.total_seconds() // 60)} min of an end of what was searched"
         for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())], notes):
@@ -607,7 +614,8 @@ def _whole_in(got: _Gathered):
 def _edges_in(got: _Gathered):
     """``edges(machine, first, last)``: for records from *first* to *last* that ``_whole_in`` does not read as whole,
     the ends of what was searched they lie near and why each is there, or a stretch not searched among them; ``""``
-    where they are whole.  An end is where a file was read only so far (cut at 1 MB, read to the time it was asked,
+    where they are whole.  An end is where a file was read only so far (cut at 1 MB, read to the time it was asked or
+    to where a read over the asks' windows stopped,
     not answered), where the oldest file kept starts with no known start, or where no file read covers what lies past
     it (the window asked)."""
     whole = _whole_in(got)

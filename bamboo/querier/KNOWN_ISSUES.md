@@ -644,6 +644,44 @@ read; when PanDA answers a history held at a moment.
 
 ## Row values at a step's time (`held.py`)
 
+### K49. A guard over a column the rows file holds is read in it, by the map's ways and the direction of their changes
+
+Where H3 reads an attribute arm's guards and the run's values decide one not, it is read in the rows file's decoded
+column where its name's ways end there (`heldcol`; the analyzer handover's out/tpm/q0/q0-step0.md; tmaeno: "D1",
+2026-11-02 23:1x): `task_params`, `jedi_taskparams.taskparams` as fieldtest 5b6d2e9 fetches it.  The map gives the ways
+(GuardFrom and ParameterFrom), the changes of the object on each before the read (HeldChange) and after it, before a
+write gives the column back (`HeldSource.after`).  A key's presence (`'K' in m`) is read by the direction of each
+change: a store, an inner change or a `*` store adds a key or needs it there; a delete, a method, an escape or a call
+not read may remove one.  The rows hold K: it was there at the read on a way, unless something may add K after the
+read or remove it before; the rows lack K: it was absent, unless something may add K before or remove it after.
+Whether the pass wrote the column back is not read: either way these hold.  A key's value (`m['K']`, a literal) is read
+as the rows hold it where nothing changes K before or after.  A change counts unless a test on its way reads false: the
+tests deciding each call of its `via` and its `at`, early returns included, each read by the map's GuardFrom of that
+test the same way, two deep -- TaskRefinerBase 915's `*` store runs only past doPreProRefine 927's
+`"preproSpec" not in taskParamMap: return`, and no task case's rows hold preproSpec.  Each way is a route; one the run
+shows by a line only its own functions print (the functions holding the calls not every route goes through) is read
+alone, else every route is read and a key is decided where they agree.  Every answer rests on the column being read
+as the pass left it: no later write of it is read (a later refine's write-back, updateTaskParams_JEDI 1749).  Before
+(querier-q), H3 stopped at these guards with "a method the guard reads through (its conditions: ... not read)": 10 of
+m-cut2's 13 attribute stops there were extractCommon's guards over the task's parameters.
+
+Not read:
+- a test of another form, a part of the value (a way with *steps*), a way ending elsewhere, or whose changes after the
+  read were not read (an after-stop other than `no_meeting`): not read on that route;
+- a change after the read is counted on every route, whichever route its *via* goes through (more counted, never
+  fewer);
+- the route by the run's "refining with <class>" (TaskRefiner 282), which every m-cut2 task case prints: it needs the
+  map's record of JEDI's factory dispatch (its JD); until then a route is shown in 1 of the 10 (AtlasAnal's "tweaked
+  architecture"), and coreCount 53345980 stays read on one route only.
+
+*Shows:* in H3, "'<guard>' read in the rows file's task_params as fetched at <as_of>: True | False | UNKNOWN[, on
+<route>, the route its run shows] (KNOWN_ISSUES.md K49)" and each key's reading per route ("'K' in m True on <routes>
+(held as fetched[; <change> did not run: <test> at <line> read <value>])", "... not read on <routes> (may be changed
+by <changes>)"); the END "its guards hold: '<guard>' read in the rows file's task_params as fetched at <as_of>...: the
+column as the pass left it, no later write of it read"; a stop's condition "'<guard>' not read (<each key per route>)".
+*Revisit:* when the map records JEDI's factory dispatch (JD); when another column is fetched decoded into the rows file
+(`HELD`).
+
 ### K22. A row value read at another time than the step's run is not read
 
 The rows file holds the row as it was read (`as_of`, days after the case), and a step reads the row as it was
@@ -773,8 +811,12 @@ the line ran; it has no guard | its guards hold in the rows' values), at <time>[
 object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
 <subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
 "the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
-<subject> in the map", or at H3 "a method the guard reads through (its conditions: '<condition>' not read)" or "a run
-that shows <arm> ran, to read its guards in (by elimination; its conditions: ...)".
+<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' not read)" (a
+guard through no method; one over a column the rows file holds is read there, K49), "a method the guard reads through
+(...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by elimination; its
+conditions: ...)".  A status's H3 reads no guard's values: through no method it stops at "the values its guard reads at
+its run", and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'" (both "a method
+the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
 marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
 row into its spec (getTasksToRefine_JEDI and the like) is told apart.
@@ -931,6 +973,30 @@ stop.
 
 ## `which_ran`
 
+### K53. A print that begins with a hole is read on the line its logger wrote
+
+A logger with no mark of its own writes a message whose first word is the print's first hole: datasetManager's
+FinisherThr.run prints `f"{job.PandaID} Finisher : Kill"`.  The log's parser (`records.PREFIX`) takes any first
+word for the instance token, so the record is token "7392812614" and message "Finisher : Kill".  The map's pattern
+begins at the space after the hole (`\ Finisher\ :\ Kill`), so it never found the message, and no run of the writer
+was readable.  `Row.texts` reads a print that begins with a hole on the message and, failing that, on token + " " +
+message, the line as written; `matches` and `capture` take both, and the hole's value is read there.
+
+- *Only a print that begins with a hole.*  On the line, a pattern can also find a mark's own words.  For example
+  `tmpLog.debug("update")` in updateDatasetLocality_JEDI found "update" in its never-closed mark's name
+  `updateDatasetLocality_JEDI < taskID=...`.  For a print beginning with a hole, the token is that hole's value.
+- *Measured by the records* (out/tk/tk_probe.py, every answer of records, records-cut, records-cut2 and
+  records-snap, the rotated files' included).  Of the map's 235 statements whose print begins with a hole, 8 rows in
+  52 records are misread, all datasetManager's: FinisherThr.run 696, 707, 709, 727, 730 and 753, ActivatorThr.run
+  863, and ActivatorWithRuleThr.run 963.  22 rows are read on the message, since their loggers have a mark.
+- *Measured by the walks* (tk1 against ck1).  Only MJ-transferring-stuck's text moves, in m-cut and m-cut2: its
+  datasetManager pass now reads its printed values, and run:735 is excluded with [730] not in the run, in place of
+  all four of its must rows.
+
+*Shows:* nothing of its own; the rows of such a print are found and captured.
+*Revisit:* when the map's pattern for a markless logger's print says where the message begins (the token split
+off), or the parser knows which loggers have a mark.
+
 ### K21. Runs of the key in several logs are one run only where one ran inside a call the other made
 
 H2 reads a run of another log as a part of the question's run (`which_ran.inside_call`) where both name the same
@@ -1051,7 +1117,7 @@ standing does not write it" for a positive of the second P.
 *Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
 the map holds a call's write conditions; when RD lands.
 
-### K42. A record two rows print alike proves neither, and rule 6 reads a caller's guard on any object of the class
+### K42. A record two rows print alike proves neither, of one function or of two, and rule 6 reads a caller's guard on any object of the class
 
 `rows.Seen.proven` counts a record only where the function reads it with that row alone (`Seen.unambiguous`, after
 `rows.claim`): activateJob prints its files' UPDATE alike at 92 (in the arm that activates) and 124 (in the one that
@@ -1061,16 +1127,33 @@ parse_job_output_report prints "parse_job_output_report end" at 750 (before the 
 records-cut (out/pv1) MJ-merging-stuck and MJ-transferring-stuck lose 967's positive, though 751 is excluded by rule 4
 and the record follows rows 869-873, which 750 cannot follow; those branches stop at S2.
 
+Nor does a record another function of the dump prints whole (`rows.whole_writers`: a row of its `function_prints`
+the map reads the record as, mark and message anchored at both ends, `trace.reads_whole`, in the run's log):
+`rows._seen` places it with no row.  `rows.claim` sets only the functions it is given against each other, and a
+sibling plugin that writes nothing the question asks is not among them.  AtlasProdTaskRefiner.doRefine prints
+"start taskType=..." and "done" (107, 174) under the mark AtlasAnalTaskRefiner.doRefine prints them with (205,
+280), and the two had made AtlasAnal's doRefine:260 positive by `rows_around` in MR-T-53344406-reqID, a run that
+printed "refining with AtlasProdTaskRefiner" (q1, 2026-11-03).  On r1 it is unexamined: no pass of it holds a
+record of the key.  Read on samples from the map's rows, it was the one of q1's 33 positives by rows (out/ra); the
+measure found a second, which samples cannot show: runImpl's "start" (138), found by search, had read AtlasAnal's
+"start taskType=anal" (doRefine 205, called at 284) as its own, and with 282 made runImpl:284 positive in
+MR-T-53351604-splitRule.  It is kept now: the callee's line that does show 284 ran is not read (K41).  A row the map cannot read whole (`reads_whole` None: no capture,
+or a mark its logger may write that the map did not read) does not count: PostProcessor.start's "done" and
+TaskRefiner.start's "start" have no prefix for that reason, and counted, they would take every "done" and
+"start" of their logs, "doBasicPostProcess done with taskStatus=..." (122) among them, which they cannot print.
+
 Rule 6 (`which_ran.rewriter`) solves the callers' guards too (`callers_guards`) and reads `<x>.<attr>` in them as the
 key's object whatever x is: archiveJob 1783's `job.jobStatus == 'finished'` tests the merge job, while
 updateUnmergedJobs 1236 writes the jobs it merged.  On records-cut before pv1 it excluded 1236 in MJ-merging-late (the
 key 7390523881, the merge job 7390910703).  With the row's second read run by run (pv1) the env no longer settles
 that guard there and 1236 is positive; the defect is not fixed.
 
-*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone; "rule 6: reached
-only when <x>.<attr> is already ..." with a caller's guard.
+*Shows:* "row(s) [..] print only on a path through it" names only rows a record is read by alone, and that no other
+function prints whole; "rule 6: reached only when <x>.<attr> is already ..." with a caller's guard.
 *Revisit:* when an ambiguous record can be given to the one row the run's order or another rule leaves (P's order
-check reads rows read alone too); rule 6, when the map says which object a caller's guard tests against the callee's
+check reads rows read alone too), or to the one function the run's other records leave (the map's JD: the
+factory's dispatch, read with "refining with <class>"); when the map reads a row whole where its mark is not read;
+rule 6, when the map says which object a caller's guard tests against the callee's
 argument.
 
 ### K44. A row shorter than MIN_PROOF proves only as its whole message no other function can print there
@@ -1218,6 +1301,137 @@ the map cannot read whole): the run is not split" -- whether the map can read th
 or the parenthesis is not there.
 *Revisit:* a function with no entry row whose runs span hours, or whose entry the map cannot read whole; the
 question's run of a mark with no key; the prefix proof (K44) on the map's whole reading.
+
+### K50. A row before the site implies it only where nothing on its way to the site may leave
+
+`rows.implying_rows` reads a row before the site as proof only where nothing on its way to the site can leave: no
+call but a logger's and no jump (`may_divert`).  An attribute or a subscript that raises is not counted, as it is
+not anywhere in the rule.  The row is at the top of the site's block, or nested in an earlier statement it falls
+out of (`rows._falls_out`, MF-7397944082 and MF-7396944927, the harness's finding, 2026-11-02): handle_failed_job
+prints 370 ("job_failure_postprocessing is back") last in a `try` of an `if`, and 374 follows that `if`.  363
+("AdderGen.run will call job_failure_postprocessing") does not: the call after it may leave.  Of q1's 108 kept
+candidates, 5 gain such a row (out/ra/d2_kept.out); on r1 374 is positive in 4 m-failed walks and no other moves.  In
+MF-7397695467 and MF-7398402231 it is positive next to parse_job_output_report:919, and H2 chooses neither ("2
+positive"): both wrote "failed", 374 later in the pass (process_job_report 421, then finalize_job_status at 446).
+On q1 919 was chosen alone with 374 kept and the walks went on to H4.  None falls out of a loop's body (it goes back
+to the loop), of a `finally` (a raise may be passing through), of a `with` (its exit is a call) or of a `match` (not
+read).
+
+*Shows:* "row(s) [..] print only on a path through it" with the nested row.
+*Revisit:* when the rule reads the map's flow (`flow.passes_through`'s ways, a raise anywhere) rather than its own.
+H2 now orders one pass's candidates by the flow (K51): 374 is a stay in all four walks.
+
+### K51. Of one pass's writes the last that changed the value is the answer, and one that kept it is a stay
+
+`changed.last_change` (rule R) reads the candidates H2 leaves in one pass: those of the question's run, and of the
+runs inside a call it made.  The value the pass writes is the one it assigned last, so the answer is the last write
+that changed it.  A write of the value already there is a stay, as the census reads a row written again with its own
+value (the harness's reading of adder_gen at the pin, 2026-11-03).
+
+- *The order.*  One function of the pass, the anchor, holds the others or calls on into them (the map's reach,
+  `Rerun._called_at`), and its rows read as one call.  A run inside a call sits at that call.  Two places are in
+  order where the flow runs one after the other and never the reverse.  Any pair out of order, and R says nothing.
+- *The value before a write.*  It is read from a printed hole of the chain the write assigns, at a row before it, or
+  from the constant an earlier write that ran assigned.  Either counts only where nothing on the way binds the chain
+  or hands what holds it to a call that can change it, by P's reading of a call (`printed.self_effects`).
+  - The way runs through the rest of the source's function, the anchor between the two places, and the write's own
+    function before it.
+  - The frames between the anchor and a function reached through others are not read (finalize_job_status, between
+    process_job_report and handle_failed_job).
+  - *What keeps it on the way* (CK, 2026-11-03).  An assignment of the value's own constant to the chain keeps it.  So
+    does a call P reads as able to change it, where two things hold.  First, the call cannot bind what holds the chain
+    anew: for a chain of self, `self_effects` binds none of its prefixes; else the chain is the field of a name the
+    call is handed.  Second, the map's reach from that call alone (`Rerun._keeps`, a copy of the row as
+    `_called_at` asks) reaches no arm assigning the field another value in memory (`reach.moving_off_in_memory`,
+    births left out), and leaves no hole; holes closed by their name are counted and said.  This rests on the reach's
+    premises, and on the junctions as every assignment of the field by its name.  A write by a name made at run time
+    is none: `JobSpec.pack`'s `object.__setattr__`; 421's closure holds one, peekJob's, on a JobSpec it makes.
+- *The value a write assigns.*  Its constant, or a printed hole of the expression it assigns, unbound between.
+- *The answer.*
+  - A write with the observed value before it is a stay, and one assigning another value is no write of it: both are
+    excluded.
+  - Read from the last back, each write left may be the last change, down to one that ran with another value before
+    it.
+  - One left that ran is chosen ("the last change in the pass").  More are named, and none is chosen ("N may have
+    changed it last in the pass: ...").
+
+In the adder's pass, row 444 prints `job.jobStatus=failed jobStatus=failed` before finalize in the 4 m-failed adder
+walks.  So handle_failed_job:374 is a stay: nothing on the way into it binds `self.job.jobStatus`, and its one call
+is handed `self.taskBuffer`, `self.job.PandaID` and `self.job.attemptNr`.  The change itself is not read.  Between
+416 and 444 the pass calls parse_job_output_report (421) and execute_plugin (425).  P's reading of a call reads both
+as changing `self.job.jobStatus`: 820, 885, 919 and 959 bind it, and 425 hands `self.job` to the plugin.  Since the
+map's RB (codemap-xx e0f6fce placed the `.get` calls at extract_executor_metadata:710 and update_outputs:393), the
+reach from each reaches no arm assigning jobStatus another value than 'failed' in memory: 421 closes one call by its
+name (DBProxyPool.getProxy:79 `proxy.wakeUp`), 425 eight (update_outputs' appends on dict elements).  So in
+MF-7397695467 and MF-7398402231, 919's 'failed' carries to 441 (959 sets it 'failed' again; the calls at 895, 910
+and 425 keep it), 441 is a stay, and the walks name 1813, 919 and 416.  In MF-7396944927 and MF-7397944082, 416 and
+441 are both kept and no value reaches 441 (no row before it prints the status), so 1813, 441 and 416 stay named.
+1813, archiveJob's UPDATE after the archive, assigns a statement's bind, so no value before it is read.  In the 65's
+A-rec, K-rec and N-rec, 444 prints `jobStatus=finished`: 416 assigns 'finished' and is no write of 'failed', and 441
+is the last change, as before (416's 'finished' does not carry: 421 reaches parse_job_output_report's 'failed' arms).
+
+The Watcher's pass: run:117 sets `job.jobStatus = "failed"`, and archiveJob:1813 runs inside the call at 135.  P's
+reading counts `EventServiceUtils.isEventServiceJob(job)` (129) and `getEventStat(job.jediTaskID, ...)` (130) between
+them as calls handed the job, and the reach from each assigns jobStatus nothing in memory (130 closes one call by its
+name).  So 1813 is a stay and 117 the last change: MF-7397938541 stops at H3 on 117's guard, MJ-sent-late at L2
+(m-cut) and S2 (m-cut2), as before R.  updateJobs:654 assigns the job handed on in another class: it is not read as
+the same object, and R leaves it as H2 did.
+
+Measured (rr1 against r1, map x13xixB14m, out/s/s-predictions.txt), every prediction held:
+- outcomes: MF-7396944927 and MF-7397944082 H3 -> H2; MF-7397938541 H3 -> H2; MJ-sent-late L2 (m-cut) and S2 (m-cut2)
+  -> H2;
+- text only: MF-7397695467 and MF-7398402231 (H2 as before), and 32 of the 65's runs (416 excluded, "the last change
+  in the pass");
+- attr and MT: the same.
+
+With CK (ck1 against rb2, map x13xxB3m read with codemap-xx 5ccd571, out/ck/ck1-predictions.txt), every prediction
+held: MF-7397938541 H2 -> H3, MJ-sent-late H2 -> L2 (m-cut) and H2 -> S2 (m-cut2); MF-7397695467 and MF-7398402231
+"4 may" -> "3 may" (441 a stay); everything else the same, the 65, attr and MT included.
+
+*Shows:* "rule R: a stay, ... already held ... before it (...)", "rule R: it assigns ... no write of ...", and the
+choice's "the last change in the pass" or "N may have changed it last in the pass: ...".  A way kept by CK adds "but to
+'<value>' again at <file:line>" and "the calls at <file:line>, ... reach no assignment of <field> but '<value>' (the
+map's reach, N call(s) closed by their name)".
+*Revisit:*
+- with the status at the pass's start (the statuslog's row before the question's, under the premise that no status
+  change went unlogged): 416's guard is then read, and the adder's MF-7396944927 and MF-7397944082, where no value
+  reaches 441, may move;
+- when a write through a statement's binds (1813) is read for the row's value before it;
+- when the frames between a join's call and the write inside it are read: in the Watcher's pass, updateJobs (between
+  run's call at 135 and archiveJob) assigns jobStatus in memory at 649, 652 and 654 for a jumbo job, and the stay of
+  1813 rests on that frame unread;
+- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes.
+
+### K52. A writer that writes its loop's objects after the loop is read on its latest run before the row
+
+H2 (`_wrote_at`), its scan (`_row_at`) and F1 read a candidate on the key's runs at the row's second.  A batched
+writer assigns each object in a loop and writes them all by one call after it, so its run of the key ends before the
+row's second.  datasetManager's FinisherThr.run prints "<PandaID> Finisher : Kill" (730) and sets the job failed
+(735) in the loop at 662, then calls updateJobs (761).  In MF-7392812614 the run ended at 13:40:29, and the row was
+written at 13:40:42.  So the candidate had "no run of the key" and stayed unexamined.
+
+- *A batched writer* (`rerun.batched`) is one where the map's KeyFrom of the candidate's function says the object
+  assigned at its line is handed to a call (`KEY_HANDED`), and a loop of the function holds the line and not the call.
+- *Its run* (`Rerun._batched`) is the key's latest run in its logs between the row before and the row's second.  It
+  counts only where the records hold it and the log was searched with no hole.  It is handed to the judge as the
+  candidate's run, and judged as any run is.  It rests on no other pass of the writer printing the key between.
+  FinisherThr runs in a pool of 3, and another thread's pass that printed nothing of the key is not seen.
+- *None held*: the candidate stays as it was, and the walk says so.  Nothing is asked: the records' answers search
+  each log's whole current file, so in m-failed only MF-7392812614's setupper writers lack the span (2 days back to
+  10-31).  An ask back to the row before would stop that walk before H2 judges (tmaeno, W1a', 2026-11-03).
+
+Measured (dw2 against tk1, map x13xxB3m read with codemap-xx 5ccd571, out/d3/dw2-predictions.txt), every
+prediction held.  MF-7392812614 goes from STOP H2 to STOP H3: run:735 is handed its run, is positive by row 730, and
+is chosen by positive evidence.  H3 then stops on its guards (`not (nTokens <= nOkTokens)`, `endTime < timeOut`), whose
+values 707 and 727 print but H3 does not read yet.  Text only: a line per batched candidate held no run, in the other
+6 m-failed, MJ-sent-late (m-cut, m-cut2) and the 65's A-db, A-rec, K-db, K-rec, N-rec with their rounds.  attr and MT
+are the same.  The run is read only with K53: without it, 735's rows found nothing in it.
+
+*Shows:* "<func>:<line> writes in a batch (assigned in the loop at N, handed on to <call> at M): its run is the key's
+latest from the row before (...) to ..., ... in <log>, the log searched with no hole; it rests on ...", or "...: no
+run of the key held from the row before (...) to ...; not asked".
+*Revisit:* where H2 cannot choose without a batched writer's run that is not held: then ask back to the row before,
+by the writer's mark where it has one.
 
 ## The walks (`asked.py`)
 
