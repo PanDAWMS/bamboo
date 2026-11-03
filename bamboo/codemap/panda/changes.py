@@ -270,6 +270,37 @@ def object_changes(
     ]
 
 
+def call_changes(
+    calls: "Calls",
+    file: str,
+    func: ast.AST,
+    call: ast.Call,
+    name: str,
+    bound: tuple = (),
+) -> list[ObjectChange]:
+    """What *call*, made in *func* of *file*, may change in place of the object *name* holds there, each place said
+    by its key (:class:`ObjectChange`) -- the reading :func:`object_changes` takes at each call --; none where it
+    cannot change it.  *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
+
+    def holds(expression: ast.AST) -> bool:
+        return isinstance(expression, ast.Name) and expression.id == name
+
+    return _reading(calls)._call_changes(file, func, call, holds, bound)
+
+
+def chain_steps(chain: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
+    """The name *chain* starts at and the keys of its steps from it, as :class:`ObjectChange` says a key:
+    ``("m", ("'k'", ".x"))`` for ``m['k'].x``, ``("job", ())`` for ``job``; ``None`` where it starts at no name."""
+    steps: list[str] = []
+    here: ast.expr = chain
+    while isinstance(here, (ast.Attribute, ast.Subscript)):
+        steps.append(_step(here))
+        here = here.value
+    if not isinstance(here, ast.Name):
+        return None
+    return here.id, tuple(reversed(steps))
+
+
 def _chain(value: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
     """``("job", ("PandaID",))`` for ``job.PandaID``."""
     attributes: list[str] = []

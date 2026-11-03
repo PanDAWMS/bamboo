@@ -11,8 +11,12 @@ and how it left.
   calls anything but a logger forks a copy that leaves there: the call raised (:meth:`Walker.raises`).
 * **Passed whole.**  A loop, a ``try`` or a ``match`` is one step: what it binds becomes unknown, the rows in it
   are passed in their order, and a copy leaves where it can divert.  A ``with`` is entered.
-* **Calls.**  A call changes what it is handed: a value the path bound below a name the call is handed or called
-  on is dropped (:func:`mutating_roots`), and the facts reading it.
+* **Calls.**  A call changes what it is handed, as the map reads the call (:func:`changes.call_changes`): a value
+  or a fact the path holds of a chain whose name the call is handed or called on (:func:`mutating_roots`) is dropped
+  where the call may change that name's object at the chain's first step -- at any key for a bare name, and for the
+  receiver of a method a test calls (``task.useScout()``).  It stays where the object cannot change (its stated
+  type, a value or a fact the path holds) and where the test reads only the chain's identity (:func:`readings`): a
+  change inside the chain's own value leaves that, and no call binds its caller's name anew.
 * **Rows.**  The reader's *order* -- the rows it asks of, by line, each with its rank -- is passed in that order: a
   path passing a row out of it, or missing one where *require_all*, is dropped, and the reader's *check_row* may
   drop it at each.
@@ -25,8 +29,9 @@ Values are read with :mod:`bamboo.codemap.panda.evaluate`.  A reader adds its ow
 held as an expression, rows rendered by the path and the calls it reads against a run.  A value a path knows only
 in part is a :class:`Partial`.
 
-The statements walked must be of one function, on a tree with parent links
-(:func:`bamboo.codemap.panda.pathcond.attach_parents`).
+The statements walked must be of one function of the corpus the walker's :class:`~bamboo.codemap.calls.Calls`
+reads, on the tree it reads (:func:`bamboo.codemap.calls.parsed`, parents attached): the map finds a definition by
+its node.
 """
 
 from __future__ import annotations
@@ -34,13 +39,19 @@ from __future__ import annotations
 import ast
 import copy
 import functools
+import weakref
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
+from bamboo.codemap import callfacts
 from bamboo.codemap.callfacts import LOG_LEVELS
-from bamboo.codemap.panda import evaluate, pathcond
+from bamboo.codemap.models import CHANGE_INNER, CHANGE_UNREAD
+from bamboo.codemap.panda import changes, evaluate, pathcond
 from bamboo.codemap.panda.recognizers.selection import log_level
+
+if TYPE_CHECKING:
+    from bamboo.codemap.calls import Calls
 
 #: The walk stops where one statement leaves more paths than this (:class:`TooMany`).
 MAX_PATHS = 3000
@@ -88,6 +99,13 @@ READERS = frozenset(
 )
 #: The source of a value the path bound itself, in the walk's :class:`~bamboo.codemap.panda.evaluate.Env`.
 BOUND_ON_PATH = "bound on the path"
+#: How a test reads a chain (:func:`readings`): by its identity -- ``is``, against a literal, its type, as a key --,
+#: which only binding the chain anew changes; or by what it holds, which a change in place changes too.
+IDENTITY, CONTENT = "identity", "content"
+#: The builtins a test reads its arguments' identity or type with -- ``isinstance(x, str)``.
+IDENTITY_TESTS = frozenset({"isinstance", "issubclass", "type", "id", "callable"})
+#: The types of a value the path knows that no change in place can touch.
+_IMMUTABLE_VALUES = (str, int, float, bool, bytes, complex, type(None))
 
 
 class _NotBound:
@@ -292,6 +310,229 @@ def mutating_roots(
                 if isinstance(m, ast.Name) and id(m) not in read_only
             }
     return out
+
+
+@functools.lru_cache(maxsize=None)
+def expression(text: str) -> Optional[ast.expr]:
+    """*text* parsed as an expression, ``None`` where it is not one: read once per text."""
+    try:
+        return ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return None
+
+
+@functools.lru_cache(maxsize=None)
+def readings(text: str) -> tuple[tuple[ast.expr, str], ...]:
+    """``(chain, how)`` for each chain rooted at a name that the test *text* reads, *how* :data:`IDENTITY` or
+    :data:`CONTENT`: ``job.status == 'a'`` reads the identity of ``job.status``, ``if items:`` the content of
+    ``items``, and a method the test calls -- ``task.useScout()`` -- its receiver's content.  A function called by
+    its name reads nothing of its own."""
+    body = expression(text)
+    if body is None:
+        return ()
+    parents = {
+        child: node for node in ast.walk(body) for child in ast.iter_child_nodes(node)
+    }
+    out: list[tuple[ast.expr, str]] = []
+    for node in ast.walk(body):
+        if not isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            continue
+        up = parents.get(node)
+        if isinstance(up, (ast.Attribute, ast.Subscript)) and up.value is node:
+            continue
+        if changes.chain_steps(node) is None:
+            continue
+        if isinstance(up, ast.Call) and up.func is node:
+            if isinstance(node, ast.Attribute):
+                out.append((node.value, CONTENT))
+            elif isinstance(node, ast.Subscript):
+                out.append((node, CONTENT))
+            continue
+        out.append((node, _how(node, up)))
+    return tuple(out)
+
+
+def _how(node: ast.expr, up: Optional[ast.AST]) -> str:
+    """How the expression *up* reads *node*, one of its operands (:func:`readings`)."""
+    if isinstance(up, ast.Compare):
+        operands = [up.left, *up.comparators]
+        at = next(i for i, one in enumerate(operands) if one is node)
+        around = [(up.ops[at - 1], operands[at - 1], False)] if at else []
+        around += [(up.ops[at], operands[at + 1], True)] if at < len(up.ops) else []
+        for op, other, left in around:
+            if isinstance(op, (ast.Is, ast.IsNot)):
+                continue
+            if isinstance(op, (ast.In, ast.NotIn)):
+                if left and _literals(other):
+                    continue
+                return CONTENT
+            if not _literal(other):
+                return CONTENT
+        return IDENTITY
+    if (
+        isinstance(up, ast.Call)
+        and isinstance(up.func, ast.Name)
+        and up.func.id in IDENTITY_TESTS
+    ):
+        return IDENTITY
+    if isinstance(up, ast.Subscript) and up.slice is node:
+        return IDENTITY
+    return CONTENT
+
+
+def _literal(node: ast.expr) -> bool:
+    return isinstance(node, ast.Constant) or (
+        isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant)
+    )
+
+
+def _literals(node: ast.expr) -> bool:
+    return isinstance(node, (ast.Tuple, ast.List, ast.Set)) and all(
+        _literal(one) for one in node.elts
+    )
+
+
+def value_reading(t: str, v: Any) -> tuple[tuple[ast.expr, str], ...]:
+    """``(chain, how)`` for the chain *t* holding *v* on a path: a container read by what it holds, a value not
+    known too, any other value by its identity."""
+    node = expression(t)
+    if node is None:
+        return ()
+    how = (
+        CONTENT
+        if v is evaluate.UNKNOWN or isinstance(v, (list, dict, set))
+        else IDENTITY
+    )
+    return ((node, how),) if changes.chain_steps(node) is not None else ()
+
+
+def stated_immutable(
+    calls: "Calls", file: str, func: ast.AST, name: str, bound: tuple = ()
+) -> bool:
+    """Whether the code states that *name* holds, everywhere in *func* of *file*, a value no change in place can touch:
+    a parameter annotated so (:func:`callfacts.immutable_annotation`), and each binding of it annotated so, a
+    literal, an f-string, a comparison, a ``not``, a builtin giving a text or a number
+    (:data:`callfacts.BUILTIN_FUNCTIONS`), or a call of definitions each annotated to return one."""
+    said: list[bool] = []
+    arguments: Optional[ast.arguments] = getattr(func, "args", None)
+    if arguments is not None:
+        named = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+        parameter = next((one for one in named if one.arg == name), None)
+        if parameter is not None:
+            said.append(callfacts.immutable_annotation(parameter.annotation))
+        if any(
+            one is not None and one.arg == name
+            for one in (arguments.vararg, arguments.kwarg)
+        ):
+            said.append(False)
+    for binding in pathcond.bindings(func, name):
+        if binding.nested:
+            continue
+        if isinstance(binding.site, ast.AnnAssign):
+            said.append(callfacts.immutable_annotation(binding.site.annotation))
+        elif binding.value is None or binding.slot is not None:
+            said.append(False)
+        else:
+            said.append(_gives_immutable(calls, file, func, binding.value, bound))
+    return bool(said) and all(said)
+
+
+def _gives_immutable(
+    calls: "Calls", file: str, func: ast.AST, value: ast.expr, bound: tuple
+) -> bool:
+    if isinstance(value, (ast.Constant, ast.JoinedStr, ast.Compare)):
+        return True
+    if isinstance(value, ast.UnaryOp):
+        return isinstance(value.op, ast.Not) or _gives_immutable(
+            calls, file, func, value.operand, bound
+        )
+    if isinstance(value, ast.BoolOp):
+        return all(
+            _gives_immutable(calls, file, func, one, bound) for one in value.values
+        )
+    if isinstance(value, ast.IfExp):
+        return all(
+            _gives_immutable(calls, file, func, one, bound)
+            for one in (value.body, value.orelse)
+        )
+    if not isinstance(value, ast.Call):
+        return False
+    function = callfacts.builtin_function(calls.types, file, func, value)
+    if function is not None:
+        return function.result in callfacts.SCALARS
+    try:
+        placed = calls.callees(file, func, value, bound)
+    except Exception:  # noqa: BLE001 -- a placing that fails says nothing
+        return False
+    targets = list(placed.targets)
+    return (
+        bool(targets)
+        and not placed.unplaced
+        and all(
+            callfacts.immutable_annotation(getattr(one.func, "returns", None))
+            for one in targets
+        )
+    )
+
+
+def _immutable_value(v: Any) -> bool:
+    if isinstance(v, _IMMUTABLE_VALUES):
+        return True
+    return isinstance(v, (tuple, frozenset)) and all(_immutable_value(one) for one in v)
+
+
+def _fact_immutable(name: str, facts: dict[str, bool]) -> bool:
+    """Whether a fact says *name* holds a value no change in place can touch: ``n == 'a'``, ``n is None``, ``n in
+    ('a', 'b')`` held, or ``isinstance(n, str)``."""
+    for atom, truth in facts.items():
+        body = expression(atom)
+        if (
+            isinstance(body, ast.Compare)
+            and len(body.ops) == 1
+            and isinstance(body.left, ast.Name)
+            and body.left.id == name
+        ):
+            op, other = body.ops[0], body.comparators[0]
+            positive = isinstance(op, (ast.Eq, ast.Is, ast.In))
+            holds = truth is True if positive else truth is False
+            if (
+                holds
+                and isinstance(op, (ast.Eq, ast.NotEq, ast.Is, ast.IsNot))
+                and _literal(other)
+            ):
+                return True
+            if holds and isinstance(op, (ast.In, ast.NotIn)) and _literals(other):
+                return True
+        if (
+            isinstance(body, ast.Call)
+            and isinstance(body.func, ast.Name)
+            and body.func.id == "isinstance"
+            and truth is True
+            and len(body.args) == 2
+            and isinstance(body.args[0], ast.Name)
+            and body.args[0].id == name
+            and callfacts.immutable_annotation(body.args[1])
+        ):
+            return True
+    return False
+
+
+class _Asked:
+    """What the map said of a corpus's calls and names, kept while the corpus's calls live: each answer with the
+    node it was asked of, so that its id is not reused."""
+
+    def __init__(self) -> None:
+        self.changes: dict[tuple, tuple[ast.AST, list[changes.ObjectChange]]] = {}
+        self.stated: dict[tuple, tuple[ast.AST, bool]] = {}
+
+
+_ASKED: "weakref.WeakKeyDictionary[Calls, _Asked]" = weakref.WeakKeyDictionary()
+
+
+def _asked(calls: "Calls") -> _Asked:
+    if calls not in _ASKED:
+        _ASKED[calls] = _Asked()
+    return _ASKED[calls]
 
 
 def below(t: str, v: Any, handed: str) -> bool:
@@ -545,9 +786,12 @@ class Walker:
     *target*: what the arm assigns, followed along each path; *relevant*: the
     chains the walk keeps values and facts of; *order*: row line -> (its
     statement, its rank); *decide*: the ways an ``if`` goes on a path;
-    *check_row*: why a path cannot pass a row, or ''; *track*: record the tests
-    taken and the target at each row; *require_all*: a path must pass every
-    row of *order*.
+    *check_row*: why a path cannot pass a row, or ''; *corpus*, *file* and
+    *bound*: the corpus's calls, the file of *func* and the classes ``self``
+    can be in it (:attr:`calls.Target.bound`; empty for every class), what
+    the map reads a call by (:meth:`call`); *track*: record the tests taken
+    and the target at each row; *require_all*: a path must pass every row of
+    *order*.
     """
 
     #: The class of the path a walk starts with.
@@ -563,10 +807,17 @@ class Walker:
         order: dict[int, tuple[ast.stmt, int]],
         decide: Callable[[Any, ast.If, Any], list[bool]],
         check_row: Callable[[Any, int, Any], str],
+        corpus: "Calls",
+        file: str,
+        bound: tuple = (),
         track: bool = False,
         require_all: bool = True,
     ) -> None:
         self.func = func
+        self.corpus = corpus
+        self.file = file
+        self.bound_classes = bound
+        self._bound_key = tuple((where, id(cls)) for where, cls in bound)
         self.arm = arm
         self.target = target
         self.target_attr = bool(target) and not target.isidentifier()
@@ -807,16 +1058,113 @@ class Walker:
         self.call(q, roots, node)
 
     def call(self, q: Path, roots: set[str], node: ast.AST) -> None:
+        """Drop what the calls in *node* may change of what the path holds of a chain rooted at one of *roots*: the
+        values it bound there, save the target's (read through ``target_called``), and the facts reading them."""
         roots = roots & self.rel_roots
         if not roots:
             return
         marks = frozenset(f"{r}()" for r in roots)
         q.marks |= marks
         q.since = {line: m | marks for line, m in q.since.items()}
-        self.forget(q, lambda t, v: root(t) in roots and below(t, v, root(t)))
-        if self.target_attr and self.target_root in roots:
+        made = [
+            n for n in own_nodes(node) if isinstance(n, ast.Call) and not is_log_call(n)
+        ]
+        facts, state = dict(q.facts), dict(q.state)
+
+        def changed(read: Iterable[tuple[ast.expr, str]]) -> bool:
+            return any(
+                self.changed(made, roots, chain, how, facts, state)
+                for chain, how in read
+            )
+
+        for t, v in state.items():
+            if (
+                t != self.target
+                and v is not evaluate.UNKNOWN
+                and changed(value_reading(t, v))
+            ):
+                q.state[t] = evaluate.UNKNOWN
+        for atom in facts:
+            if changed(readings(atom)):
+                del q.facts[atom]
+        if (
+            self.target_attr
+            and self.target_root in roots
+            and changed(
+                value_reading(self.target, state.get(self.target, evaluate.UNKNOWN))
+            )
+        ):
             q.target_called = True
             self.handed_target(q, node)
+
+    def changed(
+        self,
+        made: list[ast.Call],
+        roots: set[str],
+        chain: ast.expr,
+        how: str,
+        facts: dict[str, bool],
+        state: dict[str, Any],
+    ) -> bool:
+        """Whether one of the calls *made* may change what a path holding *facts* and *state* reads of *chain*,
+        read as *how* says (:data:`IDENTITY` or :data:`CONTENT`): the call may change the object the chain's name
+        holds at the chain's first step, or at any key for a bare name read by its content -- its identity no call
+        changes.  Where the chain is one step and read by its identity, a change inside the value it holds does not
+        count.  An object no change in place can touch changes nothing (:meth:`immutable`)."""
+        steps = changes.chain_steps(chain)
+        if steps is None:
+            return False
+        name, keys = steps
+        if name not in roots or (not keys and how == IDENTITY):
+            return False
+        first = keys[0] if keys else changes.EVERY
+        reached = any(
+            first == changes.EVERY or change.key in (first, changes.EVERY)
+            for call in made
+            for change in self.call_changes(call, name)
+            if not (how == IDENTITY and len(keys) == 1 and change.kind == CHANGE_INNER)
+        )
+        return reached and not self.immutable(name, facts, state)
+
+    def immutable(
+        self, name: str, facts: dict[str, bool], state: dict[str, Any]
+    ) -> bool:
+        """Whether *name* holds a value no change in place can touch: a value the path knows, else a fact it holds
+        or what the code states (:func:`stated_immutable`)."""
+        value = state.get(name, evaluate.UNKNOWN)
+        if value is not evaluate.UNKNOWN and not isinstance(value, Partial):
+            return _immutable_value(value)
+        if _fact_immutable(name, facts):
+            return True
+        asked = _asked(self.corpus).stated
+        key = (id(self.func), name, self._bound_key)
+        if key not in asked:
+            asked[key] = (
+                self.func,
+                stated_immutable(
+                    self.corpus, self.file, self.func, name, self.bound_classes
+                ),
+            )
+        return asked[key][1]
+
+    def call_changes(self, call: ast.Call, name: str) -> list[changes.ObjectChange]:
+        """What *call* may change in place of the object *name* holds (:func:`changes.call_changes`); a change of
+        any key where the reading fails."""
+        asked = _asked(self.corpus).changes
+        key = (id(call), name, self._bound_key)
+        if key not in asked:
+            try:
+                found = changes.call_changes(
+                    self.corpus, self.file, self.func, call, name, self.bound_classes
+                )
+            except Exception:  # noqa: BLE001 -- a reading that fails may be of anything
+                found = [
+                    changes.ObjectChange(
+                        self.file, call.lineno, CHANGE_UNREAD, changes.EVERY, "not read"
+                    )
+                ]
+            asked[key] = (call, found)
+        return asked[key][1]
 
     def forget(self, q: Path, changed: Callable[[str, Any], bool]) -> None:
         """Drop what the path knew of what a call changed: the values it bound there (the target's stays, read

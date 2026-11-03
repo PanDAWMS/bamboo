@@ -8,7 +8,14 @@ from dataclasses import dataclass
 
 import pytest
 
+from bamboo.codemap.calls import Calls
+from bamboo.codemap.gitsource import blob_sha
+from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import evaluate, pathcond, walker
+from bamboo.codemap.panda.recognizers import sqlwrite
+
+PACKAGE = "pkg"
+FILE = f"{PACKAGE}/m.py"
 
 SOURCE = """\
 def checked(job, log, flag):
@@ -44,14 +51,81 @@ def settled(job, toSkip, log):
         log.debug("kept")  # P5
     if toSkip:  # S5
         job.status = "skipped"  # A5
+
+
+class Task:
+    splitRule: str
+
+    def useScout(self) -> bool:
+        return "SC" in self.splitRule
+
+
+def read_only(job):
+    if job.status:
+        pass
+
+
+def store(job):
+    job.status = "b"
+
+
+def add(job):
+    job.files.append(1)
+
+
+def rule(task):
+    task.splitRule = "x"
+
+
+def fill(items):
+    items.append(1)
+
+
+def put(m):
+    m["j"] = 1
+
+
+def asked(job, task: Task, items, m, flag: bool, held):
+    read_only(job)  # C2
+    store(job)  # C3
+    add(job)  # C4
+    rule(task)  # C5
+    fill(items)  # C6
+    put(m)  # C7
+    held.append(job)  # C8
+    fill(flag)  # C9
 """
 
 
 @pytest.fixture(scope="module")
-def module() -> ast.Module:
+def corpus(tmp_path_factory) -> tuple[ast.Module, Calls]:
+    """The module as a corpus of one file, and the map's calls of it: the walker reads a call as the map does."""
+    root = tmp_path_factory.mktemp("walker") / PACKAGE
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    (root / "m.py").write_text(SOURCE)
     tree = ast.parse(SOURCE)
     pathcond.attach_parents(tree)
-    return tree
+    source = SourceModule(
+        package=PACKAGE,
+        rel_path=FILE,
+        tree=tree,
+        source=SOURCE,
+        blob_sha=blob_sha(SOURCE),
+    )
+    calls = sqlwrite.corpus_calls([source], {PACKAGE: root})
+    assert calls is not None
+    return tree, calls
+
+
+@pytest.fixture(scope="module")
+def module(corpus: tuple[ast.Module, Calls]) -> ast.Module:
+    return corpus[0]
+
+
+@pytest.fixture(scope="module")
+def calls(corpus: tuple[ast.Module, Calls]) -> Calls:
+    return corpus[1]
 
 
 def _func(module: ast.Module, name: str) -> ast.FunctionDef:
@@ -86,6 +160,7 @@ def _passes(w: walker.Walker, line: int, p: walker.Path) -> str:
 
 def _walker(
     module,
+    calls,
     func,
     arm,
     *,
@@ -108,12 +183,14 @@ def _walker(
         order=order,
         decide=decide,
         check_row=check_row,
+        corpus=calls,
+        file=FILE,
         **kw,
     )
 
 
-def test_an_if_goes_both_ways_and_a_jump_leaves(module):
-    w = _walker(module, "checked", "A1", target="job.status", require_all=False)
+def test_an_if_goes_both_ways_and_a_jump_leaves(module, calls):
+    w = _walker(module, calls, "checked", "A1", target="job.status", require_all=False)
     paths = w.run(walker.region_of(_at(module, "S1")))
     left = sorted(p.left for p in paths)
     assert left == ["", "return at 4"]
@@ -123,9 +200,15 @@ def test_an_if_goes_both_ways_and_a_jump_leaves(module):
     assert (through.arm, through.state["job.status"]) == (False, "b")
 
 
-def test_a_call_forks_a_copy_that_leaves_and_forgets_what_it_is_handed(module):
+def test_a_call_forks_a_copy_that_leaves_and_forgets_what_it_is_handed(module, calls):
     w = _walker(
-        module, "called", "A3", target="job.status", relevant={"n"}, require_all=False
+        module,
+        calls,
+        "called",
+        "A3",
+        target="job.status",
+        relevant={"n"},
+        require_all=False,
     )
     paths = w.run(walker.region_of(_at(module, "S2")))
     # the way past the if, and the arm's; a logger's call forks nothing, len() changes nothing but may raise
@@ -140,7 +223,7 @@ def test_a_call_forks_a_copy_that_leaves_and_forgets_what_it_is_handed(module):
     assert "job()" in on.marks
 
 
-def test_the_rows_are_passed_in_order_and_each_one_asked(module):
+def test_the_rows_are_passed_in_order_and_each_one_asked(module, calls):
     asked: list[int] = []
 
     def check(w: walker.Walker, line: int, p: walker.Path) -> str:
@@ -149,6 +232,7 @@ def test_the_rows_are_passed_in_order_and_each_one_asked(module):
 
     w = _walker(
         module,
+        calls,
         "called",
         "A3",
         target="job.status",
@@ -169,15 +253,16 @@ def test_the_rows_are_passed_in_order_and_each_one_asked(module):
     assert asked == [_at(module, "P2").lineno, _at(module, "P3").lineno]
 
 
-def test_a_row_out_of_its_order_drops_the_path(module):
-    w = _walker(module, "called", "A3", target="job.status", rows=("P3", "P2"))
+def test_a_row_out_of_its_order_drops_the_path(module, calls):
+    w = _walker(module, calls, "called", "A3", target="job.status", rows=("P3", "P2"))
     assert w.run(walker.region_of(_at(module, "S2"))) == []
     assert w.dropped["E2 order"] == 1
 
 
-def test_a_loop_is_passed_whole(module):
+def test_a_loop_is_passed_whole(module, calls):
     w = _walker(
         module,
+        calls,
         "looped",
         "S3",
         target="job.status",
@@ -194,9 +279,10 @@ def test_a_loop_is_passed_whole(module):
     assert on.state["job.status"] is evaluate.UNKNOWN
 
 
-def test_a_branch_taken_settles_its_atoms(module):
+def test_a_branch_taken_settles_its_atoms(module, calls):
     w = _walker(
         module,
+        calls,
         "settled",
         "A5",
         target="job.status",
@@ -226,14 +312,14 @@ def test_equal_paths_merge_and_many_are_widened(monkeypatch):
     assert len(walker.widen([a, walker.Path(state={"x": 1}, arm=True)], "x")) == 2
 
 
-def test_too_many_paths_stop_the_walk(module, monkeypatch):
+def test_too_many_paths_stop_the_walk(module, calls, monkeypatch):
     monkeypatch.setattr(walker, "MAX_PATHS", 1)
-    w = _walker(module, "checked", "A1", target="job.status", require_all=False)
+    w = _walker(module, calls, "checked", "A1", target="job.status", require_all=False)
     with pytest.raises(walker.TooMany):
         w.run(walker.region_of(_at(module, "S1")))
 
 
-def test_a_reader_adds_its_rules_by_the_hooks(module):
+def test_a_reader_adds_its_rules_by_the_hooks(module, calls):
     @dataclass
     class Held(walker.Partial):
         text: str
@@ -270,6 +356,8 @@ def test_a_reader_adds_its_rules_by_the_hooks(module):
         order={},
         decide=_both,
         check_row=_passes,
+        corpus=calls,
+        file=FILE,
         require_all=False,
     )
     paths = w.run(walker.region_of(_at(module, "S2")))
@@ -280,6 +368,97 @@ def test_a_reader_adds_its_rules_by_the_hooks(module):
     # a Partial is not a value the evaluator reads
     on.state["n"] = Held("x")
     assert w.env(on).stale["n"] == walker.BOUND_ON_PATH
+
+
+def _after(module, calls, mark, facts=(), state=None):
+    """The facts and the values a path holding *facts* and *state* keeps across the call at *mark* in ``asked``."""
+    w = walker.Walker(
+        _func(module, "asked"),
+        _at(module, mark),
+        target="",
+        relevant={"job", "task", "items", "m", "flag", "held"},
+        order={},
+        decide=_both,
+        check_row=_passes,
+        corpus=calls,
+        file=FILE,
+    )
+    q = walker.Path(facts=dict.fromkeys(facts, True), state=dict(state or {}))
+    w.calls(q, _at(module, mark))
+    return set(q.facts), q.state
+
+
+def test_a_call_drops_what_it_may_change_of_a_chain_it_is_handed_as_the_map_reads_the_call(
+    module, calls
+):
+    """By the map's reading of the call (changes.call_changes), at the chain's first step: a callee that only reads
+    keeps all; a store of ``.status`` drops what reads it; an append to ``job.files`` changes what it holds, not
+    which list it is; a method reads its receiver's content; a bare name's identity no call changes; an item by its
+    key; an object put in a list goes where it is not followed; a ``bool`` cannot change."""
+    on_job = ["job.status == 'a'", "job.files", "job.files is not None"]
+    assert _after(module, calls, "C2", on_job)[0] == set(on_job)
+    assert _after(module, calls, "C3", on_job)[0] == {
+        "job.files",
+        "job.files is not None",
+    }
+    assert _after(module, calls, "C4", on_job)[0] == {
+        "job.status == 'a'",
+        "job.files is not None",
+    }
+    assert _after(module, calls, "C5", ["task.useScout()"])[0] == set()
+    assert _after(module, calls, "C6", ["items", "items is not None"])[0] == {
+        "items is not None"
+    }
+    assert _after(module, calls, "C7", ["m['k'] == 1", "m['j'] == 1"])[0] == {
+        "m['k'] == 1"
+    }
+    assert _after(module, calls, "C8", ["job.status == 'a'"])[0] == set()
+    assert _after(module, calls, "C9", ["flag"])[0] == {"flag"}
+    values = {"items": [1], "job.status": "a"}
+    assert _after(module, calls, "C2", state=values)[1] == values
+    assert _after(module, calls, "C3", state=values)[1] == {
+        "items": [1],
+        "job.status": evaluate.UNKNOWN,
+    }
+    assert _after(module, calls, "C6", state=values)[1] == {
+        "items": evaluate.UNKNOWN,
+        "job.status": "a",
+    }
+
+
+def test_a_test_reads_a_chain_by_its_identity_or_by_what_it_holds():
+    """``is``, a literal compared, a type and a key read a chain's identity; anything else what it holds; a method
+    called reads its receiver's content, and a function called by its name nothing of its own."""
+    read = {
+        ast.unparse(chain): how
+        for chain, how in walker.readings(
+            "job.status == 'a' and x is None and isinstance(y, str)"
+        )
+    }
+    assert read == {
+        "job.status": walker.IDENTITY,
+        "x": walker.IDENTITY,
+        "y": walker.IDENTITY,
+        "str": walker.IDENTITY,
+    }
+    read = {
+        ast.unparse(chain): how
+        for chain, how in walker.readings(
+            "items and n in names and m[k] and task.useScout() and f(z)"
+        )
+    }
+    assert read == {
+        "items": walker.CONTENT,
+        "n": walker.CONTENT,
+        "names": walker.CONTENT,
+        "m[k]": walker.CONTENT,
+        "k": walker.IDENTITY,
+        "task": walker.CONTENT,
+        "z": walker.CONTENT,
+    }
+    assert {ast.unparse(c): h for c, h in walker.readings("s in ('a', 'b')")} == {
+        "s": walker.IDENTITY
+    }
 
 
 def test_the_static_parts():
