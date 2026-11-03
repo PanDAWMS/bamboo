@@ -135,7 +135,7 @@ _BUILTINS = set(dir(builtins))
 _BUILTIN_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
 } | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
-_SCALARS = {"str", "int", "float", "bool", "bytes", "complex", "NoneType"}
+_SCALARS = callfacts.SCALARS
 #: The dunders each operator calls (:data:`callfacts.OPERATOR_DUNDERS`).
 _OPERATORS = callfacts.OPERATOR_DUNDERS
 
