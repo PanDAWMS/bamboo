@@ -1350,6 +1350,42 @@ def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
     assert _outcomes(junctions) == [("runtime(newStatus)", 2)]
 
 
+def test_a_parameter_reaching_the_write_is_an_outcome_beside_the_literal():
+    """``ppEventServiceJob`` writes ``jobSpec.jobStatus = currentJobStatus``, the
+    status its caller handed it unless that was ``None``.  Read by its literals
+    alone, the write's one branch was the status the function sets itself.
+    """
+    source = (
+        "def pp(self, taskSpec, currentStatus):\n"
+        "    if currentStatus is None:\n"
+        "        currentStatus = 'assigned'\n"
+        "    taskSpec.status = currentStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert _outcomes(junctions) == [("runtime(currentStatus)", 2), ("assigned", 1)]
+    assert [b.path_condition for b in junctions[0].branches] == [
+        ["not (currentStatus is None)  [at 2]"],
+        ["currentStatus is None"],
+    ]
+
+
+def test_a_local_bound_from_a_field_beside_a_literal_is_a_passthrough_to_the_field():
+    """The other arm of :func:`test_both_arms_of_an_if_else_are_on_the_map`, through a local."""
+    source = (
+        "def doActionForReassign(self, taskSpec):\n"
+        "    if taskSpec.oldStatus in ['assigning', 'exhausted', None]:\n"
+        "        newStatus = 'ready'\n"
+        "    else:\n"
+        "        newStatus = taskSpec.oldStatus\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedidog/AtlasProdWatchDog.py")
+
+    assert _outcomes(junctions) == [("ready", 1), ("passthrough(JediTaskSpec.oldStatus)", 2)]
+    assert junctions[0].branches[1].path_condition == ["not (taskSpec.oldStatus in ['assigning', 'exhausted', None])"]
+
+
 def test_a_qualified_field_name_is_a_passthrough():
     """``self.oldStatus = self.status`` is how ``oldStatus`` gets recorded -- the
     edge prune works from, and the first hop out of the flagship symptom."""
@@ -4386,6 +4422,32 @@ def test_a_bind_filled_from_a_local_is_resolved_like_an_attribute_write_is():
     assert status[0].branches[1].path_condition == ["self.ready", "not (toSkip)"]
 
 
+def test_a_bind_from_a_local_keeps_the_binding_that_settles_nothing():
+    """``retryTask_JEDI``'s ``newTaskStatus = taskOldStatus`` beside its
+    ``newTaskStatus = "exhausted"``: the bind's branches were the literal alone,
+    and the task going back to the status it held was off the map."""
+    source = (
+        "class M:\n"
+        "    def f(self, toSkip, taskOldStatus):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus=:oldStatus '\n"
+        "        if toSkip:\n"
+        "            newStatus = 'exhausted'\n"
+        "        else:\n"
+        "            newStatus = taskOldStatus\n"
+        "        if self.ready:\n"
+        "            varMap = {}\n"
+        "            varMap[':status'] = newStatus\n"
+        "            self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert [(b.outcome, b.tier, b.path_condition) for b in status[0].branches] == [
+        ("exhausted", 1, ["self.ready", "toSkip"]),
+        ("runtime(taskOldStatus)", 2, ["self.ready", "not (toSkip)"]),
+    ]
+
+
 def test_a_bind_filled_from_a_declared_mapping_resolves_to_its_values():
     """``newTaskStatus = commandStatusMap[commandStr]["doing"]`` reaches the
     database through a bind, which is where the statuses only this mapping
@@ -4843,6 +4905,66 @@ def test_exclusive_siblings_do_not_negate_each_other():
     assert values["-link_unusable"] == [
         "not (spec.blacklisted)",
         "not (not (spec.blacklisted) and spec.queued >= spec.limit)",
+    ]
+
+
+def test_a_binding_that_settles_nothing_is_a_value_too_where_another_settles():
+    """``retryTask_JEDI`` binds ``:status`` from ``newTaskStatus``, which blocks
+    set to ``exhausted`` and blocks set back to the task's ``oldStatus`` column.
+    Read by its literals alone, the bind could never put a task back.  Every
+    binding that reaches is a value, under its own tests and the entries of
+    what can replace it -- a parameter too, which is the call's value.
+    """
+    func = _func(
+        "def f(self, spec, status, oldStatus):\n"
+        "    if spec.exhausted:\n"
+        "        status = 'exhausted'\n"
+        "    elif spec.back:\n"
+        "        status = oldStatus\n"
+        "    return status\n"
+    )
+
+    reached = pathcond.reaching_values(func, "status", None, _returned(func))
+
+    assert [
+        (one.values, one.expression and ast.unparse(one.expression), one.conditions, one.line) for one in reached
+    ] == [
+        ((), None, ["not (spec.exhausted)", "not (not (spec.exhausted) and spec.back)"], None),
+        (("exhausted",), None, ["spec.exhausted"], 3),
+        ((), "oldStatus", ["not (spec.exhausted)", "spec.back"], 5),
+    ]
+    # The settled part is what literal_values answers, as it did.
+    assert pathcond.literal_values(func, "status", at=_returned(func)) == [("exhausted", ["spec.exhausted"], 3)]
+
+
+def test_where_no_binding_settles_there_are_no_reaching_values():
+    """The name is then a run-time value as a whole, which its readers read as one."""
+    func = _func("def f(self, a):\n    status = a\n    if a:\n        status = a.b\n    return status\n")
+
+    assert pathcond.reaching_values(func, "status", None, _returned(func)) == []
+
+
+def test_a_value_every_way_rebinds_is_no_value_of_the_read():
+    """``getRandomSeed_JEDI`` sets the fetched ``maxRndSeed`` to 1 where it is
+    None and adds to it where it is not, so the fetched value never gets to the
+    write as itself.  Asked of the two writes that replace it, it came out as
+    an arm under a test and its negation, which no run can take.
+    """
+    func = _func(
+        "def f(self, row):\n"
+        "    (seed,) = row\n"
+        "    if seed is None:\n"
+        "        seed = 'first'\n"
+        "    else:\n"
+        "        seed += '+'\n"
+        "    return seed\n"
+    )
+
+    reached = pathcond.reaching_values(func, "seed", None, _returned(func))
+
+    assert [(one.values, one.conditions, one.line) for one in reached] == [
+        (("first",), ["seed is None"], 4),
+        ((), ["not (seed is None)"], 6),
     ]
 
 

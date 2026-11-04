@@ -155,10 +155,10 @@ from bamboo.codemap.panda.pathcond import (
     enclosing_function,
     entries,
     functions_with_owner,
-    literal_values,
     names_bound_by,
     path_condition,
     reaching_definitions,
+    reaching_values,
     site_of,
     surviving_writes,
     targets_of,
@@ -1609,25 +1609,41 @@ def _outcomes(
             if isinstance(value, ast.Name):
                 # Reaching definitions, the same reading the attribute slice
                 # makes of a local: 19% of the corpus's writes fill the bind
-                # from a variable a guarded chain assigned above it.
-                reached = literal_values(func, value.id, settle, at=site)
+                # from a variable a guarded chain assigned above it.  Each one
+                # that reaches is a value, whether it settles or not.
+                reached = reaching_values(func, value.id, settle, at=site)
                 if reached:
                     dominating = path_condition(site)
-                    found.extend(
-                        _Outcome(
-                            outcome,
-                            1,
-                            site,
-                            [c for c in conditions if c not in dominating]
-                            + [entry for entry in later if entry not in conditions],
-                            # Where the value was chosen, which is not where it
-                            # was bound: ``newTaskStatus = "exhausted"`` sits in
-                            # the block that also records why, and the bind is
-                            # further down, after the chain has closed.
-                            _statement_at(func, line) or site,
-                        )
-                        for outcome, conditions, line in reached
-                    )
+                    for one in reached:
+                        extra = [c for c in one.conditions if c not in dominating] + [
+                            entry for entry in later if entry not in one.conditions
+                        ]
+                        # Where the value was chosen, which is not where it
+                        # was bound: ``newTaskStatus = "exhausted"`` sits in
+                        # the block that also records why, and the bind is
+                        # further down, after the chain has closed.  A
+                        # parameter's was chosen by the call.
+                        chosen = (_statement_at(func, one.line) if one.line is not None else None) or site
+                        if one.values:
+                            found.extend(_Outcome(outcome, 1, site, list(extra), chosen) for outcome in one.values)
+                        else:
+                            # Decided at run time from what the binding holds:
+                            # ``newTaskStatus = taskOldStatus`` is
+                            # ``runtime(taskOldStatus)``; a parameter, a slot
+                            # or a ``+=`` holds the name.
+                            held = one.expression if one.expression is not None else value
+                            reading = values.value_reading(held, func)
+                            found.append(
+                                _Outcome(
+                                    f"runtime({ast.unparse(held)})",
+                                    2,
+                                    site,
+                                    extra,
+                                    chosen,
+                                    tuple(reading.frames),
+                                    tuple(reading.cuts),
+                                )
+                            )
                     continue
             # The writer is known, the value is not until run time.
             # Recorded rather than dropped: localize and prune read
@@ -1701,7 +1717,7 @@ def _statement_at(
 ) -> Optional[ast.stmt]:
     """The statement of *func* that starts on *line*.
 
-    ``literal_values`` answers with a line rather than a node, and the block
+    ``reaching_values`` answers with a line rather than a node, and the block
     around that line is what says why the value was chosen.  Looked up rather
     than threaded through because the resolver is shared with the attribute
     slice, which has the node in hand and needs no line at all.

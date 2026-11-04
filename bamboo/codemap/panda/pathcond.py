@@ -1602,55 +1602,144 @@ def literal_values(
     it can hold.  One assignment may then contribute several values, all under
     the same guards, since the guards are what reached the assignment and the
     mapping is what chose among its entries.
+
+    With *at*, these are the bindings of :func:`reaching_values` that settle.
     """
 
-    def literal_only(expression: ast.expr, _func: ast.AST) -> list[str]:
-        if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
-            return [expression.value]
-        return []
+    if at is not None:
+        # A copy per value: two branches sharing one condition list is a
+        # mutation away from one of them rewriting the other's reason.
+        return [
+            (value, list(one.conditions), one.line)
+            for one in reaching_values(func, name, resolve, at)
+            if one.line is not None  # a parameter settles nothing
+            for value in one.values
+        ]
+    settle = resolve or _literal_only
+    values: list[tuple[str, list[str], int]] = []
+    for assignment, written in _whole_assignments(func, name):
+        guards = path_condition(assignment)
+        values.extend((value, list(guards), assignment.lineno) for value in settle(written, func))
+    return values
 
-    settle = resolve or literal_only
-    found: list[tuple[ast.stmt, list[str]]] = []
-    for node in walk(func):
-        value = written_value(node)
-        if value is None:
-            continue
-        if not any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node)):
-            continue
-        if enclosing_function(node) is not func:
-            continue
-        settled = settle(value, func)
-        if settled:
-            found.append((node, settled))
-    found.sort(key=lambda pair: pair[0].lineno)
+
+class Reached(NamedTuple):
+    """One binding of a local that can be what a statement reads (:func:`reaching_values`)."""
+
+    #: what the binding settles to; empty where it settles nothing
+    values: tuple[str, ...]
+    #: the expression it binds the name to whole, where it settles nothing: ``taskOldStatus`` in ``newTaskStatus =
+    #: taskOldStatus``; None for a parameter, a tuple's slot, a loop's target, a ``+=``, which bind none of their own
+    expression: Optional[ast.expr]
+    #: its own tests, and an entry for each other binding that can replace it on the way
+    conditions: list[str]
+    #: the binding's line; None for a parameter, which the call decides
+    line: Optional[int]
+
+
+def reaching_values(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    name: str,
+    resolve: Optional[Callable[[ast.expr, ast.AST], list[str]]],
+    at: ast.AST,
+) -> list[Reached]:
+    """Every binding of the local *name* that can be what *at* reads, settled or not -- none where none settles.
+
+    :func:`literal_values` is the part that settles, and a reader filling a
+    write from the name took it for every value the name can have.
+    ``retryTask_JEDI`` binds ``:status`` from ``newTaskStatus``, which five
+    blocks set to ``exhausted`` and four set back to the task's ``oldStatus``
+    column (``newTaskStatus = taskOldStatus``): the write's branches said a
+    retried task ends exhausted, ready or rerefine, and never back where it
+    was.  Here a binding that settles nothing is a value as well, read the way
+    a settled one is -- under its own tests, with an entry for each other
+    binding that can replace it on the way (:func:`replacements`) -- and what
+    it holds is the expression it binds the name to, where it binds one whole:
+    what a reader makes of that expression is the value.  A parameter, a
+    tuple's slot, a loop's target and a ``+=`` bind none of their own, and a
+    reader reads the name.  A parameter is the function's entry:
+    ``ppEventServiceJob`` writes ``jobSpec.jobStatus = currentJobStatus`` the
+    call handed it, under ``not (currentJobStatus is None)``, beside the
+    ``assigned`` it may set itself.  A name the entry reaches unbound has no
+    value there: reading it raises.  And each is a value only as itself, on a
+    way to *at* past no other binding of the name, a ``+=`` among them.
+
+    Nothing where no binding that reaches *at* settles.  The name is then a
+    run-time value as a whole, which a reader reads as one, and that is what
+    it read before any binding was asked.
+    """
+    settle = resolve or _literal_only
+    whole = {id(assignment): (assignment, written) for assignment, written in _whole_assignments(func, name)}
+    settled = {key: settle(written, func) for key, (_assignment, written) in whole.items()}
+    if not any(settled.values()):
+        return []
     own = [binding for binding in bindings(func, name) if not binding.nested]
     sites = _unique([binding.site for binding in own])
     # The name's ``+=``: each keeps what was there and makes another value of it.
     added = [site for site in sites if isinstance(site, ast.AugAssign)]
-    values: list[tuple[str, list[str], int]] = []
-    for assignment, settled in found:
-        guards = list(path_condition(assignment))
-        if at is not None:
-            replaced = replacements(
-                assignment,
-                [site for site in sites if site is not assignment],
-                [at],
-                place=name,
-                value=written_value(assignment),
-                rereads=added,
+    arguments = func.args
+    parameters = {one.arg for one in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]}
+    parameters |= {one.arg for one in (arguments.vararg, arguments.kwarg) if one is not None}
+    found: list[Reached] = []
+    entry: list[ast.AST] = [arguments] if name in parameters else []
+    assigned = [assignment for assignment, _written in whole.values()]
+    for site in entry + sorted(_unique([*assigned, *sites]), key=lambda one: getattr(one, "lineno", 0)):
+        value = whole[id(site)][1] if id(site) in whole else None
+        others = [other for other in sites if other is not site]
+        # As itself, past any other binding of the name -- a ``+=`` too, past which the value is another one.  The
+        # flow takes each way, so a value every way rebinds is no value here, however the tests read:
+        # getRandomSeed_JEDI's ``(maxRndSeed,) = resLR`` is set to 1 under ``if maxRndSeed is None:`` and added to
+        # under its ``else``, which as two entries is a test and its negation.
+        if not reaching(at, [site], others):
+            continue
+        replaced = replacements(
+            site,
+            others,
+            [at],
+            place=name,
+            value=value,
+            rereads=[one for one in added if one is not site],
+        )
+        if replaced is None:
+            continue
+        guards = [] if site is arguments else list(path_condition(site))
+        # Each value the assignment is settled to meets the tests on the way as a literal does in
+        # replacements: getTasksToExecCommand_JEDI binds the status only under `if newTaskStatus != "dummy"`.
+        literals = [
+            one for one in settled.get(id(site), []) if not _refused(at, site, func, name, one, added, (), texts=True)
+        ]
+        if settled.get(id(site)) and not literals:
+            continue
+        guards.extend(entries(replaced, guards))
+        found.append(
+            Reached(
+                tuple(literals),
+                None if literals else value,
+                guards,
+                getattr(site, "lineno", None),  # the entry, ``args``, has none
             )
-            if replaced is None:
-                continue
-            # Each value the assignment is settled to meets the tests on the way as a literal does in
-            # replacements: getTasksToExecCommand_JEDI binds the status only under `if newTaskStatus != "dummy"`.
-            settled = [one for one in settled if not _refused(at, assignment, func, name, one, added, (), texts=True)]
-            if not settled:
-                continue
-            guards.extend(entries(replaced, guards))
-        # A copy per value: two branches sharing one condition list is a
-        # mutation away from one of them rewriting the other's reason.
-        values.extend((value, list(guards), assignment.lineno) for value in settled)
-    return values
+        )
+    return found if any(one.values for one in found) else []
+
+
+def _literal_only(expression: ast.expr, _func: ast.AST) -> list[str]:
+    """The settling :func:`literal_values` does by default: a string literal is its value."""
+    if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
+        return [expression.value]
+    return []
+
+
+def _whole_assignments(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[tuple[ast.stmt, ast.expr]]:
+    """The ``name = ...`` statements of *func* itself, *name* a target of its own and not a tuple's slot, and what
+    each writes, in line order."""
+    found: list[tuple[ast.stmt, ast.expr]] = []
+    for node in walk(func):
+        value = written_value(node)
+        if value is None or not isinstance(node, ast.stmt):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node)) and enclosing_function(node) is func:
+            found.append((node, value))
+    return sorted(found, key=lambda pair: pair[0].lineno)
 
 
 def _unique(nodes: Sequence[ast.AST]) -> list[ast.AST]:
