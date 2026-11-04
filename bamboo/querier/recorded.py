@@ -39,11 +39,15 @@ What is read from a record:
 A run is the records of one machine with one mark (``runs_for``).  The search for the key returns every record of a
 run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own.  A run whose part
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
-begins or ends within EDGE of an end of what was searched on its machine may go on past it: the window is widened past
-that end, once: the end is one the asks over the window itself searched, so a run that a widened ask's record (or a
-wider ask's) shows reaching past them is not widened again -- a periodic method's mark, a pass every few minutes, is
-one run as far as any record reaches, and was asked EDGE further back each round (the harness's round 18,
-2026-11-03).  Not past an end inside the window (a gap a new ask does not fill) nor past today's file's end (asking
+begins or ends within EDGE of an end of what was searched on its machine may go on past it.  Where its mark holds the
+key, the window is widened past that end, once: the end is one the asks over the window itself searched, so a run that
+a widened ask's record (or a wider ask's) shows reaching past them is not widened again.  A mark that does not hold the
+key is shared -- a periodic method's, a pass every few minutes, one run as far as any record reaches and asked EDGE
+further back each round (the harness's round 18, 2026-11-03), or the setupper's stamp over its jobs -- and its run is
+not widened: the pass that decides sits within a second of its row (MT-toretry-late, rescueTime), so a candidate whose
+window holds no line of the key under such a mark stays unexamined (2026-11-04).  A function whose pass prints the key
+only farther before its write than EDGE would need it; the map is to say which (not read yet).  Not past an end inside
+the window (a gap a new ask does not fill) nor past today's file's end (asking
 again only reads it later).  A second past the end is enough because the recording step is the other half of the
 rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again EDGE past each end of
 the window (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal), so the run
@@ -474,17 +478,27 @@ class RecordedLogs:
             gather(record)
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
+        # and its mark holds the key; a shared mark's run is read as cut there (the module's doc)
         widen: dict[tuple[str, Window], set[str]] = {}
+        shared = 0
         for (m, token), lo, hi in _runs(got, pattern, window, own):
             if (m, token) in partial:
                 continue
-            again = set(asked) if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end where it was read to the time asked: the run is read as cut there
-            if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
-                widen.setdefault((m, (_text(lo[0] - _SECOND), window[1])), set()).update(again)
-            if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in own.continued_ends:
-                widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(again)
+            before = _text(lo[0] - _SECOND) if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0] else None
+            after = (_text(hi[1] + _SECOND) if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1]
+                     and (m, hi[1]) in own.continued_ends else None)
+            if not pattern.search(token):
+                shared += before is not None or after is not None
+                continue
+            if before is not None:
+                widen.setdefault((m, (before, window[1])), set()).update(asked)
+            if after is not None:
+                widen.setdefault((m, (window[0], after)), set()).update(asked)
+        if shared:
+            notes.append(f"{shared} run(s) under a mark that does not hold the key lie within {int(EDGE.total_seconds() // 60)} "
+                         "min of an end of what was searched: a shared mark, not widened, read as cut there")
         why = f"a run within {int(EDGE.total_seconds() // 60)} min of an end of what was searched"
         for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())], notes):
             got.add(record)

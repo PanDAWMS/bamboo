@@ -146,8 +146,15 @@ moment was answered from the record of the round before's widened ask (`_within`
 periodic method's mark (`rescueUnLockedTasksWithPicked_JEDI < vo=atlas label=user >`, a pass every few minutes) is one
 run as far as any record reaches, so each round asked it EDGE further back: MR-T-53351604-rescueTime's 081 went 13:09:14,
 12:59:13, 12:49:12, 12:39:11 in rounds 5-18, and round 6 took three machines to their files' starts (the harness's
-round 18).  A run reaching past the window's own search is read as cut there.  Whether a shared periodic mark needs
-widening at a row's moment at all -- the pass at that second is whole in the window -- is not decided (tmaeno).
+round 18).  A run reaching past the window's own search is read as cut there.  Since 2026-11-04 only a run whose mark
+holds the key is widened.  A mark that does not hold the key is shared: a periodic method's, the setupper's stamp,
+or the first word of a line with no mark, which the records read as its mark (ContentsFeeder's "failed to get taskSpec
+for jediTaskID=..." -> `failed`).  Its run is read as cut at that end, and the log's notes say how many.  The pass that
+decides sits within a second of its row: MT-toretry-late's 19:19:29.607 to .611, rescueTime's 082 13:09:13.450 to
+13:09:14.128 (the harness), and superStatus's hour of prepareTasksToBeFinished_JEDI decided nothing.
+*Revisit:* a function whose pass prints the key only farther before its write than EDGE.  Its window then holds only
+key-less lines of the run, and widening is what ties the run to the key.  The map is to say which functions do this,
+from their prints and the write (asked by the harness, 2026-11-04); the door does not read it yet.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 
