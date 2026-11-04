@@ -252,10 +252,13 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozen
     ``try`` body before *site* printed up to that line, and no print from the statement holding it on is a must
     row -- the call may have left there, *site* itself included.  None when a frame of the function cannot be
     placed: where it left is not known, and no print after *site* is a must row.
+
+    A *site* that leaves (``return``, ``raise``) has no print after it: setup_jumbo_jobs's ``if
+    len(self.jumbo_jobs) == 0: return`` at 1967 does not print "start" at 1968, which only the other way prints.
     """
     before: list[ast.stmt] = []
     after: list[ast.stmt] = []
-    open_after = raised_at is not None and not _holds(site, raised_at)
+    open_after = raised_at is not None and not _holds(site, raised_at) and not isinstance(site, EXITS)
     left_at = raised_at or set()
     node: ast.AST = site
     while node is not func:

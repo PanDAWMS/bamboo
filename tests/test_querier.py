@@ -7363,6 +7363,100 @@ def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_r
     assert said[-1] == f"the nearest arm(s) [{arm}] were kept off by: 'job.flag' (rule 21)"
 
 
+_QUIET = """
+class Mover:
+    def __init__(self):
+        self.logger = logger
+
+    def jumbo(self, job):
+        if len(self.jumbo_jobs) == 0:
+            return
+        self.logger.debug("start")
+        job.jobStatus = "failed"
+
+    def run(self, job):
+        try:
+            self.logger.debug(f"begin {job.PandaID}")
+            self.work()
+            self.logger.debug("end")
+        except Exception:
+            if job.jobStatus not in ["failed", "cancelled"]:
+                job.jobStatus = "failed"
+            self.logger.error("setupper.run failed")
+"""
+
+
+def test_a_return_has_no_row_after_it_and_an_arm_whose_try_raised_nothing_is_excluded(tmp_path):
+    # setup_jumbo_jobs's ``if len(self.jumbo_jobs) == 0: return`` was excluded by the "start" after it, which only
+    # the other way prints; setupper_atlas_plugin's run printed "end", its try's last statement, so the arm in its
+    # handler did not run, and S3 stopped "a guard the passes made false against every arm"
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(_QUIET)
+    lines = _QUIET.splitlines()
+    ret, start = lines.index("            return") + 1, lines.index('        self.logger.debug("start")') + 1
+    arm, handler = lines.index('                job.jobStatus = "failed"') + 1, lines.index("        except Exception:") + 1
+    end = lines.index('            self.logger.debug("end")') + 1
+    line = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "ended.log").write_text(line.format(0, "begin 1") + line.format(1, "end"))
+    (tmp_path / "cut.log").write_text(line.format(0, "begin 1"))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import evaluate as E
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import class_of, stable_holes
+
+        R.ROWS_FROM = "walk"
+        jumbo = R.function("pandaserver/m.py", "jumbo", within=[ARM])
+        must = [[s.lineno for s in part] for part in R.must_rows(jumbo.node, R.statement_at(jumbo.node, RET))]
+        fn = R.function("pandaserver/m.py", "run", within=[ARM])
+        got = {}
+        for name in ("ended", "cut"):
+            run, = runs_for(read_log(f"{name}.log"), "1")
+            env = E.Env()
+            stable_holes([R.seen(fn, run, "outside")], env, class_of(fn), local_to=fn.owner)
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
+            try:
+                r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.jobStatus not in ['failed', 'cancelled']"])]))
+                got[name] = None
+            except rerun.Stop as stop:
+                got[name] = [type(stop).__name__, str(stop)]
+        # a fork: an excluded branch is neither an end nor a stop; every branch excluded is no answer
+        class Out:
+            pass
+        class In:
+            pass
+        def out(q):
+            raise rerun.Excluded("not it")
+        def done(q):
+            f.ends.append((f.hop, "it"))
+        f = object.__new__(rerun.Rerun)
+        f.lines, f.hand, f.hand_used, f.hop, f.ends, f.branches = [], {}, [], "S1", [], []
+        f.touched, f.row_facts, f.question, f.steps = [], {}, None, {Out: out, In: done}
+        f.fork(rerun.Fork([Out(), In()], ["a", "b"]))
+        kinds = [b["kind"] for b in f.branches]
+        try:
+            f.fork(rerun.Fork([Out(), Out()], ["a", "b"]))
+            every = None
+        except rerun.Stop as stop:
+            every = [type(stop).__name__, str(stop)]
+        print(json.dumps([must, got, kinds, every]))
+    """
+    code = code.replace("ARM", str(arm)).replace("RET", str(ret))
+    must, got, kinds, every = json.loads(_ok(_run(tmp_path, code)).splitlines()[-1])
+    assert start == ret + 1
+    # nothing prints after a return: the "start" after the if is the other way's
+    assert must == [[], []]
+    assert got["ended"] == ["Excluded", f"S3: every arm of run runs only in an except handler (at {handler}), and every pass "
+                                        f"printed row {end} with nothing after it in the try that may raise"]
+    # the try's last row not printed: it may have raised, and S3 asks a guard of the arm as before
+    assert got["cut"] == ["Stop", f"S3: a guard the passes made false against every arm (none shown against arm {arm} (in an except handler))"]
+    assert kinds == ["excluded", "end"]
+    assert every == ["Stop", "S1: a branch that was not excluded (each of the 2 was)"]
+
+
 def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):
     corpus = _corpus(tmp_path)
     (corpus / "pandajedi" / "base.py").write_text(textwrap.dedent("""\

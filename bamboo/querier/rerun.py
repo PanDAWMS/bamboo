@@ -516,6 +516,29 @@ def early_exit_if(func: ast.AST, arm_stmt: ast.AST, guard: str) -> ast.If | None
     return None
 
 
+def raised_nothing(func: ast.AST, handler_line: int, printed: set[int]) -> int | None:
+    """A row of *printed* that shows the ``try`` whose ``except`` is at *handler_line* raised nothing: one in its body
+    with nothing after it there, up to the body's end, that may leave other than by falling through
+    (``rows.may_divert``, as :func:`rows.must_rows` reads what follows a row), and no loop between.  setupper_atlas_plugin's
+    run prints "end" at 206, its try's last statement, so the handler at 207 and the arm 212 in it did not run.  None
+    where no row shows it, or where a loop of *func* holds the ``try`` (a later round may raise)."""
+    tried = next((n for n in ast.walk(func) if isinstance(n, R.TRYS) and any(h.lineno == handler_line for h in n.handlers)), None)
+    if tried is None or R.loops_over(tried, func):
+        return None
+    for line in sorted(printed, reverse=True):
+        node = R.statement_at(func, line)
+        while node is not None and node is not tried and node is not func:
+            parent = getattr(node, "parent", None)
+            placed = R.block_of(parent, node) if parent is not None else None
+            if (placed is None or isinstance(parent, R.LOOPS) or (parent is tried and placed[0] != "body")
+                    or any(R.may_divert(s) for s in placed[1][placed[1].index(node) + 1:])):
+                break
+            node = parent
+        if node is tried:
+            return line
+    return None
+
+
 def lines_after(func: ast.AST, arm_stmt: ast.stmt, name: str) -> list[tuple[int, int]]:
     """The spans of the statements after *arm_stmt* in its own block, up to the first that binds *name*: a row printed
     there holds *name* as the arm read it (updateJobStatus' ``varMap[":jobStatus"] = jobStatus`` at 241, then ``new=
@@ -2277,7 +2300,7 @@ class Rerun:
 
     def fork(self, q: Fork):
         """Each branch to its end or its stop, each from the state the fork was reached in; a stop of any is the run's."""
-        stops, codes = [], set()
+        stops, codes, excluded = [], set(), 0
         kept = (list(self.touched), dict(self.row_facts), self.question)
         at = self.hop
         for n, (branch, label) in enumerate(zip(q.branches, q.labels, strict=True), 1):
@@ -2285,6 +2308,11 @@ class Rerun:
             stop = self._branch(n, len(q.branches), branch, label, kept)
             if stop is None:
                 self.branches.append({"label": label, "kind": "end", "step": self.hop, "record": _ends(self.ends[said:])})
+            elif isinstance(stop, Excluded):
+                # a branch excluded did not do it (S3: an arm kept off because nothing raised): neither an end nor a stop
+                excluded += 1
+                self.branches.append({"label": label, "kind": "excluded", "step": self.hop,
+                                      "record": T.Said("excluded-line", {"stop": stop.said}), "code": None})
             else:
                 stops.append(T.Said("numbered", {"n": n, "said": stop.said}))
                 codes.add(stop.code)
@@ -2293,6 +2321,7 @@ class Rerun:
         self.hop = at
         if stops:
             raise Stop(T.Said("of-branch-es-stopped", {"n_stops": len(stops), "n_q_branches": len(q.branches), "stops": stops}), codes.pop() if len(codes) == 1 else None)
+        self.need(T.Said("a-branch-not-excluded", {"n_branches": len(q.branches)}), excluded < len(q.branches))
 
     def _branch(self, n: int, of: int, branch, label: T.Said | str, kept: tuple) -> Stop | None:
         """Branch *n* of a fork walked to its end (None) or its stop, from the state *kept* the fork was reached in."""
@@ -4172,6 +4201,16 @@ class Rerun:
             path = pathcond.path_condition(exit_stmt)
             self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
+        # an arm in an except handler is kept off where every pass's rows show its try raised nothing: no guard to read
+        printed = [self._rows_of_one_call(fn, run) for run in q.passes]
+        quiet: dict[int, tuple[int, list[int]]] = {}
+        for a in q.arms:
+            for u in read[a.line][1]:
+                shown = [raised_nothing(fn.node, u.line, rows) for rows in printed]
+                if shown and all(r is not None for r in shown):
+                    quiet[a.line] = (u.line, sorted({r for r in shown if r is not None}))
+                    break
+        guarded = [a for a in q.arms if a.line not in quiet]
         per_pass = []
         for run, env in zip(q.passes, q.envs, strict=True):
             fixed: dict[str, bool] = {}
@@ -4186,7 +4225,7 @@ class Rerun:
                 fixed.update(sol.known)
                 fixed.update(sol.settled)
             blocking = {}
-            for arm in q.arms:
+            for arm in guarded:
                 blocking[arm.line] = [
                     g for g in read[arm.line][0]
                     if not E.read_elsewhere(g)
@@ -4202,16 +4241,26 @@ class Rerun:
         for arm in q.arms:
             guards, handlers = read[arm.line]
             inside = "".join(f"; in an except handler at {u.line} ({u.detail})" for u in handlers)
-            self.say(f"  arm {arm.line} {arm.outcomes}: needs {guards}{inside}; false in the passes: {blocking[arm.line]}")
+            if arm.line in quiet:
+                handler, rows = quiet[arm.line]
+                self.say(f"  arm {arm.line} {arm.outcomes}: in the except handler at {handler}; every pass printed row(s) {rows} "
+                         "with nothing after it in the try that may raise: kept off, nothing raised")
+            else:
+                self.say(f"  arm {arm.line} {arm.outcomes}: needs {guards}{inside}; false in the passes: {blocking[arm.line]}")
         # what S3 needs to go on, not a finding: an arm none of whose guards the passes were shown to make false
-        unshown = [str(a.line) + (" (in an except handler)" if read[a.line][1] else "") for a in q.arms if not blocking[a.line]]
+        unshown = [str(a.line) + (" (in an except handler)" if read[a.line][1] else "") for a in guarded if not blocking[a.line]]
         self.need(T.Said("a-guard-the-passes-made-false-against", {"unshown": list(unshown)}), not unshown)
+        if not guarded:
+            # kept off by no guard to follow: why nothing raised has no cause to walk, so the branch did not do it
+            raise Excluded(T.at(self.hop, T.Said("every-arm-runs-only-in-an-except", {
+                "fn_name": fn.name, "handlers": sorted({h for h, _ in quiet.values()}),
+                "rows": sorted({r for _, rows in quiet.values() for r in rows})})))
         fewest = min(len(v) for v in blocking.values())
-        nearest = [a for a in q.arms if len(blocking[a.line]) == fewest]
+        nearest = [a for a in guarded if len(blocking[a.line]) == fewest]
         guards = sorted({g for a in nearest for g in blocking[a.line]})
         self.need(T.Said("one-guard-against-the-nearest-arm-s"), len(guards) == 1)
         guard = guards[0]
-        for a in q.arms:
+        for a in guarded:
             if a not in nearest:
                 self.say(f"  not followed: arm {a.line} also needs {[g for g in blocking[a.line] if g != guard]}")
         self.say(f"the nearest arm(s) {[a.line for a in nearest]} were kept off by: {guard!r} (rule 21)")
@@ -4219,6 +4268,14 @@ class Rerun:
         where = guard_if(arm_stmt, guard) or early_exit_if(fn.node, arm_stmt, guard)
         where = self.need(T.Said("the-if-whose-test-is", {"guard": guard}), where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
+
+    def _rows_of_one_call(self, fn: R.Function, run) -> set[int]:
+        """The rows of *fn* one call's pass *run* printed: none of a run of several calls, another of which may have
+        raised (as :meth:`_ways_printed`)."""
+        if run is None or not getattr(fn, "rows", None):
+            return set()
+        sn = R.claim([R.seen(fn, run, self.mode)])[0]
+        return {row.line for row in fn.rows if sn.present(row)} if sn.single_call() else set()
 
     def _ways_printed(self, fn: R.Function, run) -> list[tuple[int, list[str]]]:
         """``(row line, its path condition)`` of each row one call's pass *run* printed (unambiguous), outside any loop

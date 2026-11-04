@@ -1118,7 +1118,12 @@ guard reads" (it says "reads []"): it follows bare names, and this guard reads t
 MJ-transferring-stuck on records-cut; the only such S4 in the four sets).  An arm in an `except` handler has
 no guard to show false -- it is reached only where something above raised -- and S3 stops at "a guard the passes made
 false against every arm (none shown against arm N (in an except handler))", the need it could not meet, not a claim
-(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  And a
+(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  Since 2026-11-04 such an arm is kept off
+where every pass's rows show its `try` raised nothing (`rerun.raised_nothing`): a row in the try's body with nothing
+after it there that may leave (`rows.may_divert`, as `must_rows` reads what follows a row), no loop between, and a
+pass that is one call.  Every arm so kept off, the branch is excluded, and a fork counts it neither an end nor a stop
+(setupper_atlas_plugin's run 212: row 206, its try's last statement).  `may_divert` does not see a subscript or an
+attribute that raises, as `must_rows` does not.  And a
 pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
 walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
 {'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither
@@ -1126,6 +1131,11 @@ gives a wrong answer: S3 stops.  A pass whose judgement excluded every candidate
 none of them (`rerun.took_none`, 2026-11-04): it ran to its end or left by a raise in what it calls, and S2 used to
 stop at "which way pass N went" (setupper_atlas_plugin's run, whose one arm 212 its row 206 excludes).  S3 then has
 no exit's path to settle a guard, and reads the arms' guards in the rows the passes printed only (`_ways_printed`).
+setup_jumbo_jobs's pass took none only because `rows.must_rows` gave its `if len(self.jumbo_jobs) == 0: return`
+(1967) the "start" after the `if` (1968), which only the other way prints; since 2026-11-04 a `return` or `raise` has
+no row after it, and S2 takes 1967.  S3 then reads `not (len(self.jumbo_jobs) == 0)` false against its three arms,
+and S4 stops at "one binding of len in every pass": it reads the builtin the guard calls as a name to bind, and not
+the attribute (MJ-assigned-stuck, MJ-defined-stuck on m-cut2).
 
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".
