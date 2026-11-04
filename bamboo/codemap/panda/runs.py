@@ -1259,8 +1259,9 @@ class _Reader:
                 else None
             )
             attr = recorded.rpartition(".")[2]
+            arm = (func, point) if one.owner == owner else None
             carries[write] = sorted(
-                set(self._carried(there, argument, attr, one.held, read, same))
+                set(self._carried(there, argument, attr, one.held, read, same, arm))
             )
         return carries
 
@@ -1364,12 +1365,15 @@ class _Reader:
         held: frozenset[str],
         read: Callable[[ast.AST, bool], list[str]],
         same: Optional[Callable[[ast.expr], bool]],
+        arm: Optional[tuple[ast.AST, ast.stmt]] = None,
         depth: int = 0,
     ) -> list[str]:
         """What *expr*, a history writer's argument in *func* or what one is bound from, can hold, as the map reads
         a write's value: the object's own *attr*, on a path *held* names (*read*); a name holding what the arm's
         own write is given (*same*); a literal as it settles; each binding of a local that reaches it, and each
-        bind of a statement map's key, read on; else ``runtime(<expression>)``."""
+        bind of a statement map's key, read on; else ``runtime(<expression>)``.  Where the arm's own statement
+        (*arm*: its function and statement) binds the local, only the bindings a way from it brings are read: it,
+        and those that can run after it (:meth:`_from_arm`)."""
         if (
             isinstance(expr, ast.Attribute)
             and expr.attr == attr
@@ -1378,27 +1382,50 @@ class _Reader:
             return read(expr, True)
         if same is not None and same(expr):
             return [HISTORY_CARRIES_OWN]
-        settled = self._settle(expr, func)  # type: ignore[arg-type]
-        if settled:
-            return list(settled)
+        sites = (
+            self._from_arm(arm[1], func, _bindings_at(func, expr))
+            if isinstance(expr, ast.Name) and arm is not None and arm[0] is func
+            else None
+        )
+        if sites is None:
+            settled = self._settle(expr, func)  # type: ignore[arg-type]
+            if settled:
+                return list(settled)
         found: list[str] = []
         if depth < CARRIED_DEPTH:
             if isinstance(expr, ast.Name):
-                for site in _bindings_at(func, expr):
+                for site in sites if sites is not None else _bindings_at(func, expr):
                     value = _bound_whole(site, expr.id)
                     found += (
                         [f"runtime({expr.id})"]
                         if value is None
                         else self._carried(
-                            func, value, attr, held, read, same, depth + 1
+                            func, value, attr, held, read, same, arm, depth + 1
                         )
                     )
             elif (keyed := _bind_key(expr)) is not None:
                 for bind in sql.bound_values(func, *keyed, at=expr):  # type: ignore[arg-type]
                     found += self._carried(
-                        func, bind.value, attr, held, read, same, depth + 1
+                        func, bind.value, attr, held, read, same, arm, depth + 1
                     )
         return found or [f"runtime({ast.unparse(expr)})"]
+
+    def _from_arm(
+        self, point: ast.stmt, func: ast.AST, sites: tuple[ast.AST, ...]
+    ) -> Optional[tuple[ast.AST, ...]]:
+        """Of the bindings *sites* of a local that reach a read, the ones a way from the arm at *point* brings to
+        it, where *point* is one of them: it, and those that can run after it in one pass -- ``newJobStatus`` bound
+        ``activated`` in one branch and ``throttled`` in the other, each arm's row records its own.  None where
+        *point* binds none of them, or one is no statement."""
+        if not any(site is point for site in sites) or not all(
+            isinstance(site, ast.stmt) for site in sites
+        ):
+            return None
+        return tuple(
+            site
+            for site in sites
+            if site is point or self._ordered(func, point, site)[0]  # type: ignore[arg-type]
+        )
 
     def _same_binding(
         self, func: ast.AST, point: ast.stmt
@@ -1746,6 +1773,12 @@ class _Reader:
             # What the caller holds the object by: its own bindings, and what the calls it makes hand back.
             whole = self._follow(owner, start)
             held = set(whole.held.get(owner, ())) | {start}
+            # A way that starts by an object's key reaches the object's row: the object holds it by its own paths too.
+            own = (
+                set(self._follow(owner, said).held.get(owner, ())) | {said}
+                if said != start and said in held_objects
+                else set()
+            )
             for call in here.call_bindings:
                 if call.line != line:
                     continue
@@ -1780,8 +1813,8 @@ class _Reader:
                                 owner,
                                 line,
                                 call.to,
-                                frozenset(held),
-                                frozenset(held),
+                                frozenset(held | own),
+                                frozenset(held | own),
                                 {},
                             )
                             continue

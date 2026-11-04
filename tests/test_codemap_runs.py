@@ -1383,6 +1383,21 @@ class Carry(DBProxy):
         self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
         status = "held"
         self.note_change(panda_id, status)  # S4
+
+    def move_down(self, down_id):
+        down = JobSpec()
+        down.PandaID = down_id
+        down.jobStatus = "cancelled"  # K5
+        self.note_change(down_id, down.jobStatus)  # K6
+
+    def command(self, panda_id, resume):
+        if resume:
+            new = "activated"  # K7
+        else:
+            new = "throttled"  # K8
+        var_map = {":PandaID": panda_id, ":newJobStatus": new}
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newJobStatus WHERE PandaID=:PandaID", var_map)
+        self.note_change(panda_id, new)  # K9
 """
 
 
@@ -1447,6 +1462,30 @@ def test_a_name_holding_what_an_sql_arm_writes_records_the_arms_own_value(
     assert pairs[_line(PROXY, "H1")].carries == {
         f"pkg/proxy.py::DBProxy.archiveJob:{_line(PROXY, 'H1')}": [HISTORY_CARRIES_OWN]
     }
+
+
+def test_a_row_keyed_by_a_local_holding_the_objects_key_records_its_own_value(
+    tmp_path: Path,
+) -> None:
+    """``archiveJob`` records a downstream job it moved by ``downID``, the key the
+    job's row was read by, handing ``dJob.jobStatus``: the way to the record starts
+    by the job's key, and the row is still the job's, its own value."""
+    fragment = _carry(tmp_path, ("Carry.move_down", "K5"))
+    assert _carried(_branch(fragment, "K5")) == {
+        f"Carry.move_down:{_line(CARRY, 'K6')}": [HISTORY_CARRIES_OWN]
+    }
+
+
+def test_a_local_the_arm_binds_records_only_the_arms_own_binding(
+    tmp_path: Path,
+) -> None:
+    """``getTasksToExecCommand_JEDI`` binds ``newJobStatus`` to ``activated`` or
+    ``throttled``, writes it and records it: each arm's row records the value its
+    own binding gives, not the other branch's."""
+    fragment = _carry(tmp_path, ("Carry.command", "K7"), ("Carry.command", "K8"))
+    write = f"Carry.command:{_line(CARRY, 'K9')}"
+    assert _carried(_branch(fragment, "K7")) == {write: ["activated"]}
+    assert _carried(_branch(fragment, "K8")) == {write: ["throttled"]}
 
 
 TASK_CARRY = """\
