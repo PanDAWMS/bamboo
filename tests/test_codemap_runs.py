@@ -1302,6 +1302,48 @@ def test_an_early_exit_a_call_decides_rules_out_what_follows_it(
     assert runs.HISTORY_RULED_OUT in branch.history_hole
 
 
+DAEMON = """\
+from typing import Any
+
+from pkg.spec import JobSpec
+
+
+def main(tbuf: Any, job: JobSpec, pool: Any):
+    job.jobStatus = "closed"  # U1
+    pool.peek(job.PandaID)
+    tbuf.archiveJob(job, job, True)  # T1
+
+
+def quiet(pool: Any, job: JobSpec):
+    job.jobStatus = "closed"  # U2
+    pool.peek(job.PandaID)
+"""
+
+
+def test_a_call_the_record_cannot_place_named_as_a_history_writer_way_is_said(
+    tmp_path: Path,
+) -> None:
+    """``add_sub.main`` archives a job through a ``taskBuffer`` declared ``Any``: no
+    pair is found, and without the hole the empty list says the pass writes none.
+    ``peek`` is a corpus name too, of a function that leads to no history write, and
+    says nothing.
+    """
+    arms = [
+        ("daemon", "main", "U1", "JobSpec.jobStatus"),
+        ("daemon", "quiet", "U2", "JobSpec.jobStatus"),
+    ]
+    fragment = _build(tmp_path, arms, spec=SPEC, proxy=PROXY, daemon=DAEMON)
+
+    unplaced = _branch(fragment, "U1")
+    assert unplaced.history == []
+    assert unplaced.history_hole == runs.HISTORY_UNPLACED.format(
+        calls=f"main:{_line(DAEMON, 'T1')} tbuf.archiveJob"
+    )
+    quiet = _branch(fragment, "U2")
+    assert quiet.history == []
+    assert quiet.history_hole == ""
+
+
 def test_ruled_out_by_reads_an_early_exit_and_leaves_an_open_one_open() -> None:
     tree = ast.parse(
         "def f(a, b, c):\n"

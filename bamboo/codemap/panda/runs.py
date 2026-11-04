@@ -206,6 +206,11 @@ HISTORY_NO_FUNCTION = "the arm's function is not a row of the reach record"
 HISTORY_DEPTH = f"a way up reached depth {MAX_DEPTH} with no pair"
 HISTORY_WIDE = f"the walk up met {MAX_FUNCTIONS} functions and went no further"
 HISTORY_RULED_OUT = "a way up from the arm is ruled out by what the calls on it hand"
+#: No pair, and a call the walk met in one pass with the arm is one the reach record
+#: could not place, so a history row may be written behind it.
+HISTORY_UNPLACED = "no pair, but a call in one pass with the arm is not placed: {calls}"
+#: How many of those calls the hole names.
+UNPLACED_NAMED = 3
 
 ROW_ANOTHER = "another: "
 ROW_NO_START = (
@@ -347,6 +352,11 @@ def history_writers(functions: list[tuple[str, ast.AST, str]]) -> dict[str, str]
     return found
 
 
+def _method_name(owner: str) -> str:
+    """The name a function is called by: ``JobComplexModule.archiveJob`` of a row's owner."""
+    return owner.rpartition("::")[2].rpartition(".")[2]
+
+
 class _Reader:
     def __init__(
         self, fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
@@ -392,6 +402,7 @@ class _Reader:
                             lines.append(line)
         self.below: dict[tuple[str, str], set[str]] = {}
         self.subject_of: dict[str, str] = {}
+        self._leading: Optional[set[str]] = None
 
     # -- runs ----------------------------------------------------------------- #
 
@@ -821,6 +832,9 @@ class _Reader:
             return
         pairs: dict[tuple[int, str, int, int], HistoryPair] = {}
         holes: list[str] = []
+        # The calls the reach record could not place, in one pass with the point of a
+        # function the walk met: a writer may be behind any of them.
+        unplaced: list[str] = []
         ruled = False
         for site in sites:
             owner = self.names.of(site.func)
@@ -855,6 +869,9 @@ class _Reader:
                             (pair.level, pair.caller, pair.point, pair.call), pair
                         )
                     continue
+                for call in self._unplaced_at(here, func, point):
+                    if call not in unplaced:
+                        unplaced.append(call)
                 if level >= MAX_DEPTH:
                     if HISTORY_DEPTH not in holes:
                         holes.append(HISTORY_DEPTH)
@@ -910,6 +927,11 @@ class _Reader:
         )
         if ruled and not pairs:
             holes.append(HISTORY_RULED_OUT)
+        if unplaced and not pairs:
+            named = ", ".join(unplaced[:UNPLACED_NAMED])
+            if len(unplaced) > UNPLACED_NAMED:
+                named += f" and {len(unplaced) - UNPLACED_NAMED} more"
+            holes.append(HISTORY_UNPLACED.format(calls=named))
         branch.history_hole = "; ".join(holes)
 
     def _pairs_at(
@@ -935,23 +957,12 @@ class _Reader:
                     candidates.setdefault(line, []).append(call)
         if not candidates:
             return []
-        if id(func) not in self._kills:
-            self._kills[id(func)] = [bound.statement for bound in self.built(func)]
-        kills = self._kills[id(func)]
-        around = _loops(point, func)
         pairs: list[HistoryPair] = []
         for line, through in sorted(candidates.items()):
             site = mustprints._statement_at(func, line)
             if site is None or site is point:
                 continue
-            both = [
-                loop
-                for loop in _loops(site, func)
-                if any(loop is one for one in around)
-            ]
-            killers = [*kills, *both]
-            after = bool(reaching(site, [point], killers))
-            before = bool(reaching(point, [site], killers))
+            after, before = self._ordered(func, point, site)
             if not (after or before):
                 continue
             writes: set[str] = set()
@@ -1012,6 +1023,53 @@ class _Reader:
                 )
             )
         return pairs
+
+    def _ordered(
+        self, func: ast.AST, point: ast.stmt, site: ast.stmt
+    ) -> tuple[bool, bool]:
+        """Whether *site* can run after *point* in one pass of *func*, and whether before it."""
+        if id(func) not in self._kills:
+            self._kills[id(func)] = [bound.statement for bound in self.built(func)]
+        around = _loops(point, func)
+        both = [
+            loop for loop in _loops(site, func) if any(loop is one for one in around)
+        ]
+        killers = [*self._kills[id(func)], *both]
+        return bool(reaching(site, [point], killers)), bool(
+            reaching(point, [site], killers)
+        )
+
+    def _unplaced_at(self, owner: str, func: ast.AST, point: ast.stmt) -> list[str]:
+        """The calls of *owner* the reach record holds as holes, in one pass with *point*,
+        named as a function that leads to a history write is.
+
+        ``add_sub.main`` sets a co-jumbo job ``closed`` and archives it through
+        ``taskBuffer.archiveJobs``, whose receiver is declared ``Any``: the record
+        places no callee, so the walk finds no history call, and an empty list
+        with no hole beside it says the pass writes none.  A hole named as no
+        such function is -- a logger's ``debug``, a list's ``append`` -- is no
+        way to one, by the only thing the record knows of it.
+        """
+        row = self.rows.get(owner)
+        if row is None:
+            return []
+        if self._leading is None:
+            # The functions every history write is below, and the writers themselves.
+            self._leading = {
+                _method_name(caller)
+                for (caller, _cls), writes in self.below.items()
+                if writes
+            } | {_method_name(writer) for writer in self.writers}
+        found: list[str] = []
+        for hole in row.holes:
+            if hole.callee.rpartition(".")[2] not in self._leading:
+                continue
+            site = mustprints._statement_at(func, hole.line)
+            if site is None or site is point:
+                continue
+            if any(self._ordered(func, point, site)):
+                found.append(f"{owner.rpartition('::')[2]}:{hole.line} {hole.callee}")
+        return found
 
     def _row(
         self,
