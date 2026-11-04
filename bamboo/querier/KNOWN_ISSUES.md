@@ -101,16 +101,27 @@ not built.
 
 *Shows:* said (a note on every log read from JEDI's machines).
 
-### K13. The round that asks a run's mark is not limited to the window
+### K13. The round that asks a run's mark reaches only the key's records near the window
 
-The records are not cut to the window (a widened ask reuses them), so the key's records include runs of
-other days, and `RecordedLogs._read` asks the mark of each of them that does not hold the key.
-*Shows:* nothing wrong; it costs asks (a mark of a run a day before the window, on each machine).
-*Why not now:* limiting it to the marks whose key records reach the window +- `EDGE` would miss the end of
-a run that goes on longer than `EDGE` past its last record of the key -- the case the mark round is for
-(a run that names the key at its start and writes the row at its end).  How long such runs last is not
-measured.
-*Revisit:* measure, per log, how long a mark's run goes on past its last record of the key.
+The records are not cut to the window (a widened ask reuses them, and a rotated file's record holds the key's lines of
+its whole day), so the key's records include runs of other hours.  Since 2026-11-04 `RecordedLogs._read` asks the mark
+that does not hold the key only of a key record within `EDGE` of the window.  Before, it asked every such mark, over
+the window: in the analyzer handover's six sets 25 of the round's 65 asks named a mark with no line of the key in the
+window +- 10 min -- 15 runs after it (periodic marks: getTasksToBeProcessed_JEDI 7, getTasksToExecCommand_JEDI 4), 7 on
+both sides and none in it, 3 before (insertNewJob's marks at the job's creation, 7 min to 11.6 h before a stuck
+window) -- and of the harness's round 20 most were AtlasProdWatchDog's stamps and setCloudToTasks_JEDI's mark 4-8 h
+after MT-staged-late's window (out/l2bk/mark_round_windows.py).  None was a run that named the key before the window's
+slack and went on into it.
+*Shows:* such a run -- one that names the key at its start, more than `EDGE` before the window, and writes the row
+inside it -- is not asked: the window holds its key-less lines only, and they are read as no run of the key.  A mark
+not asked is not read as cut either (`Log.partial`): its run is the key's records alone, and with no entry row among
+them a candidate's pass spans from a key record before the window to one after it.  In m-cut2's MT-defined-late,
+reactivatePendingTasks_JEDI:4704 was kept at 12:30:50 on its records at 11:29, 13:06 and 13:17, where the whole mark
+showed none of its 133 passes there.  That arm is no candidate: its UPDATE requires status 'pending' (the map's
+`row_precondition`), and the row before held 'defined'.  H2 does not read the precondition; S1 and L2 do (`arms_of`).
+No other candidate in the six sets was read so.
+*Revisit:* measure, per log, how long a mark's run goes on past its last record of the key; the functions whose pass
+prints the key that far before its write are the map's to name (below).
 For S1 (and S2 after it) the round is narrower (`recorded._partial`, 2026-10-26): S1 names the functions whose runs it
 reads, and a DB proxy method's mark of none of them is not asked, nor one of theirs whose key records come in
 pieces `EDGE` or more apart -- a mark the method's calls share (`getTasksToExecCommand_JEDI < vo=None label=None >`),

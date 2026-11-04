@@ -898,6 +898,31 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert "two.jsonl:2: a second record for the ask" in two
 
 
+def test_the_record_door_asks_a_mark_that_does_not_hold_the_key_only_of_a_key_record_near_the_window(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W = ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            key_ask = Ask("panda-x.log", ("ds_sub1",), W)
+            # the key under five marks: in the window, 8 min past its end, 10 min before its start, 16 min before it,
+            # and 3 h after it -- a rotated file's record holds the key's lines of its whole day
+            hits = [{**line(t, "registered ds_sub1", f"{tok} < x >"), "offset": i} for i, (t, tok) in enumerate(
+                [("08:31:12", "inside"), ("08:49:13", "past"), ("08:11:12", "edge"), ("08:05:00", "before"),
+                 ("11:41:00", "after")])]
+            _, round1 = ask_of([record(key_ask, {M1: answered({**TODAY, "records": hits})})], "panda-x.log", "ds_sub1", W)
+            print(json.dumps(round1))
+            """),
+        )
+    )
+    round1 = json.loads(out)
+    # the marks of the key records within EDGE (10 min) of the window, its ends held; a run that began hours after the
+    # window, or ended before it, is not what it asks about (K13)
+    assert [a["strings"] for a, _ in round1] == [["edge < x >", "inside < x >", "past < x >"]]
+    assert all(a["window"] == ["2026-09-28 08:21:12", "2026-09-28 08:41:13"] for a, _ in round1)
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(

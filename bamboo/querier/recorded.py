@@ -37,7 +37,8 @@ What is read from a record:
 * ``cut`` (more than 200 lines after the match): the record's traceback and holes are not read.
 
 A run is the records of one machine with one mark (``runs_for``).  The search for the key returns every record of a
-run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own.  A run whose part
+run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own, where a record of
+the key under it lies within :data:`EDGE` of the window.  A run whose part
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
 begins or ends within EDGE of an end of what was searched on its machine may go on past it.  Where its mark holds the
 key, the window is widened past that end, once: the end is one the asks over the window itself searched, so a run that
@@ -459,15 +460,18 @@ class RecordedLogs:
 
         gather(first)
 
-        # the marks that do not hold the key: their records need not -- every such mark, near the window or not
-        # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
-        # only where it is one of theirs and its run can be made whole by it (_partial), and for the method's own rows
-        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed); for
-        # one that reads a run at a row's moment (*whole*), each of theirs whole
+        # the marks that do not hold the key: their records need not -- each of a key record within EDGE of the window;
+        # a rotated file's record holds the key's lines of its whole day, and a run that began hours after the window or
+        # ended before it is not what the window asks about (KNOWN_ISSUES.md K13); for an asker that reads some
+        # functions' runs alone, a DB proxy method's mark is asked only where it is one of theirs and its run can be made
+        # whole by it (_partial), and for the method's own rows and every line at WARNING and above where its rows below
+        # WARNING all start with fixed text (_narrowed); for one that reads a run at a row's moment (*whole*), each of
+        # theirs whole
         pattern = keyed(key)
+        lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
-            if r.token and pattern.search(r.message) and not pattern.search(r.token):
+            if r.token and pattern.search(r.message) and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w:
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners, whole)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
