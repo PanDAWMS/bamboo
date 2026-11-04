@@ -7309,6 +7309,60 @@ def test_a_status_arm_its_run_shows_ran_names_the_values_its_guards_held_on_wher
                             "false": None}
 
 
+_NONE_TAKEN = """
+class Mover:
+    def __init__(self):
+        self.logger = logger
+
+    def run(self, job):
+        self.logger.debug(f"flag={job.flag}")
+        if job.flag:
+            self.logger.debug("flagged")
+            job.jobStatus = "failed"
+        self.logger.debug("done")
+"""
+
+
+def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_reads_why(tmp_path):
+    # setupper_atlas_plugin's run: its one arm 212, which the row 206 its pass printed excludes, is no way the pass
+    # went, and S2 stopped "which way pass 1 went"
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(_NONE_TAKEN)
+    lines = _NONE_TAKEN.splitlines()
+    arm = lines.index('            job.jobStatus = "failed"') + 1
+    (tmp_path / "x.log").write_text("".join(f"2026-01-01 00:00:0{n},000 panda.log.X: DEBUG    <PandaID=1> {t}\n"
+                                            for n, t in enumerate(["flag=False", "done"])))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import evaluate as E
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import class_of, stable_holes
+
+        verdicts = lambda *kinds: N(chosen=None, verdicts=[N(kind=k) for k in kinds])
+        took = [rerun.took_none(verdicts("excluded", "excluded")), rerun.took_none(verdicts("excluded", "kept")),
+                rerun.took_none(verdicts("excluded", "unexamined")), rerun.took_none(verdicts())]
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/m.py", "run", within=[ARM])
+        run, = runs_for(read_log("x.log"), "1")
+        env = E.Env()
+        stable_holes([R.seen(fn, run, "outside")], env, class_of(fn), local_to=fn.owner)
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
+        got = r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])]))
+        print(json.dumps([took, got.guard, got.line, [x for x in r.lines if x]]))
+    """
+    out = _ok(_run(tmp_path, code.replace("ARM", str(arm))))
+    took, guard, line, said = json.loads(out.splitlines()[-1])
+    # every candidate excluded: none taken; one kept or not examined may have been taken
+    assert took == [True, False, False, False]
+    # no exit's path: the guard of the arm is read false in what the pass printed, and S3 goes on to where it is tested
+    assert guard == "job.flag" and line == lines.index("        if job.flag:") + 1
+    assert said[1] == "run: every pass took none of its candidates, so no exit's path settles a guard"
+    assert said[-1] == f"the nearest arm(s) [{arm}] were kept off by: 'job.flag' (rule 21)"
+
+
 def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):
     corpus = _corpus(tmp_path)
     (corpus / "pandajedi" / "base.py").write_text(textwrap.dedent("""\

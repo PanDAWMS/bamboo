@@ -1122,7 +1122,10 @@ false against every arm (none shown against arm N (in an except handler))", the 
 pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
 walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
 {'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither
-gives a wrong answer: S3 stops.
+gives a wrong answer: S3 stops.  A pass whose judgement excluded every candidate, the arms and the exits alike, took
+none of them (`rerun.took_none`, 2026-11-04): it ran to its end or left by a raise in what it calls, and S2 used to
+stop at "which way pass N went" (setupper_atlas_plugin's run, whose one arm 212 its row 206 excludes).  S3 then has
+no exit's path to settle a guard, and reads the arms' guards in the rows the passes printed only (`_ways_printed`).
 
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".

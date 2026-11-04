@@ -1337,10 +1337,11 @@ class Fork:
 
 @dataclass
 class Blocked:
-    """What kept every pass from the arms that move the value."""
+    """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
+    candidates (:func:`took_none`)."""
 
     fn: R.Function
-    exit_line: int
+    exit_line: int | None
     passes: list
     envs: list
     arms: list[Arm]
@@ -1858,6 +1859,14 @@ def _the_arm_taken(j, arms: set[int]):
     positive = [v for v in j.verdicts if v.kind == "positive"]
     taken = [v for v in positive if v.line in arms]
     return taken[0] if len(taken) == 1 and len(positive) > 1 else None
+
+
+def took_none(j) -> bool:
+    """S2's way for a pass whose judgement excluded every candidate, the arms that move the value and the exits alike:
+    it took none of them -- it ran to its end, or left by a raise in what it calls -- so no arm of the mover's moved the
+    value in it, and S3 reads why (setupper_atlas_plugin's run, whose one arm 212 its row 206 excludes).  A candidate
+    kept or not examined may have been taken: False."""
+    return j.chosen is None and bool(j.verdicts) and all(v.kind == "excluded" for v in j.verdicts)
 
 
 def _number(value):
@@ -4109,7 +4118,8 @@ class Rerun:
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in q.arms} | set(exits))
         self.say(f"candidates: arms {[a.line for a in q.arms]}, exits {exits}")
-        chosen, envs = [], []
+        chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
+        envs = []
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
@@ -4120,12 +4130,17 @@ class Rerun:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
                          f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
-            chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
+            if took_none(j):
+                self.say(f"  pass {n} took none of the candidates: no arm of {func} that moves the value ran in it")
+                chosen.append(None)
+            else:
+                chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
             envs.append(env)
-        taken = {v.line for v in chosen}
+        taken = {v.line if v is not None else None for v in chosen}
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
-        self.say(f"every pass ({len(found)}) left by {func}:{exit_line}")
+        self.say(f"every pass ({len(found)}) left by {func}:{exit_line}" if exit_line is not None
+                 else f"every pass ({len(found)}) of {func} took none of its candidates")
         return Blocked(fn, exit_line, found, envs, q.arms)
 
     def _printed_in(self, fn: R.Function, run, expr: str) -> list[str]:
@@ -4148,9 +4163,14 @@ class Rerun:
         arm = next((a for a in q.arms if a.line == q.exit_line), None)
         if arm is not None:
             return self._arm_taken(q, arm)
-        exit_stmt = R.statement_at(fn.node, q.exit_line)
-        path = pathcond.path_condition(exit_stmt)
-        self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
+        if q.exit_line is None:
+            # every pass took none of the arms and the exits: what settles a guard is what the passes printed on the way
+            path = []
+            self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
+        else:
+            exit_stmt = R.statement_at(fn.node, q.exit_line)
+            path = pathcond.path_condition(exit_stmt)
+            self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         per_pass = []
         for run, env in zip(q.passes, q.envs, strict=True):
