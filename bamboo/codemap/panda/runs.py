@@ -122,6 +122,20 @@ prints after it that print the new key (``printed_at``: ``Generate new
 PandaID ...``, in a run the old key marks).  Only an assignment on a path
 the record follows the object by is seen.
 
+**What the row records.**  Each write whose key the object reaches by a way
+that runs in one pass says what its row can record for the object
+(:attr:`HistoryPair.carries`): the writer's value of its subject -- the
+parameter its ``INSERT`` binds the column to, or the row an ``INSERT ...
+SELECT`` copies -- read where the writer is called, as the map reads a
+write's value.  The object's own value read after the arm is ``own``, beside
+the subject's arms on the object that can replace it on the way; read
+before, ``prior``.  ``archiveJob`` records ``tmpJobStatus`` for each job of
+``updatedJobList``: for the job, its own status or the ``closed``,
+``failed`` or ``merging`` it is set to after; for a downstream job it
+cancelled, the job's status -- not ``cancelled``.  A call the caller makes
+between the point and the call, handed the object, is not read for what it
+writes there.
+
 **Not read.**  What the calls on the way down to the writer hand: the
 object is followed without the values calls hand
 (:data:`bamboo.codemap.objects.PREMISES` ``handed_values_not_read``), so a
@@ -153,6 +167,8 @@ from bamboo.codemap.models import (
     BIND_RESULT,
     HISTORY_AFTER,
     HISTORY_BEFORE,
+    HISTORY_CARRIES_OWN,
+    HISTORY_CARRIES_PRIOR,
     HISTORY_EITHER,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
@@ -172,7 +188,7 @@ from bamboo.codemap.models import (
     RunStart,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, mustprints, pathcond, sql, sqltext
+from bamboo.codemap.panda import keycolumns, mustprints, pathcond, sql, sqltext, values
 from bamboo.codemap.panda.reaching import reaching
 from bamboo.codemap.panda.recognizers import logfile
 
@@ -184,6 +200,9 @@ HISTORY_TABLES: dict[str, str] = {
 }
 #: The attribute a history row is keyed by, per class: the row of the object's own key.
 HISTORY_KEYS: dict[str, str] = {"JobSpec": "PandaID", "JediTaskSpec": "jediTaskID"}
+#: How many bindings back a writer's argument is read for what its row records (:meth:`_Reader._carried`):
+#: ``archiveJob``'s ``tmpJobStatus`` to ``varMap[":jobStatus"]`` to ``"closed"``.
+CARRIED_DEPTH = 4
 
 
 #: PanDA's logger factories, each with where it takes its mark from: a logger bound to one of these starts a run
@@ -322,6 +341,21 @@ class _Bound(NamedTuple):
     builder: str
 
 
+class _Reached(NamedTuple):
+    """A history write whose key the arm's object reaches by a way that runs in one pass (:meth:`_Reader._followed`)."""
+
+    #: the function the writer is called in, and the call's line
+    owner: str
+    line: int
+    writer: str
+    #: the paths that function holds the object by
+    held: frozenset[str]
+    #: the paths the pair's caller holds it by
+    caller: frozenset[str]
+    #: the paths each function the pair's call takes the object into holds it by; empty for a call of the writer
+    below: dict[str, frozenset[str]]
+
+
 def attach(
     fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
 ) -> tuple[int, int, int, int]:
@@ -403,6 +437,11 @@ class _Reader:
         self.below: dict[tuple[str, str], set[str]] = {}
         self.subject_of: dict[str, str] = {}
         self._leading: Optional[set[str]] = None
+        #: (owner, subject) -> the statement and outcome of each of the subject's arms there.
+        self._arms: dict[tuple[str, str], list[tuple[ast.stmt, str]]] = {}
+        #: Each history writer's source of its subject's value (:meth:`_recorded_from`).
+        self._sources: dict[str, Optional[str]] = {}
+        self._settle = values.resolver()
 
     # -- runs ----------------------------------------------------------------- #
 
@@ -713,6 +752,7 @@ class _Reader:
                         arms[(owner, junction.subject)].append(
                             (site.statement, branch.outcome)
                         )
+        self._arms = dict(arms)
         count = 0
         for row in self.fragment.reach_graph:
             row.history = []
@@ -972,7 +1012,7 @@ class _Reader:
                     if call.to in self.writers
                     else self._below(call)
                 )
-            row_said, row_why, held, start, steps = self._row(
+            row_said, row_why, held, start, steps, reached = self._row(
                 level,
                 owner,
                 func,
@@ -991,6 +1031,13 @@ class _Reader:
                 self._rekeyed(owner, func, point, site, start, steps, key)
                 if row_said in (HISTORY_ROW_SAME, HISTORY_ROW_CAN) and key
                 else []
+            )
+            carries = (
+                self._carries(
+                    owner, func, point, level, subject, site, after, before, reached
+                )
+                if row_said in (HISTORY_ROW_SAME, HISTORY_ROW_CAN)
+                else {}
             )
             pairs.append(
                 HistoryPair(
@@ -1017,6 +1064,7 @@ class _Reader:
                     object=held,
                     row_via=[step.said() for step in steps],
                     rekeyed=rekeyed,
+                    carries=carries,
                     runs=runs,
                     runs_in=runs_in,
                     run_hole=run_hole,
@@ -1084,17 +1132,24 @@ class _Reader:
         written: Optional[ast.expr],
         arm: "_Arm",
         writes: set[str],
-    ) -> tuple[str, str, str, str, list[_WayStep]]:
-        """Whether the history row is the arm's row: ``(row, why, object, the path the way starts by, its steps)``."""
+    ) -> tuple[str, str, str, str, list[_WayStep], dict[str, _Reached]]:
+        """Whether the history row is the arm's row: ``(row, why, object, the path the way starts by, its steps, the
+        writes the object reaches)``."""
         direct = [call for call in through if call.to in self.writers]
         if level == 0 and direct and written is not None:
             row, why = self._in_place(func, point, site, line, direct, subject, written)
             if row == HISTORY_ROW_SAME:
-                return row, why, ast.unparse(written), ast.unparse(written), []
+                held = arm.objects | {ast.unparse(written)}
+                reached = {
+                    f"{owner}:{line}": _Reached(
+                        owner, line, direct[0].to, held, held, {}
+                    )
+                }
+                return row, why, ast.unparse(written), ast.unparse(written), [], reached
             if not row.startswith(ROW_ANOTHER):
-                return row, why, "", "", []
+                return row, why, "", "", [], {}
             found = self._followed(level, owner, point, line, subject, arm, writes)
-            return found if found[0] == HISTORY_ROW_CAN else (row, why, "", "", [])
+            return found if found[0] == HISTORY_ROW_CAN else (row, why, "", "", [], {})
         return self._followed(level, owner, point, line, subject, arm, writes)
 
     def _in_place(
@@ -1138,6 +1193,284 @@ class _Reader:
         if reaching(point, sites) == reaching(site, sites):
             return HISTORY_ROW_SAME, ""
         return "", ROW_REBOUND
+
+    # -- what the row records ----------------------------------------------------------------------------------
+
+    def _carries(
+        self,
+        owner: str,
+        func: ast.AST,
+        point: ast.stmt,
+        level: int,
+        subject: str,
+        site: ast.stmt,
+        after: bool,
+        before: bool,
+        reached: dict[str, _Reached],
+    ) -> dict[str, list[str]]:
+        """What the row each write of *reached* writes for the arm's object can record (:attr:`HistoryPair.carries`).
+
+        The writer's value of its subject (:meth:`_recorded_from`) is read where the writer is called: its argument
+        as the map reads a write's value (:meth:`_carried`), or the row it copies.  The object's own value is read
+        as of where it is read -- in the caller, by its order from the point; below the call, by the call's.
+        """
+        carries: dict[str, list[str]] = {}
+        for write, one in sorted(reached.items()):
+            recorded = self.writers.get(one.writer, "")
+            source = self._recorded_from(one.writer)
+            there = self.funcs[one.owner][1]
+            call = self._writer_call(there, one.line, one.writer)
+            if source is None or call is None:
+                carries[write] = []
+                continue
+
+            def read(
+                at: ast.AST, memory: bool, one: _Reached = one, recorded: str = recorded
+            ) -> list[str]:
+                # The object's own value of the subject where *at* reads it: in memory, or the row's.
+                statement = (
+                    at if isinstance(at, ast.stmt) else mustprints._statement_of(at)
+                )
+                if statement is point:
+                    later, earlier = True, False
+                elif one.owner == owner and statement is not None:
+                    later, earlier = self._ordered(func, point, statement)
+                else:
+                    later, earlier = after, before
+                found = [HISTORY_CARRIES_OWN] if later else []
+                if earlier:
+                    found.append(HISTORY_CARRIES_PRIOR)
+                if later and memory:
+                    found += self._replacing(
+                        owner, func, point, site, recorded, one, statement
+                    )
+                return found
+
+            if source == "":
+                carries[write] = sorted(set(read(call, False)))
+                continue
+            argument = self._argument(one.writer, call, source)
+            if argument is None:
+                carries[write] = []
+                continue
+            same = (
+                self._same_binding(func, point)
+                if level == 0 and one.owner == owner and subject == recorded
+                else None
+            )
+            attr = recorded.rpartition(".")[2]
+            carries[write] = sorted(
+                set(self._carried(there, argument, attr, one.held, read, same))
+            )
+        return carries
+
+    def _recorded_from(self, writer: str) -> Optional[str]:
+        """The parameter the history writer *writer* records its subject's value from -- the one its ``INSERT``
+        binds the subject's column to, ``recordStatusChange``'s ``jobStatus`` --; ``""`` where the statement copies
+        it from a row (``INSERT ... SELECT status FROM JEDI_Tasks``); None where neither is read."""
+        if writer not in self._sources:
+            self._sources[writer] = self._source_of(writer)
+        return self._sources[writer]
+
+    def _source_of(self, writer: str) -> Optional[str]:
+        held = self.funcs.get(writer)
+        subject = self.writers.get(writer, "")
+        if held is None or not subject:
+            return None
+        func = held[1]
+        attr = subject.rpartition(".")[2].lower()
+        found: set[str] = set()
+        for run in self._executed(func):
+            try:
+                read = sqltext.writes(run.reading)
+            except Exception:  # noqa: BLE001 -- the record keeps no write of it
+                return None
+            for one in read:
+                if (
+                    one.kind != "insert"
+                    or HISTORY_TABLES.get(one.table.rpartition(".")[2].lower())
+                    != subject
+                ):
+                    continue
+                given = next(
+                    (
+                        value
+                        for column, value in one.columns.items()
+                        if column.lower() == attr
+                    ),
+                    None,
+                )
+                if given is None or given.kind == "literal":
+                    return None
+                if given.kind != "bind":
+                    found.add("")
+                    continue
+                for call in run.run_at:
+                    for bind in _column_binds(func, run, call, attr):
+                        name = bind.value
+                        if not (
+                            isinstance(name, ast.Name)
+                            and keycolumns.is_parameter(func, name.id)
+                            and not C._rebinds(func, name.id)
+                        ):
+                            return None
+                        found.add(name.id)
+        return found.pop() if len(found) == 1 else None
+
+    def _writer_call(self, func: ast.AST, line: int, writer: str) -> Optional[ast.Call]:
+        """The call of *writer* on *line* of *func*."""
+        statement = self._statement(func, line)
+        named = self.rows[writer].function if writer in self.rows else ""
+        if statement is None or not named:
+            return None
+        return next(
+            (
+                node
+                for node in walk(statement)
+                if isinstance(node, ast.Call)
+                and node.lineno == line
+                and _called(node) == named
+            ),
+            None,
+        )
+
+    def _argument(
+        self, writer: str, call: ast.Call, parameter: str
+    ) -> Optional[ast.expr]:
+        """What *call* hands *writer*'s *parameter*, by name or by its place after ``self``; None where it is not
+        handed -- the default -- or a ``*`` stands at or before its place."""
+        for keyword in call.keywords:
+            if keyword.arg == parameter:
+                return keyword.value
+        arguments = self.funcs[writer][1].args  # type: ignore[attr-defined]
+        names = [one.arg for one in [*arguments.posonlyargs, *arguments.args]]
+        row = self.rows.get(writer)
+        if row is not None and row.cls:
+            names = names[1:]
+        if parameter not in names:
+            return None
+        index = names.index(parameter)
+        if index >= len(call.args) or any(
+            isinstance(one, ast.Starred) for one in call.args[: index + 1]
+        ):
+            return None
+        return call.args[index]
+
+    def _carried(
+        self,
+        func: ast.AST,
+        expr: ast.expr,
+        attr: str,
+        held: frozenset[str],
+        read: Callable[[ast.AST, bool], list[str]],
+        same: Optional[Callable[[ast.expr], bool]],
+        depth: int = 0,
+    ) -> list[str]:
+        """What *expr*, a history writer's argument in *func* or what one is bound from, can hold, as the map reads
+        a write's value: the object's own *attr*, on a path *held* names (*read*); a name holding what the arm's
+        own write is given (*same*); a literal as it settles; each binding of a local that reaches it, and each
+        bind of a statement map's key, read on; else ``runtime(<expression>)``."""
+        if (
+            isinstance(expr, ast.Attribute)
+            and expr.attr == attr
+            and self.keys.paths.of(func, expr.value) & held
+        ):
+            return read(expr, True)
+        if same is not None and same(expr):
+            return [HISTORY_CARRIES_OWN]
+        settled = self._settle(expr, func)  # type: ignore[arg-type]
+        if settled:
+            return list(settled)
+        found: list[str] = []
+        if depth < CARRIED_DEPTH:
+            if isinstance(expr, ast.Name):
+                for site in _bindings_at(func, expr):
+                    value = _bound_whole(site, expr.id)
+                    found += (
+                        [f"runtime({expr.id})"]
+                        if value is None
+                        else self._carried(
+                            func, value, attr, held, read, same, depth + 1
+                        )
+                    )
+            elif (keyed := _bind_key(expr)) is not None:
+                for bind in sql.bound_values(func, *keyed, at=expr):  # type: ignore[arg-type]
+                    found += self._carried(
+                        func, bind.value, attr, held, read, same, depth + 1
+                    )
+        return found or [f"runtime({ast.unparse(expr)})"]
+
+    def _same_binding(
+        self, func: ast.AST, point: ast.stmt
+    ) -> Callable[[ast.expr], bool]:
+        """Whether a name holds what the arm at *point* writes: the name the arm assigns from, with the same
+        bindings of it reaching both -- ``updateJobStatus`` binds ``:jobStatus`` to its parameter ``jobStatus``,
+        and records ``jobStatus``."""
+        given = (
+            pathcond.written_value(point)
+            if isinstance(point, (ast.Assign, ast.AnnAssign))
+            else None
+        )
+        if not isinstance(given, ast.Name):
+            return lambda _expr: False
+        name = given.id
+        bound = {id(one) for one in _bindings_at(func, given)}
+
+        def same(expr: ast.expr) -> bool:
+            return (
+                isinstance(expr, ast.Name)
+                and expr.id == name
+                and bool(bound)
+                and {id(one) for one in _bindings_at(func, expr)} == bound
+            )
+
+        return same
+
+    def _replacing(
+        self,
+        owner: str,
+        func: ast.AST,
+        point: ast.stmt,
+        site: ast.stmt,
+        subject: str,
+        one: _Reached,
+        at: Optional[ast.stmt],
+    ) -> list[str]:
+        """The outcomes of *subject*'s arms on the object that can replace its value between the point and a read
+        at *at*: in the caller, after the point and before the read -- or before the call, where the read is below
+        it --; in a function the call takes the object into, any."""
+        attr = subject.rpartition(".")[2]
+        end = at if one.owner == owner and at is not None else site
+        found: list[str] = []
+        for statement, outcome in self._arms.get((owner, subject), []):
+            if statement is point or statement is end:
+                continue
+            if (
+                self._writes_on(owner, statement, attr, one.caller)
+                and self._ordered(func, point, statement)[0]
+                and self._ordered(func, statement, end)[0]
+            ):
+                found.append(outcome)
+        for below, held in sorted(one.below.items()):
+            for statement, outcome in self._arms.get((below, subject), []):
+                if self._writes_on(below, statement, attr, held):
+                    found.append(outcome)
+        return found
+
+    def _writes_on(
+        self, owner: str, statement: ast.stmt, attr: str, held: frozenset[str]
+    ) -> bool:
+        """Whether *statement* of *owner* assigns *attr*, or any attribute, on a path *held* names."""
+        row = self.rows.get(owner)
+        if row is None:
+            return False
+        lines = range(statement.lineno, (statement.end_lineno or statement.lineno) + 1)
+        return any(
+            one.line in lines
+            and (attr in one.attrs or "*" in one.attrs)
+            and one.path in held
+            for one in row.assigns
+        )
 
     # -- the arm's object followed into the pair's call ----------------------------------------------------------
 
@@ -1353,21 +1686,24 @@ class _Reader:
         subject: str,
         arm: "_Arm",
         writes: set[str],
-    ) -> tuple[str, str, str, str, list[_WayStep]]:
+    ) -> tuple[str, str, str, str, list[_WayStep], dict[str, _Reached]]:
         """The arm's object followed from the caller into the call at *line*: ``(row, why, object, the path the way
-        starts by, its steps)``."""
+        starts by, its steps, the writes it reaches)``.
+
+        The way said is the first found; every write of *writes* whose key the object reaches by a way that runs in
+        one pass is read on, for what its row records (:meth:`_carries`)."""
         cls = subject.rpartition(".")[0]
         key = HISTORY_KEYS.get(cls, "")
         here = self.rows.get(owner)
         if here is None or not (arm.objects or arm.keys):
-            return "", ROW_NO_START, "", "", []
+            return "", ROW_NO_START, "", "", [], {}
         if level == 0:
             held_objects = dict.fromkeys(arm.objects, 0)
             held_keys = dict.fromkeys(arm.keys, 0)
         else:
             held_objects, held_keys = self._handed(owner, point, arm)
             if not (held_objects or held_keys):
-                return "", ROW_NOT_HANDED, "", "", []
+                return "", ROW_NOT_HANDED, "", "", [], {}
 
         def order(held: dict[str, int]) -> list[str]:
             # The path the call is handed before one below it or an element of it, then the shorter, then the
@@ -1391,6 +1727,8 @@ class _Reader:
         another = ""
         hole = ""
         broke = ""
+        first: Optional[tuple[str, str, list[_WayStep]]] = None
+        reached: dict[str, _Reached] = {}
         func = self.funcs[owner][1]
         # Where the way starts: the point, or for an SQL arm the calls it gives its value to, where the row is written.
         firsts = [
@@ -1403,6 +1741,8 @@ class _Reader:
             if one is not None
         ]
         for start, said in starts.items():
+            if len(reached) == len(writes):
+                break
             # What the caller holds the object by: its own bindings, and what the calls it makes hand back.
             whole = self._follow(owner, start)
             held = set(whole.held.get(owner, ())) | {start}
@@ -1413,6 +1753,8 @@ class _Reader:
                     call.to
                 ):
                     holder = _holder(held, call.path)
+                    if f"{owner}:{line}" in reached:
+                        continue
                     if (
                         holder is not None
                         and self.writers[call.to].rpartition(".")[0] == cls
@@ -1433,7 +1775,16 @@ class _Reader:
                             ),
                         )
                         if steps is not None:
-                            return HISTORY_ROW_CAN, "", said, start, steps
+                            first = first or (said, start, steps)
+                            reached[f"{owner}:{line}"] = _Reached(
+                                owner,
+                                line,
+                                call.to,
+                                frozenset(held),
+                                frozenset(held),
+                                {},
+                            )
+                            continue
                         broke = broke or where
                         continue
                     another = another or call.path
@@ -1452,6 +1803,8 @@ class _Reader:
                     reach = self._follow(call.to, taken)
                     hole = hole or (reach.holes[0].how if reach.holes else reach.cut)
                     for write in sorted(writes):
+                        if write in reached:
+                            continue
                         target, _sep, at = write.rpartition(":")
                         paths = reach.held.get(target)
                         if not paths:
@@ -1499,18 +1852,33 @@ class _Reader:
                                     ),
                                 )
                                 if steps is not None:
-                                    return HISTORY_ROW_CAN, "", said, start, steps
+                                    first = first or (said, start, steps)
+                                    reached[write] = _Reached(
+                                        target,
+                                        keyed.line,
+                                        keyed.to,
+                                        frozenset(paths),
+                                        frozenset(held),
+                                        {
+                                            one: frozenset(held_there)
+                                            for one, held_there in reach.held.items()
+                                        },
+                                    )
+                                    break
                                 broke = broke or where
                                 continue
                             another = another or keyed.path
+        if first is not None:
+            said, start, steps = first
+            return HISTORY_ROW_CAN, "", said, start, steps, reached
         if broke:
             # The object reaches the call's key, by no way that runs in one pass: more than another key says.
-            return "", ROW_NO_WAY.format(where=broke), "", "", []
+            return "", ROW_NO_WAY.format(where=broke), "", "", [], {}
         if another:
-            return f"{ROW_ANOTHER}{another}", "", "", "", []
+            return f"{ROW_ANOTHER}{another}", "", "", "", [], {}
         if hole:
-            return "", ROW_HOLE.format(why=hole), "", "", []
-        return "", ROW_NOT_TO_WRITER, "", "", []
+            return "", ROW_HOLE.format(why=hole), "", "", [], {}
+        return "", ROW_NOT_TO_WRITER, "", "", [], {}
 
     def _steps(
         self, owner: str, start: str, path: str, reach: objects.ObjectReach
@@ -1852,6 +2220,15 @@ class _Reader:
             self._statements[(id(func), line)] = mustprints._statement_at(func, line)
         return self._statements[(id(func), line)]
 
+    def _executed(self, func: ast.AST) -> list[sql.Execution]:
+        """:func:`sql.executions` of *func*, kept; none where they cannot be read."""
+        if id(func) not in self._executions:
+            try:
+                self._executions[id(func)] = sql.executions(func)  # type: ignore[arg-type]
+            except Exception:  # noqa: BLE001 -- the record keeps no write of it
+                self._executions[id(func)] = []
+        return self._executions[id(func)]
+
     def _gives(self, func: ast.AST, arm: ast.stmt, line: int, attr: str) -> bool:
         """Whether the SQL arm *arm* gives the value of *attr* the call on *line* writes.
 
@@ -1869,13 +2246,8 @@ class _Reader:
         """
         if self._statement(func, line) is arm:
             return True
-        if id(func) not in self._executions:
-            try:
-                self._executions[id(func)] = sql.executions(func)  # type: ignore[arg-type]
-            except Exception:  # noqa: BLE001 -- the record keeps no write of it
-                self._executions[id(func)] = []
         inside = {id(node) for node in walk(arm)}
-        for run in self._executions[id(func)]:
+        for run in self._executed(func):
             for call in run.run_at:
                 if call.lineno != line:
                     continue
@@ -2281,6 +2653,39 @@ def _read_from(func: ast.AST, bind: sql.Bind, inside: set[int]) -> bool:
                     seen.add(id(one))
                     todo.append((pathcond.site_of(one), one))
     return False
+
+
+def _bindings_at(func: ast.AST, name: ast.Name) -> tuple[ast.AST, ...]:
+    """The bindings of the local *name* reads that can reach it (:func:`pathcond.held_at`); none where not read."""
+    try:
+        return pathcond.held_at(func, name.id, name).sites  # type: ignore[arg-type]
+    except ValueError:
+        return ()
+
+
+def _bound_whole(site: ast.AST, name: str) -> Optional[ast.expr]:
+    """What *site* binds the local *name* to whole, ``name = <value>``; None for any other binding of it."""
+    if isinstance(site, (ast.Assign, ast.AnnAssign)) and site.value is not None:
+        targets = pathcond.targets_of(site)
+        if (
+            len(targets) == 1
+            and isinstance(targets[0], ast.Name)
+            and targets[0].id == name
+        ):
+            return site.value
+    return None
+
+
+def _bind_key(expr: ast.expr) -> Optional[tuple[str, str]]:
+    """``(map, key)`` for a statement map's entry read by a literal key: ``varMap[":jobStatus"]``."""
+    if (
+        isinstance(expr, ast.Subscript)
+        and isinstance(expr.value, ast.Name)
+        and isinstance(expr.slice, ast.Constant)
+        and isinstance(expr.slice.value, str)
+    ):
+        return expr.value.id, expr.slice.value
+    return None
 
 
 def _site_statement(site: ast.AST) -> Optional[ast.AST]:
