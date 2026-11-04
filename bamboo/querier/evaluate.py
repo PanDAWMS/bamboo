@@ -171,6 +171,13 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
     are not read with *env*: the value only when it is a literal.  Where the
     class cannot be told (a tree before f9b501c, or own steps of two classes),
     such a step is ``foreign`` and no binding is taken, as before.
+
+    A name the function does not bind is a free variable of it: a def that
+    holds the function binds it (datasetManager's ``main`` binds
+    TRANSFER_TIMEOUT_HI_PRIORITY at 84, which its FinisherThr.run reads), and
+    the map's trace answers it with that def's step.  The innermost def around
+    the function that binds the name is kept (:func:`_enclosing`), read as
+    another method's field is: its value only when it is a literal.
     """
     # imported here: evaluate reads no corpus, and asked's rows reads it as it is imported
     from bamboo.querier import asked as A
@@ -179,6 +186,12 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
     out = Taken(name)
     walked = {s.cls for s in steps if s.owner == owner and getattr(s, "cls", "")}
     lineage = _lineage(next(iter(walked))) if len(walked) == 1 else None
+    binds = [s for s in steps if s.name == name and getattr(s, "kind", "") != "handover"]
+    binder = None
+    if not name.startswith("self.") and not any(s.owner == owner for s in binds):
+        # a name the function does not bind is free: the innermost def around it that binds it does
+        bound = {s.owner for s in binds}
+        binder = next((o for o in _enclosing(owner, next(iter(walked)) if len(walked) == 1 else None) if o in bound), None)
     for step in steps:
         if step.name != name:
             continue
@@ -187,7 +200,10 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
             # (setup_destination 768 hands file.destinationDBlock to make_sub_dataset_name's original_name)
             continue
         if step.owner and step.owner != owner:
-            if name.startswith("self."):
+            if step.owner == binder and getattr(step, "kind", "") != "handover":
+                # the enclosing def's frame: its guards and its value are not read with *env*
+                out.kept.append(step)
+            elif name.startswith("self."):
                 if lineage is None or not getattr(step, "cls", ""):
                     out.foreign.append(step)
                 elif step.cls in lineage:
@@ -237,6 +253,41 @@ def _lineage(cls: str) -> frozenset[str] | None:
             frozenset(f"{where}::{holder.name}" for where, holder in types.lineage(file, found[0])) if len(found) == 1 else None
         )
     return _LINEAGES[cls]
+
+
+_ENCLOSING: dict[tuple[str, str | None], tuple[str, ...]] = {}
+
+
+def _enclosing(owner: str, cls: str | None) -> tuple[str, ...]:
+    """``file::function`` of each def around *owner*'s function, innermost first: the scopes a free variable of it is
+    read in (a class body is none).  *cls* (``file::Class``, the walked steps') tells same-named methods apart; () where
+    the function is not one def of the file."""
+    if (owner, cls) not in _ENCLOSING:
+        from bamboo.codemap.calls import Types
+
+        from .rows import ROOTS
+
+        file, func = owner.split("::", 1)
+        tree = Types(ROOTS, {}).tree(file)
+        found: list[list[ast.AST]] = []
+
+        def visit(node: ast.AST, around: list[ast.AST]) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if (not isinstance(child, ast.ClassDef) and child.name == func.rpartition(".")[2]
+                            and (cls is None or (around and isinstance(around[-1], ast.ClassDef) and f"{file}::{around[-1].name}" == cls))):
+                        found.append(around)
+                    visit(child, [*around, child])
+                else:
+                    visit(child, around)
+
+        if tree is not None:
+            visit(tree, [])
+        _ENCLOSING[(owner, cls)] = (
+            tuple(f"{file}::{d.name}" for d in reversed(found[0]) if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef)))
+            if len(found) == 1 else ()
+        )
+    return _ENCLOSING[(owner, cls)]
 
 
 def _value_of(text: str, env: Env) -> Any:

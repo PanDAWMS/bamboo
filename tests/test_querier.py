@@ -6680,6 +6680,61 @@ def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_na
     assert json.loads(out.splitlines()[-1]) == [2, "'x'", [2]]
 
 
+_CLOSURE = """
+def main():
+    LIMIT = get_config() or 3
+    N = 3
+
+    class Thr:
+        def run(self, x):
+            if x < LIMIT and x < N:
+                return x
+
+    def keeps(x):
+        N = 5
+        return x < N
+
+
+def other(x):
+    return x < LIMIT
+"""
+
+
+def test_a_name_a_nested_function_reads_free_is_bound_by_the_def_around_it(tmp_path):
+    # datasetManager's FinisherThr.run reads main's TRANSFER_TIMEOUT_HI_PRIORITY (84): the map's trace answers it with
+    # main's step, which only run's own steps were taken from before
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_CLOSURE)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
+            from bamboo.querier import evaluate as E
+
+            f = "pandaserver/a.py::"
+            step = lambda name, owner, line, value, terminal="", cls="": N(
+                name=name, owner=f + owner, kind="binding", line=line, value=value, guards=[], unseen=[], reads=[],
+                terminal=terminal, detail="", depth=2, cls=cls)
+            steps = A.given([step("x", "run", 7, "1", cls=f + "Thr"),
+                             step("LIMIT", "main", 3, "get_config() or 3", terminal="a configuration value, set outside the code"),
+                             step("N", "main", 4, "3"), step("N", "keeps", 11, "5")])
+            got = {}
+            for name, owner in (("LIMIT", "run"), ("N", "run"), ("N", "keeps"), ("LIMIT", "other")):
+                t = E.taken(steps, name, E.Env(), owner=f + owner)
+                got[f"{name} {owner}"] = [t.step.line if t.step else None, repr(t.value), [s.line for s in t.kept]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # main's binding: a terminal is unknown, a literal its value
+    assert got["LIMIT run"] == [3, "UNKNOWN", [3]] and got["N run"] == [4, "3", [4]]
+    # a def that binds the name itself reads its own; a def that main does not hold reads none of main's
+    assert got["N keeps"] == [11, "5", [11]] and got["LIMIT other"] == [None, "UNKNOWN", []]
+
+
 def test_a_reader_asks_the_questions_it_reads_and_refuses_steps_that_cannot_ask(tmp_path):
     out = _ok(
         _run(
