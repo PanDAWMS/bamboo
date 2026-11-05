@@ -72,6 +72,7 @@ from bamboo.codemap.panda.pathcond import (
     site_of,
     surviving_writes,
     targets_of,
+    tested_values,
     written_value,
 )
 from bamboo.codemap.panda.values import rendered_text
@@ -2410,53 +2411,6 @@ def settled_term(term: str, held_by: Callable[[str], Optional[set[str]]]) -> tup
         return f"{column}{'<>' if negated else '='}{value}", True
     inside = ",".join(sorted(found))
     return f"{column} {'NOT IN' if negated else 'IN'} ({inside})", True
-
-
-def tested_values(value: ast.expr, site: ast.stmt, func: ast.AST) -> list[str]:
-    """The constants a test above *site* says the name *value* holds there, or ``[]``.
-
-    ``getTasksToBeFinished_JEDI`` binds the status it read off a row, ``varMap[":oldStatus"] = taskStatus``, under
-    ``if taskStatus == "scouted":``, so the bind holds ``scouted`` whatever the row held: the test is a value the code
-    wrote down.  The nearest ``if`` whose body holds *site* and whose test -- or a term of it joined by ``and`` --
-    is ``name == <literal>`` or ``name in (<literals>)``, the name not bound again on the way; an ``else`` says what
-    the name is not, which is no value.
-    """
-    if not isinstance(value, ast.Name):
-        return []
-    rebound = [binding.site for binding in bindings(func, value.id)]  # type: ignore[arg-type]
-    previous: ast.AST = site
-    for ancestor in ancestors(site):
-        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            break
-        if isinstance(ancestor, ast.If) and previous in ancestor.body:
-            found = _equal_to(ancestor.test, value.id)
-            if found:
-                inside = {id(node) for node in walk(ancestor)}
-                again = any(id(one) in inside and one.lineno < site.lineno for one in rebound)
-                return [] if again else found
-        previous = ancestor
-    return []
-
-
-def _equal_to(test: ast.expr, name: str) -> list[str]:
-    """The literals *test* says *name* equals: ``name == "x"``, ``"x" == name``, ``name in ("x", "y")``, or a term
-    of an ``and`` that does."""
-    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
-        return next((found for one in test.values if (found := _equal_to(one, name))), [])
-    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
-        return []
-    left, right, op = test.left, test.comparators[0], test.ops[0]
-    if isinstance(op, ast.Eq):
-        if isinstance(right, ast.Name):
-            left, right = right, left
-        if isinstance(left, ast.Name) and left.id == name and isinstance(right, ast.Constant):
-            return [right.value] if isinstance(right.value, str) else [ast.unparse(right)]
-    if isinstance(op, ast.In) and isinstance(left, ast.Name) and left.id == name:
-        if isinstance(right, (ast.List, ast.Tuple, ast.Set)) and right.elts and all(
-            isinstance(one, ast.Constant) and isinstance(one.value, str) for one in right.elts
-        ):
-            return [one.value for one in right.elts]  # type: ignore[attr-defined]
-    return []
 
 
 def fragment_holding(spans: list[Span], offset: int) -> Optional[ast.stmt]:

@@ -5131,6 +5131,59 @@ def test_a_value_every_way_rebinds_is_no_value_of_the_read():
     ]
 
 
+def test_a_binding_of_a_name_a_test_says_holds_what_the_test_says():
+    """``retryTask_JEDI`` puts a task back where it was, ``newTaskStatus =
+    taskOldStatus``, under ``if taskOldStatus == "done"``: there the binding
+    holds ``done``, which the write read as any status the column can hold.
+    Where no test says, the binding is still the name it binds.
+    """
+    func = _func(
+        "def f(self, spec, taskOldStatus):\n"
+        "    status = 'exhausted'\n"
+        "    if taskOldStatus == 'done' and spec.check:\n"
+        "        status = taskOldStatus\n"
+        "    elif spec.back:\n"
+        "        status = taskOldStatus\n"
+        "    return status\n"
+    )
+
+    reached = pathcond.reaching_values(func, "status", None, _returned(func))
+
+    assert [(one.values, one.expression and ast.unparse(one.expression), one.line) for one in reached] == [
+        (("exhausted",), None, 2),
+        (("done",), None, 4),
+        ((), "taskOldStatus", 6),
+    ]
+
+
+def test_a_name_a_test_above_the_read_says_holds_what_the_test_says():
+    """``updateWorkers`` writes back the ``old_status`` it read off the worker
+    only under ``if old_status in ["finished", "failed", "cancelled",
+    "missed"]``, and ``ppEventServiceJob`` the ``currentJobStatus`` its call
+    handed it only under a test of the four statuses it may keep.  Whichever
+    binding that settles nothing put the name there, the entry too, it holds
+    what the test says; a literal the test refuses is no value of the read.
+    """
+    func = _func(
+        "def f(self, spec, status):\n"
+        "    if spec.fresh:\n"
+        "        status = spec.status\n"
+        "    elif spec.first:\n"
+        "        status = 'activated'\n"
+        "    if status in ['defined', 'pending']:\n"
+        "        return status\n"
+    )
+
+    reached = pathcond.reaching_values(func, "status", None, _returned(func))
+
+    assert [(one.values, one.line) for one in reached] == [(("defined", "pending"), None), (("defined", "pending"), 3)]
+    # No binding settles: the test alone says what the name holds.
+    lone = _func("def f(self, spec):\n    old = spec.status\n    if old in ['finished', 'failed']:\n        return old\n")
+    assert pathcond.reaching_values(lone, "old", None, _returned(lone)) == [
+        pathcond.Reached(("finished", "failed"), None, [], 2)
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # declared mappings -- the value set behind a subscript
 # --------------------------------------------------------------------------- #

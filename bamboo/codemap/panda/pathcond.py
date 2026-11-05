@@ -1612,7 +1612,7 @@ def literal_values(
         return [
             (value, list(one.conditions), one.line)
             for one in reaching_values(func, name, resolve, at)
-            if one.line is not None  # a parameter settles nothing
+            if one.line is not None  # the entry, which the call decides, has no line to hold a value at
             for value in one.values
         ]
     settle = resolve or _literal_only
@@ -1626,7 +1626,8 @@ def literal_values(
 class Reached(NamedTuple):
     """One binding of a local that can be what a statement reads (:func:`reaching_values`)."""
 
-    #: what the binding settles to; empty where it settles nothing
+    #: what the binding settles to, or what a test of a name says it holds (:func:`tested_values`); empty where
+    #: neither says
     values: tuple[str, ...]
     #: the expression it binds the name to whole, where it settles nothing: ``taskOldStatus`` in ``newTaskStatus =
     #: taskOldStatus``; None for a parameter, a tuple's slot, a loop's target, a ``+=``, which bind none of their own
@@ -1657,21 +1658,38 @@ def reaching_values(
     it holds is the expression it binds the name to, where it binds one whole:
     what a reader makes of that expression is the value.  A parameter, a
     tuple's slot, a loop's target and a ``+=`` bind none of their own, and a
-    reader reads the name.  A parameter is the function's entry:
+    reader reads the name, unless a test says what it is.  A parameter is the function's entry:
     ``ppEventServiceJob`` writes ``jobSpec.jobStatus = currentJobStatus`` the
     call handed it, under ``not (currentJobStatus is None)``, beside the
     ``assigned`` it may set itself.  A name the entry reaches unbound has no
     value there: reading it raises.  And each is a value only as itself, on a
     way to *at* past no other binding of the name, a ``+=`` among them.
 
-    Nothing where no binding that reaches *at* settles.  The name is then a
-    run-time value as a whole, which a reader reads as one, and that is what
-    it read before any binding was asked.
+    A binding that settles nothing holds what the nearest test of a name says
+    it is (:func:`tested_values`), as a bind does.  A binding of another
+    name holds what that name's test above the binding says: ``retryTask_JEDI``
+    puts a task back with ``newTaskStatus = taskOldStatus`` only under ``if
+    taskOldStatus == "done"``, so it binds ``done``.  And the name at *at* is
+    what its test above *at* says, whichever binding that settles nothing put
+    it there: ``updateWorkers`` writes back the ``old_status`` it read off the
+    worker only under ``if old_status in ["finished", "failed", "cancelled",
+    "missed"]``, and ``ppEventServiceJob`` the ``currentJobStatus`` the call
+    handed it only under ``elif currentJobStatus in ["defined", "assigned",
+    "waiting", "pending"]``.  Each value meets the tests on the way as a
+    literal does.
+
+    Nothing where no binding that reaches *at* settles or is told.  The name
+    is then a run-time value as a whole, which a reader reads as one, and
+    that is what it read before any binding was asked.
     """
     settle = resolve or _literal_only
     whole = {id(assignment): (assignment, written) for assignment, written in _whole_assignments(func, name)}
-    settled = {key: settle(written, func) for key, (_assignment, written) in whole.items()}
-    if not any(settled.values()):
+    settled = {
+        key: settle(written, func) or tested_values(written, assignment, func)
+        for key, (assignment, written) in whole.items()
+    }
+    told = tested_values(ast.Name(id=name, ctx=ast.Load()), at, func)
+    if not any(settled.values()) and not told:
         return []
     own = [binding for binding in bindings(func, name) if not binding.nested]
     sites = _unique([binding.site for binding in own])
@@ -1703,12 +1721,12 @@ def reaching_values(
         if replaced is None:
             continue
         guards = [] if site is arguments else list(path_condition(site))
-        # Each value the assignment is settled to meets the tests on the way as a literal does in
-        # replacements: getTasksToExecCommand_JEDI binds the status only under `if newTaskStatus != "dummy"`.
-        literals = [
-            one for one in settled.get(id(site), []) if not _refused(at, site, func, name, one, added, (), texts=True)
-        ]
-        if settled.get(id(site)) and not literals:
+        # What the binding settles to, or what the test at *at* says where it settles nothing.  Each meets the tests
+        # on the way as a literal does in replacements: getTasksToExecCommand_JEDI binds the status only under
+        # `if newTaskStatus != "dummy"`.
+        held = settled.get(id(site)) or told
+        literals = [one for one in held if not _refused(at, site, func, name, one, added, (), texts=True)]
+        if held and not literals:
             continue
         guards.extend(entries(replaced, guards))
         found.append(
@@ -1726,6 +1744,54 @@ def _literal_only(expression: ast.expr, _func: ast.AST) -> list[str]:
     """The settling :func:`literal_values` does by default: a string literal is its value."""
     if isinstance(expression, ast.Constant) and isinstance(expression.value, str):
         return [expression.value]
+    return []
+
+
+def tested_values(value: ast.expr, site: ast.AST, func: ast.AST) -> list[str]:
+    """The constants a test above *site* says the name *value* holds there, or ``[]``.
+
+    ``getTasksToBeFinished_JEDI`` binds the status it read off a row, ``varMap[":oldStatus"] = taskStatus``, under
+    ``if taskStatus == "scouted":``, so the bind holds ``scouted`` whatever the row held: the test is a value the code
+    wrote down.  The nearest ``if`` whose body holds *site* and whose test -- or a term of it joined by ``and`` --
+    is ``name == <literal>`` or ``name in (<literals>)``, the name not bound again on the way; an ``else`` says what
+    the name is not, which is no value.
+    """
+    if not isinstance(value, ast.Name):
+        return []
+    rebound = [binding.site for binding in bindings(func, value.id)]  # type: ignore[arg-type]
+    previous: ast.AST = site
+    for ancestor in ancestors(site):
+        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            break
+        if isinstance(ancestor, ast.If) and previous in ancestor.body:
+            found = _equal_to(ancestor.test, value.id)
+            if found:
+                inside = {id(node) for node in walk(ancestor)}
+                line = getattr(site, "lineno", 0)
+                again = any(id(one) in inside and one.lineno < line for one in rebound)
+                return [] if again else found
+        previous = ancestor
+    return []
+
+
+def _equal_to(test: ast.expr, name: str) -> list[str]:
+    """The literals *test* says *name* equals: ``name == "x"``, ``"x" == name``, ``name in ("x", "y")``, or a term
+    of an ``and`` that does."""
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return next((found for one in test.values if (found := _equal_to(one, name))), [])
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return []
+    left, right, op = test.left, test.comparators[0], test.ops[0]
+    if isinstance(op, ast.Eq):
+        if isinstance(right, ast.Name):
+            left, right = right, left
+        if isinstance(left, ast.Name) and left.id == name and isinstance(right, ast.Constant):
+            return [right.value] if isinstance(right.value, str) else [ast.unparse(right)]
+    if isinstance(op, ast.In) and isinstance(left, ast.Name) and left.id == name:
+        if isinstance(right, (ast.List, ast.Tuple, ast.Set)) and right.elts and all(
+            isinstance(one, ast.Constant) and isinstance(one.value, str) for one in right.elts
+        ):
+            return [one.value for one in right.elts]  # type: ignore[attr-defined]
     return []
 
 
