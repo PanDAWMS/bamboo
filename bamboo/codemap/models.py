@@ -684,7 +684,11 @@ class Branch(BaseModel):
     the same as one that took a different branch).
 
     ``path_condition`` is the conjunction of the ``if``/``elif``/``else`` tests
-    dominating the write, and of one entry for every other write of the same
+    dominating the write, of what each early exit above it says (``not (X)``
+    under an ``if X: return``, ``continue``, ``break`` or ``raise``; ending in
+    ``  [at <its line>]`` where a name it reads is given a new value before the
+    write -- :func:`~bamboo.codemap.panda.pathcond.arm_condition`), the same of
+    the binding the value comes from, and of one entry for every other write of the same
     place that can replace the value before it is read
     (:func:`~bamboo.codemap.panda.pathcond.replacements`): ``not (<the tests
     that write is under and this one is not>)``, ``not any(<them> for <target>

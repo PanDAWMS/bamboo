@@ -1051,6 +1051,44 @@ def reachable_when(node: ast.AST) -> list[str]:
     ]
 
 
+def exits_above(node: ast.AST) -> list[str]:
+    """The conditions the early exits above *node* put on reaching it, by line.
+
+    An ``if X:`` whose body ends in a ``return``, ``continue``, ``break`` or
+    ``raise`` puts ``not (X)`` on what follows it, and one whose ``else`` does
+    puts ``X``: the tests :func:`tests_on` reads beside the ``if`` statements
+    around *node*.  Each is rendered as :func:`path_condition` renders a test, but one
+    reading a name given a new value between the exit and *node*
+    (:func:`_given_between`) ends in ``  [at <the exit's line>]`` instead: its
+    names as they are when the exit's test runs.  ``doActionForReassign`` skips
+    a task with ``if tmpStat is not True: continue`` and sets ``tmpStat``
+    afresh further down the same loop.
+    """
+    func = enclosing_function(node)
+    if func is None:
+        return []
+    found: list[str] = []
+    for implied, exit_if in sorted(_early_exit_ifs(node), key=lambda one: one[1].lineno):
+        if _given_between(func, exit_if, node):  # type: ignore[arg-type]
+            implied = f"{implied}  [at {exit_if.lineno}]"
+        else:
+            implied = _substitute_bare_name(implied, exit_if.test, func)  # type: ignore[attr-defined]
+        if implied not in found:
+            found.append(implied)
+    return found
+
+
+def arm_condition(node: ast.AST) -> list[str]:
+    """The tests reaching *node* runs under: :func:`path_condition`'s, then :func:`exits_above`'s.
+
+    What a branch says of its write and of the binding its value comes from.
+    :func:`path_condition` stays the ``if`` statements around a node alone, which is
+    what its other readers compare.
+    """
+    held = path_condition(node)
+    return held + [one for one in exits_above(node) if one not in held]
+
+
 def _names_in(expression: ast.AST) -> set[str]:
     return {node.id for node in walk(expression) if isinstance(node, ast.Name)}
 
@@ -1618,7 +1656,7 @@ def literal_values(
     settle = resolve or _literal_only
     values: list[tuple[str, list[str], int]] = []
     for assignment, written in _whole_assignments(func, name):
-        guards = path_condition(assignment)
+        guards = arm_condition(assignment)
         values.extend((value, list(guards), assignment.lineno) for value in settle(written, func))
     return values
 
@@ -1720,7 +1758,7 @@ def reaching_values(
         )
         if replaced is None:
             continue
-        guards = [] if site is arguments else list(path_condition(site))
+        guards = [] if site is arguments else list(arm_condition(site))
         # What the binding settles to, or what the test at *at* says where it settles nothing.  Each meets the tests
         # on the way as a literal does in replacements: getTasksToExecCommand_JEDI binds the status only under
         # `if newTaskStatus != "dummy"`.
@@ -2094,7 +2132,7 @@ def _replacement(
             held: list[str] = []
             ruled_out = False
             for condition in conditions:
-                text = _unannotated(condition)
+                text = _unannotated(unmarked(condition))
                 try:
                     test = ast.parse(text, mode="eval").body
                 except SyntaxError:

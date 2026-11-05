@@ -4585,6 +4585,68 @@ def test_a_bind_filled_from_a_local_is_resolved_like_an_attribute_write_is():
     assert status[0].branches[1].path_condition == ["self.ready", "not (toSkip)"]
 
 
+def test_an_early_exit_above_a_write_is_on_its_branch():
+    """An ``if X: return`` above a write is a test the write runs under, as an ``if`` around it is: the branch says
+    ``not (X)`` after the tests around it.  The guards' sources and the route reading (``pathcond.tests_on``) read the
+    exit already; the branch read the ``if`` statements around the write alone.
+    """
+    source = (
+        "def f(self, taskSpec, ok):\n"
+        "    if not ok:\n"
+        "        return\n"
+        "    if taskSpec.useScout():\n"
+        "        taskSpec.status = 'scouting'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert junctions[0].branches[0].path_condition == ["taskSpec.useScout()", "not (not ok)"]
+
+
+def test_an_early_exit_whose_name_is_given_a_new_value_before_the_write_is_read_at_its_line():
+    """``doActionForReassign`` skips a task with ``if tmpStat is not True: continue`` and sets ``tmpStat`` afresh
+    further down: at the write the name holds the second call's value, so the exit's entry ends in ``[at <its
+    line>]``, its names as they are when its test runs.
+    """
+    source = (
+        "def f(self, taskSpec):\n"
+        "    tmpStat = self.check(taskSpec)\n"
+        "    if tmpStat is not True:\n"
+        "        return\n"
+        "    tmpStat = self.prepare(taskSpec)\n"
+        "    taskSpec.status = 'ready'\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert junctions[0].branches[0].path_condition == ["not (tmpStat is not True)  [at 3]"]
+
+
+def test_an_early_exit_above_the_binding_a_bind_reads_is_on_that_value_s_branch():
+    """The value a bind writes was chosen at its binding, so an exit above the binding alone is a test of that
+    value's branch, as the binding's ``if`` is.
+    """
+    source = (
+        "class M:\n"
+        "    def f(self, ready, ok):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,oldStatus=:oldStatus '\n"
+        "        if ready:\n"
+        "            if not ok:\n"
+        "                return\n"
+        "            newStatus = 'scouted'\n"
+        "        else:\n"
+        "            newStatus = 'running'\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = newStatus\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    status = [j for j in junctions if j.subject == "JediTaskSpec.status"]
+
+    assert [(b.outcome, b.path_condition) for b in status[0].branches] == [
+        ("scouted", ["ready", "not (not ok)"]),
+        ("running", ["not (ready)"]),
+    ]
+
+
 def test_a_bind_from_a_local_keeps_the_binding_that_settles_nothing():
     """``retryTask_JEDI``'s ``newTaskStatus = taskOldStatus`` beside its
     ``newTaskStatus = "exhausted"``: the bind's branches were the literal alone,
@@ -6115,8 +6177,10 @@ def test_a_status_decided_inside_a_helper_reaches_the_map():
     assert outcomes == {"broken", "aborted", "done", "finished"}
     aborted = next(b for b in junction.branches if b.outcome == "aborted")
     # The helper's own guards, marked with where they came from, and the recheck
-    # that can replace whatever the chain decided.
+    # that can replace whatever the chain decided.  The return the value leaves
+    # by is below ``if checkGoal: return True``.
     assert aborted.path_condition == [
+        "not (checkGoal)  [in getFinalTaskStatus()]",
         "not (taskSpec.status == 'tobroken')  [in getFinalTaskStatus()]",
         "taskSpec.status == 'toabort'  [in getFinalTaskStatus()]",
         "not (taskSpec.is_hpo_workflow())  [in getFinalTaskStatus()]",

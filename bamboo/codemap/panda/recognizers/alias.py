@@ -66,6 +66,7 @@ from bamboo.codemap.panda.pathcond import (
     Callee,
     Replacement,
     additions,
+    arm_condition,
     attach_parents,
     enclosing_class,
     enclosing_function,
@@ -74,7 +75,6 @@ from bamboo.codemap.panda.pathcond import (
     field_writes,
     functions_with_owner,
     literal_values,
-    path_condition,
     replacements,
     site_of,
     targets_of,
@@ -123,10 +123,10 @@ def _literal_self_writes(
             ):
                 left, adding = _added_to(func, node, target, value) if enclosing_function(node) is func else ([], [])
                 if left is not None:
-                    inner = path_condition(node)
+                    inner = arm_condition(node)
                     found.append((target.attr, value.value, inner + entries(left, inner), 1))
                 for one in adding:
-                    write = (target.attr, f"runtime({func.name}())", path_condition(one), 2)
+                    write = (target.attr, f"runtime({func.name}())", arm_condition(one), 2)
                     if write not in found:
                         found.append(write)
     return found
@@ -209,7 +209,7 @@ def _returned_values(
             continue
         if enclosing_function(node) is not func:
             continue
-        returning = path_condition(node)
+        returning = arm_condition(node)
         if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             values.append((node.value.value, [marked(test) for test in returning]))
         elif isinstance(node.value, ast.Name):
@@ -319,7 +319,7 @@ def extract_producers(
                     continue
                 candidates += 1
                 attributed.add((spec_class, target.attr))
-                caller = path_condition(node)
+                caller = arm_condition(node)
                 # What the field still holds where the object leaves: no branch
                 # where it never does, an entry per later write that can replace it.
                 replaced = field_replacements(
@@ -473,7 +473,7 @@ def extract(
             if alias is None:
                 continue
             explained += 1
-            caller = path_condition(node)
+            caller = arm_condition(node)
             for attribute, value, inner, tier in alias.writes:
                 attributed.add((alias.spec_class, attribute))
                 # The call writes the field as an assignment would: no branch

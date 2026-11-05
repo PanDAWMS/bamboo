@@ -59,6 +59,7 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
 )
 from bamboo.codemap.panda.pathcond import (
+    arm_condition,
     assigned_expressions,
     attach_parents,
     enclosing_class,
@@ -1056,7 +1057,7 @@ def extract(
             if replaced is not None:
                 # The write's own guards, shared by every outcome its right-hand
                 # side can produce: reaching a write is necessary for any of them.
-                dominating = path_condition(node)
+                dominating = arm_condition(node)
                 later = entries(replaced, dominating)
                 tags, messages = (
                     recorded_signature(node, func, setters, target.attr)
@@ -1090,7 +1091,7 @@ def extract(
                     )
             for one in adding:
                 added_at.add((name, id(one)))
-                guards = path_condition(one)
+                guards = arm_condition(one)
                 left = field_replacements(one, target.value, target.attr, None, callee, memo) or []
                 one_tags, one_messages = recorded_signature(one, func, setters, target.attr)
                 junction.branches.append(
