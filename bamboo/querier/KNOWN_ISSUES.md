@@ -1333,6 +1333,124 @@ caller's passes went on the row", then S2's lines over its passes and S3's over 
 *Revisit:* when the map lists more than two hops, or a facade's guard is read; when a mover's run inside its caller's
 call is read by the caller's pass span (its mark's own strings, no key).
 
+### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
+
+A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's
+ran it, and H3 has nothing to read.  U3 reads which call: the arm's run is marked by what that call handed it, not by
+the row's key -- updateUnmergedJobs < PandaID=... > is the merge job's, and the unmerged job's key is on one line of
+it -- so the caller's run is asked by that value.
+
+- The run's mark (the map's `runs` of the arm's function) gives each hole's value and the expression it prints
+  (`job.PandaID`); the map's `call_bindings` give, for each call `called_from` lists (the hop into the function), the
+  caller's name handed to that parameter (`job` at archiveJob 1783, `jobSpec` at propagateResultToJEDI 4822).  A
+  caller's run marks by that name (`jobSpec.PandaID`) hold the same value; a call handing it no name a mark of the
+  caller's prints is not asked, and with none, U3 stops.
+- The callers' runs are asked over the arm's run, on its machine.  A caller's run holds the arm's whole where the
+  call ran it, and of those the innermost (latest begun) is the call's: archiveJob's run holds propagateResultToJEDI's,
+  which holds updateUnmergedJobs's when 4822 called it.  A run cut by the window holds nothing, and U3 stops naming
+  how many runs it found.  One run of a caller holding the arm's at two calls of it does not say which, and U3 stops.
+- The call ran, so its guard held (K54): the call statement's path condition (`call_statements`, one statement on the
+  line) is read as H3 reads an arm's, with where the values it held on were printed in the caller's run, and the
+  walk stops there as a status's H3 does.  A call with no guard of its own says its callers made it run, past the
+  hop read.
+- Not read: which call a value carried through the arm tells.  updateUnmergedJobs:1236 copies the caller's
+  job.jobStatus, and 1783 is under `job.jobStatus == "finished"`, so a value other than 'finished' did not come from
+  1783 -- with no caller's run read.
+
+*Shows:* "U3 which call ran the arm" with the mark's values, each call's handed name and marks, the run holding the
+arm's and the call's guards; or "STOP U3: ..." with code K56.
+*Revisit:* when the carried value picks the call; when an arm's early exits are its guards (the map's branch
+condition, `pathcond.reachable_when`), which takes killUnusedEventServiceConsumers:986 out of this class.
+
+### K57. A run is at the window only where a record of it lies near, not where its span holds it
+
+H2 placed a run, or a pass of one, at the window where its span held it.  `passes_at` cuts a run at its function's
+entry rows, but the records at hand are those the asks returned.  Where they hold no entry row, the run stays whole,
+and it spans every pass of its mark between its first and last record.  So it is "at" any time between them.
+
+MT-scouted-late (JediTaskSpec.status 'scouted' -> 'running' at 18:49:05) is the example.  TaskRefiner's run
+`< jediTaskID=53199089 >` held only the child task's two "pending until parent task 53199080 is done" lines, at
+15:53:23 and 22:35:59.  runImpl:257 was positive on it, beside getTasksToBeFinished_JEDI:1672, which made the write.
+The census of every H2 judgement over the querier's sets found 7 verdicts in 4 cases on such runs, 6 kept and 1
+positive.  All 7 are separate passes under one mark, with no record within 10 min of the window: reactivatePendingTasks_JEDI's
+`< vo=atlas label=... >` with records hours apart, and JobGenerator's `<jediTaskID=... datasetID=...>` over 16 hours.
+No excluded verdict was on such a run.
+
+Now `which_ran.at_window` places a run at the window where its span holds it and one of its records lies within
+EDGE (`recorded.EDGE`) of it -- the door's part near the window.  Inside EDGE the records at hand are what the asks
+searched, so a pass at the window has a record near it unless it printed nothing there.
+- `passes_at` keeps a pass only where it is at the window this way.  A run that spans the window with none near is
+  said so ("N span(s) it with no record within 10 min of it"), and its candidate is left unexamined.
+- The runs H2 gathers at the row's second (`_wrote_at`, `_row_at`), and F1's (`rows_between`) and H7's (`missing`),
+  keep the span (`which_ran.spans`).  They decide the question's run, and a question's run is read whole, not cut into
+  passes.  With the far runs dropped there, MR-T-53351604-rescueTime's one run left in JediDBProxy.log, the
+  `< vo=atlas label=user >` mark's 297 passes, became the question's run and was read as one (rule 20's warning),
+  where each candidate had been read on its pass at 13:09:13.  MR-T-53348259-rescueTime is read so already (187
+  passes).
+- Judgement 3 (`_runs_of`) still reads a mover as run where a run of its spans its window (`which_ran.spans`).
+  There, "not at the window" would be absence: a mover could be ruled out, and the window's rest asked.
+
+A pass that prints nothing within EDGE either side of its write -- a slow call between two prints -- is now not at
+the window, and its candidate is unexamined there: a positive lost, not a wrong one.
+
+*Shows:* "no pass of the key at ...: ... none of its N pass(es) of F is at the window (N span(s) it with no record
+within 10 min of it)".
+*Revisit:* where a function's pass is silent for longer than EDGE around a write (the map's reach of a slow call);
+when judgement 3's twin is decided; when a question's run is cut into the pass at the window, which lets the runs at
+the row's second be gathered by records near it too.
+
+### K58. H2 can read another object's run as the key's run, where the run prints the key in another role
+
+A run is the key's for H2 where a record of it holds the key.  It can be another object's run that prints the key
+in another role.  TaskRefiner's child-task run `< jediTaskID=53199089 >` printed the parent's key 53199080 in row
+262's `parent_tid` hole, and runImpl:257, which writes the child's `impl.taskSpec.status`, was read on it (MT-scouted-late).
+K57 removes that run there, since it was not at the window.  The census found no other case of the class.
+
+A rule would read a run as the key's for an arm only where the key is in a hole that holds the key of the row the arm
+writes -- the run's mark, a local, a loop's element, or an SQL bind map.  The map types a hole by the column it holds
+(row 262's `parent_tid` as `JediTaskSpec.jediTaskID`), not by which row's key it is.  It names the written row only
+for an arm's must prints (`Branch.must_names`, row "written"): for 52 of the 242 positive or kept verdicts of the
+census.  257 has no such name, and 616's reading of the mark's `jediTaskID` cannot show it holds the value the write
+counts.  On today's map the rule would cut the tie of the other 190, of which 4 are wrong.
+
+*Revisit:* when a case shows another object's run at the window; the map would then be asked to name, for every row
+of an arm's function, which holes hold the written row's key.
+
+### K59. A bare mark with a blank is cut by the map's marks of its log, not at its first word
+
+`records.PREFIX` takes the first word for the mark where no bracket ends it.  A LogWrapper prefix or a MsgWrapper
+token holding a blank was read short:
+- `update_job PandaID={job_id} PID={os.getpid()}` (pilot_api.py:513) was the mark `update_job`: every pilot's call,
+  with the key in the message.  U2's mark round (`recorded._read`) asked `update_job` on api_pilot.log over U2's
+  window, 5.6 h on two machines each, in MJ-merging-stuck and MJ-transferring-stuck (the harness's round 21 re-run).
+  The key's own ask had returned the call whole (Start, executing, Done).
+- AtlasAnalWatchDog's ` #ATM #KV doForPreStaging label=user` was `#ATM`, every ATM action's lines (MT-throttled-late,
+  7 asks).
+The map holds 86 LogWrapper and 16 MsgWrapper runs whose mark has a blank and no bracket.
+
+Now `records.cut_mark` cuts a line again by the map's marks of the runs printing into its log: the marks of the runs a
+statement prints through, its own and those handed to it, under the files the map follows its logger to (basis
+`logger`), of the builders that write the mark bare (LogWrapper, MsgWrapper).  Where one starts the line and goes past
+PREFIX's cut, ending at a blank, it is the mark; the longest wins.  Both readers of a line (`read_log`,
+`recorded._record`) call it.
+- update_job's run is one call, the key in its mark, so the mark round does not ask it.
+- `#ATM`'s is `#ATM #KV doForPreStaging label=user`.  It is still a shared mark, which the mark round asks (below).
+- A hole is one word.  A value holding a blank leaves the line as PREFIX cut it.
+- A mark with no literal (`{}`, `{} {}`: 283 (mark, log) pairs in the map, the time stamps' empty marks among them)
+  is not read: it would cut any word.  make_logger's and create_tagged_logger's marks are bracketed, and PREFIX reads them.
+
+Left:
+- A line with no mark at all keeps its first word as the mark: a bare getLogger's `Sent Watcher {id}` in
+  copyArchive.log (MJ-sent-late), base_module's `rollback EC:...` in DBProxy.log (MJE-7394762518, MJE-7397173613).
+  The map's marks cannot tell such a word from the value of a mark that is a hole alone (DBProxy.log has `{}`).  The
+  row that printed the line can.
+- The mark round asks a mark the calls share over the whole window: a JEDI worker's `process <host_pid-thread>`
+  (MT-scouting-stuck, 5.3 h), `getTasksToExecCommand_JEDI < vo=None label=None >` (MT-passed-late's L2), and
+  `#ATM #KV doForPreStaging label=user`.
+
+*Shows:* nothing of its own: the run under the whole mark (`token=update_job PandaID=... PID=...`).
+*Revisit:* with the two left above; when the map says how each builder prints its mark.
+
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
@@ -1381,7 +1499,7 @@ Now `which_ran.passes_at` reads the runs that span the window in four steps:
   LogWrapper's `<setup_destination> ` mark stands inside the message.  A record the map cannot read whole -- its row
   has no capture, or its logger is not bound in the function -- does not cut: the passes it may begin stay one, and
   the word on the cut counts them.  The rule-20 warning and S2's passes of a mover read the same entries;
-- it keeps a pass whose span holds the window;
+- it keeps a pass whose span holds the window and that has a record within EDGE of it (`at_window`, K57);
 - of these it keeps one that holds the key: in one of its records, or in a run of the key inside one of its calls
   (`inside_call`, with a callee the map's rows say printed that run's key records:
   reactivatePendingTasks_JEDI's `< vo=atlas ... >` pass, inside which release_task_on_hold's
