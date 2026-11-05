@@ -89,19 +89,21 @@ def _same_frame(a: Point, b: Point, anchor: R.Function) -> bool:
     return a.fn.owner == b.fn.owner and (a.fn.owner == anchor.owner or (len(a.at) == 1 and a.at == b.at))
 
 
-def _flow_order(first: ast.stmt, then: ast.stmt, first_printed: bool, then_printed: bool) -> bool | None:
-    """True where one call runs *then* after *first* and never the other way, False for the reverse, else None."""
+def _flow_order(first: ast.stmt, then: ast.stmt, first_printed: bool, then_printed: bool,
+                once: tuple[ast.AST, ...] = ()) -> bool | None:
+    """True where one call runs *then* after *first* and never the other way, False for the reverse, else None.
+    *once*: loops the pass went round once."""
     if first is then:
         return None
-    ab = flow.runs_after(first, then, printed=first_printed)
-    ba = flow.runs_after(then, first, printed=then_printed)
+    ab = flow.runs_after(first, then, printed=first_printed, once=once)
+    ba = flow.runs_after(then, first, printed=then_printed, once=once)
     return True if ab and not ba else False if ba and not ab else None
 
 
-def precedes(a: Point, b: Point, anchor: R.Function) -> bool | None:
+def precedes(a: Point, b: Point, anchor: R.Function, once: tuple[ast.AST, ...] = ()) -> bool | None:
     """Whether the pass runs *a* before *b* (None: not read)."""
     if _same_frame(a, b, anchor):
-        return _flow_order(a.stmt, b.stmt, a.printed, b.printed)
+        return _flow_order(a.stmt, b.stmt, a.printed, b.printed, once)
     if not a.at or not b.at:
         return None
     order = {_flow_order(x, y, a.printed and a.fn.owner == anchor.owner, b.printed and b.fn.owner == anchor.owner)
@@ -197,15 +199,16 @@ def breaks(fn: R.Function, s: ast.stmt, chain: str, value: str | None = None, ke
 
 
 @functools.lru_cache(maxsize=None)
-def _between(func: ast.AST, first: ast.stmt | None, then: ast.stmt | None, printed: bool) -> tuple[ast.stmt, ...]:
+def _between(func: ast.AST, first: ast.stmt | None, then: ast.stmt | None, printed: bool,
+             once: tuple[ast.AST, ...] = ()) -> tuple[ast.stmt, ...]:
     """The statements of *func* one call can run after *first* and before *then* (None: the start, the end)."""
     out = []
     for s in R.own_nodes(func):
         if not isinstance(s, ast.stmt) or s is func or s is first or s is then:
             continue
-        if first is not None and not flow.runs_after(first, s, printed=printed):
+        if first is not None and not flow.runs_after(first, s, printed=printed, once=once):
             continue
-        if then is not None and not flow.runs_after(s, then):
+        if then is not None and not flow.runs_after(s, then, once=once):
             continue
         out.append(s)
     return tuple(out)
@@ -216,14 +219,14 @@ def _class(fn: R.Function) -> ast.ClassDef | None:
 
 
 def holds(q: Point, p: Point, chain: str, anchor: R.Function, value: str | None = None,
-          keeps: Keeps | None = None) -> Way | None:
+          keeps: Keeps | None = None, once: tuple[ast.AST, ...] = ()) -> Way | None:
     """Whether what *chain* held at *q*, *value* where it is known, still holds at *p*, a later place of the pass:
     nothing on the way can change it (:func:`breaks`), and what kept it.  Across functions only a chain of ``self`` in
     methods of the anchor's class is one object in both, and the way is the rest of *q*'s function, the anchor's
-    statements between the two, and *p*'s before it."""
+    statements between the two, and *p*'s before it.  *once*: loops the pass went round once, read in one frame."""
     way = Way()
     if _same_frame(q, p, anchor):
-        broken = any(breaks(q.fn, s, chain, value, keeps, way) for s in _between(q.fn.node, q.stmt, p.stmt, q.printed))
+        broken = any(breaks(q.fn, s, chain, value, keeps, way) for s in _between(q.fn.node, q.stmt, p.stmt, q.printed, once))
         return None if broken else way
     cls = _class(anchor)
     if PR.root(chain) != "self" or cls is None or _class(q.fn) is not cls or _class(p.fn) is not cls:
@@ -237,6 +240,41 @@ def holds(q: Point, p: Point, chain: str, anchor: R.Function, value: str | None 
     if p.fn.owner != anchor.owner:
         ways.append((p.fn, _between(p.fn.node, None, p.stmt, False)))
     return None if any(breaks(fn, s, chain, value, keeps, way) for fn, stmts in ways for s in stmts) else way
+
+
+def printed_at(fn: R.Function, sn: R.Seen, at: ast.stmt, wanted: str, read: Callable[[R.Row], list[int]],
+               once: tuple[ast.AST, ...] = ()) -> tuple[str, str] | None:
+    """*wanted*'s value at *at*, a statement of *fn*, from what *fn*'s run *sn* printed, with where: a hole of *wanted*
+    at *at* itself, or at a row before or after it that holds there (:func:`holds`); or a hole of a chain that one
+    assignment after *at* binds to *wanted*, *wanted* holding up to it and the chain from it to the row (1107
+    ``job.ddmErrorDiag = disp_error[disp]``, printed at 1108).  Every one agreeing, said by the first.  *read*: the
+    record indexes a row is read at, one or none; *once*: loops the pass went round once."""
+    p = Point(fn, at, [at])
+    found: list[tuple[str, str]] = []
+    for row in fn.rows:
+        if len(at_ := read(row)) != 1:
+            continue
+        record = sn.run.records[at_[0]]
+        q = Point(fn, row.stmt, [row.stmt], True)
+        where = f"row {fn.name}:{row.line} at {record.span}"
+        after = row.stmt is not at and precedes(p, q, fn, once)
+        for expr, value in row.capture(record).items():
+            value = value.strip()
+            # a hole str(x) prints what {x} prints
+            if expr in (wanted, f"str({wanted})"):
+                if row.stmt is at or (precedes(q, p, fn, once) and holds(q, p, wanted, fn, value, once=once) is not None) \
+                        or (after and holds(p, q, wanted, fn, value, once=once) is not None):
+                    found.append((value, where))
+                continue
+            if not after:
+                continue
+            for a in _between(fn.node, at, row.stmt, False, once):
+                if isinstance(a, ast.Assign) and len(a.targets) == 1 and ast.unparse(a.targets[0]) == expr \
+                        and ast.unparse(a.value) == wanted:
+                    bound = Point(fn, a, [a])
+                    if holds(p, bound, wanted, fn, once=once) is not None and holds(bound, q, expr, fn, value, once=once) is not None:
+                        found.append((value, f"{where}, as {expr} bound at {Path(fn.rel).name}:{a.lineno}"))
+    return found[0] if len({value for value, _ in found}) == 1 else None
 
 
 def assignment(stmt: ast.stmt | None, subject: str) -> tuple[str, ast.expr] | None:

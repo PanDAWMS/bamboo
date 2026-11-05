@@ -37,10 +37,18 @@ What is read from a record:
 * ``cut`` (more than 200 lines after the match): the record's traceback and holes are not read.
 
 A run is the records of one machine with one mark (``runs_for``).  The search for the key returns every record of a
-run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own.  A run whose part
+run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own, where a record of
+the key under it lies within :data:`EDGE` of the window.  A run whose part
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
-begins or ends within EDGE of an end of what was searched on its machine may go on past it: the window is widened past
-that end, once -- not past an end inside the window (a gap a new ask does not fill) nor past today's file's end (asking
+begins or ends within EDGE of an end of what was searched on its machine may go on past it.  Where its mark holds the
+key, the window is widened past that end, once: the end is one the asks over the window itself searched, so a run that
+a widened ask's record (or a wider ask's) shows reaching past them is not widened again.  A mark that does not hold the
+key is shared -- a periodic method's, a pass every few minutes, one run as far as any record reaches and asked EDGE
+further back each round (the harness's round 18, 2026-11-03), or the setupper's stamp over its jobs -- and its run is
+not widened: the pass that decides sits within a second of its row (MT-toretry-late, rescueTime), so a candidate whose
+window holds no line of the key under such a mark stays unexamined (2026-11-04).  A function whose pass prints the key
+only farther before its write than EDGE would need it; the map is to say which (not read yet).  Not past an end inside
+the window (a gap a new ask does not fill) nor past today's file's end (asking
 again only reads it later).  A second past the end is enough because the recording step is the other half of the
 rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again EDGE past each end of
 the window (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal), so the run
@@ -428,7 +436,7 @@ class RecordedLogs:
         where = wider["machine"] or "every machine"
         only = {} if wider["strings"] == want["strings"] else {"only": want["strings"], "needed": _needed(wider["strings"], want["strings"])}
         strings = "" if not only else f", {len(wider['strings'])} string(s), the lines holding the ask's"
-        return {**record, **only, "ask": want, "machines": machines,
+        return {**record, **only, "ask": want, "machines": machines, "within_window": wider["window"],
                 "within": f"answered from the record of a wider ask ({wider['window'][0]} .. {wider['window'][1]}, {where}, round {record.get('round')}{strings})"}
 
     def _read(self, name: str, key: str, window: Window, machine: str | None, owners: Owners | None = None,
@@ -441,17 +449,29 @@ class RecordedLogs:
             (first,) = self._get([(Ask(name, asked, window), f"{machine} is not in list_logs: every machine asked")], notes)
             notes.append(f"{machine} is not in list_logs, so every machine was asked")
         got = _Gathered()
-        got.add(first)
+        # the records of the asks over the window itself, apart: a widening is decided from the ends they searched
+        # alone, so neither a widened ask's record nor a wider ask's widens again (once: the module's doc)
+        own = _Gathered()
 
-        # the marks that do not hold the key: their records need not -- every such mark, near the window or not
-        # (KNOWN_ISSUES.md K13); for an asker that reads some functions' runs alone, a DB proxy method's mark is asked
-        # only where it is one of theirs and its run can be made whole by it (_partial), and for the method's own rows
-        # and every line at WARNING and above where its rows below WARNING all start with fixed text (_narrowed); for
-        # one that reads a run at a row's moment (*whole*), each of theirs whole
+        def gather(record: dict) -> None:
+            got.add(record)
+            if tuple(record.get("within_window") or record["ask"]["window"]) == tuple(window):
+                own.add(record)
+
+        gather(first)
+
+        # the marks that do not hold the key: their records need not -- each of a key record within EDGE of the window;
+        # a rotated file's record holds the key's lines of its whole day, and a run that began hours after the window or
+        # ended before it is not what the window asks about (KNOWN_ISSUES.md K13); for an asker that reads some
+        # functions' runs alone, a DB proxy method's mark is asked only where it is one of theirs and its run can be made
+        # whole by it (_partial), and for the method's own rows and every line at WARNING and above where its rows below
+        # WARNING all start with fixed text (_narrowed); for one that reads a run at a row's moment (*whole*), each of
+        # theirs whole
         pattern = keyed(key)
+        lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
-            if r.token and pattern.search(r.message) and not pattern.search(r.token):
+            if r.token and pattern.search(r.message) and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w:
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners, whole)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
@@ -459,20 +479,30 @@ class RecordedLogs:
         why = "the records of the key's runs whose mark does not hold the key"
         asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(marks.items())]
         for record in self._get(asks, notes):
-            got.add(record)
+            gather(record)
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
+        # and its mark holds the key; a shared mark's run is read as cut there (the module's doc)
         widen: dict[tuple[str, Window], set[str]] = {}
-        for (m, token), lo, hi in _runs(got, pattern, window):
+        shared = 0
+        for (m, token), lo, hi in _runs(got, pattern, window, own):
             if (m, token) in partial:
                 continue
-            again = set(asked) if pattern.search(token) else _strings(m, {token}, narrowed, owners)
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
             # again), nor past today's file's end where it was read to the time asked: the run is read as cut there
-            if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0]:
-                widen.setdefault((m, (_text(lo[0] - _SECOND), window[1])), set()).update(again)
-            if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1] and (m, hi[1]) in got.continued_ends:
-                widen.setdefault((m, (window[0], _text(hi[1] + _SECOND))), set()).update(again)
+            before = _text(lo[0] - _SECOND) if lo and lo[2] - lo[0] < EDGE and _text(lo[0] - _SECOND) < window[0] else None
+            after = (_text(hi[1] + _SECOND) if hi and hi[1] - hi[2] < EDGE and _text(hi[1] + _SECOND) > window[1]
+                     and (m, hi[1]) in own.continued_ends else None)
+            if not pattern.search(token):
+                shared += before is not None or after is not None
+                continue
+            if before is not None:
+                widen.setdefault((m, (before, window[1])), set()).update(asked)
+            if after is not None:
+                widen.setdefault((m, (window[0], after)), set()).update(asked)
+        if shared:
+            notes.append(f"{shared} run(s) under a mark that does not hold the key lie within {int(EDGE.total_seconds() // 60)} "
+                         "min of an end of what was searched: a shared mark, not widened, read as cut there")
         why = f"a run within {int(EDGE.total_seconds() // 60)} min of an end of what was searched"
         for record in self._get([(Ask(name, tuple(sorted(s)), w, m), why) for (m, w), s in sorted(widen.items())], notes):
             got.add(record)
@@ -564,10 +594,11 @@ def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str
     return out
 
 
-def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
-    """``((machine, mark), lo, hi)`` of every run the key is in that reaches *window*: *lo* the searched stretch the
-    first record of its part near the window is in, as ``(start, end, first)``, and *hi* the one its last is in, as
-    ``(start, end, last)``; None for a record outside every stretch.
+def _runs(got: _Gathered, pattern, window: Window, own: _Gathered) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
+    """``((machine, mark), lo, hi)`` of every run the key is in that reaches *window*: *lo* the stretch *own* searched
+    (the asks over the window itself) the first record of its part near the window is in, as ``(start, end, first)``,
+    and *hi* the one its last is in, as ``(start, end, last)``; None for a record outside every such stretch -- one a
+    wider record holds, the run reaching past what the window's own asks searched.
 
     The part near the window: a mark's records split where they stop for EDGE or more, the pieces that reach the window
     +- EDGE.  A task's mark holds days of passes; its passes far from the window are not what the window asks about.
@@ -591,7 +622,7 @@ def _runs(got: _Gathered, pattern, window: Window) -> list[tuple[tuple[str, str]
         if not near:
             continue
         first, last = near[0][0], near[-1][-1]
-        stretches = got.stretches(mark[0])
+        stretches = own.stretches(mark[0])
         lo, hi = _stretch_of(stretches, first), _stretch_of(stretches, last)
         out.append((mark, lo and (*lo, first), hi and (*hi, last)))
     return out

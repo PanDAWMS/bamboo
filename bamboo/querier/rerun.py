@@ -113,6 +113,7 @@ from bamboo.codemap.reading import containing_function
 from bamboo.querier import asked as A
 from bamboo.querier import attr_time as AT
 from bamboo.querier import census as C
+from bamboo.querier import changed as CH
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
 from bamboo.querier import held as HD
@@ -120,6 +121,7 @@ from bamboo.querier import heldcol as HC
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
+from bamboo.querier import printed as PR
 from bamboo.querier import raised as X
 from bamboo.querier import render as T
 from bamboo.querier import reproduce as P
@@ -511,6 +513,29 @@ def early_exit_if(func: ast.AST, arm_stmt: ast.AST, guard: str) -> ast.If | None
     for u in pathcond.enclosing_guards(arm_stmt):
         if u.kind == pathcond.UNSEEN_EARLY_EXIT and u.detail == E.strip_annotation(guard):
             return next((n for n in ast.walk(func) if isinstance(n, ast.If) and n.lineno == u.line), None)
+    return None
+
+
+def raised_nothing(func: ast.AST, handler_line: int, printed: set[int]) -> int | None:
+    """A row of *printed* that shows the ``try`` whose ``except`` is at *handler_line* raised nothing: one in its body
+    with nothing after it there, up to the body's end, that may leave other than by falling through
+    (``rows.may_divert``, as :func:`rows.must_rows` reads what follows a row), and no loop between.  setupper_atlas_plugin's
+    run prints "end" at 206, its try's last statement, so the handler at 207 and the arm 212 in it did not run.  None
+    where no row shows it, or where a loop of *func* holds the ``try`` (a later round may raise)."""
+    tried = next((n for n in ast.walk(func) if isinstance(n, R.TRYS) and any(h.lineno == handler_line for h in n.handlers)), None)
+    if tried is None or R.loops_over(tried, func):
+        return None
+    for line in sorted(printed, reverse=True):
+        node = R.statement_at(func, line)
+        while node is not None and node is not tried and node is not func:
+            parent = getattr(node, "parent", None)
+            placed = R.block_of(parent, node) if parent is not None else None
+            if (placed is None or isinstance(parent, R.LOOPS) or (parent is tried and placed[0] != "body")
+                    or any(R.may_divert(s) for s in placed[1][placed[1].index(node) + 1:])):
+                break
+            node = parent
+        if node is tried:
+            return line
     return None
 
 
@@ -1335,10 +1360,11 @@ class Fork:
 
 @dataclass
 class Blocked:
-    """What kept every pass from the arms that move the value."""
+    """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
+    candidates (:func:`took_none`)."""
 
     fn: R.Function
-    exit_line: int
+    exit_line: int | None
     passes: list
     envs: list
     arms: list[Arm]
@@ -1423,6 +1449,18 @@ def _guard_read(text: str, env: E.Env) -> object:
         return E.evaluate(text, env)
     except SyntaxError:
         return E.UNKNOWN
+
+
+def _orders_texts(text: str, env: E.Env) -> bool:
+    """Whether condition *text* orders (<, >) a value *env* holds as text: a printed time read back is a string, and
+    text order is not the time's order ('...13:40:26.260951' and '...12:45:38')."""
+    try:
+        tree = ast.parse(E.strip_annotation(text), mode="eval")
+    except SyntaxError:
+        return False
+    return any(isinstance(n, ast.Compare) and any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
+               and any(isinstance(env.lookup(ast.unparse(x)), str) for x in [n.left, *n.comparators])
+               for n in ast.walk(tree))
 
 
 @dataclass(frozen=True)
@@ -1846,6 +1884,14 @@ def _the_arm_taken(j, arms: set[int]):
     return taken[0] if len(taken) == 1 and len(positive) > 1 else None
 
 
+def took_none(j) -> bool:
+    """S2's way for a pass whose judgement excluded every candidate, the arms that move the value and the exits alike:
+    it took none of them -- it ran to its end, or left by a raise in what it calls -- so no arm of the mover's moved the
+    value in it, and S3 reads why (setupper_atlas_plugin's run, whose one arm 212 its row 206 excludes).  A candidate
+    kept or not examined may have been taken: False."""
+    return j.chosen is None and bool(j.verdicts) and all(v.kind == "excluded" for v in j.verdicts)
+
+
 def _number(value):
     try:
         return float(value)
@@ -2254,7 +2300,7 @@ class Rerun:
 
     def fork(self, q: Fork):
         """Each branch to its end or its stop, each from the state the fork was reached in; a stop of any is the run's."""
-        stops, codes = [], set()
+        stops, codes, excluded = [], set(), 0
         kept = (list(self.touched), dict(self.row_facts), self.question)
         at = self.hop
         for n, (branch, label) in enumerate(zip(q.branches, q.labels, strict=True), 1):
@@ -2262,6 +2308,11 @@ class Rerun:
             stop = self._branch(n, len(q.branches), branch, label, kept)
             if stop is None:
                 self.branches.append({"label": label, "kind": "end", "step": self.hop, "record": _ends(self.ends[said:])})
+            elif isinstance(stop, Excluded):
+                # a branch excluded did not do it (S3: an arm kept off because nothing raised): neither an end nor a stop
+                excluded += 1
+                self.branches.append({"label": label, "kind": "excluded", "step": self.hop,
+                                      "record": T.Said("excluded-line", {"stop": stop.said}), "code": None})
             else:
                 stops.append(T.Said("numbered", {"n": n, "said": stop.said}))
                 codes.add(stop.code)
@@ -2270,6 +2321,7 @@ class Rerun:
         self.hop = at
         if stops:
             raise Stop(T.Said("of-branch-es-stopped", {"n_stops": len(stops), "n_q_branches": len(q.branches), "stops": stops}), codes.pop() if len(codes) == 1 else None)
+        self.need(T.Said("a-branch-not-excluded", {"n_branches": len(q.branches)}), excluded < len(q.branches))
 
     def _branch(self, n: int, of: int, branch, label: T.Said | str, kept: tuple) -> Stop | None:
         """Branch *n* of a fork walked to its end (None) or its stop, from the state *kept* the fork was reached in."""
@@ -2405,6 +2457,23 @@ class Rerun:
                 "fn_name": site_fn.name, "chosen_line": chosen.line,
                 "why": T.Said("left-by-elimination-no-pass") if not branch else T.Said("no-pass-at-the-window", {"left": left}),
             })))
+        def through(env: Any) -> list[tuple[str, str]]:
+            """The methods the guards read through whose values *env* leaves unknown: H4 reads which call set each."""
+            out = []
+            for g in guards:
+                for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
+                    for n in ast.walk(atom):
+                        if (
+                            isinstance(n, ast.Call) and not n.args and not n.keywords
+                            and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Attribute, ast.Name))
+                            and E.ev(n, env) is E.UNKNOWN
+                        ):
+                            out.append((n.func.attr, ast.unparse(n)))
+            return out
+
+        # an arm its run shows ran (H2's positive, its own run: a stand-in's is its caller's) ran under its guards
+        # (KNOWN_ISSUES.md K54)
+        ran = chosen.kind == "positive" and w.via is None and question is not None
         unread = []
         if attribute:
             shown = chosen.kind == "positive"
@@ -2440,14 +2509,24 @@ class Rerun:
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
                     return WroteBy(q, nxt.branch, list(nxt.premises), a.older[1:])
                 raise Excluded(T.at(self.hop, T.Said("it-did-not-write-at-any-row", {"where": where})))
-            if all(got is True for got in read.values()):
+            # a guard the values leave unread held where the run shows the arm ran; one read false still decides, and
+            # one through a method goes on to H4, which says why the arm ran
+            by_run = ([g for g, got in read.items() if got is not True]
+                      if ran and not any(got is False for got in read.values()) and not through(env) else [])
+            if all(got is True or g in by_run for g, got in read.items()):
                 lo, hi = w.window
                 at = (T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
                       T.Said("at-time", {"time": hi}) if lo == hi else T.Said("in-window", {"lo": lo, "hi": hi}))
                 via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
                        else T.Said("it-has-no-guard"))
-                if used := [g for g in guards if g in held]:
+                used = [g for g in guards if g in held and read[g] is True]
+                if by_run:
+                    how = T.Said("its-guards-held-as-it-ran", {
+                        "guards": [T.Said("guard-quoted", {"guard": g}) for g in by_run],
+                        "rest": T.Said("the-rest-in-the-run") if any(read[g] is True and g not in used for g in guards) else "",
+                    })
+                if used:
                     premise = held[used[0]].premise(used)
                     how = (T.Said("its-guards-hold-held", {"held": premise}) if len(used) == len(guards)
                            else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
@@ -2468,26 +2547,82 @@ class Rerun:
                       for g, got in read.items() if got is not True]
             # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
             self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
-        methods = []
-        for g in guards:
-            for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
-                for n in ast.walk(atom):
-                    if (
-                        isinstance(n, ast.Call) and not n.args and not n.keywords
-                        and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Attribute, ast.Name))
-                        and E.ev(n, env) is E.UNKNOWN
-                    ):
-                        methods.append((n.func.attr, ast.unparse(n)))
+        methods = through(env)
         self.say(f"read through a method: {methods}")
         if not methods:
-            # what H3 lacks is then the values the guard reads at the run (a status's are not read here), not a method's
+            # what H3 lacks is then the values the guard reads at the run, not a method's
             if not guards:
                 self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
-            unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
-            self.need(T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})}), None)
+            if ran and not attribute and site is not None:
+                # a status's arm ran under its guards: where the values they held on came from, said where its run printed
+                # them -- unless they read a guard false, which the run says held
+                held_on, read_false = self._held_on(site_fn, site, guards, question)
+                what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
+                        else T.Said("values-held-on", {"held": held_on}))
+            else:
+                unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
+                what = T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})})
+            self.need(what, None)
         method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
                            methods[0][0])
         return SetBy(method, reading, question, guard_record, env)
+
+    def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
+        """Each guard of *site* (``pathcond.path_condition``'s, outermost first) with the values its terms held at its
+        ``if``, where *fn*'s run printed them (:func:`CH.printed_at`, read as the map's evaluator reads a printed value),
+        and the first guard they read false, with its values (KNOWN_ISSUES.md K54).  Texts are not ordered: a guard
+        ordering a value read as text is not read.  In a loop that holds the site, a row is read only at a record the
+        key is on, and only where each of the loop's rows printed once among those: the key's one pass of the loop."""
+        ifs: list[ast.If] = []
+        previous: ast.AST = site
+        for anc in pathcond.ancestors(site):
+            if isinstance(anc, ast.If) and (previous in anc.body or previous in anc.orelse):
+                ifs.append(anc)
+            previous = anc
+        ifs.reverse()
+        if len(ifs) != len(guards):
+            # a test path_condition could not render: the guards are not placed, and no value is read
+            return [T.Said("guard-held-on", {"guard": g, "on": ""}) for g in guards], None
+        own = {id(n) for n in ast.walk(fn.node)}
+        sn = R.seen(fn, run, self.mode)
+        loops: list[ast.AST] = []
+        previous = site
+        for anc in pathcond.ancestors(site):
+            if anc is fn.node:
+                break
+            if isinstance(anc, R.LOOPS) and previous in anc.body:
+                loops.append(anc)
+            previous = anc
+        keyed = {id(r) for r in run.found_by}
+
+        def in_loop(stmt: ast.stmt) -> bool:
+            return any(a in loops for a in pathcond.ancestors(stmt))
+
+        once = all(sum(id(run.records[i]) in keyed for i, *_ in sn.hits.get(row.line, ())) <= 1
+                   for row in fn.rows if in_loop(row.stmt))
+
+        def read(row: R.Row) -> list[int]:
+            at = sn.unambiguous.get(row.line, [])
+            if loops and in_loop(row.stmt):
+                return [i for i in at if id(run.records[i]) in keyed] if once else []
+            return at
+
+        held: list[T.Said] = []
+        false: tuple[str, T.Said | str] | None = None
+        for n, g in enumerate(guards):
+            on, env = [], E.Env()
+            # an if outside the function (one the def sits in) is not this frame's
+            terms = sorted(PR.chains(g), key=lambda t: (g.find(t), t)) if id(ifs[n]) in own else []
+            for t in terms:
+                if (got := CH.printed_at(fn, sn, ifs[n], t, read, tuple(loops) if once else ())) is not None:
+                    on.append(T.Said("term-printed", {"term": t, "value": got[0], "where": got[1]}))
+                    env.put_printed(t, got[0], got[1])
+                    self.say(f"  {t} = {got[0]!r} ({got[1]})")
+            said: T.Said | str = T.Said("held-on-values", {"values": on}) if on else ""
+            held.append(T.Said("guard-held-on", {"guard": g, "on": said}))
+            if false is None and on and not _orders_texts(g, env) and _guard_read(g, env) is False:
+                false = (g, said)
+        return held, false
 
     def _wrote_said(self, w: Wrote) -> dict:
         """result.json's ``wrote`` for an attribute: H2's answer -- the arm, whether its run shows the line ran (else it was
@@ -4012,7 +4147,8 @@ class Rerun:
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in q.arms} | set(exits))
         self.say(f"candidates: arms {[a.line for a in q.arms]}, exits {exits}")
-        chosen, envs = [], []
+        chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
+        envs = []
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
@@ -4023,12 +4159,17 @@ class Rerun:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
                          f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
-            chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
+            if took_none(j):
+                self.say(f"  pass {n} took none of the candidates: no arm of {func} that moves the value ran in it")
+                chosen.append(None)
+            else:
+                chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
             envs.append(env)
-        taken = {v.line for v in chosen}
+        taken = {v.line if v is not None else None for v in chosen}
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
-        self.say(f"every pass ({len(found)}) left by {func}:{exit_line}")
+        self.say(f"every pass ({len(found)}) left by {func}:{exit_line}" if exit_line is not None
+                 else f"every pass ({len(found)}) of {func} took none of its candidates")
         return Blocked(fn, exit_line, found, envs, q.arms)
 
     def _printed_in(self, fn: R.Function, run, expr: str) -> list[str]:
@@ -4051,10 +4192,25 @@ class Rerun:
         arm = next((a for a in q.arms if a.line == q.exit_line), None)
         if arm is not None:
             return self._arm_taken(q, arm)
-        exit_stmt = R.statement_at(fn.node, q.exit_line)
-        path = pathcond.path_condition(exit_stmt)
-        self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
+        if q.exit_line is None:
+            # every pass took none of the arms and the exits: what settles a guard is what the passes printed on the way
+            path = []
+            self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
+        else:
+            exit_stmt = R.statement_at(fn.node, q.exit_line)
+            path = pathcond.path_condition(exit_stmt)
+            self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
+        # an arm in an except handler is kept off where every pass's rows show its try raised nothing: no guard to read
+        printed = [self._rows_of_one_call(fn, run) for run in q.passes]
+        quiet: dict[int, tuple[int, list[int]]] = {}
+        for a in q.arms:
+            for u in read[a.line][1]:
+                shown = [raised_nothing(fn.node, u.line, rows) for rows in printed]
+                if shown and all(r is not None for r in shown):
+                    quiet[a.line] = (u.line, sorted({r for r in shown if r is not None}))
+                    break
+        guarded = [a for a in q.arms if a.line not in quiet]
         per_pass = []
         for run, env in zip(q.passes, q.envs, strict=True):
             fixed: dict[str, bool] = {}
@@ -4069,7 +4225,7 @@ class Rerun:
                 fixed.update(sol.known)
                 fixed.update(sol.settled)
             blocking = {}
-            for arm in q.arms:
+            for arm in guarded:
                 blocking[arm.line] = [
                     g for g in read[arm.line][0]
                     if not E.read_elsewhere(g)
@@ -4085,16 +4241,26 @@ class Rerun:
         for arm in q.arms:
             guards, handlers = read[arm.line]
             inside = "".join(f"; in an except handler at {u.line} ({u.detail})" for u in handlers)
-            self.say(f"  arm {arm.line} {arm.outcomes}: needs {guards}{inside}; false in the passes: {blocking[arm.line]}")
+            if arm.line in quiet:
+                handler, rows = quiet[arm.line]
+                self.say(f"  arm {arm.line} {arm.outcomes}: in the except handler at {handler}; every pass printed row(s) {rows} "
+                         "with nothing after it in the try that may raise: kept off, nothing raised")
+            else:
+                self.say(f"  arm {arm.line} {arm.outcomes}: needs {guards}{inside}; false in the passes: {blocking[arm.line]}")
         # what S3 needs to go on, not a finding: an arm none of whose guards the passes were shown to make false
-        unshown = [str(a.line) + (" (in an except handler)" if read[a.line][1] else "") for a in q.arms if not blocking[a.line]]
+        unshown = [str(a.line) + (" (in an except handler)" if read[a.line][1] else "") for a in guarded if not blocking[a.line]]
         self.need(T.Said("a-guard-the-passes-made-false-against", {"unshown": list(unshown)}), not unshown)
+        if not guarded:
+            # kept off by no guard to follow: why nothing raised has no cause to walk, so the branch did not do it
+            raise Excluded(T.at(self.hop, T.Said("every-arm-runs-only-in-an-except", {
+                "fn_name": fn.name, "handlers": sorted({h for h, _ in quiet.values()}),
+                "rows": sorted({r for _, rows in quiet.values() for r in rows})})))
         fewest = min(len(v) for v in blocking.values())
-        nearest = [a for a in q.arms if len(blocking[a.line]) == fewest]
+        nearest = [a for a in guarded if len(blocking[a.line]) == fewest]
         guards = sorted({g for a in nearest for g in blocking[a.line]})
         self.need(T.Said("one-guard-against-the-nearest-arm-s"), len(guards) == 1)
         guard = guards[0]
-        for a in q.arms:
+        for a in guarded:
             if a not in nearest:
                 self.say(f"  not followed: arm {a.line} also needs {[g for g in blocking[a.line] if g != guard]}")
         self.say(f"the nearest arm(s) {[a.line for a in nearest]} were kept off by: {guard!r} (rule 21)")
@@ -4102,6 +4268,14 @@ class Rerun:
         where = guard_if(arm_stmt, guard) or early_exit_if(fn.node, arm_stmt, guard)
         where = self.need(T.Said("the-if-whose-test-is", {"guard": guard}), where)
         return Input(fn, guard, where.lineno, q.passes, q.envs, sorted({o for a in nearest for o in a.outcomes}))
+
+    def _rows_of_one_call(self, fn: R.Function, run) -> set[int]:
+        """The rows of *fn* one call's pass *run* printed: none of a run of several calls, another of which may have
+        raised (as :meth:`_ways_printed`)."""
+        if run is None or not getattr(fn, "rows", None):
+            return set()
+        sn = R.claim([R.seen(fn, run, self.mode)])[0]
+        return {row.line for row in fn.rows if sn.present(row)} if sn.single_call() else set()
 
     def _ways_printed(self, fn: R.Function, run) -> list[tuple[int, list[str]]]:
         """``(row line, its path condition)`` of each row one call's pass *run* printed (unambiguous), outside any loop
