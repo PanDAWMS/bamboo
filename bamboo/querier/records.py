@@ -274,12 +274,13 @@ class Log:
     extract_key: str = ""  # the key the file was grepped by, when it says it is an extract
     #: what of the window asked was not searched, and why (a recorded answer; a file handed in says nothing)
     holes: list[str] = field(default_factory=list)
-    #: a recorded search's test of a run or a pass, ``(machine, first stamp, last stamp) -> bool``: false where it may
-    #: go on past what was searched, and rule 8 reads no row missing from it (None in a file handed in)
-    whole: Callable[[str, str, str], bool] | None = None
-    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, first stamp, last stamp) -> str``,
-    #: empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
-    edges: Callable[[str, str, str], str] | None = None
+    #: a recorded search's test of a run or a pass, ``(machine, mark, first stamp, last stamp) -> bool``: false where it
+    #: may go on past what was searched for the strings that return the mark's records, and rule 8 reads no row missing
+    #: from it (None in a file handed in)
+    whole: Callable[[str, str, str, str], bool] | None = None
+    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, mark, first stamp, last stamp) ->
+    #: str``, empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
+    edges: Callable[[str, str, str, str], str] | None = None
     #: ``(machine, mark) -> why`` for the marks whose records are the key's alone, the rest not asked: a run of one is
     #: read as cut at both ends, and rule 8 reads no row missing from it (a recorded search asked for S1's movers)
     partial: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -471,7 +472,7 @@ class Run:
             return False
         if not self.holds(func, level):
             return False
-        if self.log.whole is not None and not self.log.whole(self.machine, self.first, self.last):
+        if self.log.whole is not None and not self.log.whole(self.machine, self.token, self.first, self.last):
             return False
         rank = LEVEL_RANK.get(level)
         if rank is None:
@@ -494,7 +495,7 @@ class Run:
         """The run's line as a record: where, its mark, its records' count and stamps; and, for a run a recorded search
         may have cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
         where = T.Said("log-at-machine", {"log": self.log.name, "machine": self.machine.split(".")[0]}) if self.machine else self.log.name
-        cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
+        cut = self.log.edges(self.machine, self.token, self.first, self.last) if self.log.edges is not None and self.machine else ""
         cut = self.log.partial.get((self.machine, self.token), cut)
         method = self.log.narrowed.get((self.machine, self.token))
         return T.Said("run-line", {

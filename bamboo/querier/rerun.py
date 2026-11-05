@@ -91,7 +91,7 @@ from pathlib import Path
 from typing import Any
 
 from bamboo.codemap import strategy as strategy_mod
-from bamboo.codemap.calls import Types
+from bamboo.codemap.calls import Types, call_statements
 from bamboo.codemap.models import (
     KEY_BOUND,
     KEY_HANDED,
@@ -1348,6 +1348,9 @@ class Passes:
     since: str | None = None
     before: str | None = None
     unsure: list = field(default_factory=list)
+    #: the subject and the mover's ``called_from``: where no pass of it took the row, U1 reads its callers' (K55)
+    subject: str | None = None
+    entries: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1368,6 +1371,48 @@ class Blocked:
     passes: list
     envs: list
     arms: list[Arm]
+
+
+@dataclass
+class Caller:
+    """A def that calls into a mover, as U1 reads it (:func:`callers_of`): the def holding the call (*owner*, its bare
+    name), the lines it calls on from, its hop in ``called_from``, how its runs are asked for the row (*how*: ``marks``,
+    its marks holding the key; ``key``, the key alone, a row of it printing a key column; ``none``) and the hop-1 sites
+    between, a facade's or a plugin's dispatch, whose way no run shows."""
+
+    owner: str
+    lines: list[int]
+    hop: int
+    how: str
+    marks: tuple[str, ...] = ()
+    between: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Callers:
+    """Why a mover's passes did not take the row in *window*: its callers' passes of the key there (U1; KNOWN_ISSUES.md
+    K55).  *kind* is the stop it goes on from: ``before``, a late mover's passes before the move (K45); ``window``, a
+    mover's passes in the window; ``statement``, a statement of the mover's that took the row only at the move (L2's
+    judgement 1).  *entries* are the mover's ``called_from``; *up*, the hop-1 caller U1 went up from (once: the map
+    lists two hops)."""
+
+    mover: str
+    arms: list[Arm]
+    subject: str
+    key: str
+    window: tuple[str, str]
+    kind: str
+    entries: list[str]
+    before: str | None = None
+    up: str | None = None
+
+
+@dataclass
+class CallerPasses:
+    """Which way each pass of one caller of the mover went on the row (U2): through its call into the mover, or not."""
+
+    caller: Caller
+    callers: Callers
 
 
 @dataclass
@@ -1614,6 +1659,60 @@ def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
             if text != key:
                 out.add(text)
     return tuple(sorted(out))
+
+
+def prints_key(owner: str, lines, columns: set[str]) -> bool:
+    """Whether a row of *owner*'s prints a hole the map says holds one of *columns*, the row's key, in its message or
+    its mark: a run of it is found there by the key alone, though a line of it without the key is not (as K45's mover
+    whose mark holds none).  AtlasAnalWatchDog.doForPreStaging's "action=release_... jediTaskID=..."."""
+    found = R._prints_of(owner, lines)
+    return found is not None and any(
+        columns & set(h.columns or [])
+        for st in found.statements for r in st.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])])
+
+
+def _entries_of(writers: list, owner: str) -> list[str]:
+    """The ``called_from`` entries of *owner*'s junctions among *writers*, each once."""
+    return list(dict.fromkeys(e for w in writers if w.owner == owner for e in getattr(w, "called_from", None) or []))
+
+
+def _site(hop: str) -> str | None:
+    """The ``file:line`` a ``called_from`` hop starts with, without what the map writes after it."""
+    m = re.match(r"[\w./-]+\.py:\d+", hop.strip())
+    return m[0] if m else None
+
+
+def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> list[Caller]:
+    """The defs a mover's ``called_from`` *entries* call into it from, each as its runs can be asked for the row
+    (KNOWN_ISSUES.md K55).  An entry is one hop (``file:line``) or two (``outer -> inner``, the inner the call into the
+    mover).  Of its hops, inner first, the caller is the first whose run marks hold the key (``key_marks``), else the
+    first a row of which prints a key column (:func:`prints_key`), else the innermost that prints, which can say only
+    that its runs print no key.  A facade or a plugin's dispatch prints nothing or marks no key, and the caller behind
+    it is the one a run shows: feed_contents_to_tasks, behind JediTaskBuffer's updateTaskStatusByContFeeder_JEDI.  An
+    entry the map cut (``… N more``) names no site.  A caller is one def, not one name: datasetManager.py has seven
+    ``run``, two of them (ActivatorThr's, ActivatorWithRuleThr's) calling activateJobs."""
+    out: dict[tuple[str, int], Caller] = {}
+    for entry in entries:
+        hops = []
+        for rel, line in reversed([(f, int(n)) for f, n in re.findall(r"([\w./-]+\.py):(\d+)", entry)]):
+            node = R.def_holding(rel, line)
+            if node is None:
+                break
+            owner = f"{rel}::{node.name}"
+            silent = prints_nothing(owner, [line])
+            marks = () if silent else key_marks(owner, line, cls, key)
+            how = "silent" if silent else "marks" if marks else "key" if prints_key(owner, [line], columns) else "none"
+            hops.append((owner, rel, line, how, marks, node.lineno))
+        pick = next((h for kind in ("marks", "key", "none") for h in hops if h[3] == kind), None)
+        if pick is None:
+            continue
+        n = hops.index(pick)
+        owner, rel, line, how, marks, at = pick
+        c = out.setdefault((rel, at), Caller(owner, [], n + 1, how, marks))
+        c.lines = sorted({*c.lines, line})
+        c.marks = tuple(sorted({*c.marks, *marks}))
+        c.between = sorted({*c.between, *(f"{r}:{n_}" for _, r, n_, _, _, _ in hops[:n])})
+    return list(out.values())
 
 
 def _f3(state: dict | None) -> str:
@@ -2287,7 +2386,8 @@ class Rerun:
             Asked: self.asked, WroteBy: self.wrote_by, ArmsLeft: self.arms_left, SetBy: self.set_by, Raised: self.raised, Missing: self.missing,
             Branch: self.branch, Settled: self.settled, Pair: self.pair, FalseAtom: self.false_atom,
             Reproduce: self.reproduce, Field: self.field,
-            Stuck: self.stuck, Passes: self.passes, Blocked: self.blocked, Input: self.input, Rows: self.rows,
+            Stuck: self.stuck, Passes: self.passes, Callers: self.callers, CallerPasses: self.caller,
+            Blocked: self.blocked, Input: self.input, Rows: self.rows,
             Late: self.late, Missed: self.missed, Ordered: self.ordered,
         }
         if a.late:
@@ -3998,7 +4098,8 @@ class Rerun:
         logs = self._runs_of(found, owner, searched)
         if logs:
             entry["verdict"] = "ran"
-            return Passes(owner, logs, list(arms.values()), key, searched, owners), missed
+            return Passes(owner, logs, list(arms.values()), key, searched, owners, subject=subject,
+                          entries=_entries_of(writers, owner)), missed
         entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, searched, missed, holes, writers, rest)
         if holes:
             # not found is not "did not run" where the search did not reach
@@ -4139,14 +4240,33 @@ class Rerun:
             moving = [p for p in found if p.last[:19] >= q.before]
             found = [p for p in found if p.last[:19] < q.before]
             self.say(f"{len(moving)} pass(es) ending at {q.before} or later, the one that moved it on among them, not read")
+            if not found and (up := self._callers_of_mover(q, since, "before")) is not None:
+                return up
             if q.unsure:
                 self.need(T.Said("a-pass-of-before-the-one-that-2", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "q_unsure": q.unsure}), found, "K45")
             self.need(T.Said("a-pass-of-before-the-one-that", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "func_2": func}), found, "K45")
+        if not found and (up := self._callers_of_mover(q, since, "window")) is not None:
+            return up
         self.need(T.Said("a-pass-in-the-window-that-holds-the-key", {"func": func, "unkeyed": unkeyed}) if unkeyed
                   else T.Said("a-pass-of-the-mover-in-the-window"), found)
+        return self._which_way(fn, rel, func, found, q.arms)
+
+    def _callers_of_mover(self, q: Passes, since: str | None, kind: str) -> Callers | None:
+        """U1's question where no pass of the mover *q* asks of took the row in the window: its callers' passes there,
+        the delay or the stay being in what calls it on the row (KNOWN_ISSUES.md K55).  None where the map lists no
+        caller of it, or the window is not known (the door over files)."""
+        if not q.entries or since is None or not self.logs.needs_window or q.asking.window is None:
+            return None
+        end = q.before or q.asking.window[1]
+        self.say(f"no pass of {q.owner.split('::')[-1]} took the row from {since} to {end}: its callers' passes there are read (KNOWN_ISSUES.md K55)")
+        return Callers(q.owner, q.arms, q.subject or self.args.subject, q.key, (since, end), kind, q.entries, before=q.before)
+
+    def _which_way(self, fn: R.Function, rel: str, func: str, found: list, arms: list[Arm]) -> Blocked:
+        """Which way each pass of *found* went -- an arm of *arms*, an exit of *fn*, or none of them -- and the one way
+        every pass took: S2's reading of a mover's passes, and U2's of a caller's, its calls into the mover the arms."""
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
-        lines = sorted({a.line for a in q.arms} | set(exits))
-        self.say(f"candidates: arms {[a.line for a in q.arms]}, exits {exits}")
+        lines = sorted({a.line for a in arms} | set(exits))
+        self.say(f"candidates: arms {[a.line for a in arms]}, exits {exits}")
         chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
         envs = []
         for n, p in enumerate(found, 1):
@@ -4155,7 +4275,7 @@ class Rerun:
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
             j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
             self.say(j.report(p))
-            if j.chosen is None and (arm := _the_arm_taken(j, {a.line for a in q.arms})) is not None:
+            if j.chosen is None and (arm := _the_arm_taken(j, {a.line for a in arms})) is not None:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
                          f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
@@ -4170,7 +4290,100 @@ class Rerun:
         exit_line = taken.pop()
         self.say(f"every pass ({len(found)}) left by {func}:{exit_line}" if exit_line is not None
                  else f"every pass ({len(found)}) of {func} took none of its candidates")
-        return Blocked(fn, exit_line, found, envs, q.arms)
+        return Blocked(fn, exit_line, found, envs, arms)
+
+    # ------------------------------------------------------------ Callers: what called the mover on the row
+    def callers(self, q: Callers):
+        """U1: the callers of a mover none of whose passes took the row in the window, each read on its own (U2), as S1
+        forks over the movers (KNOWN_ISSUES.md K55)."""
+        self.start("U1", "what called the mover on the row")
+        func = q.mover.split("::")[-1]
+        cls = q.subject.partition(".")[0]
+        found = callers_of(q.entries, cls, q.key, self._key_columns(q.subject, q.key))
+        self.need(T.Said("a-caller-the-map-lists", {"func": func}), found, "K55")
+        ways = {"marks": "asked for its marks holding the key", "key": "asked for the key alone (a row of it prints it)",
+                "none": "its runs print no key"}
+        for c in found:
+            through = f", through {', '.join(c.between)}" if c.between else ""
+            self.say(f"  {c.owner.split('::')[-1]} at {c.lines} (hop {c.hop}{through}): {ways[c.how]}")
+        asks = [CallerPasses(c, q) for c in found]
+        if len(asks) == 1:
+            return asks[0]
+        return Fork(asks, [T.Said("caller-branch", {"caller": c.owner.split("::")[-1], "lines": c.lines}) for c in found])
+
+    def caller(self, q: CallerPasses):
+        """U2: which way each pass of one caller went on the row in the window -- its calls into the mover are its arms,
+        S2's reading -- and so what kept it from calling: S3 on the call's guard.  No pass of it on the row, where the
+        window was searched whole and every line of its runs holds the key: it did not run on the row, and U1 goes up
+        to its own callers once; else it stops, saying what is not read (KNOWN_ISSUES.md K55)."""
+        c, up = q.caller, q.callers
+        self.start("U2", "which way the caller's passes went on the row")
+        rel, func = c.owner.split("::", 1)
+        mover = up.mover.split("::")[-1]
+        start, end = up.window
+        self.need(T.Said("a-caller-s-run-printing-the-key", {"caller": func, "lines": c.lines}), c.how != "none", "K55")
+        prints = R._prints_of(c.owner, c.lines)
+        files = self.files_of(c.owner, sorted({f for st in prints.statements for f in st.log_files}) if prints else [], c.lines)
+        to_hand = self.need(T.Said("a-log-of-to-hand", {"func": func, "files": files}), self.logs.names(files))
+        how = T.Said("for-marks", {"marks": list(c.marks)}) if c.marks else T.Said("for-the-key-alone")
+        asking = W.Asking(up.window, None, T.Said("over-the-movers-window", {"start": start, "end": end, "how": how}), c.marks)
+        self.say(f"{func}: logs {files}, asked {asking.why}")
+        runs, missed, holes = self._ask(up.key, to_hand, asking)
+        self._stop_unanswered(missed)
+        fn = R.function(rel, func, c.lines)
+        found = []
+        for name in to_hand:
+            for run in runs.get(name, []):
+                if of_mover(run, c.owner):
+                    parts, said = R.passes(fn, run, self.mode)
+                    self.say(f"{run.describe()}: {said}")
+                    found += parts
+        found = sorted((p for p in found if p.last[:19] >= start and p.first[:19] <= end), key=lambda p: p.first)
+        keyed = [p for p in found if holds_key(fn, p, runs, self.mode, self._called_at)]
+        if len(found) > len(keyed):
+            self.say(f"{len(found) - len(keyed)} pass(es) of {func} in the window print no record of the key, nor run it inside a call: not read")
+        if up.before is not None:
+            moving = [p for p in keyed if p.last[:19] >= up.before]
+            keyed = [p for p in keyed if p.last[:19] < up.before]
+            self.say(f"{len(moving)} pass(es) ending at {up.before} or later, the one that called {mover} to move it on among them, not read")
+        if not keyed:
+            return self._caller_absent(c, up, to_hand, asking, holes)
+        outcomes = sorted({o for a in up.arms for o in a.outcomes})
+        arms = [Arm(line, outcomes, self._call_guards(rel, line)) for line in c.lines]
+        blocked = self._which_way(fn, rel, func, keyed, arms)
+        self.need(T.Said("caller-called-mover-not-found", {"caller": func, "line": blocked.exit_line, "mover": mover}),
+                  blocked.exit_line not in c.lines, "K55")
+        return blocked
+
+    def _call_guards(self, rel: str, line: int) -> list[str]:
+        """The path condition of the call at *rel*:*line*, the statement the map's ``call_statements`` picks for the
+        hop (``called_from``'s own reader); two statements on the line that differ are not read."""
+        stmts = call_statements(R.CORPUS, f"{rel}:{line}")
+        conds = {tuple(pathcond.path_condition(s)) for s in stmts}
+        self.need(T.Said("one-call-statement-at", {"site": f"{rel}:{line}", "n": len(stmts)}), len(conds) == 1, "K55")
+        return list(conds.pop())
+
+    def _caller_absent(self, c: Caller, up: Callers, to_hand: list[str], asking: W.Asking, holes: dict):
+        """U2 where no pass of the caller *c* took the row in the window: judgement 3 for it -- it did not run on the row
+        only where the window was searched whole, every log of it was asked and every line of its runs holds the key
+        (its marks do) -- then up once to the callers ``called_from`` lists for it (hop 1's, at hop 2); else it stops."""
+        func = c.owner.split("::")[-1]
+        start, end = up.window
+        premises: dict[str, dict[str, Any]] = {"window": self._searched_whole(to_hand, asking, asking, [], holes, None),
+                    "logs": every_log_asked(c.owner, c.lines, to_hand),
+                    "prints": {"held": True, "why": T.Said("caller-marks-hold-the-key", {"marks": list(c.marks)})} if c.marks
+                    else {"held": None, "why": T.Said("caller-asked-by-the-key-alone")}}
+        failing = [T.Said("premise-why", {"premise": k, "why": p["why"]}) for k, p in premises.items() if not p["held"]]
+        self.need(T.Said("a-pass-of-the-caller-on-the-row", {"caller": func, "start": start, "end": end, "failing": failing}),
+                  not failing, "K55")
+        self.say(f"{func} did not run on the row from {start} to {end}: {'; '.join(T.text(p['why']) for p in premises.values())}")
+        sites = {f"{c.owner.partition('::')[0]}:{line}" for line in c.lines}
+        outer = [e.split(" -> ")[0] for e in up.entries if " -> " in e and _site(e.split(" -> ")[1]) in sites]
+        if c.hop == 1 and up.up is None and outer:
+            self.say(f"up to {func}'s callers: {outer}")
+            return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner)
+        self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
+                                                                 "hop": c.hop}), None, "K55")
 
     def _printed_in(self, fn: R.Function, run, expr: str) -> list[str]:
         """``value at record`` for every hole of *expr* the function's rows read in *run*."""
@@ -4578,7 +4791,8 @@ class Rerun:
         if not any(st.owner == q.mover for st in q.statements):
             # judgement 4: a mover that takes the row by its key moved it only then for what its passes before did
             return self._late_passes(q)
-        self._why_late(q, ordered)
+        if (up := self._why_late(q, ordered)) is not None:
+            return up
         mine = [st for st in ordered if st.owner == q.mover]
         self.need(T.Said("the-statement-that-moved-the-value-on"), len(mine) == 1)
         return Ordered(mine[0], q.run, q)
@@ -4797,22 +5011,31 @@ class Rerun:
         if holes:
             self.say(f"  {func}: {', '.join(holes)} not searched all the window: a pass there is not read")
         return Passes(q.mover, self._runs_of(found, q.mover, asking), list(arms.values()), self.args.key, asking,
-                      since=since, before=before, unsure=unsure)
+                      since=since, before=before, unsure=unsure, subject=q.subject, entries=_entries_of(q.writers, q.mover))
 
-    def _why_late(self, q: Missed, ordered: list) -> None:
+    def _why_late(self, q: Missed, ordered: list) -> Callers | None:
         """Judgement 1: why the mover that moved the value on did it only then, where a statement of its own took the
         row.  One that returns the first rows of an order goes on to L3 (lost on order); one that took the row in no
-        such order stops here, saying what is not read yet.  One that takes the row by its key goes to judgement 4
-        (``_late_passes``)."""
+        such order goes to its callers' passes before the move (U1: what it took the row by is what they handed it,
+        KNOWN_ISSUES.md K55), or stops, saying what is not read yet, where the map lists none or the window is not
+        known.  One that takes the row by its key goes to judgement 4 (``_late_passes``)."""
         rel, func = q.mover.split("::", 1)
         name = f"{Path(rel).name}::{func}"
         took = [st for st in q.statements if st.owner == q.mover]
         if any(st.owner == q.mover for st in ordered):
-            return
+            return None
         spans = _union([span for st in took for span in self._statement_true(st, q)])
         where = ", ".join(f"{st.owner.split('::')[-1]}@{st.line}" for st in took)
         held = f"held for the row {_spans_words(spans, (q.since, q.moved))}" if spans else "held for the row at times not known"
-        self.need(T.Said("why-took-it-only-at-and-it", {"name": name, "q_moved": q.moved, "where": where, "held": held}), None)
+        said = T.Said("why-took-it-only-at-and-it", {"name": name, "q_moved": q.moved, "where": where, "held": held})
+        entries = _entries_of(q.writers, q.mover)
+        if entries and self.logs.needs_window:
+            self.say(f"{said}: its callers' passes before are read (KNOWN_ISSUES.md K55)")
+            since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
+            arms = list(arms_of(q.writers, q.mover, q.subject, q.observed).values())
+            return Callers(q.mover, arms, q.subject, self.args.key, (since, before), "statement", entries, before=before)
+        self.need(said, None)
+        return None
 
     def _row_of(self, cls: str) -> dict:
         """The rows file's row of the class: the one its ``classes`` says is of it (A1 answers a row of a class)."""
