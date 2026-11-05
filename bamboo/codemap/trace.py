@@ -72,6 +72,7 @@ from bamboo.codemap.models import (
     SKELETON_ARM,
     SKELETON_BRANCH,
     SKELETON_PRINT,
+    STOP_CLOCK,
     STOP_CONFIG,
     STOP_EXTERNAL,
     STOP_PARAMETER,
@@ -88,6 +89,7 @@ from bamboo.codemap.models import (
     PrintStatement,
     SkeletonHole,
     SkeletonLine,
+    StepCall,
     TraceStep,
 )
 from bamboo.codemap.panda import mapentries, pathcond
@@ -105,6 +107,7 @@ from bamboo.codemap.panda.recognizers.emit import (
     own_logging_arguments,
 )
 from bamboo.codemap.panda.recognizers.selection import log_level
+from bamboo.codemap.panda.runnable import read_call
 from bamboo.codemap.reading import containing_function
 
 logger = logging.getLogger(__name__)
@@ -170,7 +173,7 @@ def _budgets(names: set[str]) -> str:
 Classifier = Callable[..., tuple[str, str]]
 
 
-def _nothing(_expression: ast.expr, _resolve=None, _typed=None) -> tuple[str, str]:
+def _nothing(_expression: ast.expr, _resolve=None, _typed=None, _spell=None) -> tuple[str, str]:
     return "", ""
 
 
@@ -187,7 +190,10 @@ def _nothing(_expression: ast.expr, _resolve=None, _typed=None) -> tuple[str, st
 #: this corpus -- ``getConfigValue`` is a ``SELECT`` on ``ATLAS_PANDA.CONFIG`` --
 #: so their arguments flow into statements the map reads, which is the crossing
 #: of a call and its arguments, and a different change from this one.
-_WALKED_THROUGH = frozenset({STOP_EXTERNAL})
+#:
+#: The clock's is here: ``timeLimit = naive_utcnow() - timedelta(minutes=self.sleepTime)``
+#: is the time the run read less a span, and the span is ``self.sleepTime``'s.
+_WALKED_THROUGH = frozenset({STOP_EXTERNAL, STOP_CLOCK})
 
 
 #: Where a binding the walk reports actually lives, when that is not the
@@ -2796,7 +2802,7 @@ class _Walk:
         """``(terminal, detail)`` for *expression* in *frame*; a value the database supplies says what it is read from at the call."""
         resolve = resolve if resolve is not None else self.resolver(frame)
         typed = typed if typed is not None else self.typer(frame)
-        terminal, detail = self.classify(expression, resolve, typed)
+        terminal, detail = self.classify(expression, resolve, typed, self.speller(frame))
         if terminal == STOP_UPSTREAM and detail and " " not in detail:
             from bamboo.codemap.panda.provenance import database_call
 
@@ -2903,9 +2909,30 @@ class _Walk:
 
         return declared
 
+    def speller(self, frame: _Frame):
+        """callee -> its name as *frame*'s file's imports spell it (:func:`callfacts.spelled`), or None."""
+        return lambda called: callfacts.spelled(self.types, frame.file, called)
+
     def terminal_of(self, frame: _Frame, expression: ast.expr) -> tuple[str, str]:
         """(terminal, detail) for *expression* read in *frame*, the walk's way."""
         return self._classified(frame, expression)
+
+    def calls_of(self, frame: _Frame, expression: Optional[ast.AST]) -> list[StepCall]:
+        """Each call in *expression*, outermost first, as :func:`runnable.read_call` reads it, with the terminal it is
+        by itself (:attr:`TraceStep.calls`)."""
+        if expression is None:
+            return []
+        resolve, typed, spell = self.resolver(frame), self.typer(frame), self.speller(frame)
+        out = []
+        for node in astwalk.walk(expression):
+            if not isinstance(node, ast.Call):
+                continue
+            read = read_call(self.calls, frame.file, frame.func, node)
+            landed = {f"{one.file}::{getattr(one.func, 'name', '<lambda>')}" for one in read.targets}
+            what = read.what or ", ".join(sorted(landed))
+            terminal, _detail = self.classify(node, resolve, typed, spell)
+            out.append(StepCall(call=_text(node), made=read.made, what=what, terminal=terminal))
+        return out
 
     def scope_key(self, frame: _Frame) -> str:
         """What a name asked in *frame* is unique within.
@@ -3109,6 +3136,7 @@ class _Walk:
             reads=reads,
             terminal=terminal,
             detail=detail,
+            calls=self.calls_of(frame, value),
         )
         if not self.record(step):
             return
@@ -3133,7 +3161,7 @@ class _Walk:
         self._enter_tests(frame, statement, 1, above=self.guards_above)
         if value is not None:
             self._ask_keyed(frame, value, 1, statement)
-            if not terminal or terminal == STOP_EXTERNAL:
+            if not terminal or terminal in _WALKED_THROUGH:
                 self.beyond.append(lambda: self._enter(frame, step, value, None, 1))
 
     # -- skeleton ----------------------------------------------------------
@@ -4153,6 +4181,7 @@ class _Walk:
             terminal=terminal,
             detail=detail,
             depth=depth,
+            calls=self.calls_of(frame, expression),
         )
         if not self.record(step):
             return
@@ -4165,7 +4194,7 @@ class _Walk:
             self.want(frame, own, depth + 1, site)
             for test, names in _guard_tests(site):
                 self.want(frame, names, depth + 1, test)
-        if not terminal or terminal == STOP_EXTERNAL:
+        if not terminal or terminal in _WALKED_THROUGH:
             self.beyond.append(
                 lambda: self._enter(frame, step, expression, slot, depth + 1)
             )
@@ -4526,6 +4555,7 @@ class _Walk:
                         detail=detail,
                         depth=depth,
                         open=self.entered_open.get((callee.file, callee.owner), ""),
+                        calls=self.calls_of(callee, value),
                     )
                 ):
                     return
@@ -4630,8 +4660,10 @@ class _Walk:
         statement = _enclosing_statement(call) or call
         argument = bound.get(name)
         on_class = self.calls.callees(caller.file, caller.func, call).on_class
+        handed: Optional[ast.expr] = None
         if argument is not None and name in calls_mod.said(call, target, on_class):
             value, reads, detail = _text(argument), _reads(argument), f"passed to {callee} here"
+            handed = argument
         elif argument is not None:
             # Evaluated where the ``def`` is, once: nothing on the path to
             # this call chose it, so there is nothing further to walk.
@@ -4659,6 +4691,7 @@ class _Walk:
             reads=reads,
             detail=detail,
             depth=depth,
+            calls=self.calls_of(caller, handed),
         )
         return step, statement
 
@@ -5228,6 +5261,7 @@ class _Walk:
                 terminal=terminal,
                 detail=detail,
                 depth=depth,
+                calls=self.calls_of(frame, expression),
             )
         )
 

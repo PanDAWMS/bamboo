@@ -156,6 +156,7 @@ import ast
 import re
 import string
 from collections import defaultdict, deque
+from functools import partial
 from typing import Callable, Iterator, NamedTuple, Optional, Union
 
 from bamboo.codemap import callfacts, objects, reach
@@ -358,19 +359,23 @@ class _Reached(NamedTuple):
 
 def attach(
     fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
-) -> tuple[int, int, int, int]:
-    """Read the runs, the history calls, the pairs and the columns of the messages' holes into *fragment*'s nodes and
-    branches.
+) -> tuple[int, int, int, int, int]:
+    """Read the runs, the history calls, the pairs, the columns of the messages' holes and the arms' later writes
+    (:mod:`bamboo.codemap.panda.rewrites`, on the same walk up) into *fragment*'s nodes and branches.
 
     Returns how many functions have a run, how many history calls there are,
-    how many branches have a pair, and how many holes name a column.
+    how many branches have a pair, how many holes name a column, and how many
+    branches have a later write.
     """
+    from bamboo.codemap.panda import rewrites
+
     reader = _Reader(fragment, modules, calls)
     return (
         reader.attach_runs(),
         reader.attach_history_calls(),
         reader.attach_pairs(),
         reader.attach_hole_columns(),
+        rewrites.attach(reader, modules),
     )
 
 
@@ -414,6 +419,12 @@ class _Reader:
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}
+        self._afters: dict[tuple[int, int, int], bool] = {}
+        self._handeds: dict[
+            tuple[str, int, str, frozenset[str], frozenset[str]],
+            tuple[dict[str, int], dict[str, int]],
+        ] = {}
+        self._tested: dict[tuple[str, int], list[str]] = {}
         self._held_killers: dict[tuple[str, str], list[ast.AST]] = {}
         self._handed_rekeys: dict[tuple[str, str, str], list[HistoryRekey]] = {}
         self._candidates: dict[
@@ -883,85 +894,14 @@ class _Reader:
                 return
             written = mustprints._written_object(site.statement, junction.subject)
             arm = self._arm(owner, site.func, site.statement, junction.subject)
-            seen = {owner}
-            # Each entry carries its way: the functions from the arm's out to this one, each with its statement on
-            # the way, and the call into each but this one (None where the call record places none).
-            frontier: deque[_Step] = deque(
-                [
-                    _Step(
-                        owner,
-                        site.func,
-                        site.statement,
-                        0,
-                        ((owner, site.statement),),
-                        (),
-                    )
-                ]
+            visit = partial(
+                self._pairs_found, junction.subject, written, arm, pairs, unplaced
             )
-            while frontier:
-                here, func, point, level, way, into = frontier.popleft()
-                found = self._pairs_at(
-                    here, func, point, level, junction.subject, written, arm
-                )
-                if found:
-                    for pair in found:
-                        pairs.setdefault(
-                            (pair.level, pair.caller, pair.point, pair.call), pair
-                        )
-                    continue
-                for call in self._unplaced_at(here, func, point):
-                    if call not in unplaced:
-                        unplaced.append(call)
-                if level >= MAX_DEPTH:
-                    if HISTORY_DEPTH not in holes:
-                        holes.append(HISTORY_DEPTH)
-                    continue
-                for caller, lines in self.callers.get(here, {}).items():
-                    if caller in seen:
-                        continue
-                    if len(seen) >= MAX_FUNCTIONS:
-                        if HISTORY_WIDE not in holes:
-                            holes.append(HISTORY_WIDE)
-                        continue
-                    held = self.funcs.get(caller)
-                    if held is None:
-                        seen.add(caller)
-                        continue
-                    steps: list[tuple[ast.stmt, Optional[C.CallSite]]] = []
-                    out = False
-                    for line in lines:
-                        up = mustprints._statement_at(held[1], line)
-                        if up is None:
-                            continue
-                        placed = self._sites_into(here, caller, line)
-                        kept = next(
-                            (
-                                one
-                                for one in placed
-                                if not self._ruled_out(way, (*into, one))
-                            ),
-                            None,
-                        )
-                        if placed and kept is None:
-                            out = True
-                            continue
-                        steps.append((up, kept))
-                    ruled = ruled or out
-                    if out and not steps:
-                        # A way the calls rule out is not this arm's pass; another way may still reach the caller.
-                        continue
-                    seen.add(caller)
-                    for up, kept in steps:
-                        frontier.append(
-                            _Step(
-                                caller,
-                                held[1],
-                                up,
-                                level + 1,
-                                (*way, (caller, up)),
-                                (*into, kept),
-                            )
-                        )
+            met, out = self.walk_up(owner, site.func, site.statement, visit)
+            for hole in met:
+                if hole not in holes:
+                    holes.append(hole)
+            ruled = ruled or out
         branch.history = sorted(
             pairs.values(), key=lambda one: (one.level, one.caller, one.point, one.call)
         )
@@ -973,6 +913,107 @@ class _Reader:
                 named += f" and {len(unplaced) - UNPLACED_NAMED} more"
             holes.append(HISTORY_UNPLACED.format(calls=named))
         branch.history_hole = "; ".join(holes)
+
+    def walk_up(
+        self,
+        owner: str,
+        func: ast.AST,
+        statement: ast.stmt,
+        visit: Callable[[_Step], bool],
+    ) -> tuple[list[str], bool]:
+        """Walk up from the arm at *statement* of *owner*'s *func*, a level at a time (the module docstring's
+        **Up from the arm**): *visit* each function reached, and go on up from one only where it returns False.
+
+        Returns the caps the walk met (:data:`HISTORY_DEPTH`, :data:`HISTORY_WIDE`), in the order met, and whether
+        what the calls on a way hand ruled a way out.
+        """
+        holes: list[str] = []
+        ruled = False
+        seen = {owner}
+        # Each entry carries its way: the functions from the arm's out to this one, each with its statement on the
+        # way, and the call into each but this one (None where the call record places none).
+        frontier: deque[_Step] = deque(
+            [_Step(owner, func, statement, 0, ((owner, statement),), ())]
+        )
+        while frontier:
+            step = frontier.popleft()
+            here, _func, _point, level, way, into = step
+            if visit(step):
+                continue
+            if level >= MAX_DEPTH:
+                if HISTORY_DEPTH not in holes:
+                    holes.append(HISTORY_DEPTH)
+                continue
+            for caller, lines in self.callers.get(here, {}).items():
+                if caller in seen:
+                    continue
+                if len(seen) >= MAX_FUNCTIONS:
+                    if HISTORY_WIDE not in holes:
+                        holes.append(HISTORY_WIDE)
+                    continue
+                held = self.funcs.get(caller)
+                if held is None:
+                    seen.add(caller)
+                    continue
+                steps: list[tuple[ast.stmt, Optional[C.CallSite]]] = []
+                out = False
+                for line in lines:
+                    up = self._statement(held[1], line)
+                    if up is None:
+                        continue
+                    placed = self._sites_into(here, caller, line)
+                    kept = next(
+                        (
+                            one
+                            for one in placed
+                            if not self._ruled_out(way, (*into, one))
+                        ),
+                        None,
+                    )
+                    if placed and kept is None:
+                        out = True
+                        continue
+                    steps.append((up, kept))
+                ruled = ruled or out
+                if out and not steps:
+                    # A way the calls rule out is not this arm's pass; another way may still reach the caller.
+                    continue
+                seen.add(caller)
+                for up, kept in steps:
+                    frontier.append(
+                        _Step(
+                            caller,
+                            held[1],
+                            up,
+                            level + 1,
+                            (*way, (caller, up)),
+                            (*into, kept),
+                        )
+                    )
+        return holes, ruled
+
+    def _pairs_found(
+        self,
+        subject: str,
+        written: Optional[ast.expr],
+        arm: "_Arm",
+        pairs: dict[tuple[int, str, int, int], HistoryPair],
+        unplaced: list[str],
+        step: _Step,
+    ) -> bool:
+        """:meth:`walk_up`'s visit for the history pairs: the pairs at *step* into *pairs*, ``True`` where it has
+        one; else the calls there the record could not place into *unplaced*."""
+        found = self._pairs_at(
+            step.owner, step.func, step.point, step.level, subject, written, arm
+        )
+        if found:
+            for pair in found:
+                pairs.setdefault((pair.level, pair.caller, pair.point, pair.call), pair)
+            return True
+        for call in self._unplaced_at(step.owner, step.func, step.point):
+            if call not in unplaced:
+                unplaced.append(call)
+        return False
 
     def _pairs_at(
         self,
@@ -1076,16 +1117,25 @@ class _Reader:
         self, func: ast.AST, point: ast.stmt, site: ast.stmt
     ) -> tuple[bool, bool]:
         """Whether *site* can run after *point* in one pass of *func*, and whether before it."""
-        if id(func) not in self._kills:
-            self._kills[id(func)] = [bound.statement for bound in self.built(func)]
-        around = _loops(point, func)
-        both = [
-            loop for loop in _loops(site, func) if any(loop is one for one in around)
-        ]
-        killers = [*self._kills[id(func)], *both]
-        return bool(reaching(site, [point], killers)), bool(
-            reaching(point, [site], killers)
-        )
+        return self._after(func, point, site), self._after(func, site, point)
+
+    def _after(self, func: ast.AST, point: ast.stmt, site: ast.stmt) -> bool:
+        """Whether *site* can run after *point* in one pass of *func*, kept: the flow of each site as the write is a
+        flow of its own, and a reader asking only after does not build it."""
+        key = (id(func), id(point), id(site))
+        if key not in self._afters:
+            if id(func) not in self._kills:
+                self._kills[id(func)] = [bound.statement for bound in self.built(func)]
+            around = _loops(point, func)
+            both = [
+                loop
+                for loop in _loops(site, func)
+                if any(loop is one for one in around)
+            ]
+            self._afters[key] = bool(
+                reaching(site, [point], [*self._kills[id(func)], *both])
+            )
+        return self._afters[key]
 
     def _unplaced_at(self, owner: str, func: ast.AST, point: ast.stmt) -> list[str]:
         """The calls of *owner* the reach record holds as holes, in one pass with *point*,
@@ -1424,7 +1474,7 @@ class _Reader:
         return tuple(
             site
             for site in sites
-            if site is point or self._ordered(func, point, site)[0]  # type: ignore[arg-type]
+            if site is point or self._after(func, point, site)  # type: ignore[arg-type]
         )
 
     def _same_binding(
@@ -1474,8 +1524,8 @@ class _Reader:
                 continue
             if (
                 self._writes_on(owner, statement, attr, one.caller)
-                and self._ordered(func, point, statement)[0]
-                and self._ordered(func, statement, end)[0]
+                and self._after(func, point, statement)
+                and self._after(func, statement, end)
             ):
                 found.append(outcome)
         for below, held in sorted(one.below.items()):
@@ -1589,16 +1639,18 @@ class _Reader:
             if not route:
                 continue
             func = self.funcs[owner][1]
-            tested = sorted(
-                {
-                    name.id
-                    for test in pathcond.tests_on(statement, func)
-                    for name in walk(test)
-                    if isinstance(name, ast.Name)
-                    and keycolumns.is_parameter(func, name.id)
-                    and not C._rebinds(func, name.id)
-                }
-            )
+            if (owner, id(statement)) not in self._tested:
+                self._tested[(owner, id(statement))] = sorted(
+                    {
+                        name.id
+                        for test in pathcond.tests_on(statement, func)
+                        for name in walk(test)
+                        if isinstance(name, ast.Name)
+                        and keycolumns.is_parameter(func, name.id)
+                        and not C._rebinds(func, name.id)
+                    }
+                )
+            tested = self._tested[(owner, id(statement))]
             if not tested:
                 continue
             target = self._target(owner)
@@ -1642,7 +1694,16 @@ class _Reader:
         what it returns, 1 where it is below one or an element of one: what
         comes out of the call is read as what goes in -- ``doGenerate``'s
         jobs come back to ``runImpl`` as the elements of ``pandaJobs``.
+        Kept: every arm walking up through the call asks it again.
         """
+        key = (owner, id(point), arm.owner, arm.objects, arm.keys)
+        if key not in self._handeds:
+            self._handeds[key] = self._handed_at(owner, point, arm)
+        return self._handeds[key]
+
+    def _handed_at(
+        self, owner: str, point: ast.stmt, arm: "_Arm"
+    ) -> tuple[dict[str, int], dict[str, int]]:
         here = self.rows[owner]
         lines = range(point.lineno, (point.end_lineno or point.lineno) + 1)
         at = [

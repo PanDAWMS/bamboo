@@ -180,6 +180,39 @@ def parsed(path: Path) -> Optional[tuple[str, ast.Module]]:
     return _PARSED[key]
 
 
+#: What :meth:`Calls.hop` writes after a hop placed open.
+_PLACED_OPEN = re.compile(r" \(placed open -- .*\)$")
+
+
+def call_statements(source_root: Path, hop: str) -> list[ast.stmt]:
+    """The statements one hop of :meth:`Calls.called_from` names: in the hop's file under *source_root*, each
+    innermost statement holding a call that starts at the hop's line; ``[]`` where the file will not read.
+
+    By the line, not by the name the call spells: a call is placed by what its receiver is, so the name can be
+    another function's -- ``SiteMapper(taskBuffer)`` runs ``__init__``, ``thr.start()`` runs ``run``, and
+    ``timed_method.run(...)`` the method the wrapper was handed.  Of the 1396 hops pin 4fe0bfb4's map lists, the
+    callee's name finds no call at 44; the line finds one statement at each.  A line holding two statements names
+    both, and a reader takes them as alternatives.  The tree is :func:`parsed`'s, so the guards at a statement are
+    :func:`pathcond.path_condition`'s reading of it.
+    """
+    file, _, line = _PLACED_OPEN.sub("", hop).rpartition(":")
+    read = parsed(source_root / file)
+    if read is None or not line.isdigit():
+        return []
+    found: dict[int, ast.stmt] = {}
+    for node in walk(read[1]):
+        if isinstance(node, ast.Call) and node.lineno == int(line):
+            held = next(one for one in (node, *pathcond.ancestors(node)) if isinstance(one, ast.stmt))
+            found.setdefault(id(held), held)
+    return sorted(found.values(), key=lambda one: (one.lineno, one.col_offset))
+
+
+def call_chain(source_root: Path, entry: str) -> list[list[ast.stmt]]:
+    """:func:`call_statements` of each hop of one :meth:`Calls.called_from` entry, outermost first: ``outer file:line
+    -> inner file:line`` is the call into the caller, then the call into the function."""
+    return [call_statements(source_root, hop) for hop in entry.split(" -> ")]
+
+
 # Test code is not the system's behaviour.  It writes the same attributes with
 # the same literals, so leaving it in files fixtures as junctions and doubles
 # the ambiguous attribution cases -- 88 of 376 modules, and 47% of the writes
@@ -1673,7 +1706,8 @@ class Calls:
         return placed.unplaced if placed.targets else ""
 
     def hop(self, site: CallSite) -> str:
-        """``file:line`` of *site*, and why it may land elsewhere where it is placed open."""
+        """``file:line`` of *site*, and why it may land elsewhere where it is placed open; :func:`call_statements`
+        reads it back."""
         why = self.opened(site)
         return f"{site.file}:{site.call.lineno}" + (f" (placed open -- {why})" if why else "")
 

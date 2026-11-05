@@ -668,3 +668,20 @@ def test_pandas_conventions_and_the_databases_words_are_said_once():
     assert sqltext._reads_in_text("SELECT SYSDATE, PandaID FROM ATLAS_PANDA.jobsActive4") == [
         ("jobsActive4", ["PandaID"])
     ]
+
+
+def test_what_the_run_read_is_told_apart_as_the_time_a_draw_or_the_machine():
+    """The time is what a run's records are stamped with, so it is told apart from a draw and the machine; a function
+    of the time handed its time reads no clock, and what the same arguments always give is no clock at all."""
+    assert callfacts.CLOCK == callfacts.TIME | callfacts.DRAW | callfacts.MACHINE
+    assert callfacts.run_dependent("pandacommon.pandautils.PandaUtils.naive_utcnow") == "time"
+    assert callfacts.run_dependent("datetime.datetime.now", _call("datetime.datetime.now()")) == "time"
+    assert callfacts.run_dependent("time.gmtime", _call("time.gmtime()")) == "time"
+    assert callfacts.run_dependent("time.gmtime", _call("time.gmtime(seconds)")) == ""
+    assert callfacts.run_dependent("time.strftime", _call("time.strftime('%Y')")) == "time"
+    assert callfacts.run_dependent("time.strftime", _call("time.strftime('%Y', struct)")) == ""
+    assert callfacts.run_dependent("random.choice") == "draw" and callfacts.run_dependent("uuid.uuid4") == "draw"
+    assert callfacts.run_dependent("os.getpid") == "machine" and callfacts.run_dependent("socket.getfqdn") == "machine"
+    for same in ("time.strptime", "uuid.uuid5", "uuid.UUID"):
+        assert callfacts.run_dependent(same) == "" and callfacts.listed(same, callfacts.RUNS_ALIKE), same
+    assert callfacts.run_dependent("time.sleep") == "" and not callfacts.listed("time.sleep", callfacts.RUNS_ALIKE)

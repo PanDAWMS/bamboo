@@ -150,10 +150,12 @@ from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 from bamboo.codemap.panda.pathcond import (
     ancestors,
+    arm_condition,
     attach_parents,
     compatible,
     enclosing_function,
     entries,
+    exits_above,
     functions_with_owner,
     names_bound_by,
     path_condition,
@@ -1598,7 +1600,7 @@ def _outcomes(
         found = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
-            later = entries(replaced.get(id(site), ()), path_condition(site))
+            later = entries(replaced.get(id(site), ()), arm_condition(site))
             settled = settle(value, func)
             if settled:
                 found.extend(_Outcome(outcome, 1, site, list(later), site) for outcome in settled)
@@ -1613,7 +1615,7 @@ def _outcomes(
                 # that reaches is a value, whether it settles or not.
                 reached = reaching_values(func, value.id, settle, at=site)
                 if reached:
-                    dominating = path_condition(site)
+                    dominating = arm_condition(site)
                     for one in reached:
                         extra = [c for c in one.conditions if c not in dominating] + [
                             entry for entry in later if entry not in one.conditions
@@ -1809,7 +1811,9 @@ def _record(
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
     for outcome, tier, node, extra, decided_at, frames, cuts in outcomes:
-        condition = path_condition(node) + extra
+        tests = path_condition(node)
+        # The early exits above the write, as arm_condition adds them, less what the value's own tests say.
+        condition = tests + [one for one in exits_above(node) if one not in tests and one not in extra] + extra
         guards = beside(node) if beside is not None else row_precondition
         # The tests the branch's own condition already makes are not what tells
         # one statement from another.

@@ -44,6 +44,7 @@ rules is wrong there -- and one no path fits as ``P inconsistent``.
 from __future__ import annotations
 
 import ast
+import datetime
 import os
 import re
 from collections.abc import Callable
@@ -55,6 +56,7 @@ from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
+from bamboo.querier.recorded import EDGE  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
 
 #: ``WHICH_RUN_BY_ROWS=0``: a candidate with no run of its own takes the key's first run in the window, whatever
@@ -103,8 +105,24 @@ def of_mover(run: Run, owner: str) -> bool:
     return m is None or m[1] == owner.split("::")[-1]
 
 
-def _at(run: Run, window: tuple[str, str]) -> bool:
+def spans(run: Run, window: tuple[str, str]) -> bool:
+    """Whether *run*'s span, its first record to its last, meets *window*: how the runs at a window are gathered (H2,
+    F1, H7) and how judgement 3 reads a mover as run.  A pass is judged at the window by :func:`at_window`."""
     return run.first[:19] <= window[1] and run.last[:19] >= window[0]
+
+
+def at_window(run: Run, window: tuple[str, str]) -> bool:
+    """Whether *run*, or a pass of one, is at *window*: its span holds the window and one of its records lies within
+    EDGE of it -- the door's part near the window (``recorded._runs``).  A run :func:`passes_at` cannot cut, with no
+    entry row among the records at hand, spans its separate passes, and by its span alone is at every time between
+    them: a child task's two "pending until parent task 53199080 is done" at 15:53 and 22:35, under its own mark, were
+    read for the parent's write at 18:49:05 (MT-scouted-late, KNOWN_ISSUES.md K57).  A pass silent for longer than EDGE
+    around the window is not at it either, and its candidate is left unexamined there."""
+    if not spans(run, window):
+        return False
+    lo, hi = (datetime.datetime.fromisoformat(window[0][:19]) - EDGE).isoformat(" "), (
+        datetime.datetime.fromisoformat(window[1][:19]) + EDGE).isoformat(" ")
+    return any(lo <= r.stamp[:19] <= hi for r in run.records)
 
 
 def _key_through_call(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
@@ -152,8 +170,9 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
     A run whose mark names another method is not *c*'s (:func:`of_mover`).  A run is cut into passes at the
     function's entry row (``rows.entries``), the records before the first entry a pass of their own -- the log can
     start inside one; a function with no entry row, or one pass, keeps the run whole.  A pass is at the window where
-    its span holds it, and it holds the key where one of its records does, or where a run of the key ran inside one
-    of its calls (:func:`_key_through_call`).  A mark that names no key spans every pass of a worker:
+    its span holds it and a record of it lies near (:func:`at_window`), and it holds the key where one of its records
+    does, or where a run of the key ran inside one of its calls (:func:`_key_through_call`).  A mark that names no key
+    spans every pass of a worker:
     rescueUnLockedTasksWithPicked_JEDI's ``< vo=atlas label=user >`` on aipanda081 held 155 passes, the key in one at
     19:11, and was read for a write at 13:09:14 that aipanda082's pass made."""
     fn = R.function(c.rel, c.func, c.lines)
@@ -168,9 +187,11 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
             continue
         cuts = sorted({0, *R.entries(fn, run, mode), len(run.records)})
         parts = [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
-        at = [p for p in parts if _at(p, window)]
+        at = [p for p in parts if at_window(p, window)]
         if not at:
-            why.append(f"{where}: none of its {len(parts)} pass(es) of {fn.name} is at the window")
+            far = sum(1 for p in parts if spans(p, window))
+            why.append(f"{where}: none of its {len(parts)} pass(es) of {fn.name} is at the window"
+                       + (f" ({far} span(s) it with no record within {EDGE.seconds // 60} min of it)" if far else ""))
             continue
         keyed = [p for p in at if holds_key(fn, p, logs, mode, called_at)]
         if not keyed:
@@ -605,7 +626,7 @@ def judge(
             # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
             reasons: list[str] = []
             for name in to_hand:
-                found = [r for r in logs[name] if window is None or _at(r, window)]
+                found = [r for r in logs[name] if window is None or spans(r, window)]
                 if found and window is not None:
                     found, dropped = passes_at(c, found, window, logs, mode, called_at)
                     if not found:

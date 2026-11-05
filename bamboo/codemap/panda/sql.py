@@ -72,6 +72,7 @@ from bamboo.codemap.panda.pathcond import (
     site_of,
     surviving_writes,
     targets_of,
+    tested_values,
     written_value,
 )
 from bamboo.codemap.panda.values import rendered_text
@@ -2299,6 +2300,24 @@ _PRECONDITION_BIND = re.compile(
     re.IGNORECASE,
 )
 
+#: An ``OR`` of equality tests on one column, each by a bind, in its parentheses: ``(jobStatus=:oldJobStatus1 OR
+#: jobStatus=:oldJobStatus2)``, the list ``updateJob`` and ``archiveJob`` take a row out of ``jobsDefined4`` by.
+_ONE_COLUMN_OR = re.compile(r"^\(\s*([\w.]+)\s*=\s*:\w+(?:\s+OR\s+([\w.]+)\s*=\s*:\w+)+\s*\)$", re.IGNORECASE)
+_OR_ITEM = re.compile(r"([\w.]+)\s*=\s*(:\w+)")
+
+
+def _as_list(term: str) -> str:
+    """*term* as the ``IN`` list it is where it is an ``OR`` of equality tests on one column by binds -- ``(jobStatus=
+    :oldJobStatus1 OR jobStatus=:oldJobStatus2)`` is ``jobStatus IN (:oldJobStatus1,:oldJobStatus2)`` -- else *term*:
+    one test of the column, which a reader of either half alone takes for the whole."""
+    stripped = term.strip()
+    if _ONE_COLUMN_OR.match(stripped) is None:
+        return term
+    items = _OR_ITEM.findall(stripped)
+    if len({column.lower() for column, _bind in items}) != 1:
+        return term
+    return f"{items[0][0]} IN ({','.join(bind for _column, bind in items)})"
+
 
 def settled_precondition(
     term: str,
@@ -2362,7 +2381,7 @@ def settled_precondition(
 
 def precondition_binds(term: str) -> list[str]:
     """The binds a precondition of a shape :func:`settled_term` settles tests, in order; ``[]`` for any other."""
-    match = _PRECONDITION_BIND.match(term.strip())
+    match = _PRECONDITION_BIND.match(_as_list(term).strip())
     if match is None:
         return []
     key, keys = match.group(4), match.group(6)
@@ -2372,8 +2391,10 @@ def precondition_binds(term: str) -> list[str]:
 def settled_term(term: str, held_by: Callable[[str], Optional[set[str]]]) -> tuple[str, bool]:
     """*term* with its binds replaced by what *held_by* says each holds (``None``: not known), and whether that
     happened -- how :func:`settled_precondition` spells a settled guard, and a flush call's guard settled at the call.
-    One bind not known leaves the term as it is."""
-    match = _PRECONDITION_BIND.match(term.strip())
+    One bind not known leaves the term as it is.  An ``OR`` of equality tests on one column is the list it tests
+    (:func:`_as_list`): ``updateJob``'s ``(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)`` is ``jobStatus IN
+    (assigned,defined)``, and read from its second half alone it was ``jobStatus=defined``."""
+    match = _PRECONDITION_BIND.match(_as_list(term).strip())
     if match is None:
         return term, False
     not_term, column, operator, key, not_in, keys = match.groups()
@@ -2390,53 +2411,6 @@ def settled_term(term: str, held_by: Callable[[str], Optional[set[str]]]) -> tup
         return f"{column}{'<>' if negated else '='}{value}", True
     inside = ",".join(sorted(found))
     return f"{column} {'NOT IN' if negated else 'IN'} ({inside})", True
-
-
-def tested_values(value: ast.expr, site: ast.stmt, func: ast.AST) -> list[str]:
-    """The constants a test above *site* says the name *value* holds there, or ``[]``.
-
-    ``getTasksToBeFinished_JEDI`` binds the status it read off a row, ``varMap[":oldStatus"] = taskStatus``, under
-    ``if taskStatus == "scouted":``, so the bind holds ``scouted`` whatever the row held: the test is a value the code
-    wrote down.  The nearest ``if`` whose body holds *site* and whose test -- or a term of it joined by ``and`` --
-    is ``name == <literal>`` or ``name in (<literals>)``, the name not bound again on the way; an ``else`` says what
-    the name is not, which is no value.
-    """
-    if not isinstance(value, ast.Name):
-        return []
-    rebound = [binding.site for binding in bindings(func, value.id)]  # type: ignore[arg-type]
-    previous: ast.AST = site
-    for ancestor in ancestors(site):
-        if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-            break
-        if isinstance(ancestor, ast.If) and previous in ancestor.body:
-            found = _equal_to(ancestor.test, value.id)
-            if found:
-                inside = {id(node) for node in walk(ancestor)}
-                again = any(id(one) in inside and one.lineno < site.lineno for one in rebound)
-                return [] if again else found
-        previous = ancestor
-    return []
-
-
-def _equal_to(test: ast.expr, name: str) -> list[str]:
-    """The literals *test* says *name* equals: ``name == "x"``, ``"x" == name``, ``name in ("x", "y")``, or a term
-    of an ``and`` that does."""
-    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
-        return next((found for one in test.values if (found := _equal_to(one, name))), [])
-    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
-        return []
-    left, right, op = test.left, test.comparators[0], test.ops[0]
-    if isinstance(op, ast.Eq):
-        if isinstance(right, ast.Name):
-            left, right = right, left
-        if isinstance(left, ast.Name) and left.id == name and isinstance(right, ast.Constant):
-            return [right.value] if isinstance(right.value, str) else [ast.unparse(right)]
-    if isinstance(op, ast.In) and isinstance(left, ast.Name) and left.id == name:
-        if isinstance(right, (ast.List, ast.Tuple, ast.Set)) and right.elts and all(
-            isinstance(one, ast.Constant) and isinstance(one.value, str) for one in right.elts
-        ):
-            return [one.value for one in right.elts]  # type: ignore[attr-defined]
-    return []
 
 
 def fragment_holding(spans: list[Span], offset: int) -> Optional[ast.stmt]:

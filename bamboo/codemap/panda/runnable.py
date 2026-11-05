@@ -15,7 +15,7 @@ A definition is runnable where nothing it runs, itself or a definition it calls,
   :meth:`changes._Reading.handed_changes` follows a name into what it runs), a ``global`` name;
 - **reaches the database** (the reach record's :attr:`ReachNode.database`), or **outside** -- a file, a process,
   another system (:func:`callfacts.change`), ``open`` and ``input``;
-- reads **the clock**, a draw or the machine (:data:`callfacts.CLOCK`), **the configuration**
+- reads **the clock**, a draw or the machine (:data:`callfacts.TIME`, ``DRAW``, ``MACHINE``), **the configuration**
   (:data:`callfacts.CONFIGURATION`), or **a module's or a class's name not a constant**: a constant is bound once,
   where the module or the class is -- its last binding there before it is read -- to a value made of literals and
   constants -- ``singleToken = JobSpec._tagForSH["jobCloning"]``, a class's dict literal, a comprehension over
@@ -30,6 +30,8 @@ A definition is runnable where nothing it runs, itself or a definition it calls,
   library's (:data:`callfacts.VALUE_METHODS`), a logger's (:data:`callfacts.LOG_METHODS`: it writes a line, ASSUMPTIONS
   ``logger_keeps_nothing``, and so is a logger made);
 - calls a definition that is not runnable (**callee**).
+
+What one call does is :func:`read_call`'s reading, which the trace's steps share (:attr:`TraceStep.calls`).
 
 An ``__init__``'s stores on ``self`` make the object, they change nothing handed.  What it reads of what it is
 handed is said (*reads*): ``job.specialHandling``, ``self.splitRule`` -- a field of an
@@ -47,6 +49,16 @@ from typing import Iterable, NamedTuple, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap.calls import Calls, Target, own_nodes
 from bamboo.codemap.models import (
+    CALL_CHANGES,
+    CALL_CORPUS,
+    CALL_DRAW,
+    CALL_HANDED,
+    CALL_LIBRARY,
+    CALL_LOGGER,
+    CALL_MACHINE,
+    CALL_OUTSIDE,
+    CALL_TIME,
+    CALL_UNPLACED,
     CHANGE_DELETE,
     CHANGE_INNER,
     CHANGE_METHOD,
@@ -117,6 +129,78 @@ def _key(target: Target) -> tuple:
 
 def _owner(target: Target) -> str:
     return f"{target.file}::{getattr(target.func, 'name', '<lambda>')}"
+
+
+class CallRead(NamedTuple):
+    """How one call makes its value (:func:`read_call`): *made* a ``CALL_*`` kind; *what* the builtin's name, the
+    library function's spelling, the method's name, or why the call is not placed; *targets* the definitions of the
+    corpus it lands at; *thread* whether it starts a thread."""
+
+    made: str
+    what: str = ""
+    targets: tuple[Target, ...] = ()
+    thread: bool = False
+
+
+_RUN_DEPENDENT = {"time": CALL_TIME, "draw": CALL_DRAW, "machine": CALL_MACHINE}
+#: The :class:`Runnable` stop each ``CALL_*`` kind is; a kind not here stops nothing.
+_STOP_OF = {
+    CALL_TIME: RUN_CLOCK,
+    CALL_DRAW: RUN_CLOCK,
+    CALL_MACHINE: RUN_CLOCK,
+    CALL_CHANGES: RUN_CHANGES,
+    CALL_OUTSIDE: RUN_OUTSIDE,
+    CALL_LIBRARY: RUN_LIBRARY,
+    CALL_UNPLACED: RUN_UNPLACED,
+}
+
+
+def read_call(calls: Calls, file: str, func: ast.AST, call: ast.Call, bound: tuple = ()) -> CallRead:
+    """How *call*, in *func* of *file*, makes its value: the one reading a :class:`Runnable`'s stops and a trace
+    step's calls (:attr:`TraceStep.calls`) share, so that the two cannot say different things of one call.
+
+    A builtin by its name; a call placed only at definitions of the corpus is theirs; a name outside the corpus by
+    the tables of :mod:`callfacts` -- a logger made, :data:`callfacts.TIME` (unless handed its time), ``DRAW`` and
+    ``MACHINE``, a change outside, :data:`callfacts.RUNS_ALIKE`; a method no definition is placed for by the tables of
+    a str's, a builtin container's, a library value's and a logger's methods, then every method of the corpus of its
+    name (a receiver of no known class, as the changes read it); else not placed."""
+    types = calls.types
+    called = call.func
+    if isinstance(called, ast.Name) and types.is_builtin(file, func, called.id):
+        if called.id in _BUILTIN_CHANGES:
+            return CallRead(CALL_CHANGES, called.id)
+        if called.id in _BUILTIN_OUTSIDE:
+            return CallRead(CALL_OUTSIDE, called.id)
+        if called.id not in callfacts.BUILTIN_FUNCTIONS and not _exception(called.id):
+            return CallRead(CALL_LIBRARY, called.id)
+        return CallRead(CALL_HANDED, called.id)
+    placed = calls.callees(file, func, call, bound)
+    targets, thread = tuple(placed.targets), placed.thread
+    if placed.targets and not placed.unplaced:
+        return CallRead(CALL_CORPUS, "", targets, thread)
+    name = callfacts.spelled(types, file, called)
+    if name is not None and name.split(".")[0] not in types.roots:
+        if name.rsplit(".", 1)[-1] in callfacts.LOGGER_MAKERS:
+            # A logger made: it writes lines and keeps nothing (logger_keeps_nothing).
+            return CallRead(CALL_LOGGER, name, targets, thread)
+        run = callfacts.run_dependent(name, call)
+        if run:
+            return CallRead(_RUN_DEPENDENT[run], name, targets, thread)
+        if callfacts.change(types, file, func, call) is not None:
+            return CallRead(CALL_OUTSIDE, name, targets, thread)
+        if name in callfacts.TIME_UNLESS_HANDED or callfacts.listed(name, callfacts.RUNS_ALIKE):
+            return CallRead(CALL_HANDED, name, targets, thread)
+        return CallRead(CALL_LIBRARY, name, targets, thread)
+    if isinstance(called, ast.Attribute) and not placed.targets:
+        method = called.attr
+        if method in callfacts.TEXT_METHODS or method in _CONTAINER_METHODS or method in callfacts.VALUE_METHODS:
+            return CallRead(CALL_HANDED, method, (), thread)
+        if method in callfacts.LOG_METHODS:
+            return CallRead(CALL_LOGGER, method, (), thread)
+        named = changes_mod._reading(calls).methods().get(method, [])
+        if named:
+            return CallRead(CALL_CORPUS, method, tuple(named), thread)
+    return CallRead(CALL_UNPLACED, f"{ast.unparse(called)}: {placed.unplaced or 'not placed'}", targets, thread)
 
 
 class _Judge:
@@ -221,49 +305,14 @@ class _Judge:
     def _call(
         self, target: Target, call: ast.Call, stops: list[Stop], callees: list[tuple[str, Target]]
     ) -> None:
-        file, func = target.file, target.func
-        at = f"{file}:{call.lineno}"
-        called = call.func
-        if isinstance(called, ast.Name) and self.types.is_builtin(file, func, called.id):
-            if called.id in _BUILTIN_CHANGES:
-                stops.append(Stop(RUN_CHANGES, at, called.id))
-            elif called.id in _BUILTIN_OUTSIDE:
-                stops.append(Stop(RUN_OUTSIDE, at, called.id))
-            elif called.id not in callfacts.BUILTIN_FUNCTIONS and not _exception(called.id):
-                stops.append(Stop(RUN_LIBRARY, at, called.id))
-            return
-        placed = self.calls.callees(file, func, call, target.bound)
-        if placed.thread:
+        at = f"{target.file}:{call.lineno}"
+        read = read_call(self.calls, target.file, target.func, call, target.bound)
+        if read.thread:
             stops.append(Stop(RUN_OUTSIDE, at, "a thread"))
-        callees.extend((at, one) for one in placed.targets)
-        if placed.targets and not placed.unplaced:
-            return
-        name = callfacts.spelled(self.types, file, called)
-        if name is not None and name.split(".")[0] not in self.types.roots:
-            if name.rsplit(".", 1)[-1] in callfacts.LOGGER_MAKERS:
-                return  # a logger made: it writes lines and keeps nothing (logger_keeps_nothing)
-            if callfacts.listed(name, callfacts.CLOCK):
-                stops.append(Stop(RUN_CLOCK, at, name))
-            elif callfacts.change(self.types, file, func, call) is not None:
-                stops.append(Stop(RUN_OUTSIDE, at, name))
-            elif not callfacts.listed(name, callfacts.RUNS_ALIKE):
-                stops.append(Stop(RUN_LIBRARY, at, name))
-            return
-        if isinstance(called, ast.Attribute) and not placed.targets:
-            method = called.attr
-            if (
-                method in callfacts.TEXT_METHODS
-                or method in _CONTAINER_METHODS
-                or method in callfacts.VALUE_METHODS
-                or method in callfacts.LOG_METHODS
-            ):
-                return
-            named = self.reading.methods().get(method, [])
-            if named:
-                # A receiver of no known class: every method of the corpus of the name, as the changes read it.
-                callees.extend((at, one) for one in named)
-                return
-        stops.append(Stop(RUN_UNPLACED, at, f"{ast.unparse(called)}: {placed.unplaced or 'not placed'}"))
+        callees.extend((at, one) for one in read.targets)
+        stop = _STOP_OF.get(read.made)
+        if stop is not None:
+            stops.append(Stop(stop, at, read.what))
 
     def _attribute(
         self, target: Target, node: ast.Attribute, parameters: set[str], stops: list[Stop], reads: list[str]

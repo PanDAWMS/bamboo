@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
+from bamboo.codemap.panda import pathcond
 
 PACKAGE = "pkg"
 
@@ -3263,6 +3264,67 @@ def test_called_from_takes_the_hop_out_on_the_class_the_first_hop_lands_for(tmp_
     runimpl = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "runImpl")
 
     assert calls.called_from(calls_mod.Target(where, runimpl, cls)) == ["pkg/gen.py:9 -> pkg/threads.py:8"]
+
+
+def _statement_of(call):
+    return next(one for one in pathcond.ancestors(call) if isinstance(one, ast.stmt))
+
+
+def test_a_called_from_entry_reads_back_to_the_statements_of_its_calls(tmp_path):
+    """Each hop of ``called_from`` is the statement holding the call ``callers`` placed, in the same tree, found by
+    its line: ``thr.start()`` spells ``start`` and runs ``run``."""
+    calls = _calls(_tree(tmp_path, **_WORKERS))
+    where, cls = _class(calls, "gen", "JobGeneratorThread")
+    func = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "runImpl")
+    runimpl = calls_mod.Target(where, func, cls)
+    (entry,) = calls.called_from(runimpl)
+
+    assert [[ast.unparse(stmt) for stmt in hop] for hop in calls_mod.call_chain(tmp_path, entry)] == [
+        ["thr.start()"],
+        ["self.runImpl()"],
+    ]
+    sites = calls.callers(runimpl) + calls.callers(_method(calls, "threads", "WorkerThread", "run")._replace(bound=()))
+    assert len(sites) == 3
+    for site in sites:
+        assert calls_mod.call_statements(tmp_path, calls.hop(site)) == [_statement_of(site.call)]
+
+
+def test_a_hop_at_a_construction_names_the_statement_that_builds_the_object(tmp_path):
+    """``Mapper(buffer)`` is placed at ``Mapper.__init__``; the hop names the assignment, whose guards are read as
+    any statement's are."""
+    calls = _calls(
+        _tree(
+            tmp_path,
+            m=(
+                "class Mapper:\n"
+                "    def __init__(self, buffer):\n"
+                "        self.buffer = buffer\n\n"
+                "def make(buffer):\n"
+                "    if buffer:\n"
+                "        mapper = Mapper(buffer)\n"
+                "        return mapper\n"
+            ),
+        )
+    )
+    init = _method(calls, "m", "Mapper", "__init__")
+
+    assert calls.called_from(init) == ["pkg/m.py:7"]
+    (stmt,) = calls_mod.call_statements(tmp_path, "pkg/m.py:7")
+    assert ast.unparse(stmt) == "mapper = Mapper(buffer)"
+    assert pathcond.path_condition(stmt) == ["buffer"]
+
+
+def test_a_hop_is_read_by_its_line_whatever_follows_it_or_shares_it(tmp_path):
+    """A hop placed open reads as its line; a line of two statements names both; a file that will not read, none."""
+    calls = _calls(_tree(tmp_path, m=_FEEDER, two="def g(x):\n    return x\n\ndef f():\n    g(1); g(2)\n"))
+    buffer = _method(calls, "m", "Buffer", "getTask")
+    (site,) = calls.callers(buffer)
+    (entry,) = calls.called_from(buffer)
+
+    assert "(placed open -- " in entry
+    assert calls_mod.call_statements(tmp_path, entry) == [_statement_of(site.call)]
+    assert [ast.unparse(stmt) for stmt in calls_mod.call_statements(tmp_path, "pkg/two.py:5")] == ["g(1)", "g(2)"]
+    assert calls_mod.call_statements(tmp_path, "pkg/none.py:5") == []
 
 
 def test_a_call_on_self_in_a_mixin_lands_at_the_sibling_base_that_defines_it(tmp_path):

@@ -376,7 +376,8 @@ def test_a_value_that_settles_its_replacement_to_run_is_no_value():
 
 def test_a_return_that_no_read_follows_skips_nothing_the_value_needs():
     """``storeJobs`` returns early for a banned user, between ``userCountry =
-    None`` and the loop that may replace it: where the value lands, it did not return."""
+    None`` and the loop that may replace it: where the value lands, it did not return.
+    The binding below the return holds what the return says (``not (banned)``)."""
     func = _func(
         "def f(banned, fqans):\n"
         "    country = None\n"
@@ -403,7 +404,7 @@ def test_a_return_that_no_read_follows_skips_nothing_the_value_needs():
         ["not any(fqan.startswith('/atlas/us') for fqan in fqans)"],
         2,
     )
-    assert values["us"] == ["fqan.startswith('/atlas/us')"]
+    assert values["us"] == ["fqan.startswith('/atlas/us')", "not (banned)"]
 
 
 # --------------------------------------------------------------------------- #

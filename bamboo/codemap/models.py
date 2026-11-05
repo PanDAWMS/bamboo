@@ -675,6 +675,115 @@ class OffRow(BaseModel):
     )
 
 
+
+#: How a later write of a column is made at its level (:attr:`Rewrite.how`, :attr:`RewriteSite.how`): an assignment
+#: on the object; a call whose run assigns it on the object or writes it on the object's row; a statement writing it
+#: on that row.
+REWRITE_STORE = "store"
+REWRITE_CALL = "call"
+REWRITE_ROW = "row"
+
+#: Why a part of an arm's pass is not read for its later writes (:attr:`RewriteOpen.why`).  The arm assigns no
+#: attribute on an object -- an SQL arm's bind or text, a method run on the object, a value carried -- and its later
+#: writes are not read.
+REWRITE_NOT_ATTRIBUTE = "not_an_attribute_arm"
+#: The column is not one the reach record keeps assignments of (:data:`bamboo.codemap.panda.objects.COLUMN_CLASSES`).
+REWRITE_COLUMNS_UNRECORDED = "columns_unrecorded"
+#: A way up reached :data:`bamboo.codemap.panda.runs.MAX_DEPTH`, or met :data:`~bamboo.codemap.panda.runs.MAX_FUNCTIONS`
+#: functions.
+REWRITE_DEPTH = "depth"
+REWRITE_WIDE = "wide"
+#: A call the record could not place, named as a function writing the column is (or named by nothing).
+REWRITE_UNPLACED = "call_unplaced"
+#: A write of the column on a row whose key is not followed to the object, or not read.
+REWRITE_ROW_KEY = "row_key"
+#: A write naming its columns at run time on the object's row.
+REWRITE_RUN_TIME_COLUMNS = "columns_at_run_time"
+#: A statement the record does not read.
+REWRITE_STATEMENT_UNREAD = "statement_unread"
+#: The object's follow into a call was cut short (:attr:`bamboo.codemap.objects.ObjectReach.cut`, ``capped``).
+REWRITE_CUT = "follow_cut"
+
+
+class SamePassWrite(BaseModel):
+    """Another column the block of an arm's write writes on the arm's row (:mod:`bamboo.codemap.panda.rewrites`)."""
+
+    column: str = Field(
+        description=(
+            "Another attribute of the object an attribute arm assigns on, or the column another key of the map an SQL "
+            "arm binds sets in the statement: ``ddmErrorDiag``, ``jobSubStatus``."
+        )
+    )
+    line: int
+    values: list[str] = Field(
+        description=(
+            "What it writes, spelled as a branch's outcome is: each literal it settles to, else "
+            "``runtime(<expression>)``."
+        )
+    )
+    frames: list[str] = Field(
+        default_factory=list,
+        description="The texts a run-time value can be, as :attr:`Branch.value_frames`; ``[]`` unbounded.",
+    )
+
+
+class RewriteSite(BaseModel):
+    """One write of a column a :class:`Rewrite` makes: where, and what it writes."""
+
+    owner: str = Field(description="A :attr:`ReachNode.owner`.")
+    line: int
+    how: str = Field(description=":data:`REWRITE_STORE` or :data:`REWRITE_ROW`.")
+    values: list[str] = Field(
+        description="As :attr:`SamePassWrite.values`; for a row, the statement's value of the column."
+    )
+    frames: list[str] = Field(default_factory=list, description="As :attr:`SamePassWrite.frames`.")
+    written: bool = Field(
+        default=True,
+        description=(
+            "For a store in a call: whether a write of the call's run takes it "
+            "(:attr:`bamboo.codemap.objects.Change.because`).  ``False``: assigned only, which a write later in the "
+            "pass may still take."
+        ),
+    )
+
+
+class Rewrite(BaseModel):
+    """A write of a column of an arm's object or row that can run after the arm in its pass.
+
+    ``level``, ``caller`` and ``point`` are a :class:`HistoryPair`'s: level 0
+    is the arm's function and the point its write; level n+1 a caller of a
+    level-n function and the point its call on the way to the arm.  ``line``
+    is the statement at *caller* that can run after the point in one pass:
+    the assignment, the call, or the statement writing the row.  See
+    :mod:`bamboo.codemap.panda.rewrites`.
+    """
+
+    column: str
+    level: int
+    caller: str = Field(description="A :attr:`ReachNode.owner`.")
+    point: int
+    line: int
+    how: str = Field(description=":data:`REWRITE_STORE`, :data:`REWRITE_CALL` or :data:`REWRITE_ROW`.")
+    sites: list[RewriteSite] = Field(
+        description="The writes: the statement itself for a store or a row; for a call, those of its run, sorted."
+    )
+
+
+class RewriteOpen(BaseModel):
+    """Where the later writes of a column were not read -- see :mod:`bamboo.codemap.panda.rewrites`."""
+
+    column: str = Field(default="", description="Empty where it holds for every column: the arm's kind, a cap.")
+    level: int
+    caller: str = Field(description="A :attr:`ReachNode.owner`.")
+    line: int = Field(
+        description=(
+            "The line at *caller* the reading stopped at: the call whose run leaves it open, one entry for every reason "
+            "there, or the point."
+        )
+    )
+    why: str = Field(description="One of the ``REWRITE_*`` reasons above :class:`SamePassWrite`.")
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -684,7 +793,11 @@ class Branch(BaseModel):
     the same as one that took a different branch).
 
     ``path_condition`` is the conjunction of the ``if``/``elif``/``else`` tests
-    dominating the write, and of one entry for every other write of the same
+    dominating the write, of what each early exit above it says (``not (X)``
+    under an ``if X: return``, ``continue``, ``break`` or ``raise``; ending in
+    ``  [at <its line>]`` where a name it reads is given a new value before the
+    write -- :func:`~bamboo.codemap.panda.pathcond.arm_condition`), the same of
+    the binding the value comes from, and of one entry for every other write of the same
     place that can replace the value before it is read
     (:func:`~bamboo.codemap.panda.pathcond.replacements`): ``not (<the tests
     that write is under and this one is not>)``, ``not any(<them> for <target>
@@ -896,6 +1009,26 @@ class Branch(BaseModel):
             "beside an empty list, also a way up it did not take because what "
             "the calls on it hand rule it out."
         ),
+    )
+    same_pass: Optional[list[SamePassWrite]] = Field(
+        default=None,
+        description=(
+            "The other columns the block of the arm's write writes on its row, by line -- "
+            ":mod:`bamboo.codemap.panda.rewrites`.  ``None`` where the arm's statement is not read."
+        ),
+    )
+    rewrites: Optional[list[Rewrite]] = Field(
+        default=None,
+        description=(
+            "The writes of the arm's column, and of each ``same_pass`` column, that can run after the arm in its pass "
+            "on its object or its row: what the row can hold though the arm ran.  ``[]`` beside an empty "
+            "``rewrites_open``: none the reading finds; beside one, the parts it did not read.  ``None`` where not "
+            "read, with ``rewrites_open`` saying why where it says."
+        ),
+    )
+    rewrites_open: list[RewriteOpen] = Field(
+        default_factory=list,
+        description="Where the later writes were not read, so ``rewrites`` may hold less than every one.",
     )
     off_row: Optional[OffRow] = Field(
         default=None,
@@ -5071,7 +5204,7 @@ class Localization(BaseModel):
 #: and naming which one is the answer, not the absence of one.
 #:
 #: The first six are reached by a :class:`Lead`, hop by hop through the map.
-#: The last four are reached by the use-time trace, which walks the source of
+#: The last five are reached by the use-time trace, which walks the source of
 #: one arm and gets further down into an expression than the map's own edges
 #: do.  One vocabulary for both, because it is one question and two spellings
 #: of it drift.  Measured on a prototype walk over the map's 983 locatable
@@ -5092,6 +5225,9 @@ STOP_CONFIG = "a configuration value, set outside the code"
 STOP_EXTERNAL = "a value another system supplies"
 STOP_UPSTREAM = "a value the database supplies, whose writers the map names"
 STOP_PARAMETER = "chosen by whoever called or built this"
+#: A call :data:`callfacts.TIME` holds: the value is the time the run read, which its records are stamped with.  The
+#: walk goes on through it, to the names a span taken off the time is made of.
+STOP_CLOCK = "the time the run read off the clock"
 
 
 #: Where a lead came from, kept because the three are not equally trustworthy
@@ -5750,6 +5886,22 @@ RUN_STOPS = (
 RUN_CONDITION = "condition"
 RUN_HOOK = "hook"
 RUN_DECODER = "decoder"
+#: How one call makes its value, as :func:`bamboo.codemap.panda.runnable.read_call` reads it: the one reading a
+#: :class:`Runnable`'s stops and a :class:`TraceStep`'s :attr:`TraceStep.calls` share.  Of what it is handed alone --
+#: a builtin, a library function :data:`callfacts.RUNS_ALIKE` holds, a str's, a builtin container's or a library
+#: value's method; the time the run read, a draw, the machine's (:data:`callfacts.TIME`, ``DRAW``, ``MACHINE``); a
+#: logger made or a line written; a builtin changing what it is handed; a file, a process, another system or a thread;
+#: a library function or a builtin no table says; a definition of the corpus, whose body makes it; a call not placed.
+CALL_HANDED = "handed"
+CALL_TIME = "time"
+CALL_DRAW = "draw"
+CALL_MACHINE = "machine"
+CALL_LOGGER = "logger"
+CALL_CHANGES = "changes"
+CALL_OUTSIDE = "outside"
+CALL_LIBRARY = "library"
+CALL_CORPUS = "corpus"
+CALL_UNPLACED = "unplaced"
 
 
 class RunStop(BaseModel):
@@ -6474,6 +6626,20 @@ class Reach(BaseModel):
     closure: int = Field(default=0, description="How many functions the closure holds, the start included.")
 
 
+class StepCall(BaseModel):
+    """How one call in a :class:`TraceStep`'s value makes its value, read as a :class:`Runnable` reads a call.
+
+    *what* is the builtin's name, the library function's spelling, the definitions of the corpus the call lands at,
+    or why it is not placed.  *terminal* is the ``STOP_*`` category the call is by itself -- the database's, the
+    configuration's, another system's, the clock's -- which the step's own ``terminal`` names only for the outermost.
+    """
+
+    call: str = Field(..., description="The call, as source.")
+    made: str = Field(..., description="One of the CALL_* kinds.")
+    what: str = Field(default="")
+    terminal: str = Field(default="", description="The STOP_* category the call is by itself, else empty.")
+
+
 class TraceStep(BaseModel):
     """One thing the source says about why an arm ran with the value it did.
 
@@ -6568,6 +6734,20 @@ class TraceStep(BaseModel):
             "why that call was placed open: it may land elsewhere, and then it "
             "is not the call that handed the value.  "
             "Empty where every call that entered it was placed closed."
+        ),
+    )
+    calls: list[StepCall] = Field(
+        default_factory=list,
+        description=(
+            "Each call in ``value``, outermost first, and how it makes its "
+            "value.  A step whose calls are each made of what they are "
+            "handed, or are a terminal, holds a value made of its ``reads`` "
+            "and those terminals alone: ``naive_utcnow() - "
+            "datetime.timedelta(minutes=self.sleepTime)`` is the clock less a "
+            "span of ``self.sleepTime``.  A call of the corpus is made in its "
+            "body, where the walk's ``return`` steps of it say what it gives.  "
+            "``reads`` names a callable the value calls (``naive_utcnow``, "
+            "``datetime``) as it names any other: these say which are called."
         ),
     )
 

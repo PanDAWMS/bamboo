@@ -30,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
 
+from bamboo.querier import mapdump
 from bamboo.querier import render as T
 
 #: the panda-server tree every reading here is taken from: ``PANDA_PIN``, a pinned copy (a ``git archive`` of the
@@ -54,13 +55,105 @@ STAMP = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 #: and three tags begin with ``<`` alone (``insertNewJob < <JediTaskID=12345 idPool=2 >``),
 #: so its `` >`` ends the mark -- not the method alone, nor a later ``>`` of the message.
 #: A prefix that never closes (LogWrapper's ``put_file_recovery_request <
-#: jediTaskID=12345``, one in the corpus) has nothing to end it and reads as the name
+#: jediTaskID=12345``, one in the corpus) has nothing to end it and reads as the name;
+#: it and every other bare mark with a blank are cut again by the map's marks (:func:`cut_mark`)
 PREFIX = re.compile(
     r"^(?P<stamp>\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}) (?P<logger>\S+): "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL)\s+"
     r"(?P<token>[A-Za-z_]\w* < <[^<>\n]* >|[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>"
     r"|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
+#: the builders whose mark a line carries as the logger was handed it, blanks and all (``callfacts.LOGGER_MAKERS``):
+#: LogWrapper's prefix and MsgWrapper's token.  make_logger and create_tagged_logger write ``method <token>`` and
+#: ``method < tag >``, which :data:`PREFIX` reads whole.
+_BARE_BUILDERS = frozenset({"LogWrapper", "MsgWrapper"})
+#: the dump :func:`_marks_of` read its marks from, and those marks by log
+_MARKS: list = []
+
+
+def log_name(path: str) -> str:
+    """The log file the map names, which the file at *path* is a copy or a rotation of.
+
+    The map says ``panda-adder.log``; production rotates it into ``panda-adder.log.1`` or
+    ``panda-adder.log-20261030.gz``, and a copy handed over may carry the key (``panda-adder.log.<PandaID>``).
+    Whatever follows ``.log`` is dropped.
+    """
+    base = Path(path).name
+    at = base.find(".log")
+    return base[: at + len(".log")] if at >= 0 else base
+
+
+def _marks_of(log: str):
+    """The map's marks with a blank of the runs printing into *log* (:func:`cut_mark`), as ``(by first word, the
+    rest)``: the patterns of a mark whose first word is literal under that word, and ``(literal head, pattern)`` of one
+    whose first word holds a hole.  None for a log no such run prints into, or with no map installed."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return None
+    if not _MARKS or _MARKS[0] is not fragment:
+        _MARKS[:] = [fragment, _bare_marks(fragment)]
+    return _MARKS[1].get(log)
+
+
+def _bare_marks(fragment) -> dict[str, tuple[dict[str, list[re.Pattern[str]]], list[tuple[str, re.Pattern[str]]]]]:
+    """:func:`_marks_of` for every log: the marks of the runs a statement prints through, its own and those handed to
+    it (``PrintStatement.runs``, ``handed_runs``), put under the files the map follows its logger to (basis
+    ``logger``).  Only a builder's that writes the mark bare, with a blank inside it and a literal: ``{} {}`` (a
+    file server's) would cut any two words."""
+    nodes = {n.owner: n for n in getattr(fragment, "function_prints", None) or []}
+    found: dict[str, set[str]] = {}
+    for node in nodes.values():
+        runs = {r.line: r for r in node.runs}
+        for st in node.statements:
+            if st.log_files_basis != "logger":
+                continue
+            held = [runs.get(line) for line in st.runs]
+            held += [next((r for r in other.runs if r.line == ref.line), None)
+                     for ref in st.handed_runs if (other := nodes.get(ref.owner)) is not None]
+            for run in held:
+                mark = run.mark.strip() if run is not None and run.builder in _BARE_BUILDERS else ""
+                if " " in mark and re.sub(r"\{\}|\s", "", mark):
+                    for log in st.log_files:
+                        found.setdefault(log, set()).add(mark)
+    out = {}
+    for log, marks in found.items():
+        first: dict[str, list[re.Pattern[str]]] = {}
+        rest: list[tuple[str, re.Pattern[str]]] = []
+        for mark in sorted(marks):
+            # a hole is one word, as a mark's value is: one holding a blank leaves the line as PREFIX cut it
+            pattern = re.compile(r"\S*".join(re.escape(p) for p in mark.split("{}")) + r"(?=\s|$)")
+            word = mark.split(" ", 1)[0]
+            if "{}" in word:
+                rest.append((word.split("{}", 1)[0], pattern))
+            else:
+                first.setdefault(word, []).append(pattern)
+        out[log] = (first, rest)
+    return out
+
+
+def cut_mark(log: str, token: str, message: str) -> tuple[str, str]:
+    """*token* and *message* as :data:`PREFIX` cut a line of the file *log*, cut again where a mark with a blank of a
+    run printing into it starts the line and goes past *token* (KNOWN_ISSUES.md K59).
+
+    PREFIX takes the first word for the mark where no bracket ends it, so ``LogWrapper(_logger, f"update_job
+    PandaID={job_id} PID={os.getpid()}")`` (pilot_api.py:513) is the mark ``update_job``: every pilot's call, and the
+    key in the message.  The map's mark ``update_job PandaID={} PID={}`` reads the line ``update_job PandaID=7389884699
+    PID=2649684 Start`` as the mark ``update_job PandaID=7389884699 PID=2649684`` and the message ``Start``.  The
+    longest mark that reads the line wins."""
+    marks = _marks_of(log)
+    if not marks or not token:
+        return token, message
+    first, rest = marks
+    text = f"{token} {message}"
+    end = len(token)
+    for pattern in [*first.get(token, ()), *(p for head, p in rest if text.startswith(head))]:
+        if (m := pattern.match(text)) and m.end() > end:
+            end = m.end()
+    if end == len(token):
+        return token, message
+    return text[:end], text[end + 1:] if text[end:end + 1] == " " else text[end:]
+
+
 TRACEBACK = "Traceback (most recent call last):"
 FRAME = re.compile(r'^\s*File "(?P<path>[^"]+)", line (?P<line>\d+), in (?P<func>\S+)')
 EXCEPTION = re.compile(r"^(?P<type>[A-Za-z_][\w.]*): (?P<message>.*)$")
@@ -274,12 +367,13 @@ class Log:
     extract_key: str = ""  # the key the file was grepped by, when it says it is an extract
     #: what of the window asked was not searched, and why (a recorded answer; a file handed in says nothing)
     holes: list[str] = field(default_factory=list)
-    #: a recorded search's test of a run or a pass, ``(machine, first stamp, last stamp) -> bool``: false where it may
-    #: go on past what was searched, and rule 8 reads no row missing from it (None in a file handed in)
-    whole: Callable[[str, str, str], bool] | None = None
-    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, first stamp, last stamp) -> str``,
-    #: empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
-    edges: Callable[[str, str, str], str] | None = None
+    #: a recorded search's test of a run or a pass, ``(machine, mark, first stamp, last stamp) -> bool``: false where it
+    #: may go on past what was searched for the strings that return the mark's records, and rule 8 reads no row missing
+    #: from it (None in a file handed in)
+    whole: Callable[[str, str, str, str], bool] | None = None
+    #: why a run ``whole`` is false for may go on past what was searched, ``(machine, mark, first stamp, last stamp) ->
+    #: str``, empty where it is whole: said on the run's line (:meth:`Run.describe`; None in a file handed in)
+    edges: Callable[[str, str, str, str], str] | None = None
     #: ``(machine, mark) -> why`` for the marks whose records are the key's alone, the rest not asked: a run of one is
     #: read as cut at both ends, and rule 8 reads no row missing from it (a recorded search asked for S1's movers)
     partial: dict[tuple[str, str], str] = field(default_factory=dict)
@@ -290,15 +384,8 @@ class Log:
 
     @property
     def name(self) -> str:
-        """The log file the map names, which this file is a copy or a rotation of.
-
-        The map says ``panda-adder.log``; production rotates it into
-        ``panda-adder.log.1`` and a copy handed over may carry the key
-        (``panda-adder.log.<PandaID>``).  Whatever follows ``.log`` is dropped.
-        """
-        base = Path(self.path).name
-        at = base.find(".log")
-        return base[: at + len(".log")] if at >= 0 else base
+        """The log file the map names, which this file is a copy or a rotation of (:func:`log_name`)."""
+        return log_name(self.path)
 
     @property
     def covers(self) -> tuple[str, str]:
@@ -312,15 +399,15 @@ class Log:
 def read_log(path: str) -> Log:
     records: list[Record] = []
     extract_key = ""
+    name = log_name(path)
     for lineno, line in enumerate(Path(path).read_text(errors="replace").splitlines(), 1):
         if lineno == 1 and (m := EXTRACT.match(line)):
             extract_key = m["key"]
         elif STAMP.match(line):
             m = PREFIX.match(line)
             if m:
-                records.append(
-                    Record(path, lineno, m["stamp"], m["logger"], m["level"], m["token"], m["message"])
-                )
+                token, message = cut_mark(name, m["token"], m["message"])
+                records.append(Record(path, lineno, m["stamp"], m["logger"], m["level"], token, message))
             else:
                 records.append(Record(path, lineno, line[:23], "", "", "", line[24:]))
         elif records:
@@ -471,7 +558,7 @@ class Run:
             return False
         if not self.holds(func, level):
             return False
-        if self.log.whole is not None and not self.log.whole(self.machine, self.first, self.last):
+        if self.log.whole is not None and not self.log.whole(self.machine, self.token, self.first, self.last):
             return False
         rank = LEVEL_RANK.get(level)
         if rank is None:
@@ -494,7 +581,7 @@ class Run:
         """The run's line as a record: where, its mark, its records' count and stamps; and, for a run a recorded search
         may have cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
         where = T.Said("log-at-machine", {"log": self.log.name, "machine": self.machine.split(".")[0]}) if self.machine else self.log.name
-        cut = self.log.edges(self.machine, self.first, self.last) if self.log.edges is not None and self.machine else ""
+        cut = self.log.edges(self.machine, self.token, self.first, self.last) if self.log.edges is not None and self.machine else ""
         cut = self.log.partial.get((self.machine, self.token), cut)
         method = self.log.narrowed.get((self.machine, self.token))
         return T.Said("run-line", {

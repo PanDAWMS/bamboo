@@ -5260,3 +5260,76 @@ def f(job, log, src_dst):
 
     assert [(hole.expression, hole.prints) for hole in row.holes] == [("source", "token"), ("destination", "token")]
     assert [hole.prints for hole in whole.holes] == ["text"]
+
+
+CLOCK_SPAN = '''\
+import datetime
+
+from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+
+class Watcher:
+    def __init__(self, sleepTime):
+        self.sleepTime = sleepTime
+
+    def run(self, job):
+        timeLimit = naive_utcnow() - datetime.timedelta(minutes=self.sleepTime)
+        if job.modificationTime < timeLimit:
+            job.jobStatus = "failed"
+'''
+
+
+def test_the_time_the_run_read_is_a_terminal_the_walk_goes_on_through(tmp_path):
+    """Watcher's ``timeLimit`` is the time the run read less a span: the step says the clock, and the span's name is
+    walked as before; each call in the step says how it makes its value."""
+    roots = _tree(tmp_path, **{"watcher.py": CLOCK_SPAN})
+    steps, _note = _walk(roots, file="watcher.py", owner="run", lines=[13])
+    (limit,) = [s for s in steps if s.name == "timeLimit"]
+    assert (limit.terminal, limit.detail) == (models.STOP_CLOCK, "pandacommon.pandautils.PandaUtils.naive_utcnow")
+    assert [(c.call, c.made, c.terminal) for c in limit.calls] == [
+        ("naive_utcnow()", models.CALL_TIME, models.STOP_CLOCK),
+        ("datetime.timedelta(minutes=self.sleepTime)", models.CALL_HANDED, ""),
+    ]
+    assert any(s.name == "self.sleepTime" and s.kind == TRACE_BINDING for s in steps)
+    assert any(s.name == "sleepTime" and s.terminal == STOP_PARAMETER for s in steps)
+
+
+CLOCK_HANDED = '''\
+from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+
+class Finisher:
+    def run(self):
+        jobs = self.taskBufferIF.getJobs(naive_utcnow())
+        if jobs:
+            self.status = "done"
+'''
+
+
+def test_the_database_s_value_stays_the_database_s_though_it_is_handed_the_time(tmp_path):
+    """The outermost construct names the step, as before: the rows the database hands back for a time are the
+    database's.  The step's calls say the time is in it."""
+    roots = _tree(tmp_path, **{"finisher.py": CLOCK_HANDED})
+    steps, _note = _walk(roots, file="finisher.py", owner="run", lines=[8])
+    (jobs,) = [s for s in steps if s.name == "jobs"]
+    assert jobs.terminal == STOP_UPSTREAM
+    assert [(c.call, c.terminal) for c in jobs.calls] == [
+        ("self.taskBufferIF.getJobs(naive_utcnow())", STOP_UPSTREAM),
+        ("naive_utcnow()", models.STOP_CLOCK),
+    ]
+    assert jobs.calls[1].made == models.CALL_TIME
+
+
+def test_a_function_of_the_time_reads_the_clock_only_where_it_is_not_handed_a_time():
+    """``time.gmtime(seconds)`` makes its value of what it is handed.  Without a speller nothing is the clock, as
+    before it was read."""
+
+    def spell(called):
+        return ast.unparse(called)
+
+    def classified(text, **kwargs):
+        return provenance.classify(ast.parse(text, mode="eval").body, **kwargs)
+
+    assert classified("time.gmtime()", spell=spell) == (models.STOP_CLOCK, "time.gmtime")
+    assert classified("time.gmtime(seconds)", spell=spell) == ("", "")
+    assert classified("naive_utcnow()") == ("", "")
