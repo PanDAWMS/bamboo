@@ -4658,6 +4658,53 @@ def test_a_candidate_is_read_on_its_pass_that_holds_the_key_at_the_window_and_th
     assert got["windows"] == [True, False]
 
 
+def test_a_run_no_entry_row_cuts_is_at_the_window_only_where_a_record_of_it_lies_near(tmp_path):
+    # K57: a child task's run held only its two key lines, hours apart, and was read for the parent's write between
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_PASSES)
+    line = "2026-01-01 {},000 panda.log.X: DEBUG    rescue < jediTaskID=777 > [jediTaskID=777] {}\n"
+    logs = {
+        # two passes' key lines, no entry row among them, hours either side of the window
+        "far": [line.format("10:00:00", "to check"), line.format("16:00:00", "done")],
+        # the same, one of them 9 min before the window
+        "near": [line.format("12:51:00", "to check"), line.format("16:00:00", "done")],
+    }
+    for name, said in logs.items():
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "w.log").write_text("".join(said))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, at_window, judge, passes_at, spans
+
+            R.ROWS_FROM = "walk"
+            at = ("2026-01-01 13:00:00", "2026-01-01 13:00:00")
+            rescue = Candidate("pandaserver/a.py", "rescue", [7], ["w.log"])
+            got = {}
+            for name in ("far", "near"):
+                run, = runs_for(read_log(f"{name}/w.log"), "777")
+                kept, why = passes_at(rescue, [run], at, {"w.log": [run]}, "outside")
+                v, = judge([rescue], {"w.log": [run]}, window=at).verdicts
+                got[name] = [spans(run, at), at_window(run, at), len(kept), why, v.kind, v.reasons]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # its span holds the window, but no record of it lies within 10 min: no pass of it is at the window
+    assert got["far"][:4] == [True, False, 0, ["w.log 'rescue < jediTaskID=777 >': none of its 1 pass(es) of rescue is at "
+                                               "the window (1 span(s) it with no record within 10 min of it)"]]
+    assert got["far"][4:] == ["unexamined", ["w.log: no pass of the key at ('2026-01-01 13:00:00', '2026-01-01 13:00:00'): "
+                                             "w.log 'rescue < jediTaskID=777 >': none of its 1 pass(es) of rescue is at "
+                                             "the window (1 span(s) it with no record within 10 min of it)"]]
+    # a record within 10 min: the run is at the window, and judged on
+    assert got["near"][:4] == [True, True, 1, []]
+    assert got["near"][4] != "unexamined"
+
+
 def test_a_late_question_asks_the_stay_it_names_and_stops_where_the_value_has_several_and_it_names_none(tmp_path):
     out = _ok(
         _run(

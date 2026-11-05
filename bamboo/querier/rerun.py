@@ -148,6 +148,7 @@ from bamboo.querier.which_ran import (
     judge,
     of_mover,
     once_loops_of,
+    spans,
     stable_holes,
 )
 from bamboo.scripts.derive_strategy import _investigate
@@ -2002,10 +2003,6 @@ def _read_at(data: dict) -> list[dict] | None:
     return out or None
 
 
-def _overlaps(run, window: Window) -> bool:
-    return run.first[:19] <= window[1] and run.last[:19] >= window[0]
-
-
 def _question_run(at: dict[str, list]):
     """The run H2's question is read in, of *at* (log -> the key's runs at the window): the one run of one log, or
     None, and each candidate is judged on its own run.  Runs in more than one log: the machines' clocks are not known
@@ -3064,7 +3061,7 @@ class Rerun:
         cands = self._h2_candidates(subject, readings)
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                    owners_of([c.owner for c in cands]), whole=True)
-        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
@@ -3208,7 +3205,7 @@ class Rerun:
         runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                             owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
-        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+        at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
         if not at and not handed and not last:
             self.say(f"  no run of {key} at {when}")
@@ -3331,7 +3328,7 @@ class Rerun:
             self.say(f"-- {state['status']!r} at {hi}: {len(readings)} reading(s) from the map, logs {names}")
             if said:
                 self.say(f"   {said}")
-            at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if r.first[:19] <= hi and r.last[:19] >= lo])}
+            at_row = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
             handed = self._batched(cands, at_row, runs, holes, state, hi, history.subject)
             if not at_row and not handed:
                 unsearched = "".join(f"; {name} not searched: {'; '.join(h)}" for name, h in holes.items())
@@ -3451,7 +3448,7 @@ class Rerun:
             if missed:
                 continue
             lo, hi = asking.window
-            held = [r for rs in runs.values() for r in rs if r.first[:19] <= hi and r.last[:19] >= lo]
+            held = [r for rs in runs.values() for r in rs if spans(r, (lo, hi))]
             found = []
             for x in calls:
                 f2 = R.function(x.rel, x.func, [x.line])
@@ -4193,7 +4190,7 @@ class Rerun:
     def _runs_of(self, found: dict[str, list], owner: str, asking: W.Asking) -> list[str]:
         """The logs among *found* holding a run of *owner* in *asking*'s window (any run, for the door over files)."""
         window = asking.window if self.logs.needs_window else None
-        return [name for name, rs in found.items() if any((window is None or _overlaps(r, window)) and of_mover(r, owner) for r in rs)]
+        return [name for name, rs in found.items() if any((window is None or spans(r, window)) and of_mover(r, owner) for r in rs)]
 
     def _premises(self, subject: str, key: str, owner: str, lines, to_hand: list[str], asking: W.Asking,
                   searched: W.Asking, missed: list, holes: dict, writers: list, rest: W.Asking | None) -> dict:

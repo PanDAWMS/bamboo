@@ -1362,6 +1362,60 @@ arm's and the call's guards; or "STOP U3: ..." with code K56.
 *Revisit:* when the carried value picks the call; when an arm's early exits are its guards (the map's branch
 condition, `pathcond.reachable_when`), which takes killUnusedEventServiceConsumers:986 out of this class.
 
+### K57. A run is at the window only where a record of it lies near, not where its span holds it
+
+H2 placed a run, or a pass of one, at the window where its span held it.  `passes_at` cuts a run at its function's
+entry rows, but the records at hand are those the asks returned.  Where they hold no entry row, the run stays whole,
+and it spans every pass of its mark between its first and last record.  So it is "at" any time between them.
+
+MT-scouted-late (JediTaskSpec.status 'scouted' -> 'running' at 18:49:05) is the example.  TaskRefiner's run
+`< jediTaskID=53199089 >` held only the child task's two "pending until parent task 53199080 is done" lines, at
+15:53:23 and 22:35:59.  runImpl:257 was positive on it, beside getTasksToBeFinished_JEDI:1672, which made the write.
+The census of every H2 judgement over the querier's sets found 7 verdicts in 4 cases on such runs, 6 kept and 1
+positive.  All 7 are separate passes under one mark, with no record within 10 min of the window: reactivatePendingTasks_JEDI's
+`< vo=atlas label=... >` with records hours apart, and JobGenerator's `<jediTaskID=... datasetID=...>` over 16 hours.
+No excluded verdict was on such a run.
+
+Now `which_ran.at_window` places a run at the window where its span holds it and one of its records lies within
+EDGE (`recorded.EDGE`) of it -- the door's part near the window.  Inside EDGE the records at hand are what the asks
+searched, so a pass at the window has a record near it unless it printed nothing there.
+- `passes_at` keeps a pass only where it is at the window this way.  A run that spans the window with none near is
+  said so ("N span(s) it with no record within 10 min of it"), and its candidate is left unexamined.
+- The runs H2 gathers at the row's second (`_wrote_at`, `_row_at`), and F1's (`rows_between`) and H7's (`missing`),
+  keep the span (`which_ran.spans`).  They decide the question's run, and a question's run is read whole, not cut into
+  passes.  With the far runs dropped there, MR-T-53351604-rescueTime's one run left in JediDBProxy.log, the
+  `< vo=atlas label=user >` mark's 297 passes, became the question's run and was read as one (rule 20's warning),
+  where each candidate had been read on its pass at 13:09:13.  MR-T-53348259-rescueTime is read so already (187
+  passes).
+- Judgement 3 (`_runs_of`) still reads a mover as run where a run of its spans its window (`which_ran.spans`).
+  There, "not at the window" would be absence: a mover could be ruled out, and the window's rest asked.
+
+A pass that prints nothing within EDGE either side of its write -- a slow call between two prints -- is now not at
+the window, and its candidate is unexamined there: a positive lost, not a wrong one.
+
+*Shows:* "no pass of the key at ...: ... none of its N pass(es) of F is at the window (N span(s) it with no record
+within 10 min of it)".
+*Revisit:* where a function's pass is silent for longer than EDGE around a write (the map's reach of a slow call);
+when judgement 3's twin is decided; when a question's run is cut into the pass at the window, which lets the runs at
+the row's second be gathered by records near it too.
+
+### K58. H2 can read another object's run as the key's run, where the run prints the key in another role
+
+A run is the key's for H2 where a record of it holds the key.  It can be another object's run that prints the key
+in another role.  TaskRefiner's child-task run `< jediTaskID=53199089 >` printed the parent's key 53199080 in row
+262's `parent_tid` hole, and runImpl:257, which writes the child's `impl.taskSpec.status`, was read on it (MT-scouted-late).
+K57 removes that run there, since it was not at the window.  The census found no other case of the class.
+
+A rule would read a run as the key's for an arm only where the key is in a hole that holds the key of the row the arm
+writes -- the run's mark, a local, a loop's element, or an SQL bind map.  The map types a hole by the column it holds
+(row 262's `parent_tid` as `JediTaskSpec.jediTaskID`), not by which row's key it is.  It names the written row only
+for an arm's must prints (`Branch.must_names`, row "written"): for 52 of the 242 positive or kept verdicts of the
+census.  257 has no such name, and 616's reading of the mark's `jediTaskID` cannot show it holds the value the write
+counts.  On today's map the rule would cut the tie of the other 190, of which 4 are wrong.
+
+*Revisit:* when a case shows another object's run at the window; the map would then be asked to name, for every row
+of an arm's function, which holes hold the written row's key.
+
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
@@ -1410,7 +1464,7 @@ Now `which_ran.passes_at` reads the runs that span the window in four steps:
   LogWrapper's `<setup_destination> ` mark stands inside the message.  A record the map cannot read whole -- its row
   has no capture, or its logger is not bound in the function -- does not cut: the passes it may begin stay one, and
   the word on the cut counts them.  The rule-20 warning and S2's passes of a mover read the same entries;
-- it keeps a pass whose span holds the window;
+- it keeps a pass whose span holds the window and that has a record within EDGE of it (`at_window`, K57);
 - of these it keeps one that holds the key: in one of its records, or in a run of the key inside one of its calls
   (`inside_call`, with a callee the map's rows say printed that run's key records:
   reactivatePendingTasks_JEDI's `< vo=atlas ... >` pass, inside which release_task_on_hold's
