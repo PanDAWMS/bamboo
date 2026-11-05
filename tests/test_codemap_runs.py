@@ -18,6 +18,12 @@ from bamboo.codemap.models import (
     HISTORY_CARRIES_PRIOR,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
+    REWRITE_COLUMNS_UNRECORDED,
+    REWRITE_NOT_ATTRIBUTE,
+    REWRITE_ROW_KEY,
+    REWRITE_RUN_TIME_COLUMNS,
+    REWRITE_STATEMENT_UNREAD,
+    REWRITE_UNPLACED,
     RUN_KEY_TIME,
     Anchor,
     Branch,
@@ -33,7 +39,7 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, pathcond, runs, sql
+from bamboo.codemap.panda import keycolumns, pathcond, rewrites, runs, sql
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
@@ -2341,3 +2347,233 @@ def test_a_message_hole_s_uses_are_followed_through_fewer_states_than_a_mark_s(
             KeyStop(kind="cut", what="states", at=["Holes.handed"]),
         ],
     )
+
+
+REWRITE_SPEC = """\
+class JobSpec:
+    _attributes = ("PandaID", "jobStatus", "jobSubStatus", "ddmErrorCode", "ddmErrorDiag")
+
+
+class DatasetSpec:
+    _attributes = ("name", "state")
+"""
+
+REWRITTEN = """\
+from pkg.spec import DatasetSpec, JobSpec
+
+
+class Proxy:
+    def updateJobs(self, jobs):
+        for job in jobs:
+            self.archiveJob(job)
+
+    def archiveJob(self, job: JobSpec):
+        var_map = {}
+        var_map[":PandaID"] = job.PandaID
+        var_map[":jobStatus"] = "failed"  # S1
+        var_map[":jobSubStatus"] = job.jobSubStatus  # S2
+        self.cur.execute(  # S3
+            "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus,jobSubStatus=:jobSubStatus WHERE PandaID=:PandaID",
+            var_map,
+        )
+
+
+class Adder:
+    def __init__(self, job: JobSpec, proxy: Proxy):
+        self.job = job
+        self.proxy = proxy
+
+    def plugin(self):
+        try:
+            self.job.name = "x"
+        except Exception:
+            self.job.ddmErrorDiag = "plugin failure"  # P1
+
+    def parse(self):
+        if self.job.ddmErrorCode:
+            self.job.jobStatus = "failed"  # A2
+            self.job.ddmErrorCode = 200  # A2C
+            self.job.ddmErrorDiag = "missing output"  # A2D
+        return 0
+
+    def process(self, ok):
+        self.job.jobStatus = "running"  # A1
+        self.parse()  # C1
+        self.plugin()  # C2
+        if not ok:
+            self.job.jobStatus = "failed"  # A3
+        self.proxy.updateJobs([self.job])  # C3
+
+    def mark(self, ds: DatasetSpec):
+        ds.state = "done"  # D1
+
+    def time_out(self, jobs):
+        done = []
+        for job in jobs:
+            job.jobStatus = "failed"  # A4
+            done.append(job)
+        self.proxy.updateJobs(done)  # C4
+"""
+
+
+def _rewritten(tmp_path: Path) -> MapFragment:
+    arms = [
+        ("rewritten", "Adder.process", "A1", "JobSpec.jobStatus"),
+        ("rewritten", "Adder.parse", "A2", "JobSpec.jobStatus"),
+        ("rewritten", "Proxy.archiveJob", "S1", "JobSpec.jobStatus"),
+        ("rewritten", "Adder.mark", "D1", "DatasetSpec.state"),
+        ("rewritten", "Adder.time_out", "A4", "JobSpec.jobStatus"),
+    ]
+    return _build(tmp_path, arms, spec=REWRITE_SPEC, rewritten=REWRITTEN)
+
+
+def _said(branch: Branch, column: str) -> list[tuple]:
+    return [
+        (
+            one.level,
+            one.how,
+            one.line,
+            [
+                (
+                    site.owner.rpartition("::")[2],
+                    site.line,
+                    site.how,
+                    site.values,
+                    site.written,
+                )
+                for site in one.sites
+            ],
+        )
+        for one in branch.rewrites or []
+        if one.column == column
+    ]
+
+
+def test_a_later_write_of_the_arm_s_column_is_read_in_its_function_and_in_the_calls_after_it(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "A1")
+    said = _said(branch, "jobStatus")
+    line = lambda marker: _line(REWRITTEN, marker)  # noqa: E731
+    # The rewrite two statements down is a store, though the calls between may read the value first.
+    a3 = (
+        0,
+        "store",
+        line("A3"),
+        [("Adder.process", line("A3"), "store", ["failed"], True)],
+    )
+    assert a3 in said
+    # parse's run assigns it and writes no row: assigned only.
+    c1 = (
+        0,
+        "call",
+        line("C1"),
+        [("Adder.parse", line("A2"), "store", ["failed"], False)],
+    )
+    assert c1 in said
+    # updateJobs' run writes the column on the job's row by its key, a value of its own.
+    (c3,) = [one for one in said if one[2] == line("C3")]
+    assert ("Proxy.archiveJob", line("S3"), "row", ["failed"], True) in c3[3]
+    # plugin writes no jobStatus.
+    assert not [one for one in said if one[2] == line("C2")]
+    assert branch.rewrites_open == []
+
+
+def test_a_caller_s_later_writes_are_read_where_it_holds_the_arm_s_object(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "A2")
+    said = _said(branch, "jobStatus")
+    line = lambda marker: _line(REWRITTEN, marker)  # noqa: E731
+    assert (
+        1,
+        "store",
+        line("A3"),
+        [("Adder.process", line("A3"), "store", ["failed"], True)],
+    ) in said
+    assert [one[2] for one in said if one[:2] == (1, "call")] == [line("C3")]
+    assert {one.point for one in branch.rewrites or [] if one.level == 1} == {
+        line("C1")
+    }
+
+
+def test_the_block_s_other_columns_are_the_arm_s_same_pass_and_read_for_later_writes(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "A2")
+    line = lambda marker: _line(REWRITTEN, marker)  # noqa: E731
+    assert [(one.column, one.line, one.values) for one in branch.same_pass or []] == [
+        ("ddmErrorCode", line("A2C"), ["200"]),
+        ("ddmErrorDiag", line("A2D"), ["missing output"]),
+    ]
+    # The plugin's except writes the text again, later in the pass.
+    assert _said(branch, "ddmErrorDiag") == [
+        (
+            1,
+            "call",
+            line("C2"),
+            [("Adder.plugin", line("P1"), "store", ["plugin failure"], False)],
+        )
+    ]
+    assert _said(branch, "ddmErrorCode") == []
+
+
+def test_an_sql_arm_s_same_pass_is_another_column_its_statement_sets_and_its_later_writes_are_not_read(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "S1")
+    assert [(one.column, one.line, one.values) for one in branch.same_pass or []] == [
+        ("jobSubStatus", _line(REWRITTEN, "S2"), ["runtime(job.jobSubStatus)"])
+    ]
+    assert branch.rewrites is None
+    assert [one.why for one in branch.rewrites_open] == [REWRITE_NOT_ATTRIBUTE]
+
+
+def test_a_column_the_reach_record_keeps_no_assignment_of_is_said_not_read(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "D1")
+    assert branch.rewrites == []
+    assert [(one.column, one.why) for one in branch.rewrites_open] == [
+        ("state", REWRITE_COLUMNS_UNRECORDED)
+    ]
+
+
+def test_each_reason_may_change_leaves_open_has_its_kind() -> None:
+    from bamboo.codemap import objects
+
+    assert (
+        rewrites.open_kind(
+            objects.NOT_FOLLOWED_KEY.format(column="jobStatus", key="job.PandaID")
+        )
+        == REWRITE_ROW_KEY
+    )
+    assert (
+        rewrites.open_kind(objects.UNREAD_KEY.format(column="jobStatus"))
+        == REWRITE_ROW_KEY
+    )
+    assert (
+        rewrites.open_kind(
+            objects.HOLE_NAMED.format(name="archiveJob", column="jobStatus")
+        )
+        == REWRITE_UNPLACED
+    )
+    assert rewrites.open_kind(objects.HOLE_UNNAMED) == REWRITE_UNPLACED
+    assert (
+        rewrites.open_kind(objects.NAMED_AT_RUN_TIME.format(column="jobStatus"))
+        == REWRITE_RUN_TIME_COLUMNS
+    )
+    assert (
+        rewrites.open_kind("the statement is not read: a name")
+        == REWRITE_STATEMENT_UNREAD
+    )
+
+
+def test_a_call_handed_a_list_the_arm_s_object_is_put_in_is_read_for_later_writes(
+    tmp_path: Path,
+) -> None:
+    branch = _branch(_rewritten(tmp_path), "A4")
+    line = lambda marker: _line(REWRITTEN, marker)  # noqa: E731
+    (c4,) = [one for one in _said(branch, "jobStatus") if one[2] == line("C4")]
+    assert c4[:2] == (0, "call")
+    assert ("Proxy.archiveJob", line("S3"), "row", ["failed"], True) in c4[3]

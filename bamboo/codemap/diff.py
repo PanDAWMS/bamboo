@@ -270,8 +270,9 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: and ``messages`` are the signature production writes when the branch fires,
 #: so a reworded message is a branch a reader can no longer name from a log.
 #: ``value_frames`` is what an observed value rules the branch out by, and
-#: ``value_cuts`` which lengths of it are read as a frame's head, and
-#: ``off_row`` whether a reader of the row's value skips the branch.
+#: ``value_cuts`` which lengths of it are read as a frame's head,
+#: ``off_row`` whether a reader of the row's value skips the branch, and
+#: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
@@ -293,6 +294,9 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "history",
     "history_hole",
     "off_row",
+    "same_pass",
+    "rewrites",
+    "rewrites_open",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

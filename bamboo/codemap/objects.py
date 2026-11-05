@@ -665,6 +665,8 @@ CHANGE_PREMISES: dict[str, str] = {
 NO_FLUSH = (
     "assigned on the object, and no write of the object the answer reads takes it"
 )
+#: The how of a write :func:`may_change` finds writing the column, by a value of its own, on the object's row.
+ROW_WRITE = "{kind} {table} writes {column} on the object's row"
 NOT_FOLLOWED_KEY = (
     "writes {column} on a row named by {key}, which is not followed to the object's"
 )
@@ -932,7 +934,9 @@ def may_change(
                         Site(
                             at,
                             site_line,
-                            f"{write.kind} {write.table} writes {column} on the object's row",
+                            ROW_WRITE.format(
+                                kind=write.kind, table=write.table, column=column
+                            ),
                         )
                     ] = None
                 else:

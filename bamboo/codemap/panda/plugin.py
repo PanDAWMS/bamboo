@@ -848,14 +848,15 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # can record, and the calls that write a history row in the same pass
             # as an arm: what gives a value the map sees set a time, and the log
             # lines of the run it was set in.
-            started, recorded, paired, columned = runs.attach(fragment, self._modules, self._calls)
+            started, recorded, paired, columned, rewritten = runs.attach(fragment, self._modules, self._calls)
             logger.info(
                 "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair, "
-                "%d message hole(s) naming a column",
+                "%d message hole(s) naming a column, %d branch(es) with a later write",
                 started,
                 recorded,
                 paired,
                 columned,
+                rewritten,
             )
             # The arms whose object no row is written from, read on the same records: what a reader of a row's
             # value skips.
