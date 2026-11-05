@@ -701,6 +701,7 @@ def may_change(
     key_column: str = "PandaID",
     spec_class: str = "",
     table_classes: Optional[dict[str, Optional[str]]] = None,
+    memo: Optional[dict] = None,
 ) -> Change:
     """Whether the run *owner* starts can change *column* of the row the object at *path* is.
 
@@ -750,6 +751,11 @@ def may_change(
     names columns no spec declares (``modiftime_extended``), and its row is a
     log's, not the job's.  A table it does not know -- a name the statement
     builds at run time -- may be the class's, and is kept.
+
+    *memo* is a caller's, kept across its asks of one *rows* and one
+    *table_classes*: what the answer reads of the whole record -- the
+    functions by name, and the writers of the column for the class
+    (:func:`_writers_up`) -- is read once.
     """
     lowered = column.lower()
 
@@ -955,8 +961,13 @@ def may_change(
             else:
                 opened[Site(at, site_line, UNREAD_KEY.format(column=column))] = None
     # Calls of the closure the record could not place: by name, a writer of the column or not.
-    up = _writers_up(rows, column, other_class)
-    names = _function_names(rows)
+    memo = {} if memo is None else memo
+    if ("up", column, spec_class) not in memo:
+        memo[("up", column, spec_class)] = _writers_up(rows, column, other_class)
+    if ("names",) not in memo:
+        memo[("names",)] = _function_names(rows)
+    up = memo[("up", column, spec_class)]
+    names = memo[("names",)]
     for at in closure:
         for hole in rows[at].holes:
             if hole.why.startswith("the statement is not read"):

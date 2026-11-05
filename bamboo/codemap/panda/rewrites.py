@@ -169,6 +169,9 @@ class _Later:
         self._writers: dict[tuple[str, str], set[str]] = {}
         self._helds: dict[tuple[str, frozenset[str]], tuple[set[str], bool]] = {}
         self._names = objects._function_names(self.rows)
+        #: :func:`objects.may_change`'s memo of what it reads of the whole record.
+        self._record: dict = {}
+        self._afters: dict[tuple[int, int, int], Optional[ast.stmt]] = {}
 
     # -- one branch ----------------------------------------------------------------------------------------------
 
@@ -432,16 +435,8 @@ class _Later:
                     ),
                 )
 
-        def after(line: int) -> Optional[ast.stmt]:
-            statement = mustprints._statement_at(func, line)
-            if (
-                statement is None
-                or statement is point
-                or not self.reader._ordered(func, point, statement)[0]
-            ):
-                return None
-            return statement
-
+        after = partial(self._after, func, point)
+        calls = self._handed_calls(row, held)
         for column in columns:
             # At the arm's function its own holder's stores are the replacements read already; another name's are not.
             for one in row.assigns:
@@ -490,28 +485,47 @@ class _Later:
                             sites=[site],
                         ),
                     )
-            self._calls(cls, column, row, held, step, after, found, opened)
+            self._calls(cls, column, calls, step, after, found, opened)
         for hole in row.holes:
-            if after(hole.line) is None:
+            whys = [
+                (column, why)
+                for column in columns
+                if (why := self._unplaced(hole.callee, hole.why, column, cls))
+            ]
+            if not whys or after(hole.line) is None:
                 continue
-            for column in columns:
-                why = self._unplaced(hole.callee, hole.why, column, cls)
-                if why:
-                    _open(
-                        opened,
-                        RewriteOpen(
-                            column=column,
-                            level=step.level,
-                            caller=step.owner,
-                            line=hole.line,
-                            why=why,
-                        ),
-                    )
+            for column, why in whys:
+                _open(
+                    opened,
+                    RewriteOpen(
+                        column=column,
+                        level=step.level,
+                        caller=step.owner,
+                        line=hole.line,
+                        why=why,
+                    ),
+                )
         return False
 
-    def _calls(self, cls, column, row, held, step, after, found, opened) -> None:
-        """The later writes of *column* in the runs of the calls at *step* after its point that are handed the
-        object."""
+    def _after(self, func: ast.AST, point: ast.stmt, line: int) -> Optional[ast.stmt]:
+        """The statement of *func* at *line* where it can run after *point* in one pass, else ``None``."""
+        key = (id(func), id(point), line)
+        if key not in self._afters:
+            statement = self.reader._statement(func, line)
+            self._afters[key] = (
+                None
+                if statement is None
+                or statement is point
+                or not self.reader._after(func, point, statement)
+                else statement
+            )
+        return self._afters[key]
+
+    def _handed_calls(
+        self, row: ReachNode, held: set[str]
+    ) -> dict[tuple[int, str], set[str]]:
+        """The plain calls of *row* handed the object *held* holds: each ``(line, callee)``, and the callee's paths
+        holding it."""
         plain = {
             (call.line, call.to)
             for call in row.calls
@@ -531,6 +545,11 @@ class _Later:
                     handed.setdefault((binding.line, binding.to), set()).add(
                         binding.parameter + binding.at + rest
                     )
+        return handed
+
+    def _calls(self, cls, column, handed, step, after, found, opened) -> None:
+        """The later writes of *column* in the runs of the calls at *step* after its point that are handed the
+        object (:meth:`_handed_calls`)."""
         for (line, to), paths in sorted(handed.items()):
             if to not in self.rows or after(line) is None:
                 continue
@@ -604,6 +623,7 @@ class _Later:
                 key_column=ROW_KEYS.get(cls, "PandaID"),
                 spec_class=cls,
                 table_classes=self.tables,
+                memo=self._record,
             )
         return self._changes[key]
 
@@ -631,7 +651,7 @@ class _Later:
                     return None
         held = self.reader.funcs.get(one.owner)
         statement = (
-            mustprints._statement_at(held[1], one.line) if held is not None else None
+            self.reader._statement(held[1], one.line) if held is not None else None
         )
         if statement is None:
             return RewriteSite(

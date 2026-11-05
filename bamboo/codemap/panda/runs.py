@@ -419,6 +419,12 @@ class _Reader:
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
         self._runs: dict[str, list[RunStart]] = {}
         self._kills: dict[int, list[ast.stmt]] = {}
+        self._afters: dict[tuple[int, int, int], bool] = {}
+        self._handeds: dict[
+            tuple[str, int, str, frozenset[str], frozenset[str]],
+            tuple[dict[str, int], dict[str, int]],
+        ] = {}
+        self._tested: dict[tuple[str, int], list[str]] = {}
         self._held_killers: dict[tuple[str, str], list[ast.AST]] = {}
         self._handed_rekeys: dict[tuple[str, str, str], list[HistoryRekey]] = {}
         self._candidates: dict[
@@ -952,7 +958,7 @@ class _Reader:
                 steps: list[tuple[ast.stmt, Optional[C.CallSite]]] = []
                 out = False
                 for line in lines:
-                    up = mustprints._statement_at(held[1], line)
+                    up = self._statement(held[1], line)
                     if up is None:
                         continue
                     placed = self._sites_into(here, caller, line)
@@ -1111,16 +1117,25 @@ class _Reader:
         self, func: ast.AST, point: ast.stmt, site: ast.stmt
     ) -> tuple[bool, bool]:
         """Whether *site* can run after *point* in one pass of *func*, and whether before it."""
-        if id(func) not in self._kills:
-            self._kills[id(func)] = [bound.statement for bound in self.built(func)]
-        around = _loops(point, func)
-        both = [
-            loop for loop in _loops(site, func) if any(loop is one for one in around)
-        ]
-        killers = [*self._kills[id(func)], *both]
-        return bool(reaching(site, [point], killers)), bool(
-            reaching(point, [site], killers)
-        )
+        return self._after(func, point, site), self._after(func, site, point)
+
+    def _after(self, func: ast.AST, point: ast.stmt, site: ast.stmt) -> bool:
+        """Whether *site* can run after *point* in one pass of *func*, kept: the flow of each site as the write is a
+        flow of its own, and a reader asking only after does not build it."""
+        key = (id(func), id(point), id(site))
+        if key not in self._afters:
+            if id(func) not in self._kills:
+                self._kills[id(func)] = [bound.statement for bound in self.built(func)]
+            around = _loops(point, func)
+            both = [
+                loop
+                for loop in _loops(site, func)
+                if any(loop is one for one in around)
+            ]
+            self._afters[key] = bool(
+                reaching(site, [point], [*self._kills[id(func)], *both])
+            )
+        return self._afters[key]
 
     def _unplaced_at(self, owner: str, func: ast.AST, point: ast.stmt) -> list[str]:
         """The calls of *owner* the reach record holds as holes, in one pass with *point*,
@@ -1459,7 +1474,7 @@ class _Reader:
         return tuple(
             site
             for site in sites
-            if site is point or self._ordered(func, point, site)[0]  # type: ignore[arg-type]
+            if site is point or self._after(func, point, site)  # type: ignore[arg-type]
         )
 
     def _same_binding(
@@ -1509,8 +1524,8 @@ class _Reader:
                 continue
             if (
                 self._writes_on(owner, statement, attr, one.caller)
-                and self._ordered(func, point, statement)[0]
-                and self._ordered(func, statement, end)[0]
+                and self._after(func, point, statement)
+                and self._after(func, statement, end)
             ):
                 found.append(outcome)
         for below, held in sorted(one.below.items()):
@@ -1624,16 +1639,18 @@ class _Reader:
             if not route:
                 continue
             func = self.funcs[owner][1]
-            tested = sorted(
-                {
-                    name.id
-                    for test in pathcond.tests_on(statement, func)
-                    for name in walk(test)
-                    if isinstance(name, ast.Name)
-                    and keycolumns.is_parameter(func, name.id)
-                    and not C._rebinds(func, name.id)
-                }
-            )
+            if (owner, id(statement)) not in self._tested:
+                self._tested[(owner, id(statement))] = sorted(
+                    {
+                        name.id
+                        for test in pathcond.tests_on(statement, func)
+                        for name in walk(test)
+                        if isinstance(name, ast.Name)
+                        and keycolumns.is_parameter(func, name.id)
+                        and not C._rebinds(func, name.id)
+                    }
+                )
+            tested = self._tested[(owner, id(statement))]
             if not tested:
                 continue
             target = self._target(owner)
@@ -1677,7 +1694,16 @@ class _Reader:
         what it returns, 1 where it is below one or an element of one: what
         comes out of the call is read as what goes in -- ``doGenerate``'s
         jobs come back to ``runImpl`` as the elements of ``pandaJobs``.
+        Kept: every arm walking up through the call asks it again.
         """
+        key = (owner, id(point), arm.owner, arm.objects, arm.keys)
+        if key not in self._handeds:
+            self._handeds[key] = self._handed_at(owner, point, arm)
+        return self._handeds[key]
+
+    def _handed_at(
+        self, owner: str, point: ast.stmt, arm: "_Arm"
+    ) -> tuple[dict[str, int], dict[str, int]]:
         here = self.rows[owner]
         lines = range(point.lineno, (point.end_lineno or point.lineno) + 1)
         at = [
