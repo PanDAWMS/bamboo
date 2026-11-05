@@ -7015,6 +7015,45 @@ def test_a_reader_asks_the_questions_it_reads_and_refuses_steps_that_cannot_ask(
     assert got["refused"] == ["the steps were not asked"] * 2
 
 
+def test_a_step_whose_dump_holds_models_is_kept_once_at_any_depth(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from pydantic import BaseModel
+            from bamboo.codemap import trace
+            from bamboo.codemap.models import TraceStep
+            from bamboo.querier import asked as A
+
+            class Call(BaseModel):
+                call: str
+                made: str
+
+            # a field holding models, dumped as a list of dicts, as the map's TraceStep.calls
+            class Step(TraceStep):
+                calls: list[Call] = []
+
+            f = "pandaserver/a.py::f"
+            x3 = trace.Question("bindings", "pandaserver/a.py", f, "x", 3)
+            step = lambda depth: Step(kind="binding", name="x", owner=f, line=2, value="g()", depth=depth,
+                                      calls=[Call(call="g()", made="corpus")])
+
+            class Asker:
+                def ask(self, question):
+                    return trace.Answer([step(3)], "", [])
+
+            steps = A.Asked([step(2)], Asker(), [x3], "", "f:1")
+            steps.ask(lambda q: True)
+            print(json.dumps({"steps": [(s.name, s.line, s.depth) for s in steps], "asked": [(a.name, a.line) for a in steps.asked]}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # x at 3 hands back the step the walk started with, a hop deeper: kept once
+    assert got == {"steps": [["x", 2, 2]], "asked": [["x", 3]]}
+
+
 def test_a_rows_prefix_is_read_without_its_leading_blanks_which_the_records_cut_takes_with_the_level(tmp_path):
     out = _ok(
         _run(
