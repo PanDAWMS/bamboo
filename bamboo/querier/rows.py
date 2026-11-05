@@ -988,6 +988,12 @@ def def_at(rel: str, name: str, lines: Iterable[int]) -> ast.FunctionDef | ast.A
     return _holding(found, tuple(lines))
 
 
+def def_holding(rel: str, line: int) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The innermost def in *rel* holding *line*, or None: the def a ``called_from`` site calls from."""
+    holding = [f for f, _ in pathcond.functions_with_owner(tree(rel)) if f.lineno <= line <= (f.end_lineno or f.lineno)]
+    return min(holding, key=lambda f: (f.end_lineno or f.lineno) - f.lineno) if holding else None
+
+
 @functools.cache
 def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...] = ()) -> Function:
     found = functions(rel, name)

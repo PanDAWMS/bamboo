@@ -7146,10 +7146,13 @@ def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes
                 ("an ask not recorded", True, [], [(N(key="a"), "why")], None),
                 ("a log not to hand", True, [], (), None),
                 ("no arm", True, [], (), None),
+                ("the move alone, a caller listed", True, [pas("2026-10-29 13:33:45,900", "2026-10-29 13:33:46,100")], (), None),
             ):
                 r = rerun_(passes, missed, holes)
                 if name == "a log not to hand":
                     q.writers = [N(owner="p/j.py::f", log_files=["j.log", "k.log"])]
+                if name == "the move alone, a caller listed":
+                    q.writers = [N(owner="p/j.py::f", log_files=["j.log"], called_from=["p/c.py:9"])]
                 arms_of = rerun.arms_of
                 if name == "no arm":
                     rerun.arms_of = lambda writers, owner, subject, observed: {}
@@ -7157,7 +7160,9 @@ def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes
                     p = r._late_passes(q)
                     said = [p.since, p.before, p.logs, r.asked[0].window, r.asked[0].strings, str(r.asked[0].why)]
                     try:
-                        said.append(["exit", r.passes(p).exit_line])
+                        way = r.passes(p)
+                        said.append(["exit", way.exit_line] if isinstance(way, rerun.Blocked)
+                                    else ["callers", list(way.window), way.kind, way.entries, way.before])
                     except rerun.Stop as e:
                         said.append(["stop", str(e), e.code])
                 except rerun.Stop as e:
@@ -7208,7 +7213,167 @@ def test_judgement_4_asks_a_late_movers_marks_over_its_stay_and_reads_its_passes
     assert got["an ask not recorded"] == ["stop", "L2: 1 ask(s) of the logs not in the records (written to asks.jsonl)", "asks"]
     assert got["a log not to hand"] == [*asked, ["stop", open_.format("for 'f < PandaID=1 >'", "k.log not to hand"), "K45"]]
     assert got["no arm"] == ["stop", "L2: an arm of f that writes another value than 'assigned'", None]
+    # where the map lists a caller of it, no pass before the move goes to the callers' passes before it (K55)
+    assert got["the move alone, a caller listed"] == [*asked, ["callers", window, "before", ["p/c.py:9"], "2026-10-29 13:33:46"]]
     assert got["L2, by its key"] == "judgement 4" and got["L2, a statement of its own"] == "Ordered"
+
+
+def test_up_reads_the_callers_passes_on_the_row_where_no_pass_of_the_mover_took_it(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "m.py").write_text(
+        textwrap.dedent(
+            """\
+            class Facade:
+                def f(self):
+                    return proxy.f()
+
+            class A:
+                def a(self):
+                    if ready:
+                        Facade().f()
+                    return 1
+
+            def b():
+                Facade().f()
+
+            def c():
+                d()
+
+            def d():
+                Facade().f()
+
+            class A2:
+                def a(self):
+                    Facade().f()
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+            from bamboo.querier import render as T
+
+            M = "pandaserver/m.py"
+            rerun.prints_nothing = lambda owner, lines: owner.endswith("::f")
+            rerun.key_marks = lambda owner, line, cls, key: ("a < PandaID=1 >",) if owner.endswith("::a") else ()
+            rerun.prints_key = lambda owner, lines, columns: owner.endswith("::b")
+            got = {}
+            # the caller of an entry: hop 2 behind a facade that prints nothing, by its marks or the key alone; the innermost
+            # that prints where no hop is asked for the key; an entry the map cut names none; two defs of one name, two callers
+            entries = [f"{M}:8 -> {M}:3", f"{M}:12 -> {M}:3", f"{M}:15 -> {M}:18", "… 2 more", f"{M}:22 -> {M}:3"]
+            got["callers_of"] = [[c.owner, c.lines, c.hop, c.how, list(c.marks), c.between]
+                                 for c in rerun.callers_of(entries, "JobSpec", "1", {"JobSpec.PandaID"})]
+
+            def rerun_(passes, chosen=None):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.hop, r.hand, r.hand_used, r.unanswered = [], "U2", {}, [], []
+                r.opened, r.ends, r.branches = [], [], []
+                r.mode, r.decide = "map", "positive"
+                r.data, r.args = {"statuslog": {"states": []}}, N(observed="assigned", key="1", asks="asks.jsonl", subject="JobSpec.jobStatus")
+                r.logs = N(needs_window=True, names=lambda files: list(files))
+                r.files_of = lambda owner, today, lines: today
+                r._key_columns = lambda subject, key: {"JobSpec.PandaID"}
+                run = N(token="a < PandaID=1 >", first="2026-10-29 09:00:00,000", last="2026-10-29 13:33:47,000",
+                        describe=lambda: "the run", machine="aipanda081", found_by=[0])
+                r.asked = []
+                r._ask = lambda key, names, asking, owners=None: (r.asked.append(asking) or ({"a.log": [run]}, [], {}))
+                rerun.R.passes = lambda fn, run, mode: (passes, f"{len(passes)} pass(es)")
+                r.base_env = lambda at=None: N(values={})
+                verdict = which_ran.Verdict(which_ran.Candidate(M, "a", [chosen]), chosen, "positive")
+                rerun.judge = lambda cands, runs, **k: which_ran.Judgement([verdict], verdict, "positive evidence", None)
+                return r
+
+            rerun.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["a.log"])])
+            functions = rerun.R.functions
+            rerun.R.function = lambda rel, func, lines: N(node=functions(rel, func)[0], owner=f"{rel}::{func}", name=func, rel=rel)
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.class_of = lambda fn: None
+            rerun.holds_key = lambda fn, p, runs, mode, called_at: p.keyed
+            rerun.every_log_asked = lambda owner, lines, asked: {"held": True, "why": T.Said("logs-every-file-asked", {"files": asked})}
+
+            def pas(first, last, keyed=True):
+                return N(first=first, last=last, records=[0], log=N(name="a.log"), keyed=keyed)
+
+            up = rerun.Callers(f"{M}::f", [rerun.Arm(3, ["activated"], [])], "JobSpec.jobStatus", "1",
+                               ("2026-10-29 09:06:09", "2026-10-29 13:33:46"), "before", entries, before="2026-10-29 13:33:46")
+            a = rerun.Caller(f"{M}::a", [8], 2, "marks", ("a < PandaID=1 >",), [f"{M}:3"])
+            before = pas("2026-10-29 10:00:00,000", "2026-10-29 10:00:01,000")
+            moving = pas("2026-10-29 13:33:46,000", "2026-10-29 13:33:47,000")
+
+            def u2(name, caller, passes, chosen=None, callers=up):
+                r = rerun_(passes, chosen)
+                try:
+                    q = r.caller(rerun.CallerPasses(caller, callers))
+                    if isinstance(q, rerun.Blocked):
+                        got[name] = ["blocked", q.exit_line, [[x.line, x.outcomes, x.guards] for x in q.arms]]
+                    else:
+                        got[name] = ["callers", q.mover, q.entries, q.up, list(q.window)]
+                except rerun.Stop as e:
+                    got[name] = ["stop", str(e), e.code]
+                got[name + ": asked"] = [list(r.asked[0].window), list(r.asked[0].strings), str(r.asked[0].why)] if r.asked else []
+
+            # every pass of the caller on the row before the move went another way: S3 reads its call's guard
+            u2("another way", a, [before, moving], chosen=9)
+            # it called the mover there, and no pass of the mover holding the key was found
+            u2("it called", a, [before, moving], chosen=8)
+            # no pass of it on the row: at hop 2 nothing further is listed; at hop 1 U1 goes up once
+            u2("none, hop 2", a, [moving])
+            d = rerun.Caller(f"{M}::d", [18], 1, "marks", ("d < PandaID=1 >",))
+            u2("none, hop 1", d, [moving])
+            u2("none, hop 1, gone up", d, [moving], callers=rerun.Callers(**{**up.__dict__, "up": f"{M}::x"}))
+            # asked by the key alone, none found rules nothing out; a caller printing no key is named
+            u2("none, by the key alone", rerun.Caller(f"{M}::b", [12], 2, "key"), [pas("2026-10-29 10:00:00,000", "2026-10-29 10:00:01,000", keyed=False)])
+            u2("no key printed", rerun.Caller(f"{M}::d", [18], 1, "none"), [])
+
+            # U1: one caller is read on its own, more each in a branch
+            r = rerun_([])
+            one = r.callers(rerun.Callers(**{**up.__dict__, "entries": entries[:1]}))
+            got["U1, one"] = [type(one).__name__, one.caller.owner]
+            many = r.callers(up)
+            got["U1, many"] = [type(many).__name__, [str(label) for label in many.labels]]
+            try:
+                r.callers(rerun.Callers(**{**up.__dict__, "entries": ["… 2 more"]}))
+            except rerun.Stop as e:
+                got["U1, none"] = [str(e), e.code]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    m = "pandaserver/m.py"
+    assert got["callers_of"] == [
+        [f"{m}::a", [8], 2, "marks", ["a < PandaID=1 >"], [f"{m}:3"]],
+        [f"{m}::b", [12], 2, "key", [], [f"{m}:3"]],
+        [f"{m}::d", [18], 1, "none", [], []],
+        [f"{m}::a", [22], 2, "marks", ["a < PandaID=1 >"], [f"{m}:3"]],
+    ]
+    asked = [["2026-10-29 09:06:09", "2026-10-29 13:33:46"], ["a < PandaID=1 >"],
+             "from 2026-10-29 09:06:09 to 2026-10-29 13:33:46, for 'a < PandaID=1 >'"]
+    # the call's arm carries what the mover's arms write, and its guard the statement call_statements picks
+    assert got["another way"] == ["blocked", 9, [[8, ["activated"], ["ready"]]]]
+    assert got["another way: asked"] == asked
+    assert got["it called"] == ["stop", "U2: f's pass on the row inside a's call at 8: every pass of a on the row called there, "
+                                "and no pass of f holding the key was found; its run inside the call is not read (KNOWN_ISSUES.md K55)", "K55"]
+    assert got["none, hop 2"] == ["stop", "U2: what made a run on the row: none of its passes from 2026-10-29 09:06:09 to "
+                                  "2026-10-29 13:33:46 took it, and what makes it run on the row -- its own selection, or a "
+                                  "caller past hop 2 of the map's two -- is not read here (KNOWN_ISSUES.md K55)", "K55"]
+    assert got["none, hop 1"] == ["callers", f"{m}::d", [f"{m}:15"], f"{m}::d", ["2026-10-29 09:06:09", "2026-10-29 13:33:46"]]
+    assert got["none, hop 1, gone up"][0] == "stop" and "past hop 1" in got["none, hop 1, gone up"][1]
+    assert got["none, by the key alone"] == [
+        "stop", "U2: a pass of b on the row from 2026-10-29 09:06:09 to 2026-10-29 13:33:46: none found, and not ruled out: "
+        "prints: asked by the key alone, a pass of it printing no line with the key is not found (KNOWN_ISSUES.md K55)", "K55"]
+    assert got["none, by the key alone: asked"][1:] == [[], "from 2026-10-29 09:06:09 to 2026-10-29 13:33:46, for the key alone (its mark holds none)"]
+    assert got["no key printed"] == ["stop", "U2: a run of d (calling at [18]) printing the key: no mark of it holds the key and "
+                                     "no row of it prints a key column (KNOWN_ISSUES.md K55)", "K55"]
+    assert got["no key printed: asked"] == []
+    assert got["U1, one"] == ["CallerPasses", f"{m}::a"]
+    assert got["U1, many"] == ["Fork", ["the caller a at [8]", "the caller b at [12]", "the caller d at [18]", "the caller a at [22]"]]
+    assert got["U1, none"] == ["U1: a caller of f that called_from lists (KNOWN_ISSUES.md K55)", "K55"]
 
 def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):
     out = _ok(

@@ -1286,16 +1286,52 @@ the passes that end before the second the statuslog shows it moving on, and S3 w
   a pass of it that prints no line with the key is not found, so finding none rules nothing out.
 - The second is the statuslog's, the database's clock, against the log's: a pass of the same second as the move is
   read as the move's.
-- With no pass before it, where every line of its runs holds the key and the window was searched whole in every log
-  of it, the mover moved the value on its first pass of the key in the window, and the delay is in what calls it on
-  the row: not followed (the callers' runs, by their keys).  Elsewhere none found is said, with why it may still have
-  run.
+- With no pass before it, the delay is in what calls it on the row: U1 reads its callers' passes before the move
+  (K55), whether or not every line of its runs holds the key -- a caller's pass that called it there finds a pass of
+  it its own mark did not.  Where the map lists no caller of it, or the window is not known (the door over files),
+  none found is said: "none from" where every line of its runs holds the key and the window was searched whole in
+  every log of it, else with why it may still have run.
 - The other writers L2 lists get judgement 3 (K15); one that ran in the window and did not move it is said, not read.
 
-*Shows:* "STOP S2: a pass of <func> before the one that moved it on at <t>: none from <since>, asked <how> -- the
-delay is in what calls <func> on the row, not followed here", or "...: none found from <since>, asked <how>, and not
-ruled out: <why>", code K45; else S2's and S3's lines over the passes.
-*Revisit:* when the callers' runs are followed by their keys (the map's upward reach and its run marks).
+*Shows:* "no pass of <func> took the row from <since> to <t>: its callers' passes there are read", then U1 and U2
+(K55); with no caller listed, "STOP S2: a pass of <func> before the one that moved it on at <t>: none from <since>,
+asked <how> -- the delay is in what calls <func> on the row, not followed here", or "...: none found from <since>,
+asked <how>, and not ruled out: <why>", code K45; else S2's and S3's lines over the passes.
+*Revisit:* with K55.
+
+### K55. A mover that did not take the row is read up its callers, two hops, by their runs of the key
+
+Where no pass of a mover took the row in the window -- a late mover's passes before the move (K45), a mover's passes
+in a stuck value's window (S2), or a statement of a late mover's own that took the row only at the move (L2's
+judgement 1) -- what kept it off the row is in what calls it on the row.  U1 reads the callers the map's
+`called_from` lists for it, each on its own (a fork, as S1's movers), and U2 one caller's passes on the row in the
+window, as S2 reads a mover's, its calls into the mover the arms.
+
+- The caller of an entry (`outer -> inner`, the inner the call into the mover) is, of its two hops inner first, the
+  first whose run marks hold the key (`key_marks`), else the first a row of which prints a key column (asked by the
+  key alone, as K45's mover whose mark holds none), else the innermost that prints, which stops: its runs print no
+  key.  A facade (TaskBuffer's, JediTaskBuffer's) prints nothing, and a plugin's dispatch (doPostProcess,
+  doRefine) marks no key; the caller behind it is the one a run shows.  Their own way to the inner call is not read:
+  on pin m the 11 such calls of the 19 movers first read have no guard.
+- Every pass of the caller on the row took another way: S3 reads the guard of its call, the statement the map's
+  `call_statements` picks for the hop (two on the line with different guards are not read), with the pass's values.
+- A caller with no entry row is read on its runs whole, as S2 reads a mover's (K47): ContentsFeeder's
+  feed_contents_to_tasks prints under one mark of the task on a machine for hours (1621 records, 08:26 to 03:34 the
+  next day), and U2 judges that as one pass.  Where such passes differ, U2 stops on which way one went; were they to
+  agree, S3 would read several calls as one.
+- A pass of it called the mover there, and no pass of the mover holding the key was found: the mover's run inside the
+  call is not read (a mark holding no key: setCloudToTasks_JEDI's, doBasicPostProcess's), and it stops.
+- No pass of it on the row: it did not run on the row only where the window was searched whole, every log of it was
+  asked and every line of its runs holds the key (its marks do; one asked by the key alone rules nothing out).  Then
+  U1 goes up once, from a caller at hop 1 to its callers at hop 2 the same entries list; past the two hops, or for one
+  at hop 2, what makes it run on the row -- its own selection (a poller's SELECT, a message), or a caller further up
+  -- is not read.
+
+*Shows:* "U1 what called the mover on the row" with each caller, its hop and how it is asked; "U2 which way the
+caller's passes went on the row", then S2's lines over its passes and S3's over its call's guard; or "STOP U1/U2:
+..." with code K55.
+*Revisit:* when the map lists more than two hops, or a facade's guard is read; when a mover's run inside its caller's
+call is read by the caller's pass span (its mark's own strings, no key).
 
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
