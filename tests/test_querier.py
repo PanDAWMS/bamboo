@@ -923,6 +923,60 @@ def test_the_record_door_asks_a_mark_that_does_not_hold_the_key_only_of_a_key_re
     assert all(a["window"] == ["2026-09-28 08:21:12", "2026-09-28 08:41:13"] for a, _ in round1)
 
 
+def test_a_bare_mark_holding_a_blank_is_cut_by_the_maps_marks_of_its_log(tmp_path):
+    # LogWrapper(_logger, f"update_job PandaID={job_id} PID={os.getpid()}") (pilot_api.py:513): PREFIX alone reads the
+    # mark "update_job", every pilot's call, and the door asks it over the window (K59)
+    local = tmp_path / "panda-x.log"
+    local.write_text(
+        "2026-09-28 08:31:12,000 panda.log.X: DEBUG     #ATM #KV doForPreStaging label=user action=throttle jediTaskID=5\n"
+        "2026-09-28 08:31:13,000 panda.log.X: DEBUG    get_file a b\n"
+    )
+    (tmp_path / "panda-y.log").write_text("2026-09-28 08:31:12,000 panda.log.Y: DEBUG    update_job PandaID=12345 PID=777 Start\n")
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent(f"""
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+            from bamboo.querier.records import read_log
+
+            W = ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            call = [{{**line(t, f"PandaID=12345 PID=777 {{msg}}", "update_job"), "offset": i}}
+                    for i, (t, msg) in enumerate([("08:31:12", "Start"), ("08:31:12", "executing"), ("08:31:13", "Done.")])]
+            key_rec = record(Ask("panda-x.log", ("12345",), W), {{M1: answered({{**TODAY, "records": call}})}})
+            _, bare = ask_of([key_rec], "panda-x.log", "12345", W)
+
+            def run(line, builder, mark, logs=("panda-x.log",)):
+                return N(owner=f"p/x.py::f{{line}}", runs=[N(line=line, builder=builder, mark=mark)],
+                         statements=[N(log_files_basis="logger", runs=[line], handed_runs=[], log_files=list(logs))])
+
+            mapdump._FRAGMENT[:] = [N(function_prints=[
+                run(513, "LogWrapper", "update_job PandaID={{}} PID={{}}"),
+                # MsgWrapper's token as handed, a blank first
+                run(135, "MsgWrapper", " #ATM #KV doForPreStaging label=user"),
+                # a mark with no literal would cut any two words; a tagged logger's PREFIX reads whole
+                run(507, "LogWrapper", "{{}} {{}}"),
+                run(42, "create_tagged_logger", "get_file {{}}"),
+            ])]
+            log, cut = ask_of([key_rec], "panda-x.log", "12345", W)
+            print(json.dumps([bare, cut, [(r.token, [x.message for x in r.records]) for r in runs_for(log, "12345")],
+                              [(r.token, r.message) for r in read_log({str(local)!r}).records],
+                              [r.token for r in read_log({str(tmp_path / "panda-y.log")!r}).records]]))
+            """),
+        )
+    )
+    bare, cut, runs, local_records, other_log = json.loads(out)
+    # the first word: a mark not holding the key, asked over the window
+    assert [(a["strings"], why) for a, why in bare] == [(["update_job"], "the records of the key's runs whose mark does not hold the key")]
+    # the map's mark: the call is its own run, the key in its mark, and nothing more is asked
+    assert cut == []
+    assert runs == [["update_job PandaID=12345 PID=777", ["Start", "executing", "Done."]]]
+    assert local_records == [["#ATM #KV doForPreStaging label=user", "action=throttle jediTaskID=5"], ["get_file", "a b"]]
+    # a mark is read only in the files its run prints into
+    assert other_log == ["update_job"]
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(

@@ -101,7 +101,9 @@ from bamboo.querier.records import (
     Record,
     Unrecorded,
     Window,
+    cut_mark,
     keyed,
+    log_name,
 )
 
 EDGE = datetime.timedelta(minutes=10)
@@ -461,7 +463,8 @@ def _record(machine: str, file: str, r: dict) -> Record:
     head, *rest = r["lines"]
     m = PREFIX.match(head) if STAMP.match(head) else None
     if m:
-        rec = Record(file, 0, m["stamp"], m["logger"], m["level"], m["token"], m["message"], list(rest))
+        token, message = cut_mark(log_name(file), m["token"], m["message"])
+        rec = Record(file, 0, m["stamp"], m["logger"], m["level"], token, message, list(rest))
     else:
         rec = Record(file, 0, head[:23], "", "", "", head[24:], list(rest))
     rec.machine, rec.offset, rec.cut = machine, r["offset"], bool(r.get("cut"))

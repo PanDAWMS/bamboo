@@ -1416,6 +1416,41 @@ counts.  On today's map the rule would cut the tie of the other 190, of which 4 
 *Revisit:* when a case shows another object's run at the window; the map would then be asked to name, for every row
 of an arm's function, which holes hold the written row's key.
 
+### K59. A bare mark with a blank is cut by the map's marks of its log, not at its first word
+
+`records.PREFIX` takes the first word for the mark where no bracket ends it.  A LogWrapper prefix or a MsgWrapper
+token holding a blank was read short:
+- `update_job PandaID={job_id} PID={os.getpid()}` (pilot_api.py:513) was the mark `update_job`: every pilot's call,
+  with the key in the message.  U2's mark round (`recorded._read`) asked `update_job` on api_pilot.log over U2's
+  window, 5.6 h on two machines each, in MJ-merging-stuck and MJ-transferring-stuck (the harness's round 21 re-run).
+  The key's own ask had returned the call whole (Start, executing, Done).
+- AtlasAnalWatchDog's ` #ATM #KV doForPreStaging label=user` was `#ATM`, every ATM action's lines (MT-throttled-late,
+  7 asks).
+The map holds 86 LogWrapper and 16 MsgWrapper runs whose mark has a blank and no bracket.
+
+Now `records.cut_mark` cuts a line again by the map's marks of the runs printing into its log: the marks of the runs a
+statement prints through, its own and those handed to it, under the files the map follows its logger to (basis
+`logger`), of the builders that write the mark bare (LogWrapper, MsgWrapper).  Where one starts the line and goes past
+PREFIX's cut, ending at a blank, it is the mark; the longest wins.  Both readers of a line (`read_log`,
+`recorded._record`) call it.
+- update_job's run is one call, the key in its mark, so the mark round does not ask it.
+- `#ATM`'s is `#ATM #KV doForPreStaging label=user`.  It is still a shared mark, which the mark round asks (below).
+- A hole is one word.  A value holding a blank leaves the line as PREFIX cut it.
+- A mark with no literal (`{}`, `{} {}`: 283 (mark, log) pairs in the map, the time stamps' empty marks among them)
+  is not read: it would cut any word.  make_logger's and create_tagged_logger's marks are bracketed, and PREFIX reads them.
+
+Left:
+- A line with no mark at all keeps its first word as the mark: a bare getLogger's `Sent Watcher {id}` in
+  copyArchive.log (MJ-sent-late), base_module's `rollback EC:...` in DBProxy.log (MJE-7394762518, MJE-7397173613).
+  The map's marks cannot tell such a word from the value of a mark that is a hole alone (DBProxy.log has `{}`).  The
+  row that printed the line can.
+- The mark round asks a mark the calls share over the whole window: a JEDI worker's `process <host_pid-thread>`
+  (MT-scouting-stuck, 5.3 h), `getTasksToExecCommand_JEDI < vo=None label=None >` (MT-passed-late's L2), and
+  `#ATM #KV doForPreStaging label=user`.
+
+*Shows:* nothing of its own: the run under the whole mark (`token=update_job PandaID=... PID=...`).
+*Revisit:* with the two left above; when the map says how each builder prints its mark.
+
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
