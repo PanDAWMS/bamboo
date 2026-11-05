@@ -166,7 +166,6 @@ class _Later:
         )
         self._changes: dict[tuple[str, str, str, str], "Change"] = {}
         self._replaced: dict = {}
-        self._writers: dict[tuple[str, str], set[str]] = {}
         self._helds: dict[tuple[str, frozenset[str]], tuple[set[str], bool]] = {}
         self._names = objects._function_names(self.rows)
         #: :func:`objects.may_change`'s memo of what it reads of the whole record.
@@ -679,10 +678,8 @@ class _Later:
         lowered = column.lower()
         if write.whole:
             return None
-        if cls:
-            table = write.table.rpartition(".")[2].lower()
-            if table in self.tables and self.tables[table] not in (None, cls):
-                return None
+        if objects.other_class(write, cls, self.tables):
+            return None
         if held is not None and not any(
             key.path
             and any(objects._under(path, key.path) is not None for path in held)
@@ -713,20 +710,8 @@ class _Later:
         name = objects._called_name(callee)
         if name is None:
             return REWRITE_UNPLACED
-        key = (column, cls)
-        if key not in self._writers:
-            self._writers[key] = objects._writers_up(
-                self.rows, column, partial(self._other_class, cls)
-            )
-        return (
-            REWRITE_UNPLACED
-            if self._names.get(name, set()) & self._writers[key]
-            else ""
-        )
-
-    def _other_class(self, cls: str, write: DbWrite) -> bool:
-        table = write.table.rpartition(".")[2].lower()
-        return table in self.tables and self.tables[table] not in (None, cls)
+        up = objects.writers_of(self.rows, column, cls, self.tables, self._record)
+        return REWRITE_UNPLACED if self._names.get(name, set()) & up else ""
 
     # -- values ------------------------------------------------------------------------------------------------------
 

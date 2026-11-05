@@ -295,9 +295,13 @@ def _line(text: str, marker: str) -> int:
 
 
 def _build(
-    tmp_path: Path, arms: list[tuple[str, str, str, str]], **files: str
+    tmp_path: Path,
+    arms: list[tuple[str, str, str, str]],
+    entities: list[EntityNode] | None = None,
+    **files: str,
 ) -> MapFragment:
-    """Read *files* as the build does, with one junction per (file, owner, marker, subject) of *arms*."""
+    """Read *files* as the build does, with one junction per (file, owner, marker, subject) of *arms*, and the
+    tables *entities* (:data:`ENTITIES` where none) hold."""
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -358,7 +362,9 @@ def _build(
         fragment = MapFragment(
             map_id="m",
             derived_from="v",
-            entities=[one.model_copy() for one in ENTITIES],
+            entities=[
+                one.model_copy() for one in (ENTITIES if entities is None else entities)
+            ],
             junctions=junctions,
             function_prints=nodes,
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
@@ -2577,3 +2583,66 @@ def test_a_call_handed_a_list_the_arm_s_object_is_put_in_is_read_for_later_write
     (c4,) = [one for one in _said(branch, "jobStatus") if one[2] == line("C4")]
     assert c4[:2] == (0, "call")
     assert ("Proxy.archiveJob", line("S3"), "row", ["failed"], True) in c4[3]
+
+
+LOGGED = """\
+from pkg.spec import JobSpec
+
+
+class Log:
+    def record(self, job: JobSpec):
+        var_map = {}
+        var_map[":PandaID"] = job.PandaID
+        var_map[":jobStatus"] = job.jobStatus
+        self.cur.execute(
+            "UPDATE ATLAS_PANDA.jobs_StatusLog SET jobStatus=:jobStatus WHERE PandaID=:PandaID",
+            var_map,
+        )
+
+
+class Closer:
+    def close(self, job: JobSpec):
+        job.jobStatus = "closed"  # A1
+        var_map = {}
+        var_map[":PandaID"] = job.PandaID
+        self.cur.execute(  # L1
+            "UPDATE ATLAS_PANDA.jobs_StatusLog SET jobStatus='logged' WHERE PandaID=:PandaID",
+            var_map,
+        )
+        var_map[":jobStatus"] = "closing"
+        self.cur.execute(  # W1
+            "UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID",
+            var_map,
+        )
+"""
+
+#: :data:`ENTITIES`, and a table the build learned no class for: a log's.
+LOG_ENTITIES = [
+    *ENTITIES,
+    EntityNode(
+        name="jobs_statuslog", map_id="m", derived_from="v", tables=["jobs_StatusLog"]
+    ),
+]
+
+
+def test_a_write_of_a_table_with_no_class_is_not_a_later_write_on_the_object_s_row(
+    tmp_path: Path,
+) -> None:
+    from bamboo.codemap import objects
+
+    arms = [("logged", "Closer.close", "A1", "JobSpec.jobStatus")]
+    fragment = _build(
+        tmp_path, arms, entities=LOG_ENTITIES, spec=REWRITE_SPEC, logged=LOGGED
+    )
+    line = lambda marker: _line(LOGGED, marker)  # noqa: E731
+    # The job's table, by the job's key, is written later; the log's, by the same key, is not the job's row.
+    assert _said(_branch(fragment, "A1"), "jobStatus") == [
+        (0, "row", line("W1"), [("Closer.close", line("W1"), "row", ["closing"], True)])
+    ]
+    # Nor is a function writing only the log a writer of the job's column, for a call the record cannot place.
+    rows = {row.owner: row for row in fragment.reach_graph}
+    writers = objects.writers_of(
+        rows, "jobStatus", "JobSpec", objects.table_classes(fragment.entities)
+    )
+    assert "pkg/logged.py::Closer.close" in writers
+    assert "pkg/logged.py::Log.record" not in writers

@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import NamedTuple, Optional, Sequence
 
 from bamboo.codemap.models import (
@@ -755,16 +755,9 @@ def may_change(
     *memo* is a caller's, kept across its asks of one *rows* and one
     *table_classes*: what the answer reads of the whole record -- the
     functions by name, and the writers of the column for the class
-    (:func:`_writers_up`) -- is read once.
+    (:func:`writers_of`) -- is read once.
     """
     lowered = column.lower()
-
-    def other_class(write: DbWrite) -> bool:
-        if not spec_class or table_classes is None:
-            return False
-        table = write.table.rpartition(".")[2].lower()
-        return table in table_classes and table_classes[table] != spec_class
-
     obj = follow(rows, owner, path)
     closure = _closure(rows, owner)
     order = _Order(rows, closure)
@@ -799,7 +792,7 @@ def may_change(
     for at, paths in obj.held.items():
         row = rows.get(at)
         for write in row.writes if row is not None else []:
-            if other_class(write):
+            if other_class(write, spec_class, table_classes):
                 continue
             held = set(paths)
             attributes = {f"{one}.{column}" for one in held}
@@ -866,7 +859,7 @@ def may_change(
             if (
                 write.new_row
                 or (write.whole and _holds(own, write.whole))
-                or other_class(write)
+                or other_class(write, spec_class, table_classes)
             ):
                 continue
             named = [
@@ -962,11 +955,9 @@ def may_change(
                 opened[Site(at, site_line, UNREAD_KEY.format(column=column))] = None
     # Calls of the closure the record could not place: by name, a writer of the column or not.
     memo = {} if memo is None else memo
-    if ("up", column, spec_class) not in memo:
-        memo[("up", column, spec_class)] = _writers_up(rows, column, other_class)
+    up = writers_of(rows, column, spec_class, table_classes, memo)
     if ("names",) not in memo:
         memo[("names",)] = _function_names(rows)
-    up = memo[("up", column, spec_class)]
     names = memo[("names",)]
     for at in closure:
         for hole in rows[at].holes:
@@ -1594,4 +1585,39 @@ def table_classes(entities: list[EntityNode]) -> dict[str, Optional[str]]:
     for entity in entities:
         for spelled in {entity.name.rsplit(":", 1)[-1], *entity.tables}:
             found[spelled.rsplit(".", 1)[-1].lower()] = entity.spec_class
+    return found
+
+
+def other_class(
+    write: DbWrite,
+    spec_class: str,
+    table_classes: Optional[dict[str, Optional[str]]],
+) -> bool:
+    """Whether *write* is of a table that does not hold *spec_class* (:func:`table_classes`): one the build learned
+    another class for, or none -- a log's, as ``jobs_StatusLog``.  A table the build does not know is kept, and so is
+    every table where no class is asked."""
+    if not spec_class or table_classes is None:
+        return False
+    table = write.table.rpartition(".")[2].lower()
+    return table in table_classes and table_classes[table] != spec_class
+
+
+def writers_of(
+    rows: dict[str, ReachNode],
+    column: str,
+    spec_class: str = "",
+    table_classes: Optional[dict[str, Optional[str]]] = None,
+    memo: Optional[dict] = None,
+) -> set[str]:
+    """The functions that can write *column* on a row of *spec_class* (:func:`_writers_up`, its tables by
+    :func:`other_class`), kept in *memo*: :func:`may_change`'s, for one *rows* and one *table_classes*."""
+    memo = {} if memo is None else memo
+    key = ("up", column, spec_class)
+    if key not in memo:
+        memo[key] = _writers_up(
+            rows,
+            column,
+            partial(other_class, spec_class=spec_class, table_classes=table_classes),
+        )
+    found: set[str] = memo[key]
     return found
