@@ -113,13 +113,14 @@ window) -- and of the harness's round 20 most were AtlasProdWatchDog's stamps an
 after MT-staged-late's window (out/l2bk/mark_round_windows.py).  None was a run that named the key before the window's
 slack and went on into it.
 *Shows:* such a run -- one that names the key at its start, more than `EDGE` before the window, and writes the row
-inside it -- is not asked: the window holds its key-less lines only, and they are read as no run of the key.  A mark
-not asked is not read as cut either (`Log.partial`): its run is the key's records alone, and with no entry row among
-them a candidate's pass spans from a key record before the window to one after it.  In m-cut2's MT-defined-late,
-reactivatePendingTasks_JEDI:4704 was kept at 12:30:50 on its records at 11:29, 13:06 and 13:17, where the whole mark
-showed none of its 133 passes there.  That arm is no candidate: its UPDATE requires status 'pending' (the map's
-`row_precondition`), and the row before held 'defined'.  H2 does not read the precondition; S1 and L2 do (`arms_of`).
-No other candidate in the six sets was read so.
+inside it -- is not asked: the window holds its key-less lines only, and they are read as no run of the key.  Such a
+mark's run is the key's records alone; since 2026-11-05 it is read as cut, as a run is judged whole by what was searched
+for the strings that return its records (`Log.whole` takes the mark), and nothing searched for the mark's.  Before, it
+was judged by what was searched for any string, and with no entry row among its records a candidate's pass spanned from
+a key record before the window to one after it: in m-cut2's MT-defined-late, reactivatePendingTasks_JEDI:4704 was kept
+at 12:30:50 on its records at 11:29, 13:06 and 13:17, where the whole mark showed none of its 133 passes there.  That
+arm is no candidate: its UPDATE requires status 'pending' (the map's `row_precondition`), and the row before held
+'defined'.  H2 does not read the precondition; S1 and L2 do (`arms_of`).
 *Revisit:* measure, per log, how long a mark's run goes on past its last record of the key; the functions whose pass
 prints the key that far before its write are the map's to name (below).
 For S1 (and S2 after it) the round is narrower (`recorded._partial`, 2026-10-26): S1 names the functions whose runs it
@@ -136,9 +137,13 @@ listed, and a second of them stopped the recorder's paging.  A run of such a mar
 WARNING, and rule 8 and E6 read such a row as not searched (`Run.holds`; said on the run's line).  A message the
 shapes read as a leading hole (an f-string's expression, a conditional) leaves the mark asked whole: insertNewJob's
 rows start with `job.PandaID`.  A narrowed ask is not read from a record of the whole mark cut at 1 MB over its window
-(`recorded._cut_over`): it is asked anew, so the next round reads what the cut left unread -- where the record says what
-was read for each cut string (fieldtest ca43fb9's `read`), only if a string the ask needs is cut, and an ask that
-drops the string that filled the stopped second is read from it whole (`recorded._read_for`).  H2 and F1 name their
+(`recorded._settled`): its strings hold the cut one and more, read fewer lines a second, and may pass where it stopped,
+so it is asked anew -- where the record says what was read for each cut string (fieldtest ca43fb9's `read`), only if a
+string the ask needs is cut, and an ask that drops the string that filled the stopped second is read from it whole
+(`recorded._read_for`).  An ask of the cut string itself is not asked inside its record's window +- `EDGE` (2026-11-05):
+the recording step reads a cut string on from where it stopped there (`--again`), or cannot -- MT-ready-stuck's and
+Tr's getTasksToBeProcessed_JEDI marks, cut at the second of their own call in a rotated file, 10 asks the harness found
+no round could fill (to-querier-120) -- and the part left is a hole of the mark's run.  H2 and F1 name their
 candidates to the door as S1 does (2026-11-02): they judge a candidate on its passes alone, and a run whose mark names
 another method is none of them (`which_ran.passes_at`, `of_mover`, K47), so a mark of a method that is no candidate is
 not asked.  Before, they asked every mark whole, for a writer handed its caller's logger, whose rows under the caller's
@@ -157,7 +162,10 @@ moment was answered from the record of the round before's widened ask (`_within`
 periodic method's mark (`rescueUnLockedTasksWithPicked_JEDI < vo=atlas label=user >`, a pass every few minutes) is one
 run as far as any record reaches, so each round asked it EDGE further back: MR-T-53351604-rescueTime's 081 went 13:09:14,
 12:59:13, 12:49:12, 12:39:11 in rounds 5-18, and round 6 took three machines to their files' starts (the harness's
-round 18).  A run reaching past the window's own search is read as cut there.  Since 2026-11-04 only a run whose mark
+round 18).  A run reaching past the window's own search is read as cut there.  So is one reaching past the search of
+an ask answered from other asks' records (`recorded._held`, 2026-11-05): those records are not the window's own -- a
+widened ask's record among them would widen again each round -- while a new ask's record would be, and widen once.
+The answer needs every second of the ask's window searched, not EDGE past it.  Since 2026-11-04 only a run whose mark
 holds the key is widened.  A mark that does not hold the key is shared: a periodic method's, the setupper's stamp,
 or the first word of a line with no mark, which the records read as its mark (ContentsFeeder's "failed to get taskSpec
 for jediTaskID=..." -> `failed`).  Its run is read as cut at that end, and the log's notes say how many.  The pass that
@@ -165,7 +173,9 @@ decides sits within a second of its row: MT-toretry-late's 19:19:29.607 to .611,
 13:09:14.128 (the harness), and superStatus's hour of prepareTasksToBeFinished_JEDI decided nothing.
 *Revisit:* a function whose pass prints the key only farther before its write than EDGE.  Its window then holds only
 key-less lines of the run, and widening is what ties the run to the key.  The map is to say which functions do this,
-from their prints and the write (asked by the harness, 2026-11-04); the door does not read it yet.
+from their prints and the write (asked by the harness, 2026-11-04); the door does not read it yet.  And a run near an
+end of what other asks' records searched, read as cut where a new ask's record would have widened past it: count them
+on the measured sets before deciding whether such an answer should widen from the files meeting the window alone.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 
@@ -176,7 +186,8 @@ that string's records were never fetched (and the cut record's second).  On pin 
 MR-T-53354737-queuedTime reads aipanda081's panda-JediDBProxy.log-20261029.gz as searched at 10-29 07:43:04, though
 `getTasksToRefine_JEDI < vo=None label=managed >` was cut at 10-28 07:52:08.  A record saying where every string was
 read (`searched`) is read only there, and a later round writes such records again with `replaces` (tmaeno: "OK", 10-30
-20:5x).
+20:5x).  Such a record answers no ask but one of its own strings from 2026-11-05 (`recorded._settled`): another ask is
+asked anew rather than read past the cut.
 *Shows:* silent: the "not searched" lines of H2 and S2 leave the machine out, and a log read as searched whole with no
 run of the key there reads as no writer's pass.
 *Revisit:* when the harness's round rewrites every truncated entry with `searched`; the records snapshots taken

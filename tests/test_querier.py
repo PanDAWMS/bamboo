@@ -940,16 +940,18 @@ def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path)
             log, at_m1 = ask_of(wider, "panda-x.log", "ds_sub1", AT, M1)
             run, = runs_for(log, "ds_sub1")
             nowhere, at_m3 = ask_of(wider, "panda-x.log", "ds_sub1", AT, M3)
-            _, past = ask_of(wider, "panda-x.log", "ds_sub1", ("2026-09-28 08:31:12", "2026-09-28 08:41:14"), M1)
+            past_log, past = ask_of(wider, "panda-x.log", "ds_sub1", ("2026-09-28 08:31:12", "2026-09-28 08:41:14"), M1)
+            _, beyond = ask_of(wider, "panda-x.log", "ds_sub1", ("2026-09-29 06:45:00", "2026-09-29 07:00:00"), M1)
             _, other = ask_of(wider, "panda-x.log", "ds_sub2", AT, M1)
             own = record(Ask("panda-x.log", ("ds_sub1",), AT, M1), {M1: answered({**TODAY, "records": []})})
             mine, _ = ask_of(wider + [own], "panda-x.log", "ds_sub1", AT, M1)
-            print(json.dumps([at_m1, [r.span for r in run.records], log.holes, log.notes, at_m3, nowhere.records,
-                              nowhere.notes, past, other, mine.records, mine.notes]))
+            print(json.dumps([at_m1, [r.span for r in run.records], log.holes, log.notes, at_m3, [r.span for r in nowhere.records],
+                              nowhere.notes, past, past_log.holes, past_log.notes, beyond, other, mine.records, mine.notes]))
             """),
         )
     )
-    at_m1, spans, holes, notes, at_m3, nowhere, nowhere_notes, past, other, mine, mine_notes = json.loads(out)
+    (at_m1, spans, holes, notes, at_m3, nowhere, nowhere_notes, past, past_holes, past_notes, beyond, other, mine,
+     mine_notes) = json.loads(out)
     # an ask inside a recorded window, on a machine the every-machine record answered: that machine's part of it, and
     # the mark's ask from the mark's record on the machine -- each said
     assert at_m1 == []
@@ -960,11 +962,17 @@ def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path)
         "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, every machine, round 1)",
         "answered from the record of a wider ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, aipanda093.cern.ch, round 1)",
     ]
-    # a machine the every-machine record does not name holds no file of the log
-    assert at_m3 == [] and nowhere == []
-    assert "['aipanda095.cern.ch'] hold(s) no file of it" in nowhere_notes
-    # a window past the recorded one, or other strings: not answered
-    assert past[0][0]["window"] == ["2026-09-28 08:31:12", "2026-09-28 08:41:14"]
+    # a machine the every-machine record does not name is not in list_logs: the run is looked for on every machine, as
+    # where a record of the machine says so -- H6's row host need not hold the log its run wrote
+    assert at_m3 == [] and nowhere == spans
+    assert "aipanda095.cern.ch is not in list_logs, so every machine was asked" in nowhere_notes
+    # a window past the recorded one, inside the file the record read whole: answered, and said so -- the recording step
+    # reads a rotated file whole whatever window asked (the harness's Ja, 2026-11-04); past every file it read, or other
+    # strings: not answered
+    assert past == [] and past_holes == []
+    assert past_notes[0] == ("answered from the record of another ask (2026-09-28 08:21:12 .. 2026-09-28 08:41:13, every "
+                             "machine, round 1)")
+    assert beyond[0][0]["window"] == ["2026-09-29 06:45:00", "2026-09-29 07:00:00"]
     assert other[0][0]["strings"] == ["ds_sub2"]
     # an ask's own record comes first
     assert mine == [] and mine_notes == []
@@ -980,19 +988,24 @@ def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines
             A, B = "insertNewJob < <JediTaskID=111 idPool=3 >", "insertNewJob < <JediTaskID=222 idPool=1 >"
             TOK = "getJobs < SITE 2026-09-28T08:31:00.000000 >"
             hit = {**line("08:31:12", "12345 -> defined", A), "offset": 150}
-            # an earlier round asked the bare method (its mark read so): every insertNewJob line, cut at 1 MB at 08:31:20
-            wide = record(Ask("panda-x.log", ("insertNewJob", TOK), W, M1), {M1: answered({**TODAY, "truncated": True, "records": [
-                {**line("08:31:11", "start", A), "offset": 100}, hit, {**line("08:31:13", "start", B), "offset": 200},
-                {**line("08:31:14", "got 3", TOK), "offset": 300}, {**line("08:31:20", "end", B), "offset": 400},
-                {"offset": 500, "head": False, "cut": False, "lines": [f"  {A} in a traceback"]}]})})
+            # an earlier round asked the bare method (its mark read so): every insertNewJob line, cut at 1 MB at 08:31:20,
+            # its record saying every string was read to there; then the same from before ``searched``
+            records = [{**line("08:31:11", "start", A), "offset": 100}, hit, {**line("08:31:13", "start", B), "offset": 200},
+                       {**line("08:31:14", "got 3", TOK), "offset": 300}, {**line("08:31:20", "end", B), "offset": 400},
+                       {"offset": 500, "head": False, "cut": False, "lines": [f"  {A} in a traceback"]}]
             key_rec = record(Ask("panda-x.log", ("12345",), W), {M1: answered({**TODAY, "records": [hit]})})
-            log, asks = ask_of([key_rec, wide], "panda-x.log", "12345", AT, M1)
-            run, = runs_for(log, "12345")
-            print(json.dumps([asks, [r.span for r in log.records], run.token, log.holes, log.notes]))
+            got = []
+            for more in ({"searched": [["2026-09-28 06:40:00", "2026-09-28 08:31:20"]]}, {}):
+                wide = record(Ask("panda-x.log", ("insertNewJob", TOK), W, M1), {M1: answered(
+                    {**TODAY, "truncated": True, **more, "records": records})})
+                log, asks = ask_of([key_rec, wide], "panda-x.log", "12345", AT, M1)
+                got.append(asks if log is None else [asks, [r.span for r in log.records], runs_for(log, "12345")[0].token,
+                                                     log.holes, log.notes])
+            print(json.dumps(got))
             """),
         )
     )
-    asks, spans, token, holes, notes = json.loads(out)
+    (asks, spans, token, holes, notes), before = json.loads(out)
     # the mark with its tag is asked of no new round: the bare method's record holds every line holding it
     assert asks == []
     assert token == "insertNewJob < <JediTaskID=111 idPool=3 >"
@@ -1006,6 +1019,9 @@ def test_the_record_door_answers_a_narrower_ask_from_a_wider_record_by_the_lines
         "2 string(s), the lines holding the ask's)",
         "1 fragment(s) of records whose head was not returned",
     ]
+    # a cut record that does not say where its strings were read answers no narrower ask: another string's records may
+    # carry past a cut one's last (the recording step's doc, 157 of pin m's 315 cut files)
+    assert [a["strings"] for a, _ in before] == [["insertNewJob < <JediTaskID=111 idPool=3 >"]]
 
 
 def test_a_wider_records_lines_are_kept_for_a_narrower_ask_by_its_strings_as_written(tmp_path):
@@ -1103,17 +1119,21 @@ def test_the_record_door_asks_a_narrower_ask_anew_where_the_wider_record_was_cut
                 cut = record(Ask("panda-x.log", ask, W), {M1: answered({**TODAY, "truncated": True, **more, "records": [
                     {**line("08:31:11", "start", A), "offset": 100}, hit]})})
                 log, asks = ask_of([key_rec, cut], "panda-x.log", "12345", AT, M1)
-                got.append([[a["strings"] for a, _ in asks], log.holes if log else None])
+                got.append([[a["strings"] for a, _ in asks], log.holes if log else None,
+                            [r.describe() for r in runs_for(log, "12345") if r.token == A] if log else None])
             print(json.dumps(got))
             """),
         )
     )
     cut, searched, own = json.loads(out)
     # an ask of the tagged mark reads fewer lines a second than the bare method's cut one: asked anew
-    assert cut == [[["insertNewJob < <JediTaskID=111 idPool=3 >"]], None]
-    # a cut record that read every string through the window answers it, as does an ask's own record, cut or not
-    assert searched == [[], []]
-    assert own[0] == [] and own[1] != []
+    assert cut == [[["insertNewJob < <JediTaskID=111 idPool=3 >"]], None, None]
+    # a cut record that read every string through the window answers it, as does a record of the ask's own strings,
+    # cut or not: what it left is the recording step's to read on (--again)
+    assert searched[:2] == [[], []] and own[:2] == [[], []]
+    # the key's search is whole: the mark's cut file is a hole of the mark's run alone, read as cut where it stops
+    run, = own[2]
+    assert run.endswith("ends at 2026-09-28 08:31:12: the answer of panda-x.log-20260929.gz was cut at 1 MB after its last record)")
 
 
 def test_the_record_door_reads_a_cut_file_for_the_strings_an_ask_needs_where_it_says_what_was_read_for_each(tmp_path):
@@ -1145,9 +1165,77 @@ def test_the_record_door_reads_a_cut_file_for_the_strings_an_ask_needs_where_it_
     other, own, before = json.loads(out)
     # the ask of A's mark alone needs A's lines, read whole: answered from the cut record, with no hole
     assert other == [[], []]
-    # A's own string filled the stopped second: asked anew, as is an ask of a record that does not say
-    assert own == [[["getX < 2026-09-28/08:31:10.1 >"]], None]
-    assert before == own
+    # A's own string was cut: the recording step reads on from where it stopped (--again), inside the record's window +-
+    # EDGE, and an ask of A would stop there too -- not asked, a hole of A's run; the key's search is whole
+    assert own == [[], []]
+    # a record that does not say which string was cut: A's lines were read only where every string was, and an ask of A
+    # alone reads fewer lines a second -- asked anew
+    assert before == [[["getX < 2026-09-28/08:31:10.1 >"]], None]
+
+
+def test_the_record_door_answers_from_other_asks_records_only_what_a_new_ask_would_not_read_further(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W, A = ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), "getX < 2026-09-28/08:31:10.1 >"
+
+            def asked(records, window, machine=None, strings=()):
+                path = Path(f"r{len(list(Path('.').glob('r*.jsonl')))}.jsonl")
+                path.write_text("".join(json.dumps(r) + "\\n" for r in records))
+                try:
+                    RecordedLogs([str(path)]).log("panda-x.log", "12345", window, machine=machine, strings=strings)
+                    return []
+                except Unrecorded as e:
+                    return [[a.canonical()["machine"], a.canonical()["window"]] for a, _ in e.asks]
+
+            got = {}
+            # a record of one machine says nothing of the others; one of every machine names them
+            one = record(Ask("panda-x.log", ("12345",), W, M1), {M1: answered({**TODAY, "records": []})})
+            every = record(Ask("panda-x.log", ("12345",), W), {M1: answered({**TODAY, "records": []}),
+                                                             M2: answered({**TODAY, "records": []})})
+            AT = ("2026-09-28 09:00:00", "2026-09-28 09:05:00")
+            got["one machine"] = [asked([one], AT), asked([one], AT, M1), asked([every], AT)]
+            # a machine its own records say holds no file of the log holds none, with no record of every machine
+            gone = record(Ask("panda-x.log", ("12345",), W, M2), {M2: {"service": "server", "status": "no such log", "files": []}})
+            got["one machine"].append(asked([gone], AT, M2))
+            # 06:42 lies in today's file's first 10 min, which the older file's margin covers too: a record that does
+            # not list the older file does not answer it; one that read it does
+            EARLY = ("2026-09-28 06:42:00", "2026-09-28 06:43:00")
+            both = record(Ask("panda-x.log", ("12345",), ("2026-09-28 06:45:00", "2026-09-28 06:45:00"), M1),
+                          {M1: answered({**BEFORE, "records": []}, {**TODAY, "records": []})})
+            got["older file"] = [asked([one], EARLY, M1), asked([one, both], EARLY, M1)]
+            # A's own string cut at 08:31:12: inside its record's window +- 10 min the recording step reads on; past it,
+            # a new ask reads on from the stop
+            cut = record(Ask("panda-x.log", (A,), W, M1), {M1: answered({**TODAY, "truncated": True, "read": {
+                A: [["2026-09-28 06:40:00", "2026-09-28 08:31:12"]]}, "records": []})})
+            got["cut"] = [asked([cut], ("2026-09-28 08:31:00", "2026-09-28 08:50:00"), M1, (A,)),
+                          asked([cut], ("2026-09-28 10:00:00", "2026-09-28 10:00:30"), M1, (A,))]
+            # today's file read to when it was asked, and tomorrow's .gz of it another ask read for another string: one
+            # file, read for the key up to then
+            current = record(Ask("panda-x.log", ("12345",), ("2026-09-28 08:50:00", "2026-09-28 08:55:00"), M1), {M1: answered(
+                {**TODAY, "file": "panda-x.log", "covers": ["2026-09-28 06:40:00", "2026-09-28 09:00:00"], "margin_s": 0,
+                 "covers_to": "asked", "records": []})})
+            # (its start read off the file's time, a few seconds apart between rounds)
+            other = record(Ask("panda-x.log", ("PandaID=99",), ("2026-09-29 01:00:00", "2026-09-29 01:00:00"), M1),
+                           {M1: answered({**TODAY, "covers": ["2026-09-28 06:40:03", "2026-09-29 06:50:00"], "records": []})})
+            got["one file"] = [asked([current, other], ("2026-09-28 08:00:00", "2026-09-28 08:30:00"), M1),
+                               asked([current, other], ("2026-09-28 09:30:00", "2026-09-28 09:40:00"), M1)]
+            # one rotated file two rounds listed from starts 3 s apart, one of them reading the key
+            jitter = record(Ask("panda-x.log", ("12345",), ("2026-09-28 09:00:00", "2026-09-28 09:00:00"), M1),
+                            {M1: answered({**TODAY, "records": []})})
+            got["one file"].append(asked([jitter, other], ("2026-09-28 10:00:00", "2026-09-28 10:00:00"), M1))
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out)
+    W_AT = ["2026-09-28 09:00:00", "2026-09-28 09:05:00"]
+    assert got["one machine"] == [[[None, W_AT]], [], [], []]
+    assert got["older file"] == [[["aipanda093.cern.ch", ["2026-09-28 06:42:00", "2026-09-28 06:43:00"]]], []]
+    assert got["cut"] == [[], [["aipanda093.cern.ch", ["2026-09-28 10:00:00", "2026-09-28 10:00:30"]]]]
+    assert got["one file"] == [[], [["aipanda093.cern.ch", ["2026-09-28 09:30:00", "2026-09-28 09:40:00"]]], []]
 
 
 def test_the_record_door_asks_for_s1_the_marks_its_movers_own_and_reads_a_shared_one_as_cut(tmp_path):
