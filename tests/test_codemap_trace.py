@@ -3479,6 +3479,67 @@ def run(self, jediTaskID, log):
     assert step.detail == "getPandaIDsWithTask_JEDI -- reads jobsActive4 by :jediTaskID"
 
 
+@pytest.mark.parametrize(
+    "daemon, line",
+    [
+        (
+            """\
+from pandaserver.taskbuffer.TaskBuffer import taskBuffer
+
+
+def main(jediTaskID, log):
+    pandaIDs = taskBuffer.getPandaIDsWithTask_JEDI(jediTaskID, True)
+    log.info(f"waiting {len(pandaIDs)} jobs for soft finish")
+""",
+            6,
+        ),
+        (
+            """\
+def main(log):
+    from pandaserver.taskbuffer.TaskBuffer import taskBuffer
+
+    class Finisher:
+        def run(self, jediTaskID):
+            pandaIDs = taskBuffer.getPandaIDsWithTask_JEDI(jediTaskID, True)
+            log.info(f"waiting {len(pandaIDs)} jobs for soft finish")
+""",
+            7,
+        ),
+    ],
+    ids=["imported", "imported_by_the_enclosing_function"],
+)
+def test_a_task_buffer_held_by_a_name_is_known_by_its_declared_class(tmp_path, daemon, line):
+    """A daemon's ``taskBuffer`` is the module's ``TaskBuffer`` instance, imported at the top or, in datasetManager's
+    ``FinisherThr.run``, by the function the class is defined in.  The name is not a field the task buffer is held
+    under, and the class it is declared to be says the database's all the same."""
+    roots = _server(
+        tmp_path,
+        **{
+            "taskbuffer/OraDBProxy.py": '''\
+class DBProxy:
+    def getPandaIDsWithTask_JEDI(self, jediTaskID, onlyActive):
+        sql = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        self.cur.execute(sql, varMap)
+        return self.cur.fetchall()
+''',
+            "taskbuffer/DBProxyPool.py": _PROXY_POOL,
+            "taskbuffer/TaskBuffer.py": _forwarding_task_buffer("getPandaIDsWithTask_JEDI", "jediTaskID, onlyActive")
+            + "\n\ntaskBuffer = TaskBuffer()\n",
+            "daemons/finisher.py": daemon,
+        },
+    )
+
+    walked = trace_mod.walk_from_print(
+        roots, file="pandaserver/daemons/finisher.py", line=line, classify=provenance.classify
+    )
+
+    (step,) = [s for s in walked.steps if s.name == "pandaIDs"]
+    assert step.terminal == models.STOP_UPSTREAM
+    assert step.detail == "getPandaIDsWithTask_JEDI -- reads jobsActive4 by :jediTaskID"
+
+
 def test_a_logger_built_by_a_helper_says_its_prefix_through_the_helper(tmp_path):
     """``start`` is printed by hundreds of proxy methods; the prefix
     ``create_tagged_logger`` builds from ``comment`` is what names this one.

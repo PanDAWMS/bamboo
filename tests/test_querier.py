@@ -898,6 +898,31 @@ def test_the_record_door_asks_the_marks_that_do_not_hold_the_key_a_round_later(t
     assert "two.jsonl:2: a second record for the ask" in two
 
 
+def test_the_record_door_asks_a_mark_that_does_not_hold_the_key_only_of_a_key_record_near_the_window(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            W = ("2026-09-28 08:21:12", "2026-09-28 08:41:13")
+            key_ask = Ask("panda-x.log", ("ds_sub1",), W)
+            # the key under five marks: in the window, 8 min past its end, 10 min before its start, 16 min before it,
+            # and 3 h after it -- a rotated file's record holds the key's lines of its whole day
+            hits = [{**line(t, "registered ds_sub1", f"{tok} < x >"), "offset": i} for i, (t, tok) in enumerate(
+                [("08:31:12", "inside"), ("08:49:13", "past"), ("08:11:12", "edge"), ("08:05:00", "before"),
+                 ("11:41:00", "after")])]
+            _, round1 = ask_of([record(key_ask, {M1: answered({**TODAY, "records": hits})})], "panda-x.log", "ds_sub1", W)
+            print(json.dumps(round1))
+            """),
+        )
+    )
+    round1 = json.loads(out)
+    # the marks of the key records within EDGE (10 min) of the window, its ends held; a run that began hours after the
+    # window, or ended before it, is not what it asks about (K13)
+    assert [a["strings"] for a, _ in round1] == [["edge < x >", "inside < x >", "past < x >"]]
+    assert all(a["window"] == ["2026-09-28 08:21:12", "2026-09-28 08:41:13"] for a, _ in round1)
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(
@@ -1303,6 +1328,50 @@ def test_the_record_door_widens_once_past_an_end_and_reads_a_run_still_there_as_
     assert kept_prints is False
     # a machine list_logs does not hold: asked again on every machine
     assert unlisted[0][0]["machine"] is None and "not in list_logs" in unlisted[0][1]
+
+
+def test_the_record_door_widens_a_run_of_the_keys_own_mark_once_and_a_shared_marks_run_never(tmp_path):
+    # a periodic method's mark, a pass every few minutes: its records join into one run as far as any record reaches,
+    # and it was asked 10 min earlier each round (the harness's round 18: rescueUnLockedTasksWithPicked_JEDI's mark);
+    # a mark that does not hold the key is shared, and the pass that decides sits within a second of its row
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            SHARED, OWN = "getX < vo=atlas label=user >", "PandaID=12345"
+            W, WIDER = ("2026-09-28 06:45:00", "2026-09-28 06:45:00"), ("2026-09-28 06:39:59", "2026-09-28 06:45:00")
+            STAMPS = ("06:41:00", "06:42:00", "06:44:00", "06:46:00")
+            shared = [{**line(t, "rescued 12345" if t == "06:42:00" else "rescued 1", SHARED), "offset": i} for i, t in enumerate(STAMPS)]
+            first = record(Ask("panda-x.log", ("12345",), W, M1), {M1: answered({**TODAY, "records": shared[1:2]})})
+            mark = record(Ask("panda-x.log", (SHARED,), W, M1), {M1: answered({**TODAY, "records": shared})})
+            log, never = ask_of([first, mark], "panda-x.log", "12345", W, M1)
+            cut = [runs_for(log, "12345")[0].describe(), log.notes]
+            own = [{**line(t, "rescued", OWN), "offset": i} for i, t in enumerate(STAMPS)]
+            older = [{**line(t, "rescued", OWN), "offset": 100 + i} for i, t in enumerate(("06:30:20", "06:35:00", "06:39:30"))]
+            _, once = ask_of([record(Ask("panda-x.log", ("12345",), W, M1), {M1: answered({**TODAY, "records": own})})],
+                             "panda-x.log", "12345", W, M1)
+            # the widened ask's record alone: the older file cut at 1 MB, read EDGE before the widened window
+            widened = record(Ask("panda-x.log", ("12345",), WIDER, M1), {M1: answered(
+                {**BEFORE, "truncated": True, "searched": [["2026-09-28 06:29:59", "2026-09-28 06:50:00"]], "records": older},
+                {**TODAY, "records": own})})
+            log, again = ask_of([widened], "panda-x.log", "12345", W, M1)
+            run, = runs_for(log, "12345")
+            print(json.dumps([never, cut, once, again, [r.stamp for r in run.records][:2], run.describe()]))
+            """),
+        )
+    )
+    never, (cut, notes), once, again, stamps, described = json.loads(out)
+    # the shared mark's run lies near the file's start: not widened, read as cut there, and said
+    assert never == [] and "read as cut: what was searched on aipanda093 begins at 2026-09-28 06:40:00" in cut
+    assert ("1 run(s) under a mark that does not hold the key lie within 10 min of an end of what was searched: a shared "
+            "mark, not widened, read as cut there") in notes
+    # the key's own mark, the same run: widened past the file's start
+    assert [(a["strings"], a["window"]) for a, _ in once] == [(["12345"], ["2026-09-28 06:39:59", "2026-09-28 06:45:00"])]
+    # the key's ask answered from the widened record alone: the run reaches past what the window's own asks searched,
+    # so it was widened once, and is read as cut at the widened record's start rather than asked again
+    assert again == [] and stamps == ["2026-09-28 06:30:20,000", "2026-09-28 06:35:00,000"]
+    assert "read as cut: what was searched on aipanda093 begins at 2026-09-28 06:29:59" in described
 
 
 def test_the_record_door_widens_a_second_where_the_recording_step_reads_a_cut_string_edge_past_the_window(tmp_path):
@@ -6645,6 +6714,61 @@ def test_a_functions_own_handover_binds_the_callees_parameter_and_not_its_own_na
     assert json.loads(out.splitlines()[-1]) == [2, "'x'", [2]]
 
 
+_CLOSURE = """
+def main():
+    LIMIT = get_config() or 3
+    N = 3
+
+    class Thr:
+        def run(self, x):
+            if x < LIMIT and x < N:
+                return x
+
+    def keeps(x):
+        N = 5
+        return x < N
+
+
+def other(x):
+    return x < LIMIT
+"""
+
+
+def test_a_name_a_nested_function_reads_free_is_bound_by_the_def_around_it(tmp_path):
+    # datasetManager's FinisherThr.run reads main's TRANSFER_TIMEOUT_HI_PRIORITY (84): the map's trace answers it with
+    # main's step, which only run's own steps were taken from before
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_CLOSURE)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import asked as A
+            from bamboo.querier import evaluate as E
+
+            f = "pandaserver/a.py::"
+            step = lambda name, owner, line, value, terminal="", cls="": N(
+                name=name, owner=f + owner, kind="binding", line=line, value=value, guards=[], unseen=[], reads=[],
+                terminal=terminal, detail="", depth=2, cls=cls)
+            steps = A.given([step("x", "run", 7, "1", cls=f + "Thr"),
+                             step("LIMIT", "main", 3, "get_config() or 3", terminal="a configuration value, set outside the code"),
+                             step("N", "main", 4, "3"), step("N", "keeps", 11, "5")])
+            got = {}
+            for name, owner in (("LIMIT", "run"), ("N", "run"), ("N", "keeps"), ("LIMIT", "other")):
+                t = E.taken(steps, name, E.Env(), owner=f + owner)
+                got[f"{name} {owner}"] = [t.step.line if t.step else None, repr(t.value), [s.line for s in t.kept]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # main's binding: a terminal is unknown, a literal its value
+    assert got["LIMIT run"] == [3, "UNKNOWN", [3]] and got["N run"] == [4, "3", [4]]
+    # a def that binds the name itself reads its own; a def that main does not hold reads none of main's
+    assert got["N keeps"] == [11, "5", [11]] and got["LIMIT other"] == [None, "UNKNOWN", []]
+
+
 def test_a_reader_asks_the_questions_it_reads_and_refuses_steps_that_cannot_ask(tmp_path):
     out = _ok(
         _run(
@@ -7029,7 +7153,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 chosen = Verdict(arm.candidate, arm.line, kind)
                 r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
                                                         window=window, unsearched=unsearched or {})
-                rerun.pathcond = N(path_condition=lambda site: guards)
+                rerun.pathcond = N(path_condition=lambda site: guards, ancestors=lambda node: iter(()))
                 try:
                     got = r.asked(rerun.Asked(subject, "A", "7"))
                     said = None if got is None else ["SetBy", got.method]
@@ -7054,9 +7178,14 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 "by elimination, guards read true": asked("JediTaskSpec.rescueTime", ["1 == 1"], None, window=second, kind="kept"),
                 "shown, a guard the run's values hold": asked("JediTaskSpec.rescueTime", ["task.x"], None, window=second, env=held),
                 "not read": asked("JediTaskSpec.transUses", ["1 == 1", "task.x", "1 == 2"], row),
+                "shown, a guard not read": asked("JediTaskSpec.transUses", ["task.y"], row),
+                "shown, one guard read and one not": asked("JediTaskSpec.transUses", ["1 == 1", "task.y"], row),
+                "a stand-in, a guard not read": asked("JediTaskSpec.transUses", ["task.y"], None, call,
+                                                      ("2026-10-29 04:10:00", "2026-10-29 04:10:00")),
                 "through a method": asked("JediTaskSpec.transUses", ["task.useScout()"], row),
                 "a status": asked("JediTaskSpec.status", [], row),
                 "a status, a guard through no method": asked("JediTaskSpec.status", ["task.x < 3"], row),
+                "a status, a stand-in": asked("JediTaskSpec.status", ["task.x < 3"], row, call),
             }))
             """,
         )
@@ -7098,18 +7227,268 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
         "END JediTaskSpec.rescueTime='A' written last by extract:5 (shown in its run; its guards hold in the run's values), "
         "at 2026-10-29 00:49:09: the run"]
     assert (stood["said"], stood["wrote"]["via"], stood["wrote"]["row"]) == (None, {"owner": "pandajedi/o.py::runImpl", "line": 211}, None)
-    # a condition not read, or read false, is named where H3 stops: the values the guard reads, through no method
+    # a condition read false is named where H3 stops, with those not read: the values the guard reads, through no method
     assert got["not read"]["said"] == ["STOP", "H3: the values its guard reads at its run (its conditions: 'task.x' not read, "
                                                "'1 == 2' read false)"]
     assert (got["not read"]["ends"], got["not read"]["wrote"]["line"]) == ([], 5)
+    # an arm its run shows ran ran under its guards: one the values leave unread held (K54)
+    assert got["shown, a guard not read"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; its guards hold as its run shows it ran "
+        "('task.y')), in the pass of the statuslog row 'defined' at 2026-10-29 04:10:00.123456: the run"]
+    assert got["shown, one guard read and one not"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; its guards hold as its run shows it ran "
+        "('task.y'); the others in the run's values), in the pass of the statuslog row 'defined' at 2026-10-29 "
+        "04:10:00.123456: the run"]
+    # ... not a stand-in's, whose run is its caller's
+    assert got["a stand-in, a guard not read"]["said"] == [
+        "STOP", "H3: the values its guard reads at its run (its conditions: 'task.y' not read)"]
     # a guard read through a method goes on to H4 as for a status
     assert got["through a method"]["said"] == ["SetBy", "useScout"]
-    # a status: no wrote; with no guard, what made the arm run is its callers'; a guard through no method is read in
-    # no run's values for a status
+    # a status: no wrote; with no guard, what made the arm run is its callers'; through no method, its guards held, and
+    # what H3 lacks is where the values they held on came from (none printed here); a stand-in's are not read
     assert got["a status"] == {"said": ["STOP", "H3: extract:5 has no guard of its own to read: what made it run is its "
                                                 "callers'"], "ends": [], "wrote": None}
     assert got["a status, a guard through no method"]["said"] == [
+        "STOP", "H3: where the values its guards held on come from, its run showing it ran ('task.x < 3' held)"]
+    assert got["a status, a stand-in"]["said"] == [
         "STOP", "H3: the values its guard reads at its run (its conditions: 'task.x < 3' not read)"]
+
+
+_FINISHER = """
+class Finisher:
+    def __init__(self, jobs, time_out):
+        self.logger = logger
+        self.jobs = jobs
+        self.time_out = time_out
+
+    def run(self):
+        for job in self.jobs:
+            n_tokens = 0
+            for f in job.files:
+                n_tokens += 1
+            n_ok = count(job)
+            self.logger.debug(f"tokens n:{n_tokens} ok:{n_ok}")
+            if n_tokens <= n_ok:
+                self.logger.debug("finish")
+            else:
+                end = job.endTime
+                self.logger.debug(f"end:{str(end)} limit:{str(self.time_out)}")
+                if end < self.time_out:
+                    diag = reason(job)
+                    if diag != "":
+                        job.errorDiag = diag
+                        self.logger.debug(f"kill with {job.errorDiag}")
+                        job.jobStatus = "failed"
+"""
+
+
+def test_a_status_arm_its_run_shows_ran_names_the_values_its_guards_held_on_where_its_run_printed_them(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "v.py").write_text(_FINISHER)
+    lines = _FINISHER.splitlines()
+    site = lines.index('                        job.jobStatus = "failed"') + 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    tokens, end, kill = "tokens n:1 ok:0", "end:2026-01-01 00:00:00 limit:2026-01-02 00:00:00.500000", "kill with no replica"
+    logs = {
+        "killed": [tokens, end, kill],
+        # the printed counts read the first guard false, which the run says held: a misread, or not this pass
+        "contradicted": ["tokens n:0 ok:1", end, kill],
+        # the key's records show the loop's row twice: they are not one pass of the loop, and no row in it is read
+        "twice": [tokens, tokens, end, kill],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/v.py", "run", within=[SITE])
+        site = R.statement_at(fn.node, SITE)
+        guards = pathcond.path_condition(site)
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode = [], "outside"
+        got = {"guards": guards}
+        for name in ("killed", "contradicted", "twice"):
+            run, = runs_for(read_log(f"{name}.log"), "1")
+            held, false = r._held_on(fn, site, guards, run)
+            got[name] = {"held": [T.text(h) for h in held], "false": None if false is None else [false[0], T.text(false[1])]}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("SITE", str(site))))
+    got = json.loads(out.splitlines()[-1])
+    assert got["guards"] == ["not (n_tokens <= n_ok)", "end < self.time_out", "diag != ''"]
+    row = {k: lines.index(next(x for x in lines if f'f"{k}' in x)) + 1 for k in ("tokens", "end", "kill")}
+    bound = lines.index("                        job.errorDiag = diag") + 1
+
+    def at(n: int, k: str) -> str:
+        return f"row run:{row[k]} at killed.log:{n + 1}"
+
+    # each value said where the run printed it: a count before the guard, a time through str(), and diag through the
+    # one assignment after its guard that binds the printed chain to it
+    killed = got["killed"]
+    assert [h.split(" held")[0] for h in killed["held"]] == ["'not (n_tokens <= n_ok)'", "'end < self.time_out'", '"diag != \'\'"']
+    assert killed["held"][0] == f"'not (n_tokens <= n_ok)' held on n_tokens = '1' ({at(0, 'tokens')}), n_ok = '0' ({at(0, 'tokens')})"
+    assert killed["held"][1] == (f"'end < self.time_out' held on end = '2026-01-01 00:00:00' ({at(1, 'end')}), "
+                                 f"self.time_out = '2026-01-02 00:00:00.500000' ({at(1, 'end')})")
+    assert killed["held"][2] == f"\"diag != ''\" held on diag = 'no replica' ({at(2, 'kill')}, as job.errorDiag bound at v.py:{bound})"
+    # two times read back as text are not ordered: no guard is read false
+    assert killed["false"] is None
+    assert got["contradicted"]["false"][0] == "not (n_tokens <= n_ok)"
+    assert got["contradicted"]["false"][1].startswith(" on n_tokens = '0' (row run:")
+    assert got["twice"] == {"held": ["'not (n_tokens <= n_ok)' held", "'end < self.time_out' held", "\"diag != ''\" held"],
+                            "false": None}
+
+
+_NONE_TAKEN = """
+class Mover:
+    def __init__(self):
+        self.logger = logger
+
+    def run(self, job):
+        self.logger.debug(f"flag={job.flag}")
+        if job.flag:
+            self.logger.debug("flagged")
+            job.jobStatus = "failed"
+        self.logger.debug("done")
+"""
+
+
+def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_reads_why(tmp_path):
+    # setupper_atlas_plugin's run: its one arm 212, which the row 206 its pass printed excludes, is no way the pass
+    # went, and S2 stopped "which way pass 1 went"
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(_NONE_TAKEN)
+    lines = _NONE_TAKEN.splitlines()
+    arm = lines.index('            job.jobStatus = "failed"') + 1
+    (tmp_path / "x.log").write_text("".join(f"2026-01-01 00:00:0{n},000 panda.log.X: DEBUG    <PandaID=1> {t}\n"
+                                            for n, t in enumerate(["flag=False", "done"])))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import evaluate as E
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import class_of, stable_holes
+
+        verdicts = lambda *kinds: N(chosen=None, verdicts=[N(kind=k) for k in kinds])
+        took = [rerun.took_none(verdicts("excluded", "excluded")), rerun.took_none(verdicts("excluded", "kept")),
+                rerun.took_none(verdicts("excluded", "unexamined")), rerun.took_none(verdicts())]
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/m.py", "run", within=[ARM])
+        run, = runs_for(read_log("x.log"), "1")
+        env = E.Env()
+        stable_holes([R.seen(fn, run, "outside")], env, class_of(fn), local_to=fn.owner)
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
+        got = r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])]))
+        print(json.dumps([took, got.guard, got.line, [x for x in r.lines if x]]))
+    """
+    out = _ok(_run(tmp_path, code.replace("ARM", str(arm))))
+    took, guard, line, said = json.loads(out.splitlines()[-1])
+    # every candidate excluded: none taken; one kept or not examined may have been taken
+    assert took == [True, False, False, False]
+    # no exit's path: the guard of the arm is read false in what the pass printed, and S3 goes on to where it is tested
+    assert guard == "job.flag" and line == lines.index("        if job.flag:") + 1
+    assert said[1] == "run: every pass took none of its candidates, so no exit's path settles a guard"
+    assert said[-1] == f"the nearest arm(s) [{arm}] were kept off by: 'job.flag' (rule 21)"
+
+
+_QUIET = """
+class Mover:
+    def __init__(self):
+        self.logger = logger
+
+    def jumbo(self, job):
+        if len(self.jumbo_jobs) == 0:
+            return
+        self.logger.debug("start")
+        job.jobStatus = "failed"
+
+    def run(self, job):
+        try:
+            self.logger.debug(f"begin {job.PandaID}")
+            self.work()
+            self.logger.debug("end")
+        except Exception:
+            if job.jobStatus not in ["failed", "cancelled"]:
+                job.jobStatus = "failed"
+            self.logger.error("setupper.run failed")
+"""
+
+
+def test_a_return_has_no_row_after_it_and_an_arm_whose_try_raised_nothing_is_excluded(tmp_path):
+    # setup_jumbo_jobs's ``if len(self.jumbo_jobs) == 0: return`` was excluded by the "start" after it, which only
+    # the other way prints; setupper_atlas_plugin's run printed "end", its try's last statement, so the arm in its
+    # handler did not run, and S3 stopped "a guard the passes made false against every arm"
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(_QUIET)
+    lines = _QUIET.splitlines()
+    ret, start = lines.index("            return") + 1, lines.index('        self.logger.debug("start")') + 1
+    arm, handler = lines.index('                job.jobStatus = "failed"') + 1, lines.index("        except Exception:") + 1
+    end = lines.index('            self.logger.debug("end")') + 1
+    line = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "ended.log").write_text(line.format(0, "begin 1") + line.format(1, "end"))
+    (tmp_path / "cut.log").write_text(line.format(0, "begin 1"))
+    code = """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import evaluate as E
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import class_of, stable_holes
+
+        R.ROWS_FROM = "walk"
+        jumbo = R.function("pandaserver/m.py", "jumbo", within=[ARM])
+        must = [[s.lineno for s in part] for part in R.must_rows(jumbo.node, R.statement_at(jumbo.node, RET))]
+        fn = R.function("pandaserver/m.py", "run", within=[ARM])
+        got = {}
+        for name in ("ended", "cut"):
+            run, = runs_for(read_log(f"{name}.log"), "1")
+            env = E.Env()
+            stable_holes([R.seen(fn, run, "outside")], env, class_of(fn), local_to=fn.owner)
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
+            try:
+                r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.jobStatus not in ['failed', 'cancelled']"])]))
+                got[name] = None
+            except rerun.Stop as stop:
+                got[name] = [type(stop).__name__, str(stop)]
+        # a fork: an excluded branch is neither an end nor a stop; every branch excluded is no answer
+        class Out:
+            pass
+        class In:
+            pass
+        def out(q):
+            raise rerun.Excluded("not it")
+        def done(q):
+            f.ends.append((f.hop, "it"))
+        f = object.__new__(rerun.Rerun)
+        f.lines, f.hand, f.hand_used, f.hop, f.ends, f.branches = [], {}, [], "S1", [], []
+        f.touched, f.row_facts, f.question, f.steps = [], {}, None, {Out: out, In: done}
+        f.fork(rerun.Fork([Out(), In()], ["a", "b"]))
+        kinds = [b["kind"] for b in f.branches]
+        try:
+            f.fork(rerun.Fork([Out(), Out()], ["a", "b"]))
+            every = None
+        except rerun.Stop as stop:
+            every = [type(stop).__name__, str(stop)]
+        print(json.dumps([must, got, kinds, every]))
+    """
+    code = code.replace("ARM", str(arm)).replace("RET", str(ret))
+    must, got, kinds, every = json.loads(_ok(_run(tmp_path, code)).splitlines()[-1])
+    assert start == ret + 1
+    # nothing prints after a return: the "start" after the if is the other way's
+    assert must == [[], []]
+    assert got["ended"] == ["Excluded", f"S3: every arm of run runs only in an except handler (at {handler}), and every pass "
+                                        f"printed row {end} with nothing after it in the try that may raise"]
+    # the try's last row not printed: it may have raised, and S3 asks a guard of the arm as before
+    assert got["cut"] == ["Stop", f"S3: a guard the passes made false against every arm (none shown against arm {arm} (in an except handler))"]
+    assert kinds == ["excluded", "end"]
+    assert every == ["Stop", "S1: a branch that was not excluded (each of the 2 was)"]
 
 
 def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and_the_direction_of_their_changes(tmp_path):

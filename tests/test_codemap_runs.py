@@ -14,6 +14,8 @@ from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     HISTORY_AFTER,
     HISTORY_BEFORE,
+    HISTORY_CARRIES_OWN,
+    HISTORY_CARRIES_PRIOR,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
     RUN_KEY_TIME,
@@ -1300,6 +1302,234 @@ def test_an_early_exit_a_call_decides_rules_out_what_follows_it(
     branch = _branch(fragment, "F3")
     assert branch.history == []
     assert runs.HISTORY_RULED_OUT in branch.history_hole
+
+
+DAEMON = """\
+from typing import Any
+
+from pkg.spec import JobSpec
+
+
+def main(tbuf: Any, job: JobSpec, pool: Any):
+    job.jobStatus = "closed"  # U1
+    pool.peek(job.PandaID)
+    tbuf.archiveJob(job, job, True)  # T1
+
+
+def quiet(pool: Any, job: JobSpec):
+    job.jobStatus = "closed"  # U2
+    pool.peek(job.PandaID)
+"""
+
+
+def test_a_call_the_record_cannot_place_named_as_a_history_writer_way_is_said(
+    tmp_path: Path,
+) -> None:
+    """``add_sub.main`` archives a job through a ``taskBuffer`` declared ``Any``: no
+    pair is found, and without the hole the empty list says the pass writes none.
+    ``peek`` is a corpus name too, of a function that leads to no history write, and
+    says nothing.
+    """
+    arms = [
+        ("daemon", "main", "U1", "JobSpec.jobStatus"),
+        ("daemon", "quiet", "U2", "JobSpec.jobStatus"),
+    ]
+    fragment = _build(tmp_path, arms, spec=SPEC, proxy=PROXY, daemon=DAEMON)
+
+    unplaced = _branch(fragment, "U1")
+    assert unplaced.history == []
+    assert unplaced.history_hole == runs.HISTORY_UNPLACED.format(
+        calls=f"main:{_line(DAEMON, 'T1')} tbuf.archiveJob"
+    )
+    quiet = _branch(fragment, "U2")
+    assert quiet.history == []
+    assert quiet.history_hole == ""
+
+
+CARRY = """\
+from pkg.proxy import DBProxy
+from pkg.spec import JobSpec
+
+
+class Carry(DBProxy):
+    def archive(self, job: JobSpec, down: JobSpec, c, d, e):
+        done = []
+        down.jobStatus = "cancelled"  # K1
+        done.append(down)
+        if c:
+            job.jobStatus = "failed"  # K2
+        if e:
+            job.jobStatus = "merging"  # K3
+        done.append(job)
+        status = job.jobStatus
+        var_map = {}
+        if d:
+            var_map[":jobStatus"] = "closed"
+            status = var_map[":jobStatus"]
+        for one in done:
+            self.note_change(one.PandaID, status)  # K4
+
+    def set_given(self, panda_id, status):
+        var_map = {}
+        var_map[":PandaID"] = panda_id
+        var_map[":jobStatus"] = status  # S1
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+        self.note_change(panda_id, status)  # S2
+
+    def set_again(self, panda_id, status):
+        var_map = {}
+        var_map[":PandaID"] = panda_id
+        var_map[":jobStatus"] = status  # S3
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:jobStatus WHERE PandaID=:PandaID", var_map)
+        status = "held"
+        self.note_change(panda_id, status)  # S4
+
+    def move_down(self, down_id):
+        down = JobSpec()
+        down.PandaID = down_id
+        down.jobStatus = "cancelled"  # K5
+        self.note_change(down_id, down.jobStatus)  # K6
+
+    def command(self, panda_id, resume):
+        if resume:
+            new = "activated"  # K7
+        else:
+            new = "throttled"  # K8
+        var_map = {":PandaID": panda_id, ":newJobStatus": new}
+        self.cur.execute("UPDATE ATLAS_PANDA.jobsActive4 SET jobStatus=:newJobStatus WHERE PandaID=:PandaID", var_map)
+        self.note_change(panda_id, new)  # K9
+"""
+
+
+def _carry(tmp_path: Path, *markers: tuple[str, str]) -> MapFragment:
+    arms = [("carry", owner, marker, "JobSpec.jobStatus") for owner, marker in markers]
+    return _build(tmp_path, arms, spec=SPEC, proxy=PROXY, carry=CARRY)
+
+
+def _carried(branch: Branch) -> dict[str, list[str]]:
+    """The branch's carries, each write's owner cut to its function."""
+    return {
+        write.rpartition("::")[2]: values
+        for pair in branch.history or []
+        for write, values in pair.carries.items()
+    }
+
+
+def test_what_a_row_records_is_the_writers_argument_read_back_to_the_object(
+    tmp_path: Path,
+) -> None:
+    """``archiveJob`` records ``tmpJobStatus`` for every job of ``updatedJobList``:
+    for the job, its own status or the literal it is set to after; for a downstream
+    job it cancelled, the job's status -- not ``cancelled``.  An arm on the job after
+    another one can replace it in the row, and one before cannot.
+    """
+    fragment = _carry(
+        tmp_path,
+        ("Carry.archive", "K1"),
+        ("Carry.archive", "K2"),
+        ("Carry.archive", "K3"),
+    )
+    write = f"Carry.archive:{_line(CARRY, 'K4')}"
+    # K3's outcome, as the junction says it: a branch here is named by its marker.
+    assert _carried(_branch(fragment, "K2")) == {
+        write: ["K3", "closed", HISTORY_CARRIES_OWN]
+    }
+    assert _carried(_branch(fragment, "K3")) == {write: ["closed", HISTORY_CARRIES_OWN]}
+    assert _carried(_branch(fragment, "K1")) == {
+        write: ["closed", "runtime(job.jobStatus)"]
+    }
+    assert history_pairs_resolve(fragment).passed
+
+
+def test_a_name_holding_what_an_sql_arm_writes_records_the_arms_own_value(
+    tmp_path: Path,
+) -> None:
+    """``updateJobStatus`` binds ``:jobStatus`` to its parameter ``jobStatus`` and
+    records ``jobStatus``: the arm's own value.  Bound again before the writer, the
+    name records what it is bound to.  A row another object's key writes records
+    nothing for the arm.
+    """
+    fragment = _carry(tmp_path, ("Carry.set_given", "S1"), ("Carry.set_again", "S3"))
+    assert _carried(_branch(fragment, "S1")) == {
+        f"Carry.set_given:{_line(CARRY, 'S2')}": [HISTORY_CARRIES_OWN]
+    }
+    assert _carried(_branch(fragment, "S3")) == {
+        f"Carry.set_again:{_line(CARRY, 'S4')}": ["held"]
+    }
+    another = _proxy(tmp_path / "proxy", ("DBProxy.archiveJob", "A1"))
+    pairs = {pair.call: pair for pair in _branch(another, "A1").history or []}
+    assert pairs[_line(PROXY, "H2")].carries == {}
+    assert pairs[_line(PROXY, "H1")].carries == {
+        f"pkg/proxy.py::DBProxy.archiveJob:{_line(PROXY, 'H1')}": [HISTORY_CARRIES_OWN]
+    }
+
+
+def test_a_row_keyed_by_a_local_holding_the_objects_key_records_its_own_value(
+    tmp_path: Path,
+) -> None:
+    """``archiveJob`` records a downstream job it moved by ``downID``, the key the
+    job's row was read by, handing ``dJob.jobStatus``: the way to the record starts
+    by the job's key, and the row is still the job's, its own value."""
+    fragment = _carry(tmp_path, ("Carry.move_down", "K5"))
+    assert _carried(_branch(fragment, "K5")) == {
+        f"Carry.move_down:{_line(CARRY, 'K6')}": [HISTORY_CARRIES_OWN]
+    }
+
+
+def test_a_local_the_arm_binds_records_only_the_arms_own_binding(
+    tmp_path: Path,
+) -> None:
+    """``getTasksToExecCommand_JEDI`` binds ``newJobStatus`` to ``activated`` or
+    ``throttled``, writes it and records it: each arm's row records the value its
+    own binding gives, not the other branch's."""
+    fragment = _carry(tmp_path, ("Carry.command", "K7"), ("Carry.command", "K8"))
+    write = f"Carry.command:{_line(CARRY, 'K9')}"
+    assert _carried(_branch(fragment, "K7")) == {write: ["activated"]}
+    assert _carried(_branch(fragment, "K8")) == {write: ["throttled"]}
+
+
+TASK_CARRY = """\
+from pkg.proxy import DBProxy
+
+
+class JediTaskSpec:
+    _attributes = ("jediTaskID", "status")
+
+
+class TaskCarry(DBProxy):
+    def copy_task(self, task_id):
+        sql = (
+            "INSERT INTO ATLAS_PANDA.TASKS_STATUSLOG (jediTaskID,status) "
+            "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID"
+        )
+        self.cur.execute(sql, {":jediTaskID": task_id})
+
+    def move(self, task: JediTaskSpec):
+        self.copy_task(task.jediTaskID)  # Q0
+        task.status = "running"  # Q1
+        self.copy_task(task.jediTaskID)  # Q2
+"""
+
+
+def test_a_row_copied_from_the_table_records_the_value_as_it_stands_when_written(
+    tmp_path: Path,
+) -> None:
+    """``record_task_status_change`` copies the task's status from ``JEDI_Tasks``
+    (``INSERT ... SELECT``): called after the arm, the row records the arm's value;
+    before it, the one before."""
+    fragment = _build(
+        tmp_path,
+        [("taskcarry", "TaskCarry.move", "Q1", "JediTaskSpec.status")],
+        spec=SPEC,
+        proxy=PROXY,
+        taskcarry=TASK_CARRY,
+    )
+    pairs = {pair.call: pair for pair in _branch(fragment, "Q1").history or []}
+    owner = "pkg/taskcarry.py::TaskCarry.move"
+    before, after = _line(TASK_CARRY, "Q0"), _line(TASK_CARRY, "Q2")
+    assert pairs[before].carries == {f"{owner}:{before}": [HISTORY_CARRIES_PRIOR]}
+    assert pairs[after].carries == {f"{owner}:{after}": [HISTORY_CARRIES_OWN]}
+    assert history_pairs_resolve(fragment).passed
 
 
 def test_ruled_out_by_reads_an_early_exit_and_leaves_an_open_one_open() -> None:

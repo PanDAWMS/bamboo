@@ -1491,7 +1491,9 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
     A branch left unread with no reason reads as one no history row is
     written beside.  A ``can`` row names the caller's path holding the arm's
     object and a way to one of the pair's writes through calls of reach rows:
-    a reader asks the run of that path, and checks the way.  A run's key
+    a reader asks the run of that path, and checks the way; what a row records
+    (:attr:`HistoryPair.carries`) is said of the pair's writes, and only where
+    the row is the arm's object's (``same``, ``can``).  A run's key
     that names no column of a class a table holds
     (:attr:`EntityNode.spec_class`) says where each reading stopped
     (:attr:`RunKey.stops`); one that names one may say where others stopped,
@@ -1558,6 +1560,11 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                 if pair.row == HISTORY_ROW_CAN:
                     failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
                 failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, prints, key)]
+                if pair.carries and pair.row not in (HISTORY_ROW_SAME, HISTORY_ROW_CAN):
+                    failures.append(f"{at}: carries on a {pair.row or 'unread'} row")
+                failures += [
+                    f"{at}: carries {write}: not one of its writes" for write in pair.carries if write not in pair.writes
+                ]
     return GateResult(
         gate="history-pairs-resolve",
         passed=not failures,

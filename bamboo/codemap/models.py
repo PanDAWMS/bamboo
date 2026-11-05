@@ -452,6 +452,12 @@ HISTORY_ROW_CAN = "can"
 HISTORY_AFTER = "after"
 HISTORY_BEFORE = "before"
 HISTORY_EITHER = "either"
+#: A value of :attr:`HistoryPair.carries`: the writer records the object's own
+#: value of the history's subject as it stands after the arm -- for an arm of
+#: the subject, the arm's value, unless a write of it named beside replaces it.
+HISTORY_CARRIES_OWN = "own"
+#: ... as it stood before the arm: the writer reads it before the arm runs.
+HISTORY_CARRIES_PRIOR = "prior"
 
 
 class HistoryRekey(BaseModel):
@@ -598,6 +604,32 @@ class HistoryPair(BaseModel):
             "the record follows the object by is seen, as with ``can`` itself."
             "  The entries are in the order of their ``at`` texts, compared as "
             "strings, not the order they run in."
+        ),
+    )
+    carries: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "With ``same`` and ``can``, each of ``writes`` whose key the "
+            "object reaches by a way that runs in one pass, with the values "
+            "the row it writes for the object can record, sorted: what the "
+            "writer records its subject's value from -- the parameter its "
+            "``INSERT`` binds the column to, or the row an ``INSERT ... "
+            "SELECT`` copies -- read where the writer is called, the way the "
+            "map reads a write's value.  "
+            f"{HISTORY_CARRIES_OWN!r} where that is the object's own value "
+            "of the subject read after the arm -- the field on a path the "
+            "object is held by (``job.jobStatus`` beside ``job.PandaID``), the "
+            "row copied, or a name holding what the arm's own write is given "
+            f"--, {HISTORY_CARRIES_PRIOR!r} where it is read before the arm; "
+            "beside it, the outcomes of the subject's arms on the object that "
+            "can replace it on the way -- after the arm in the caller, or in "
+            "a function the call takes the object into.  A literal as it "
+            "settles: ``var_map[':newJobStatus']`` bound to ``throttled``; "
+            "else ``runtime(<expression>)``: ``archiveJob`` records "
+            "``tmpJobStatus``, the job's status, for a downstream job it "
+            "cancelled -- ``runtime(job.jobStatus)``.  A write whose key the "
+            "object reaches no way is not here: its row is another's.  An "
+            "empty list where the writer's value is not read."
         ),
     )
     runs: list[int] = Field(

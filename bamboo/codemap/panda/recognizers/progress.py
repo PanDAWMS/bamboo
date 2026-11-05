@@ -68,9 +68,9 @@ from bamboo.codemap.panda.pathcond import (
     field_additions,
     field_replacements,
     functions_with_owner,
-    literal_values,
     parted,
     path_condition,
+    reaching_values,
     targets_of,
     written_value,
 )
@@ -622,7 +622,7 @@ def _resolve(
     owner_class: Optional[str],
     spec_names: set[str],
     settle,
-    at: Optional[ast.AST] = None,
+    at: ast.AST,
 ) -> list[Resolved]:
     """Return every outcome *value* can settle to, with the tier of each.
 
@@ -630,8 +630,10 @@ def _resolve(
     rung says "settled at run time" rather than declining to record the write.
 
     The rung that needs stating is the one for a bare name.  A local is resolved
-    by reaching definitions and, failing that, becomes ``runtime(<name>)`` --
-    **not** ``passthrough(<name>)``.  ``passthrough(X)`` claims the value lives
+    by reaching definitions -- every one that reaches the write, a binding that
+    settles nothing read as the right-hand side it binds is read
+    (:func:`~bamboo.codemap.panda.pathcond.reaching_values`) -- and, where none
+    settles, becomes ``runtime(<name>)`` -- **not** ``passthrough(<name>)``.  ``passthrough(X)`` claims the value lives
     in X and the backward walk continues there, which is only true when X is a
     qualified field name: a spec attribute, or a table column.  A local variable
     is a step in a computation, not a place a value lives, so a passthrough onto
@@ -654,30 +656,60 @@ def _resolve(
         return [Resolved(ast.unparse(value), 1)]
 
     if isinstance(value, ast.Name) and func is not None:
-        resolved = literal_values(func, value.id, settle, at=at)
-        if resolved:
-            return [
-                Resolved(
-                    literal,
-                    1,
-                    tuple(test for test in conditions if test not in dominating),
-                )
-                for literal, conditions, _line in resolved
-            ]
+        reached = reaching_values(func, value.id, settle, at)
+        if reached:
+            found: list[Resolved] = []
+            for one in reached:
+                tests = tuple(test for test in one.conditions if test not in dominating)
+                if one.values:
+                    found.extend(Resolved(literal, 1, tests) for literal in one.values)
+                else:
+                    # What the binding holds, read as a right-hand side that
+                    # settles nothing is; a parameter, a slot or a ``+=``
+                    # holds the name.
+                    held = one.expression if one.expression is not None else value
+                    unsettled = _unsettled(
+                        held,
+                        func=func,
+                        attributor=attributor,
+                        owner_class=owner_class,
+                        spec_names=spec_names,
+                    )
+                    found.append(unsettled._replace(conditions=tests))
+            return found
 
     settled = settle(value, func)
     if settled:
         # ``commandStatusMap()[commandStr]["done"]`` -- the key is only known at
         # run time, the values it can select are not.
         return [Resolved(outcome, 1) for outcome in settled]
+    return [
+        _unsettled(
+            value,
+            func=func,
+            attributor=attributor,
+            owner_class=owner_class,
+            spec_names=spec_names,
+        )
+    ]
 
+
+def _unsettled(
+    value: ast.expr,
+    *,
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    attributor: SpecAttributor,
+    owner_class: Optional[str],
+    spec_names: set[str],
+) -> Resolved:
+    """The rungs of :func:`_resolve` below the settled ones: what *value* is when it settles to nothing."""
     if isinstance(value, ast.Attribute) and value.attr in spec_names:
         source, _basis = attributor.attribute_write(
             value, func=func, enclosing_class=owner_class
         )
         if source is not None:
             outcome = f"passthrough({SubjectNode.make_name(source, value.attr)})"
-            return [Resolved(outcome, 2)]
+            return Resolved(outcome, 2)
 
     # Assembled text lands here too, and the rendered expression is its own
     # search key: ``runtime(f'no files for {name}')`` carries the literal frame
@@ -690,7 +722,7 @@ def _resolve(
     # be is kept beside it, read back through the locals that build it: that
     # is a bound on the text, not a claim about what kind of text it is.
     reading = values.value_reading(value, func)
-    return [Resolved(_runtime(value), 2, frames=tuple(reading.frames), cuts=tuple(reading.cuts))]
+    return Resolved(_runtime(value), 2, frames=tuple(reading.frames), cuts=tuple(reading.cuts))
 
 
 def _declared_names(value: ast.expr) -> set[str]:

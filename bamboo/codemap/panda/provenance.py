@@ -76,6 +76,11 @@ EXTERNAL_INTERFACES = callfacts.EXTERNAL_INTERFACES
 #: those come back as "chosen by whoever called or built this", which is true
 #: of the cursor object and false of the row: the row came from the statement
 #: executed a few lines above, and the map has read that statement.
+#:
+#: These are names.  A name the code declares one of the task buffer's facades
+#: (:data:`FACADES`) is the database's too, whatever it is called: the API's
+#: ``global_task_buffer``, a daemon's module-level ``taskBuffer`` -- 225 calls on
+#: the pin that had no terminal by the names alone.
 DATABASE_INTERFACES = callfacts.TASK_BUFFER_NAMES | callfacts.CURSOR_NAMES
 
 #: The task buffer's facades -> the attribute each borrows a proxy from, and
@@ -174,8 +179,11 @@ def _rooted_in(
 
     The declared class is the root's -- ``self.<field>``'s, or a local's where
     the chain starts at one -- and empty where nothing declares it.  A local
-    whose class is not an interface is still followed one hop: ``src_site_spec``
-    is a ``SiteSpec``, and it came out of ``self.siteMapper.getSite(...)``.
+    declared an interface or a task buffer's facade is the chain's root:
+    ``taskBuffer``, imported by the function ``FinisherThr`` is defined in, is
+    the module's ``TaskBuffer``.  A local whose class is neither is still
+    followed one hop: ``src_site_spec`` is a ``SiteSpec``, and it came out of
+    ``self.siteMapper.getSite(...)``.
 
     Both halves, because a hop through a local moves the interesting name.
     ``taskSpec.getNumFilesPerJob()`` where ``taskSpec`` came out of
@@ -192,7 +200,7 @@ def _rooted_in(
         declared = (typed(field) if typed is not None and field is not None else None) or ""
         return nearest, attribute.attr, declared
     declared = (typed(base) if typed is not None else None) or ""
-    if declared in INTERFACE_CLASSES:
+    if declared in INTERFACE_CLASSES or declared in FACADES:
         return "", attribute.attr, declared
     if hops <= 0 or resolve is None:
         return None
@@ -222,7 +230,7 @@ def _terminal_of(
             return STOP_EXTERNAL, INTERFACE_CLASSES[declared]
         if field in EXTERNAL_INTERFACES:
             return STOP_EXTERNAL, EXTERNAL_INTERFACES[field]
-        if field in DATABASE_INTERFACES:
+        if field in DATABASE_INTERFACES or declared in FACADES:
             return STOP_UPSTREAM, call if call != field else "the task buffer"
     return None
 

@@ -101,16 +101,27 @@ not built.
 
 *Shows:* said (a note on every log read from JEDI's machines).
 
-### K13. The round that asks a run's mark is not limited to the window
+### K13. The round that asks a run's mark reaches only the key's records near the window
 
-The records are not cut to the window (a widened ask reuses them), so the key's records include runs of
-other days, and `RecordedLogs._read` asks the mark of each of them that does not hold the key.
-*Shows:* nothing wrong; it costs asks (a mark of a run a day before the window, on each machine).
-*Why not now:* limiting it to the marks whose key records reach the window +- `EDGE` would miss the end of
-a run that goes on longer than `EDGE` past its last record of the key -- the case the mark round is for
-(a run that names the key at its start and writes the row at its end).  How long such runs last is not
-measured.
-*Revisit:* measure, per log, how long a mark's run goes on past its last record of the key.
+The records are not cut to the window (a widened ask reuses them, and a rotated file's record holds the key's lines of
+its whole day), so the key's records include runs of other hours.  Since 2026-11-04 `RecordedLogs._read` asks the mark
+that does not hold the key only of a key record within `EDGE` of the window.  Before, it asked every such mark, over
+the window: in the analyzer handover's six sets 25 of the round's 65 asks named a mark with no line of the key in the
+window +- 10 min -- 15 runs after it (periodic marks: getTasksToBeProcessed_JEDI 7, getTasksToExecCommand_JEDI 4), 7 on
+both sides and none in it, 3 before (insertNewJob's marks at the job's creation, 7 min to 11.6 h before a stuck
+window) -- and of the harness's round 20 most were AtlasProdWatchDog's stamps and setCloudToTasks_JEDI's mark 4-8 h
+after MT-staged-late's window (out/l2bk/mark_round_windows.py).  None was a run that named the key before the window's
+slack and went on into it.
+*Shows:* such a run -- one that names the key at its start, more than `EDGE` before the window, and writes the row
+inside it -- is not asked: the window holds its key-less lines only, and they are read as no run of the key.  A mark
+not asked is not read as cut either (`Log.partial`): its run is the key's records alone, and with no entry row among
+them a candidate's pass spans from a key record before the window to one after it.  In m-cut2's MT-defined-late,
+reactivatePendingTasks_JEDI:4704 was kept at 12:30:50 on its records at 11:29, 13:06 and 13:17, where the whole mark
+showed none of its 133 passes there.  That arm is no candidate: its UPDATE requires status 'pending' (the map's
+`row_precondition`), and the row before held 'defined'.  H2 does not read the precondition; S1 and L2 do (`arms_of`).
+No other candidate in the six sets was read so.
+*Revisit:* measure, per log, how long a mark's run goes on past its last record of the key; the functions whose pass
+prints the key that far before its write are the map's to name (below).
 For S1 (and S2 after it) the round is narrower (`recorded._partial`, 2026-10-26): S1 names the functions whose runs it
 reads, and a DB proxy method's mark of none of them is not asked, nor one of theirs whose key records come in
 pieces `EDGE` or more apart -- a mark the method's calls share (`getTasksToExecCommand_JEDI < vo=None label=None >`),
@@ -140,6 +151,21 @@ shown by (13 records at 11:14:22-23, whole in the record); counting only its pie
 mark over hours once the run was widened, and S1 then asked getTasksToBeProcessed_JEDI's marks over a stuck window's 6
 hours (both measured, the analyzer handover's out/k13).  A candidate's rows under a caller's method mark (a logger
 handed in) are read by neither H2 nor S1; how many such rows the map holds is not counted yet.
+A run near an end of what was searched widens the window past it once, and the end is one the asks over the window
+itself searched (`recorded._runs`'s *own*, 2026-11-03).  Before, it was any record at hand: a mark asked for a row's
+moment was answered from the record of the round before's widened ask (`_within` prefers the machine's record), and a
+periodic method's mark (`rescueUnLockedTasksWithPicked_JEDI < vo=atlas label=user >`, a pass every few minutes) is one
+run as far as any record reaches, so each round asked it EDGE further back: MR-T-53351604-rescueTime's 081 went 13:09:14,
+12:59:13, 12:49:12, 12:39:11 in rounds 5-18, and round 6 took three machines to their files' starts (the harness's
+round 18).  A run reaching past the window's own search is read as cut there.  Since 2026-11-04 only a run whose mark
+holds the key is widened.  A mark that does not hold the key is shared: a periodic method's, the setupper's stamp,
+or the first word of a line with no mark, which the records read as its mark (ContentsFeeder's "failed to get taskSpec
+for jediTaskID=..." -> `failed`).  Its run is read as cut at that end, and the log's notes say how many.  The pass that
+decides sits within a second of its row: MT-toretry-late's 19:19:29.607 to .611, rescueTime's 082 13:09:13.450 to
+13:09:14.128 (the harness), and superStatus's hour of prepareTasksToBeFinished_JEDI decided nothing.
+*Revisit:* a function whose pass prints the key only farther before its write than EDGE.  Its window then holds only
+key-less lines of the run, and widening is what ties the run to the key.  The map is to say which functions do this,
+from their prints and the write (asked by the harness, 2026-11-04); the door does not read it yet.
 
 ### K40. A truncated file with no `searched` is read up to its last record, whichever string's
 
@@ -789,10 +815,11 @@ The pass H2 answers with is when the attribute took the value (attr-time-shape.m
 result.json's `wrote` names the arm, whether its run shows the line ran (`shown`; else H2 left it by elimination: the
 one writer of a value that is its time), the call it is read at for a writer that prints nothing (K25), the statuslog
 row whose pass wrote it (none for a value held or a value that is its time), the window asked and the run, and H3 ends
-there (END) where the arm has no guard or every guard holds in the run's values.  A condition not read, or read false,
-is named in H3's stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran,
-not when.  Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an
-arm with no guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
+there (END) where the arm has no guard or every guard holds in the run's values -- or, for an arm its run shows ran,
+where none is read false (K54).  A condition read false, or not read for an arm no run shows ran, is named in H3's
+stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran, not when.
+Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an arm with no
+guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
 
 An arm left by elimination names no run (`wrote.run` null), and its guards are read in the rows' values alone, its
 H3 stopping at "a run that shows <arm> ran" where they do not all hold: no run shows it, and the run the judge read it
@@ -803,7 +830,8 @@ window instead.
 
 *Shows:* "-- row n of m" in H2 and its judgement per row, "<writer>:<line>: n row(s)" for each of several writers;
 "END <subject>=<value> written last by <arm>[, called at <call>] (shown in its run; it has no guard | its guards hold
-in the run's values), in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
+in the run's values | its guards hold as its run shows it ran ('<condition>', ...)[; the others in the run's values]),
+in the pass of the statuslog row <status> at <time>: <run>", or "(by elimination: no run shows
 the line ran; it has no guard | its guards hold in the rows' values), at <time>[; not searched there: <log> on
 <machines>]"; "<arm> ...; a birth: it wrote as the row was made" or "; its runs are marked by the object's key",
 "F3: <arms> asked over the object's life, from the row's creation at <t> to when the value was read at <t>",
@@ -811,12 +839,13 @@ the line ran; it has no guard | its guards hold in the rows' values), at <time>[
 object's life <t>" (result.json's possibility rows carry `f3`: made, run, span or open); a stop "every writer of
 <subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
 "the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
-<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' not read)" (a
-guard through no method; one over a column the rows file holds is read there, K49), "a method the guard reads through
-(...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by elimination; its
-conditions: ...)".  A status's H3 reads no guard's values: through no method it stops at "the values its guard reads at
-its run", and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'" (both "a method
-the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
+<subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' read false |
+not read)" (a guard through no method; one over a column the rows file holds is read there, K49), "a method the guard
+reads through (...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by
+elimination; its conditions: ...)".  A status's arm its run shows ran stops, through no method, at "where the values
+its guards held on come from, its run showing it ran (...)" (K54; "the values its guard reads at its run" for one no
+run of its own shows), and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'"
+(both "a method the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
 *Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
 marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
 row into its spec (getTasksToRefine_JEDI and the like) is told apart.
@@ -971,6 +1000,44 @@ stop.
 *Shows:* "@<line> runs in a loop over rows this investigation does not have" among a name's origins in R2.
 *Revisit:* when the harness's fetch answers the walk's ask for the collection (K36, stage 2).
 
+### K54. An arm its run shows ran ran under its guards; a status's says the values they held on, where its run printed them
+
+H2's positive (a row printed only on a path through the site, P's proof, or P read with the other verdicts) says the
+site ran in the pass, so its path condition held there.  H3 takes that for a guard the run's values leave unread
+(`Rerun.wrote_by`, design D1's G, out/after-q/d1s-design.md; tmaeno: "C2", 11-03 17:30).  It is not taken:
+- for a stand-in (K25), whose run is its caller's and shows the caller's call, not the arm;
+- where a guard reads false: the value decides, as before (K37: an older row, or excluded);
+- where a guard reads through a method: H4 reads which call set it, saying why the arm ran.
+
+An attribute then ends at H3 (K37): "its guards hold as its run shows it ran (...)".  A status does not: what it asks
+is why the arm ran, and that is where the values its guards held on came from.  Where none is a method, H3 stops on
+it, each guard with the values its run printed (V, `Rerun._held_on`, `changed.printed_at`):
+- a hole of the term, or `str()` of it, at a row before the guard's `if` or after it, nothing between able to change
+  it (`changed.holds`, R's rule (ii));
+- or a hole of a chain one assignment after the `if` binds to the term, the term holding up to it and the chain from
+  it to the row (setupper 1107 `job.ddmErrorDiag = disp_error[disp]`, printed at 1108);
+- read as the map's evaluator reads a printed value (`put_printed`).  Text is not ordered: a guard that orders a value
+  read as text is not read (a printed time, with or without microseconds).  A guard the values read false is a stop
+  of its own: the run says it held, so the reading or the positive is wrong.
+- In a loop that holds the site, only the records the key is on are read, and only where each of the loop's rows
+  printed once among them: that is the key's one pass, and the loop is read as gone round once (`flow`'s *once*).
+  datasetManager's FinisherThr runs over its jobs, setupper over its jobs.
+
+Measured as u1 against train xx's T (xxT, 11-03 18:51; out/d1/u1-predictions.txt, every prediction held), it moves
+5 walks in 9 cases and nothing else:
+- hs06sec and queuedTime in m-cut, m-cut2 and attr go from STOP H3 to END H3 (6 cases);
+- the 3 m-failed statuses stop at H3 with their values:
+  - datasetManager run:735: nTokens 1, nOkTokens 0, endTime 2026-10-31 12:45:38, timeOut 2026-10-31 13:40:26.260951;
+  - Watcher run:117: modificationTime 2026-11-02 11:59:24, endTime NULL;
+  - setupper subscribe_dispatch_data_block:1105: disp_error[disp] "... could not register subscription", through
+    1107.
+
+*Shows:* "END ... (shown in its run; its guards hold as its run shows it ran ('<condition>', ...)[; the others in the
+run's values])"; "STOP H3: where the values its guards held on come from, its run showing it ran ('<condition>' held
+on <term> = '<value>' (row <fn>:<line> at <span>[, as <chain> bound at <file>:<line>]), ...; ...)"; "STOP H3: its run's
+printed values read '<condition>' false on ..., though its run shows it ran".
+*Revisit:* when S, the values' sources by the map's trace (d1s-design.md, tmaeno "C2"), is built: a status ends there.
+
 ## `which_ran`
 
 ### K53. A print that begins with a hole is read on the line its logger wrote
@@ -1069,11 +1136,24 @@ guard reads" (it says "reads []"): it follows bare names, and this guard reads t
 MJ-transferring-stuck on records-cut; the only such S4 in the four sets).  An arm in an `except` handler has
 no guard to show false -- it is reached only where something above raised -- and S3 stops at "a guard the passes made
 false against every arm (none shown against arm N (in an except handler))", the need it could not meet, not a claim
-(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  And a
+(parse_job_output_report 820, MJ-merging-stuck on records-cut, 7a05464).  Since 2026-11-04 such an arm is kept off
+where every pass's rows show its `try` raised nothing (`rerun.raised_nothing`): a row in the try's body with nothing
+after it there that may leave (`rows.may_divert`, as `must_rows` reads what follows a row), no loop between, and a
+pass that is one call.  Every arm so kept off, the branch is excluded, and a fork counts it neither an end nor a stop
+(setupper_atlas_plugin's run 212: row 206, its try's last statement).  `may_divert` does not see a subscript or an
+attribute that raises, as `must_rows` does not.  And a
 pass that leaves a loop at its terminator is read as leaving at that exit: setupper's assign_dispatch_data_blocks
 walks `self.jobs + [None]` and leaves at 324 (`if job is None: break`) after every job, so S2's "left by 324" and S3's
 {'job is None': True} are the call's, not the key's iteration (the investigator's round 2, 2026-10-31).  Neither
-gives a wrong answer: S3 stops.
+gives a wrong answer: S3 stops.  A pass whose judgement excluded every candidate, the arms and the exits alike, took
+none of them (`rerun.took_none`, 2026-11-04): it ran to its end or left by a raise in what it calls, and S2 used to
+stop at "which way pass N went" (setupper_atlas_plugin's run, whose one arm 212 its row 206 excludes).  S3 then has
+no exit's path to settle a guard, and reads the arms' guards in the rows the passes printed only (`_ways_printed`).
+setup_jumbo_jobs's pass took none only because `rows.must_rows` gave its `if len(self.jumbo_jobs) == 0: return`
+(1967) the "start" after the `if` (1968), which only the other way prints; since 2026-11-04 a `return` or `raise` has
+no row after it, and S2 takes 1967.  S3 then reads `not (len(self.jumbo_jobs) == 0)` false against its three arms,
+and S4 stops at "one binding of len in every pass": it reads the builtin the guard calls as a name to bind, and not
+the attribute (MJ-assigned-stuck, MJ-defined-stuck on m-cut2).
 
 *Shows:* stopped: "the if whose test is '<guard>'" for a guard with no test above the arm; a marked guard in an arm's
 "needs [...]" and never in "false in the passes".
