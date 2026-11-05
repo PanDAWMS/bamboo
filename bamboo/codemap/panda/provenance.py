@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
+from bamboo.codemap.models import STOP_CLOCK, STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
 from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
 
 if TYPE_CHECKING:
@@ -106,6 +106,8 @@ _CONFIG_MODULE = "jedi_config"
 Resolver = Callable[[str], Optional[ast.expr]]
 #: ``self.<field>`` or a local -> ``"<file>::<Class>"`` it is declared to be, or ``None``.
 Typer = Callable[[ast.expr], Optional[str]]
+#: A call's callee -> its name as the file's imports spell it (:func:`callfacts.spelled`), or ``None``.
+Speller = Callable[[ast.expr], Optional[str]]
 
 
 def _text(node: ast.AST) -> str:
@@ -214,10 +216,14 @@ def _rooted_in(
 
 
 def _terminal_of(
-    node: ast.AST, resolve: Optional[Resolver], typed: Optional[Typer] = None
+    node: ast.AST, resolve: Optional[Resolver], typed: Optional[Typer] = None, spell: Optional[Speller] = None
 ) -> Optional[tuple[str, str]]:
     if isinstance(node, ast.Call) and _called(node.func) == _CONFIG_CALL:
         return STOP_CONFIG, _config_key(node)
+    if isinstance(node, ast.Call) and spell is not None:
+        name = spell(node.func)
+        if name is not None and callfacts.run_dependent(name, node) == "time":
+            return STOP_CLOCK, name
     if isinstance(node, ast.Attribute):
         base, _ = _base(node)
         if isinstance(base, ast.Name) and base.id == _CONFIG_MODULE:
@@ -301,6 +307,7 @@ def classify(
     expression: ast.expr,
     resolve: Optional[Resolver] = None,
     typed: Optional[Typer] = None,
+    spell: Optional[Speller] = None,
 ) -> tuple[str, str]:
     """``(terminal, detail)`` for *expression*, or ``("", "")`` to keep walking.
 
@@ -315,11 +322,15 @@ def classify(
     the task buffer made a plugin's construction "a value the database
     supplies", and the walk stopped at the object whose ``result`` it was
     asking about.
+
+    With *spell*, a call :data:`callfacts.TIME` holds is the clock:
+    ``naive_utcnow() - timedelta(minutes=self.sleepTime)`` is the time the run
+    read, less a span.  Without it, as before, it is not read.
     """
     queue: list[ast.AST] = [expression]
     while queue:
         node = queue.pop(0)
-        found = _terminal_of(node, resolve, typed)
+        found = _terminal_of(node, resolve, typed, spell)
         if found is not None:
             return found
         if isinstance(node, ast.Call) and not _hands_its_arguments_on(node):

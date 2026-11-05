@@ -5071,7 +5071,7 @@ class Localization(BaseModel):
 #: and naming which one is the answer, not the absence of one.
 #:
 #: The first six are reached by a :class:`Lead`, hop by hop through the map.
-#: The last four are reached by the use-time trace, which walks the source of
+#: The last five are reached by the use-time trace, which walks the source of
 #: one arm and gets further down into an expression than the map's own edges
 #: do.  One vocabulary for both, because it is one question and two spellings
 #: of it drift.  Measured on a prototype walk over the map's 983 locatable
@@ -5092,6 +5092,9 @@ STOP_CONFIG = "a configuration value, set outside the code"
 STOP_EXTERNAL = "a value another system supplies"
 STOP_UPSTREAM = "a value the database supplies, whose writers the map names"
 STOP_PARAMETER = "chosen by whoever called or built this"
+#: A call :data:`callfacts.TIME` holds: the value is the time the run read, which its records are stamped with.  The
+#: walk goes on through it, to the names a span taken off the time is made of.
+STOP_CLOCK = "the time the run read off the clock"
 
 
 #: Where a lead came from, kept because the three are not equally trustworthy
@@ -5750,6 +5753,22 @@ RUN_STOPS = (
 RUN_CONDITION = "condition"
 RUN_HOOK = "hook"
 RUN_DECODER = "decoder"
+#: How one call makes its value, as :func:`bamboo.codemap.panda.runnable.read_call` reads it: the one reading a
+#: :class:`Runnable`'s stops and a :class:`TraceStep`'s :attr:`TraceStep.calls` share.  Of what it is handed alone --
+#: a builtin, a library function :data:`callfacts.RUNS_ALIKE` holds, a str's, a builtin container's or a library
+#: value's method; the time the run read, a draw, the machine's (:data:`callfacts.TIME`, ``DRAW``, ``MACHINE``); a
+#: logger made or a line written; a builtin changing what it is handed; a file, a process, another system or a thread;
+#: a library function or a builtin no table says; a definition of the corpus, whose body makes it; a call not placed.
+CALL_HANDED = "handed"
+CALL_TIME = "time"
+CALL_DRAW = "draw"
+CALL_MACHINE = "machine"
+CALL_LOGGER = "logger"
+CALL_CHANGES = "changes"
+CALL_OUTSIDE = "outside"
+CALL_LIBRARY = "library"
+CALL_CORPUS = "corpus"
+CALL_UNPLACED = "unplaced"
 
 
 class RunStop(BaseModel):
@@ -6474,6 +6493,20 @@ class Reach(BaseModel):
     closure: int = Field(default=0, description="How many functions the closure holds, the start included.")
 
 
+class StepCall(BaseModel):
+    """How one call in a :class:`TraceStep`'s value makes its value, read as a :class:`Runnable` reads a call.
+
+    *what* is the builtin's name, the library function's spelling, the definitions of the corpus the call lands at,
+    or why it is not placed.  *terminal* is the ``STOP_*`` category the call is by itself -- the database's, the
+    configuration's, another system's, the clock's -- which the step's own ``terminal`` names only for the outermost.
+    """
+
+    call: str = Field(..., description="The call, as source.")
+    made: str = Field(..., description="One of the CALL_* kinds.")
+    what: str = Field(default="")
+    terminal: str = Field(default="", description="The STOP_* category the call is by itself, else empty.")
+
+
 class TraceStep(BaseModel):
     """One thing the source says about why an arm ran with the value it did.
 
@@ -6568,6 +6601,20 @@ class TraceStep(BaseModel):
             "why that call was placed open: it may land elsewhere, and then it "
             "is not the call that handed the value.  "
             "Empty where every call that entered it was placed closed."
+        ),
+    )
+    calls: list[StepCall] = Field(
+        default_factory=list,
+        description=(
+            "Each call in ``value``, outermost first, and how it makes its "
+            "value.  A step whose calls are each made of what they are "
+            "handed, or are a terminal, holds a value made of its ``reads`` "
+            "and those terminals alone: ``naive_utcnow() - "
+            "datetime.timedelta(minutes=self.sleepTime)`` is the clock less a "
+            "span of ``self.sleepTime``.  A call of the corpus is made in its "
+            "body, where the walk's ``return`` steps of it say what it gives.  "
+            "``reads`` names a callable the value calls (``naive_utcnow``, "
+            "``datetime``) as it names any other: these say which are called."
         ),
     )
 

@@ -4,6 +4,7 @@ methods reading its fields, ``RefinerUtils.decodeJSON`` and its hook."""
 
 from __future__ import annotations
 
+import ast
 import textwrap
 from pathlib import Path
 
@@ -252,3 +253,90 @@ def test_definitions_calling_each_other_are_runnable_only_together(
     assert _kinds(found["pong"]) == {"clock", "callee"}
     assert _kinds(found["ping"]) == {"callee"}
     assert [stop.what for stop in found["ping"].stops] == [f"{UTILS}::pong"]
+
+
+CLOCKS = "pandaserver/taskbuffer/Clocks.py"
+CLOCK_CALLS = """\
+    import datetime
+    import time
+    import uuid
+
+    from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+
+    def helper(s):
+        return s
+
+
+    def f(s, text, log):
+        a = naive_utcnow()
+        b = time.gmtime()
+        c = time.gmtime(s)
+        d = time.strptime(text, "%Y")
+        e = uuid.uuid4()
+        g = uuid.uuid5(uuid.NAMESPACE_DNS, text)
+        h = len(text)
+        i = text.split(",")
+        j = datetime.timedelta(minutes=s)
+        time.sleep(s)
+        setattr(log, "x", 1)
+        k = helper(s)
+        m = log.mystery(s)
+    """
+
+
+def test_one_reading_says_how_each_call_makes_its_value_and_a_runnable_stops_on_it(
+    tmp_path: Path,
+) -> None:
+    """read_call is the one reading of a call that the runnable records and the trace's steps share: the time, a draw,
+    a function of the time handed its time, what the same arguments always give, a builtin, a str's method, a span, a
+    wait that the map does not say, a builtin that changes what it is handed, the corpus's own definition, and a method
+    of a value of no known class."""
+    text = textwrap.dedent(CLOCK_CALLS)
+    path = tmp_path / CLOCKS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    parsed = calls_mod.parsed(path)
+    assert parsed is not None
+    module = SourceModule(
+        package="pandaserver",
+        rel_path=CLOCKS,
+        tree=parsed[1],
+        source=text,
+        blob_sha=blob_sha(text),
+    )
+    calls = sqlwrite.corpus_calls([module], {"pandaserver": tmp_path / "pandaserver"})
+    assert calls is not None
+    (func,) = [
+        one
+        for one in parsed[1].body
+        if isinstance(one, ast.FunctionDef) and one.name == "f"
+    ]
+    made = {
+        ast.unparse(node): runnable.read_call(calls, CLOCKS, func, node)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+    }
+    assert {call: read.made for call, read in made.items()} == {
+        "naive_utcnow()": "time",
+        "time.gmtime()": "time",
+        "time.gmtime(s)": "handed",
+        "time.strptime(text, '%Y')": "handed",
+        "uuid.uuid4()": "draw",
+        "uuid.uuid5(uuid.NAMESPACE_DNS, text)": "handed",
+        "len(text)": "handed",
+        "text.split(',')": "handed",
+        "datetime.timedelta(minutes=s)": "handed",
+        "time.sleep(s)": "library",
+        "setattr(log, 'x', 1)": "changes",
+        "helper(s)": "corpus",
+        "log.mystery(s)": "unplaced",
+    }
+    assert (
+        made["naive_utcnow()"].what == "pandacommon.pandautils.PandaUtils.naive_utcnow"
+    )
+    assert [one.func.name for one in made["helper(s)"].targets] == ["helper"]
+    stops = {call: runnable._STOP_OF.get(read.made) for call, read in made.items()}
+    assert stops["naive_utcnow()"] == stops["uuid.uuid4()"] == "clock"
+    assert stops["time.gmtime(s)"] is None and stops["helper(s)"] is None
+    assert stops["time.sleep(s)"] == "library" and stops["log.mystery(s)"] == "unplaced"

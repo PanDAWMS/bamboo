@@ -956,17 +956,48 @@ RUNS_ALIKE = frozenset(
         *("datetime.timedelta", "datetime.datetime", "datetime.date", "datetime.time"),
         *("datetime.datetime.strptime", "datetime.datetime.fromisoformat", "datetime.datetime.combine"),
         "datetime.date.fromisoformat",
+        *("time.strptime", "time.mktime", "uuid.UUID", "uuid.uuid3", "uuid.uuid5"),
     }
 )
-#: Those whose value is the clock's, a draw, or the machine's: what a reader running it gets is not what the run got.
-#: PanDA's own ``naive_utcnow`` is ``pandacommon``'s, outside the corpus.
-CLOCK = frozenset(
+#: Those whose value is the time the run read the clock at.  PanDA's own ``naive_utcnow`` is ``pandacommon``'s,
+#: outside the corpus.
+TIME = frozenset(
     {
         *("datetime.datetime.now", "datetime.datetime.utcnow", "datetime.datetime.today", "datetime.date.today"),
-        *("time.", "random.", "uuid.", "socket.", "getpass.", "os.environ", "os.getenv", "os.getpid"),
+        *("time.time", "time.time_ns", "time.monotonic", "time.monotonic_ns", "time.perf_counter"),
+        *("time.gmtime", "time.localtime", "time.ctime", "time.asctime", "time.strftime"),
         "pandacommon.pandautils.PandaUtils.naive_utcnow",
     }
 )
+#: Of :data:`TIME`, those that read the clock only where they are not handed a time, by the time's position:
+#: ``time.gmtime(seconds)`` and ``time.strftime(format, struct)`` make their value of what they are handed.
+TIME_UNLESS_HANDED: dict[str, int] = {
+    "time.gmtime": 0,
+    "time.localtime": 0,
+    "time.ctime": 0,
+    "time.asctime": 0,
+    "time.strftime": 1,
+}
+#: Those whose value is a draw: another run draws another.
+DRAW = frozenset({"random.", "uuid.uuid1", "uuid.uuid4"})
+#: Those whose value is the machine's: its name, a process's, the environment's.
+MACHINE = frozenset({"socket.", "getpass.", "os.environ", "os.getenv", "os.getpid"})
+#: Those whose value is the clock's, a draw, or the machine's: what a reader running it gets is not what the run got.
+CLOCK = TIME | DRAW | MACHINE
+
+
+def run_dependent(name: str, call: Optional[ast.Call] = None) -> str:
+    """Which of :data:`TIME`, :data:`DRAW` and :data:`MACHINE` holds *name* -- ``"time"``, ``"draw"``,
+    ``"machine"`` -- or ``""``: none does, or *call* hands a :data:`TIME_UNLESS_HANDED` function its time."""
+    if listed(name, TIME):
+        position = TIME_UNLESS_HANDED.get(name)
+        handed = call is not None and position is not None and (len(call.args) > position or bool(call.keywords))
+        return "" if handed else "time"
+    if listed(name, DRAW):
+        return "draw"
+    if listed(name, MACHINE):
+        return "machine"
+    return ""
 #: The deployment's configuration objects, as the imports spell them: a value read off one is the deployment's.
 CONFIGURATION = frozenset({"pandaserver.config.panda_config", "pandajedi.jediconfig.jedi_config"})
 #: The methods, by name, of the values a call of :data:`RUNS_ALIKE` makes -- a match, a pattern, a date, a time span
