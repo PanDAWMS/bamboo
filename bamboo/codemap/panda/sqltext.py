@@ -1075,6 +1075,25 @@ def _guards(
     return preconditions, keys, spans_of, key_holes, key_lists
 
 
+def where_terms(sql: str) -> Optional[dict[str, tuple[str, list[tuple[int, int]]]]]:
+    """``{column: (its test, where in *sql* its conjuncts are)}`` for each column the ``WHERE`` of the ``UPDATE`` in
+    *sql* tests, read as :func:`writes` reads a statement's preconditions -- a conjunct kept whole, every test of one
+    column joined, a subquery's columns not the row's -- with every column taken as one the statement may write: a
+    ``SET {}`` (a spec's ``bindUpdateChangesExpression()``) writes what its caller changed, which only the caller
+    says.  ``None`` where the statement is no ``UPDATE`` this reads so."""
+    read = _statement(sql)
+    if read is None or not isinstance(read[0], exp.Update):
+        return None
+    node, tokens = read
+    where = node.args.get("where")
+    tested = {column.name for column in _own(where, None)} if where is not None else set()
+    guarded = _guards(node, sql, tokens, tested)
+    if guarded is None:
+        return None
+    preconditions, _keys, spans, _key_holes, _key_lists = guarded
+    return {column: (term, spans.get(column, [])) for column, term in preconditions.items()}
+
+
 def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
     """``(column hole, bind, bind holes)`` of a term ``{}=:cr_{}`` (:attr:`SqlWrite.key_holes`); ``None`` for any other."""
     if not (isinstance(term, exp.EQ) and _is_hole(term.this) and isinstance(term.expression, exp.Placeholder)):

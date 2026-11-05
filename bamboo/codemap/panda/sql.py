@@ -2299,6 +2299,24 @@ _PRECONDITION_BIND = re.compile(
     re.IGNORECASE,
 )
 
+#: An ``OR`` of equality tests on one column, each by a bind, in its parentheses: ``(jobStatus=:oldJobStatus1 OR
+#: jobStatus=:oldJobStatus2)``, the list ``updateJob`` and ``archiveJob`` take a row out of ``jobsDefined4`` by.
+_ONE_COLUMN_OR = re.compile(r"^\(\s*([\w.]+)\s*=\s*:\w+(?:\s+OR\s+([\w.]+)\s*=\s*:\w+)+\s*\)$", re.IGNORECASE)
+_OR_ITEM = re.compile(r"([\w.]+)\s*=\s*(:\w+)")
+
+
+def _as_list(term: str) -> str:
+    """*term* as the ``IN`` list it is where it is an ``OR`` of equality tests on one column by binds -- ``(jobStatus=
+    :oldJobStatus1 OR jobStatus=:oldJobStatus2)`` is ``jobStatus IN (:oldJobStatus1,:oldJobStatus2)`` -- else *term*:
+    one test of the column, which a reader of either half alone takes for the whole."""
+    stripped = term.strip()
+    if _ONE_COLUMN_OR.match(stripped) is None:
+        return term
+    items = _OR_ITEM.findall(stripped)
+    if len({column.lower() for column, _bind in items}) != 1:
+        return term
+    return f"{items[0][0]} IN ({','.join(bind for _column, bind in items)})"
+
 
 def settled_precondition(
     term: str,
@@ -2362,7 +2380,7 @@ def settled_precondition(
 
 def precondition_binds(term: str) -> list[str]:
     """The binds a precondition of a shape :func:`settled_term` settles tests, in order; ``[]`` for any other."""
-    match = _PRECONDITION_BIND.match(term.strip())
+    match = _PRECONDITION_BIND.match(_as_list(term).strip())
     if match is None:
         return []
     key, keys = match.group(4), match.group(6)
@@ -2372,8 +2390,10 @@ def precondition_binds(term: str) -> list[str]:
 def settled_term(term: str, held_by: Callable[[str], Optional[set[str]]]) -> tuple[str, bool]:
     """*term* with its binds replaced by what *held_by* says each holds (``None``: not known), and whether that
     happened -- how :func:`settled_precondition` spells a settled guard, and a flush call's guard settled at the call.
-    One bind not known leaves the term as it is."""
-    match = _PRECONDITION_BIND.match(term.strip())
+    One bind not known leaves the term as it is.  An ``OR`` of equality tests on one column is the list it tests
+    (:func:`_as_list`): ``updateJob``'s ``(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)`` is ``jobStatus IN
+    (assigned,defined)``, and read from its second half alone it was ``jobStatus=defined``."""
+    match = _PRECONDITION_BIND.match(_as_list(term).strip())
     if match is None:
         return term, False
     not_term, column, operator, key, not_in, keys = match.groups()

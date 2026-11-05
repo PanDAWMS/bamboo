@@ -44,7 +44,10 @@ so whether it applies is settled one step up at the call site -- the one hop
 the backward-slicing rules allow for a formal argument.  Without it the ten
 callers that pass no ``oldStatus`` would be told their write races when it
 does not, and a caveat invented is worse here than a caveat missed: it is the
-confirmed candidates it weakens.
+confirmed candidates it weakens.  Settled by what the call hands, not by its
+handing something: ``updateJob`` adds its ``jobStatus`` test under ``if
+inJobsDefined``, and ``updateJobs`` hands on its own flag, so the guard holds
+when that flag does, which the call cannot say (``row_precondition_when``).
 """
 
 from __future__ import annotations
@@ -53,11 +56,13 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
+from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import (
     KEY_IN_CALLEE,
     KEY_NO_BIND,
+    ConditionalGuard,
     Emit,
     JunctionNode,
     KeyFrom,
@@ -65,11 +70,13 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import sql, sqltext, values
+from bamboo.codemap.panda import pathcond, sql, sqltext, values
 from bamboo.codemap.panda.attribution import SpecAttributor
 from bamboo.codemap.panda.pathcond import (
     attach_parents,
+    enclosing_function,
     functions_with_owner,
+    path_condition,
     site_of,
     targets_of,
 )
@@ -89,8 +96,11 @@ class Flush(NamedTuple):
     """A method that persists whatever its caller changed on a spec."""
 
     spec_classes: frozenset[str]
-    #: column -> (the predicate term, the parameters whose presence appends it)
-    guards: dict[str, tuple[str, frozenset[str]]]
+    #: (class, column) -> (the predicate term, for each way its text is written the statement running the statement
+    #: and the statements of the method the text is written on: whether a call runs it is asked of their tests at the
+    #: call, :func:`_carried_at`).  The class is the one the term's statement flushes: ``update_workflow``'s
+    #: ``workflow_id=:workflow_id`` is a workflow's row, and a step has a column of that name too.
+    guards: dict[tuple[str, str], tuple[str, tuple[tuple[ast.stmt, tuple[ast.stmt, ...]], ...]]]
     #: columns the method takes back out of the clause before writing
     excluded: frozenset[str]
     parameters: tuple[str, ...]
@@ -102,9 +112,14 @@ class Flush(NamedTuple):
     flushed: frozenset[tuple[str, int, str]] = frozenset()
     #: the dict parameter whose items make those statements' ``WHERE`` (``updateTask_JEDI``'s ``criteria``), or ""
     criteria: str = ""
-    #: column -> (the term as written, the method, {bind: its values in the method}) for a guard the method does not
-    #: settle itself -- ``status IN (:old___in)`` from its ``oldStatus`` -- settled at each call (:func:`_guard_at`)
+    #: (class, column) -> (the term as written, the method, {bind: its values in the method}) for a guard the method
+    #: does not settle itself -- ``status IN (:old___in)`` from its ``oldStatus`` -- settled at each call
+    #: (:func:`_guard_at`)
     guard_binds: dict = {}
+    #: the method's ``def``, whose tests a call's arguments are read against
+    method: Optional[ast.AST] = None
+    #: the parameters the method tests and never binds again: the ones what a call hands decides
+    flags: frozenset[str] = frozenset()
 
 
 def _parameters(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
@@ -214,39 +229,48 @@ def _criteria(run: sql.Execution, match: re.Match, parameters: tuple[str, ...], 
     return ""
 
 
-def _gating_parameters(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-    run: sql.Execution,
-    span: tuple[int, int],
-    parameters: tuple[str, ...],
-) -> Optional[frozenset[str]]:
-    """Parameters whose value decides whether the term at *span* of *run* is appended, or ``None`` if unknown.
+def _where_terms(run: sql.Execution, match: re.Match) -> dict[str, tuple[str, list[tuple[int, int]]]]:
+    """``{column: (its test, where in the run's text)}`` of the ``WHERE`` *match* begins, read off the statement's tree
+    as the SQL slice reads its own (:func:`sqltext.where_terms`): ``updateJob``'s ``(jobStatus=:oldJobStatus1 OR
+    jobStatus=:oldJobStatus2)`` is one test, and read term by term it was its second half.  Where the tree does not
+    read it, term by term, the first test of each column."""
+    read = sqltext.where_terms(run.sql)
+    if read is not None:
+        return read
+    found: dict[str, tuple[str, list[tuple[int, int]]]] = {}
+    for term_match in sqltext._TERM.finditer(run.sql, match.end(2)):
+        found.setdefault(term_match.group(2), (term_match.group(1), [term_match.span(1)]))
+    return found
 
-    The tests are those on the way of each piece holding the term
-    (:attr:`sql.Execution.pieces`), as the SQL slice reads the guards of a
-    statement it can read whole (``sqlwrite._guard_conditions``).  Looking for
-    the term's text among the method's literals instead tied it to nothing
-    where the method formats it -- ``updateTask_JEDI`` appends
-    ``f"status IN ({old_status_var_names_str}) AND "`` -- so every caller was
-    told the guard; and to a parameter tested above the same text elsewhere --
-    ``registerTaskInOneShot_JEDI``'s ``jediTaskID=:jediTaskID``, unconditional
-    in its flush, to ``taskParams``.
 
-    ``None`` where no piece holds the term, or one was written under a test of
-    another function, whose names say nothing here: the term is then not said,
-    as the SQL slice leaves such a column out.
+def _ways(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, spans: list[tuple[int, int]]
+) -> Optional[tuple[tuple[ast.stmt, tuple[ast.stmt, ...]], ...]]:
+    """For the way of each piece of *run* holding a part of *spans*, the statement running *run* and the statements of
+    *func* on the way.
+
+    The ways are those of the pieces holding the term (:attr:`sql.Execution.pieces`) -- where its text was written
+    and each name it was put into -- as the SQL slice reads the guards of a statement it can read whole
+    (``sqlwrite._guard_conditions``); whether a call runs the term is asked of their tests at the call
+    (:func:`_carried_at`).  Looking for the term's text among the method's literals instead tied it to nothing where
+    the method formats it -- ``updateTask_JEDI`` appends ``f"status IN ({old_status_var_names_str}) AND "`` -- so
+    every caller was told the guard; and to a test above the same text elsewhere -- ``registerTaskInOneShot_JEDI``'s
+    ``jediTaskID=:jediTaskID``, unconditional in its flush, to ``taskParams``.
+
+    ``None`` where no piece holds the term, or one was written under a test of another function, whose names say
+    nothing here: the term is then not said, as the SQL slice leaves such a column out.
     """
-    start, end = span
-    ways = [way for begin, finish, way in run.pieces if begin < end and start < finish]
-    said = [sqlwrite._tests_on_way(func, way) for way in ways]
-    if not ways or any(one is None for one in said):
+    ways = [way for begin, finish, way in run.pieces if any(begin < end and start < finish for start, end in spans)]
+    if not ways or any(sqlwrite._tests_on_way(func, way) is None for way in ways):
         return None
-    return frozenset(
-        name
-        for name in parameters
-        if name != "self"
-        for tests in said
-        if any(re.search(rf"\b{re.escape(name)}\b", test) for test in tests or ())
+    execute = site_of(run.call)
+    if not isinstance(execute, ast.stmt):
+        return None
+    return tuple(
+        dict.fromkeys(
+            (execute, tuple(node for node in way if isinstance(node, ast.stmt) and enclosing_function(node) is func))
+            for way in ways
+        )
     )
 
 
@@ -292,8 +316,8 @@ def flush_methods(
             if not classes:
                 continue
             parameters = _parameters(func)
-            guards: dict[str, tuple[str, frozenset[str]]] = {}
-            guard_binds: dict[str, tuple] = {}
+            guards: dict[tuple[str, str], tuple[str, tuple[tuple[ast.stmt, tuple[ast.stmt, ...]], ...]]] = {}
+            guard_binds: dict[tuple[str, str], tuple] = {}
             flushed: set[tuple[str, int, str]] = set()
             criteria = ""
             dicts = sqlwrite._dict_names(func)
@@ -304,16 +328,12 @@ def flush_methods(
                         # reader exists for the clause the spec writes.
                         continue
                     table = match.group(1).split(".")[-1]
-                    flushed |= {
-                        (spec, run.call.lineno, table) for spec in _flushed_classes(run, match, func, owner, attributor)
-                    }
+                    here = _flushed_classes(run, match, func, owner, attributor)
+                    flushed |= {(spec, run.call.lineno, table) for spec in here}
                     criteria = criteria or _criteria(run, match, parameters, dicts)
-                    for term_match in sqltext._TERM.finditer(run.sql, match.end(2)):
-                        raw, column = term_match.group(1), term_match.group(2)
-                        if column in guards:
-                            continue
-                        gating = _gating_parameters(func, run, term_match.span(1), parameters)
-                        if gating is None:
+                    for column, (raw, spans) in sorted(_where_terms(run, match).items()):
+                        ways = _ways(func, run, spans)
+                        if ways is None:
                             continue
                         term = re.sub(r"\s+", " ", raw).strip()
                         # Settled here for the same reason the SQL slice
@@ -325,16 +345,23 @@ def flush_methods(
                         settled, done = sql.settled_precondition(
                             term, func, run.varmap, run.window, settle, at=run
                         )
-                        guards[column] = (settled, gating)
-                        if not done and run.varmap is not None:
-                            guard_binds[column] = (
-                                term,
-                                func,
-                                {
-                                    key: tuple(sql.bound_values(func, run.varmap, key, run.window, at=run))
-                                    for key in sql.precondition_binds(term)
-                                },
-                            )
+                        for spec in sorted(here or classes):
+                            held = guards.get((spec, column))
+                            if held is not None:
+                                # The same test written on another way is written on either.
+                                if held[0] == settled:
+                                    guards[(spec, column)] = (settled, tuple(dict.fromkeys(held[1] + ways)))
+                                continue
+                            guards[(spec, column)] = (settled, ways)
+                            if not done and run.varmap is not None:
+                                guard_binds[(spec, column)] = (
+                                    term,
+                                    func,
+                                    {
+                                        key: tuple(sql.bound_values(func, run.varmap, key, run.window, at=run))
+                                        for key in sql.precondition_binds(term)
+                                    },
+                                )
             found[func.name] = Flush(
                 spec_classes=frozenset(classes),
                 guards=guards,
@@ -349,28 +376,122 @@ def flush_methods(
                 flushed=frozenset(flushed),
                 criteria=criteria,
                 guard_binds=guard_binds,
+                method=func,
+                flags=frozenset(sqlwrite._flag_parameters(func)),
             )
     return found
 
 
-def _supplied(call: ast.Call, parameter: str, parameters: tuple[str, ...]) -> bool:
-    """Whether this call passes *parameter* something other than ``None``."""
-    for keyword in call.keywords:
-        if keyword.arg == parameter:
-            return not (
-                isinstance(keyword.value, ast.Constant) and keyword.value.value is None
-            )
-        if keyword.arg is None:
-            # ``**kwargs``: what it holds is not readable here, so the guard
-            # is left in rather than ruled out.
-            return True
-    if parameter in parameters:
-        # ``self`` is in the signature and never in the call's arguments.
-        index = parameters.index(parameter) - (1 if parameters and parameters[0] == "self" else 0)
-        if 0 <= index < len(call.args):
-            argument = call.args[index]
-            return not (isinstance(argument, ast.Constant) and argument.value is None)
-    return False
+class _Built:
+    """What a call hands a parameter by an expression that makes a new value -- an operator, a comprehension, an
+    f-string: not ``None``, and nothing else known.  ``JobGenerator.runImpl`` hands ``updateTask_JEDI``
+    ``oldStatus=JediTaskSpec.statusForJobGenerator() + ["pending"]``, which ``if oldStatus is not None`` lets through.
+    Its truth and what it equals raise the ``TypeError`` :func:`~bamboo.codemap.panda.pathcond.decided` reads as
+    undecided."""
+
+    def __bool__(self) -> bool:
+        raise TypeError("what a built value holds is not read")
+
+    def __eq__(self, other: object) -> bool:
+        if other is None:
+            return False
+        raise TypeError("what a built value holds is not read")
+
+    def __ne__(self, other: object) -> bool:
+        return not self.__eq__(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+
+#: The expressions that make a new value whenever they run: none of them is ``None``.
+_BUILDS = (ast.BinOp, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.JoinedStr, ast.Compare, ast.Lambda)
+
+
+def _carried_at(
+    call: ast.Call, flush: Flush, ways: tuple[tuple[ast.stmt, tuple[ast.stmt, ...]], ...]
+) -> Optional[list[list[str]]]:
+    """Whether *call* runs the text of a guard written on *ways* (:attr:`Flush.guards`): ``None`` where what the call
+    hands rules out every way; ``[]`` where it runs one whatever else holds; else, for each way it may run, the
+    tests left open, as the caller spells them (:func:`_open_at`).  A test the statement running the text is under
+    too is none of the guard's: where it fails nothing is written, and every write the method makes carries the
+    guard -- ``updateTask_JEDI`` returns at ``if criteria == {}`` before anything.
+
+    ``updateJob`` adds ``(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)`` under ``if inJobsDefined:``, and
+    ``updateJobs`` hands it its own ``inJobsDefined``: the guard holds where that does.  Read as "the call hands the
+    parameter something", it held on every write ``updateJobs`` makes, its ``jobsActive4`` ones too.  What a call
+    hands is read as a route's is (:func:`calls.bind`, the default where it hands nothing; a constant, a list
+    display), with a value an expression makes not ``None`` (:class:`_Built`), and the tests by the evaluator a
+    route's are (:func:`pathcond.ruled_out_by`).
+    """
+    method = flush.method
+    if method is None:
+        return []
+    # Read as a method's, past its ``self``: every flush is a method, called on its object.
+    held = getattr(method, "parent", None)
+    handed = calls_mod.bind(
+        call, calls_mod.Target(flush.owner.partition("::")[0], method, held if isinstance(held, ast.ClassDef) else None)
+    )
+    values: dict[str, object] = {}
+    for name in flush.flags:
+        given = handed.get(name)
+        if isinstance(given, ast.Constant):
+            values[name] = given.value
+        elif (shown := calls_mod._displayed(given)) is not None:
+            values[name] = shown
+        elif isinstance(given, _BUILDS):
+            values[name] = _Built()
+    left: list[list[str]] = []
+    for execute, way in ways:
+        if any(pathcond.ruled_out_by(node, method, values) for node in (execute, *way)):
+            continue
+        runs = {(id(test), keeps) for test, keeps in pathcond._tests_on(execute, method)}
+        tests = list(
+            dict.fromkeys(one for node in way for one in _open_at(node, method, values, handed, flush.flags, runs))
+        )
+        if not tests:
+            return []
+        if tests not in left:
+            left.append(tests)
+    return left or None
+
+
+def _open_at(
+    node: ast.stmt,
+    method: ast.AST,
+    values: dict[str, object],
+    handed: dict[str, Optional[ast.expr]],
+    flags: frozenset[str],
+    runs: set[tuple[int, bool]],
+) -> list[str]:
+    """The tests of *method* deciding whether *node* runs that *values* leave open, each as the caller spells it --
+    every name in it a parameter the method never binds again, the expression the call hands put in its place
+    (``not (...)`` where *node* runs when it fails, as :func:`pathcond.path_condition` spells an ``else``).  One of
+    *runs* (``(id(test), the value it runs on)`` of the statement running the text) is left out, and so is a test
+    reading any other name: the method's own state is not the caller's to say, and such a test was never read at
+    the call."""
+    said: list[str] = []
+    for test, keeps in pathcond._tests_on(node, method):
+        if (id(test), keeps) in runs or pathcond.decided(test, values) is not pathcond.UNDECIDED:
+            continue
+        names = {one.id for one in walk(test) if isinstance(one, ast.Name)}
+        if not names or not names <= flags or any(handed.get(name) is None for name in names):
+            continue
+        spelled = ast.unparse(_handed_in(test, handed))
+        said.append(spelled if keeps else f"not ({spelled})")
+    return said
+
+
+def _handed_in(test: ast.expr, handed: dict[str, Optional[ast.expr]]) -> ast.expr:
+    """A fresh copy of *test* with each name *handed* gives an expression for replaced by that expression."""
+
+    class Handed(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.expr:
+            given = handed.get(node.id)
+            return ast.parse(ast.unparse(given), mode="eval").body if given is not None else node
+
+    copied = Handed().visit(ast.parse(ast.unparse(test), mode="eval").body)
+    assert isinstance(copied, ast.expr)
+    return copied
 
 
 def _changed_attributes(
@@ -456,37 +577,53 @@ def attach(
                 changed = _changed_attributes(func, owner, attributor, flush.spec_classes)
                 for spec, attributes in changed.items():
                     written = attributes - flush.excluded
-                    applied = [
-                        (column, term, _guard_at(node, func, flush, column, term, settle))
-                        for column, (term, gating) in sorted(flush.guards.items())
-                        if column in written
-                        and all(_supplied(node, p, flush.parameters) for p in gating)
-                    ]
-                    uses.append((node, flush, spec, written, applied))
+                    applied: list[tuple[str, str, str]] = []
+                    # Each with the tests left open on each way the call may run it (:func:`_carried_at`).
+                    conditional: list[tuple[str, str, str, list[list[str]]]] = []
+                    for (one, column), (term, ways) in sorted(flush.guards.items()):
+                        if one != spec or column not in written:
+                            continue
+                        left = _carried_at(node, flush, ways)
+                        if left is None:
+                            continue
+                        settled = _guard_at(node, func, flush, (spec, column), term, settle)
+                        if left:
+                            conditional.append((column, term, settled, left))
+                        else:
+                            applied.append((column, term, settled))
+                    uses.append((node, flush, spec, written, applied, conditional))
             # A guard settled at a call is said where every guarded flush call of the function settles the column
             # alike, and on the branches that call writes: the calls are alternatives, and a branch's guards a
             # conjunction.  TaskRefiner.runImpl hands registerTaskInOneShot_JEDI a status tested to be registered or
             # staged, and updateTask_JEDI the status it read (`[taskStatus]`), and either guard on every branch
             # would drop the other call's arms; read as the method has it, the bind drops none.
             at_calls: dict[str, set[str]] = {}
-            for _node, _flush, _spec, _written, applied in uses:
-                for column, _term, settled in applied:
+            for _node, _flush, _spec, _written, applied, conditional in uses:
+                for column, _term, settled in [*applied, *((c, t, s) for c, t, s, _left in conditional)]:
                     at_calls.setdefault(column, set()).add(settled)
-            for node, flush, spec, written, applied in uses:
+            for node, flush, spec, written, applied, conditional in uses:
                 guards = sorted(term for _column, term, _settled in applied)
-                if not guards and not flush.rows_emits:
+                if not guards and not conditional and not flush.rows_emits:
                     continue
-                if row_keys is not None and guards:
+                if row_keys is not None and (guards or conditional):
                     row_keys.append(
                         _row_key_source(
-                            node, func, spec, [column for column, _t, _s in applied], module, called.get(id(node), [])
+                            node,
+                            func,
+                            spec,
+                            [column for column, _t, _s in applied] + [column for column, *_rest in conditional],
+                            module,
+                            called.get(id(node), []),
                         )
                     )
                 alike = {
                     column: settled
-                    for column, term, settled in applied
+                    for column, term, settled in [*applied, *((c, t, s) for c, t, s, _left in conditional)]
                     if settled != term and at_calls.get(column) == {settled}
                 }
+                # Where a guard holds only when the call's arguments do, the write carries it under the tests the call
+                # is made under too, as a statement's is under its execute's (ConditionalGuard.when).
+                around = path_condition(node) if conditional else []
                 reached = _reached_lines(node, func, owner, spec, written, attributor) if alike else set()
                 for junction in here:
                     if junction.subject not in {
@@ -508,6 +645,24 @@ def attach(
                             branch.row_precondition = sorted(
                                 branch.row_precondition + missing
                             )
+                        told = [
+                            ConditionalGuard(
+                                term=alike[column] if mine and column in alike else term,
+                                when=[test for test in [*around, *tests] if test not in branch.path_condition],
+                            )
+                            for column, term, _settled, left in conditional
+                            for tests in left
+                        ]
+                        told = [
+                            guard
+                            for guard in told
+                            if guard.term not in branch.row_precondition and guard not in branch.row_precondition_when
+                        ]
+                        if told:
+                            branch.row_precondition_when = sorted(
+                                [*branch.row_precondition_when, *told], key=lambda guard: (guard.term, guard.when)
+                            )
+                        if missing or told:
                             annotated += 1
                         # The line saying whether the row actually moved is
                         # written by the flush, in the flush's own log, and
@@ -545,7 +700,7 @@ def _guard_at(
     call: ast.Call,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     flush: Flush,
-    column: str,
+    key: tuple[str, str],
     term: str,
     settle,
 ) -> str:
@@ -556,7 +711,7 @@ def _guard_at(
     statusForJobGenerator() + ["pending"]``: its guard is that list, not the bind -- and another caller's list is not
     its.  One bind not settled leaves the guard as the method has it (``TaskRefiner.runImpl``'s ``[taskStatus]``, the
     status it read off the row: a compare-and-set)."""
-    held = flush.guard_binds.get(column)
+    held = flush.guard_binds.get(key)
     if held is None:
         return term
     raw, method, binds = held
@@ -587,7 +742,7 @@ def _guard_at(
 
 
 def _argument(call: ast.Call, parameter: str, parameters: tuple[str, ...]) -> Optional[ast.expr]:
-    """What this call passes *parameter*, or ``None`` -- as :func:`_supplied` finds it."""
+    """What this call passes *parameter* by position or by keyword, or ``None``."""
     for keyword in call.keywords:
         if keyword.arg == parameter:
             return keyword.value
@@ -687,15 +842,15 @@ def _call_key_froms(
                     column = re.match(r"\s*(\w+)", record.term)
                     if column is None or column.group(1).lower() in written:
                         continue
-                    gating = next(
+                    ways = next(
                         (
-                            gating
-                            for name, (_term, gating) in flush.guards.items()
-                            if name.lower() == column.group(1).lower()
+                            ways
+                            for (one, name), (_term, ways) in flush.guards.items()
+                            if one == spec and name.lower() == column.group(1).lower()
                         ),
-                        frozenset(),
+                        None,
                     )
-                    if not all(_supplied(call, parameter, flush.parameters) for parameter in gating):
+                    if ways is not None and _carried_at(call, flush, ways) is None:
                         continue
                     binds, own = [], False
                     for bind in (record._binds or (None, None, []))[2]:

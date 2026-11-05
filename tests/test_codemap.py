@@ -4039,11 +4039,11 @@ class TaskModule:
 '''
 
 
-def _flush(caller: str, rel: str = "pandajedi/jediorder/Knight.py"):
+def _flush(caller: str, rel: str = "pandajedi/jediorder/Knight.py", proxy: str = _FLUSH_PROXY):
     """Run the attribute slice over *caller*, then annotate it from the proxy."""
     modules = [
         _module(_SPECS, "pandaserver/taskbuffer/Specs.py"),
-        _module(_FLUSH_PROXY, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(proxy, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
         _module(caller, rel),
     ]
     _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, MAP_ID, VERSION)
@@ -4073,10 +4073,11 @@ def test_the_proxy_flush_is_recognised_by_the_expression_it_builds():
     assert set(found) == {"updateTask_JEDI"}
     assert found["updateTask_JEDI"].spec_classes == frozenset({"JediTaskSpec"})
     assert found["updateTask_JEDI"].excluded == frozenset({"jediTaskID"})
-    assert found["updateTask_JEDI"].guards["status"] == (
-        "status IN (:old_1)",
-        frozenset({"oldStatus"}),
-    )
+    term, ways = found["updateTask_JEDI"].guards[("JediTaskSpec", "status")]
+    assert term == "status IN (:old_1)"
+    assert {test for _execute, way in ways for node in way for test in pathcond.path_condition(node)} == {
+        "oldStatus is not None"
+    }
 
 
 def test_the_caller_is_told_where_its_flush_reports_the_row_count():
@@ -4136,6 +4137,165 @@ class PostProcessor:
     assert status[0].branches[0].row_precondition == []
 
 
+_JOB_FLUSH_PROXY = '''
+class JobModule:
+    def updateJob(self, job: JobSpec, inJobsDefined, oldJobStatus=None):
+        if inJobsDefined:
+            sql1 = f"UPDATE ATLAS_PANDA.jobsDefined4 SET {job.bindUpdateChangesExpression()} "
+        else:
+            sql1 = f"UPDATE ATLAS_PANDA.jobsActive4 SET {job.bindUpdateChangesExpression()} "
+        sql1 += "WHERE PandaID=:PandaID "
+        if inJobsDefined:
+            sql1 += " AND (jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2) "
+        varMap = job.valuesMap(onlyChanged=True)
+        varMap[":PandaID"] = job.PandaID
+        if inJobsDefined:
+            varMap[":oldJobStatus1"] = "assigned"
+            varMap[":oldJobStatus2"] = "defined"
+        self.cur.execute(sql1 + comment, varMap)
+'''
+
+
+def test_a_flush_guard_a_call_hands_a_flag_for_holds_when_the_flag_does():
+    """``updateJob`` tests the status only under ``if inJobsDefined``, and the call's argument says whether that holds.
+
+    ``updateJobs`` hands on its own flag: the guard holds when the flag does, which the call cannot say, so it is
+    said with the flag (``row_precondition_when``).  Read as "the call hands the flag something", every write
+    ``updateJobs`` makes was told it needed ``defined`` -- its ``jobsActive4`` ones too.  A ``True`` handed runs it,
+    a ``False`` does not.  And the test is ``assigned`` or ``defined``, not its second half.
+    """
+    caller = '''
+class TaskBuffer:
+    def updateJobs(self, job: JobSpec, inJobsDefined):
+        job.jobStatus = "running"
+        proxy.updateJob(job, inJobsDefined)
+
+    def activateJobs(self, job: JobSpec):
+        job.jobStatus = "activated"
+        proxy.updateJob(job, True)
+
+    def holdJobs(self, job: JobSpec):
+        job.jobStatus = "holding"
+        proxy.updateJob(job, inJobsDefined=False)
+'''
+    status = {
+        j.owner.rpartition("::")[2]: j.branches[0]
+        for j in _flush(caller, "pandaserver/taskbuffer/TaskBuffer.py", _JOB_FLUSH_PROXY)
+        if j.subject == "JobSpec.jobStatus"
+    }
+
+    assert status["updateJobs"].row_precondition == []
+    assert [(g.term, g.when) for g in status["updateJobs"].row_precondition_when] == [
+        ("jobStatus IN (assigned,defined)", ["inJobsDefined"])
+    ]
+    assert status["activateJobs"].row_precondition == ["jobStatus IN (assigned,defined)"]
+    assert status["activateJobs"].row_precondition_when == []
+    assert status["holdJobs"].row_precondition == []
+    assert status["holdJobs"].row_precondition_when == []
+
+
+def test_a_value_an_expression_makes_is_not_none_at_the_call():
+    """``JobGenerator.runImpl`` hands ``oldStatus=JediTaskSpec.statusForJobGenerator() + ["pending"]``: never ``None``.
+
+    The guard under ``if oldStatus is not None`` holds on its writes; a name the caller hands may be ``None``, and the
+    guard holds where it is not, as the caller spells it -- beside the tests the call itself is made under.
+    """
+    caller = '''
+class JobGenerator:
+    def generate(self, taskSpec: JediTaskSpec):
+        taskSpec.status = "running"
+        self.taskBufferIF.updateTask_JEDI(
+            taskSpec, {"jediTaskID": 1}, oldStatus=JediTaskSpec.statusForJobGenerator() + ["pending"]
+        )
+
+
+class TaskRefiner:
+    def refine(self, taskSpec: JediTaskSpec, old, toRefine):
+        taskSpec.status = "ready"
+        if toRefine:
+            self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": 1}, oldStatus=old)
+'''
+    by_value = {
+        branch.outcome: branch for j in _flush(caller) if j.subject == "JediTaskSpec.status" for branch in j.branches
+    }
+
+    assert by_value["running"].row_precondition == ["status IN (:old_1)"]
+    assert by_value["running"].row_precondition_when == []
+    assert by_value["ready"].row_precondition == []
+    assert [(g.term, g.when) for g in by_value["ready"].row_precondition_when] == [
+        ("status IN (:old_1)", ["toRefine", "old is not None"])
+    ]
+
+
+def test_a_test_the_whole_flush_runs_under_is_none_of_its_guards():
+    """``updateTask_JEDI`` returns at ``if criteria == {}`` before it writes anything: every write it makes carries
+    the ``oldStatus`` guard its caller asked for, whatever the caller's criteria are."""
+    proxy = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus=None):
+        if criteria == {}:
+            return False
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE jediTaskID=:jediTaskID "
+        varMap = {":jediTaskID": criteria["jediTaskID"]}
+        if oldStatus is not None:
+            sql += "AND status IN (:old_1) "
+            varMap[":old_1"] = oldStatus[0]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+    caller = '''
+class TaskRefiner:
+    def refine(self, taskSpec: JediTaskSpec, taskStatus):
+        taskSpec.status = "ready"
+        self.taskBufferIF.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID}, oldStatus=[taskStatus])
+'''
+    status = [b for j in _flush(caller, proxy=proxy) if j.subject == "JediTaskSpec.status" for b in j.branches]
+
+    assert [b.row_precondition for b in status] == [["status IN (:old_1)"]]
+    assert [b.row_precondition_when for b in status] == [[]]
+
+
+def test_a_flush_guard_is_its_statements_class():
+    """A method flushing two classes guards each statement's row: a column of one name in both is two columns.
+
+    ``upsert_workflow_entities`` updates ``workflows`` by ``workflow_id=:workflow_id`` and ``workflow_data`` by
+    ``data_id``; a data entity has a ``workflow_id`` too, and was told the workflow's row test.
+    """
+    proxy = '''
+class TaskModule:
+    def updateBoth(self, taskSpec: JediTaskSpec, fileSpec: JediFileSpec):
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        self.cur.execute(sql + comment, varMap)
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET {fileSpec.bindUpdateChangesExpression()} "
+        sql += "WHERE fileID=:fileID "
+        self.cur.execute(sql + comment, varMap)
+'''
+    guards = _flush_methods(proxy)["updateBoth"].guards
+
+    assert set(guards) == {("JediTaskSpec", "jediTaskID"), ("JediTaskSpec", "status"), ("JediFileSpec", "fileID")}
+
+
+def test_an_or_of_one_columns_tests_is_the_list_it_tests():
+    """``(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)`` settles as the ``IN`` list it means."""
+    held = {":oldJobStatus1": {"assigned"}, ":oldJobStatus2": {"defined"}}
+
+    assert sql.precondition_binds("(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)") == [
+        ":oldJobStatus1",
+        ":oldJobStatus2",
+    ]
+    assert sql.settled_term("(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)", held.get) == (
+        "jobStatus IN (assigned,defined)",
+        True,
+    )
+    # Two columns, or a test that is no equality, stay as written.
+    assert sql.settled_term("(jobStatus=:oldJobStatus1 OR status=:oldJobStatus2)", held.get) == (
+        "(jobStatus=:oldJobStatus1 OR status=:oldJobStatus2)",
+        False,
+    )
+    assert sql.precondition_binds("(lockedBy IS NULL OR lockedTime<:timeLimit)") == []
+
+
 def test_a_column_the_flush_takes_back_out_is_not_one_it_writes():
     """``resetChangedAttr("jediTaskID")`` says the ``WHERE`` is row identity.
 
@@ -4188,10 +4348,12 @@ class TaskModule:
         sql = sql[:-4]
         self.cur.execute(sqlU + sql + comment, varMap)
 '''
-    term, gating = _flush_methods(proxy)["updateTask_JEDI"].guards["status"]
+    term, ways = _flush_methods(proxy)["updateTask_JEDI"].guards[("JediTaskSpec", "status")]
 
     assert "status IN (" in term
-    assert gating == frozenset({"oldStatus"})
+    assert {test for _execute, way in ways for node in way for test in pathcond.path_condition(node)} == {
+        "oldStatus is not None"
+    }
 
 
 def test_a_guard_is_not_tied_to_a_test_above_the_same_text_elsewhere():
@@ -4207,9 +4369,10 @@ class TaskModule:
             sql += "WHERE jediTaskID=:jediTaskID AND status=:preStatus "
             self.cur.execute(sql + comment, varMap)
 '''
-    guards = _flush_methods(proxy)["registerTask"].guards
+    term, ways = _flush_methods(proxy)["registerTask"].guards[("JediTaskSpec", "status")]
 
-    assert guards["status"] == ("status=:preStatus", frozenset())
+    assert term == "status=:preStatus"
+    assert not [test for _execute, way in ways for node in way for test in pathcond.path_condition(node)]
 
 
 def test_a_set_the_method_left_empty_is_not_a_flush():
@@ -4234,7 +4397,7 @@ class TaskModule:
 '''
     guards = _flush_methods(proxy)["updateTask"].guards
 
-    assert set(guards) == {"jediTaskID"}
+    assert set(guards) == {("JediTaskSpec", "jediTaskID")}
 
 
 def test_table_class_is_inferred_from_the_column_names():
