@@ -1333,6 +1333,35 @@ caller's passes went on the row", then S2's lines over its passes and S3's over 
 *Revisit:* when the map lists more than two hops, or a facade's guard is read; when a mover's run inside its caller's
 call is read by the caller's pass span (its mark's own strings, no key).
 
+### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
+
+A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's
+ran it, and H3 has nothing to read.  U3 reads which call: the arm's run is marked by what that call handed it, not by
+the row's key -- updateUnmergedJobs < PandaID=... > is the merge job's, and the unmerged job's key is on one line of
+it -- so the caller's run is asked by that value.
+
+- The run's mark (the map's `runs` of the arm's function) gives each hole's value and the expression it prints
+  (`job.PandaID`); the map's `call_bindings` give, for each call `called_from` lists (the hop into the function), the
+  caller's name handed to that parameter (`job` at archiveJob 1783, `jobSpec` at propagateResultToJEDI 4822).  A
+  caller's run marks by that name (`jobSpec.PandaID`) hold the same value; a call handing it no name a mark of the
+  caller's prints is not asked, and with none, U3 stops.
+- The callers' runs are asked over the arm's run, on its machine.  A caller's run holds the arm's whole where the
+  call ran it, and of those the innermost (latest begun) is the call's: archiveJob's run holds propagateResultToJEDI's,
+  which holds updateUnmergedJobs's when 4822 called it.  A run cut by the window holds nothing, and U3 stops naming
+  how many runs it found.  One run of a caller holding the arm's at two calls of it does not say which, and U3 stops.
+- The call ran, so its guard held (K54): the call statement's path condition (`call_statements`, one statement on the
+  line) is read as H3 reads an arm's, with where the values it held on were printed in the caller's run, and the
+  walk stops there as a status's H3 does.  A call with no guard of its own says its callers made it run, past the
+  hop read.
+- Not read: which call a value carried through the arm tells.  updateUnmergedJobs:1236 copies the caller's
+  job.jobStatus, and 1783 is under `job.jobStatus == "finished"`, so a value other than 'finished' did not come from
+  1783 -- with no caller's run read.
+
+*Shows:* "U3 which call ran the arm" with the mark's values, each call's handed name and marks, the run holding the
+arm's and the call's guards; or "STOP U3: ..." with code K56.
+*Revisit:* when the carried value picks the call; when an arm's early exits are its guards (the map's branch
+condition, `pathcond.reachable_when`), which takes killUnusedEventServiceConsumers:986 out of this class.
+
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it

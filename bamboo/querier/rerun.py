@@ -1416,6 +1416,16 @@ class CallerPasses:
 
 
 @dataclass
+class ArmCaller:
+    """Which call of its function ran an arm its run shows ran, the arm with no guard of its own (U3)."""
+
+    asked: Asked
+    owner: str
+    line: int
+    run: Any
+
+
+@dataclass
 class Input:
     """Where a name a guard reads was bound, in each pass."""
 
@@ -1644,21 +1654,46 @@ def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
     reads the writer's runs of the key alone (F3, KNOWN_ISSUES.md K37).  None for a function marking no run by the
     class's key: doForPriorityMassage's "label=user"; changeTaskPriorityPanda's "<jediTaskID=...>" for a job."""
     ident = set(_identity_attrs(cls))
+    return marks_holding(owner, line, lambda k: bool(ident & set(k.columns)), key) if ident else ()
+
+
+def marks_holding(owner: str, line: int, holds: Callable[[Any], bool], value: str) -> tuple[str, ...]:
+    """What *owner*'s lines carry where its run's mark holds *value* in the first hole of the mark's key that *holds*
+    picks: each printed prefix of its rows that has the mark's holes (``.*?``, in the mark's order) cut to the text
+    around that hole, *value* in it (:func:`key_marks`, the hole holding the class's identity)."""
     found = R._prints_of(owner, [line])
-    if not ident or found is None:
+    if found is None:
         return ()
     prefixes = {r.prefix for st in (getattr(found, "statements", None) or []) for r in st.rows or [] if r.prefix}
     out = set()
     for run in getattr(found, "runs", None) or []:
-        at = [i for i, k in enumerate(run.key or []) if ident & set(k.columns)]
+        at = [i for i, k in enumerate(run.key or []) if holds(k)]
         for prefix in prefixes if at else ():
             parts = [re.sub(r"\\(.)", r"\1", p) for p in prefix.split(".*?")]
             if len(parts) != len(run.key) + 1 or any(p not in "".join(parts) for p in run.mark.split("{}")):
                 continue
-            text = (parts[at[0]] + key + parts[at[0] + 1]).strip()
-            if text != key:
+            text = (parts[at[0]] + value + parts[at[0] + 1]).strip()
+            if text != value:
                 out.add(text)
     return tuple(sorted(out))
+
+
+def mark_values(token: str, mark: str) -> list[str] | None:
+    """The values a run's *token* holds in the holes of the map's *mark* for it, in the mark's order -- "PandaID={}"
+    in "updateUnmergedJobs < PandaID=7397569813 >" holds 7397569813 -- or None where the token has no such mark."""
+    parts = mark.split("{}")
+    m = re.search("(.+?)".join(re.escape(p) for p in parts) + r"\s*>?\s*$", token)
+    return [v.strip() for v in m.groups()] if m and len(parts) > 1 else None
+
+
+def mark_handed(owner: str, line: int, run: Any) -> list[tuple[str, str]]:
+    """What *run*'s mark holds, as the map's runs of *owner*'s function read it: each hole's expression on a name --
+    ``job.PandaID`` -- with the value *run*'s token shows there.  None where no mark of the function's reads in the
+    token: a logger the caller hands in marks the run by the caller's (doBasicPostProcess's tmpLog)."""
+    prints = R._prints_of(owner, [line])
+    return [(k.expression, v) for r in (getattr(prints, "runs", None) or [])
+            if (vs := mark_values(run.token, r.mark)) is not None and len(vs) == len(r.key or [])
+            for k, v in zip(r.key, vs, strict=True) if "." in k.expression]
 
 
 def prints_key(owner: str, lines, columns: set[str]) -> bool:
@@ -1680,6 +1715,18 @@ def _site(hop: str) -> str | None:
     """The ``file:line`` a ``called_from`` hop starts with, without what the map writes after it."""
     m = re.match(r"[\w./-]+\.py:\d+", hop.strip())
     return m[0] if m else None
+
+
+def _same_function(a: str, b: str) -> bool:
+    """Whether two owners name one function of one file, one as the map's reach spells it (``Class.method``), the
+    other as a junction does (the bare name)."""
+    (ra, _, fa), (rb, _, fb) = a.partition("::"), b.partition("::")
+    return ra == rb and fa.split(".")[-1] == fb.split(".")[-1]
+
+
+def _expression_is(want: str) -> Callable[[Any], bool]:
+    """Whether a hole of a run mark's key prints *want* (``jobSpec.PandaID``)."""
+    return lambda k: k.expression == want
 
 
 def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> list[Caller]:
@@ -2386,7 +2433,7 @@ class Rerun:
             Asked: self.asked, WroteBy: self.wrote_by, ArmsLeft: self.arms_left, SetBy: self.set_by, Raised: self.raised, Missing: self.missing,
             Branch: self.branch, Settled: self.settled, Pair: self.pair, FalseAtom: self.false_atom,
             Reproduce: self.reproduce, Field: self.field,
-            Stuck: self.stuck, Passes: self.passes, Callers: self.callers, CallerPasses: self.caller,
+            Stuck: self.stuck, Passes: self.passes, Callers: self.callers, CallerPasses: self.caller, ArmCaller: self.arm_caller,
             Blocked: self.blocked, Input: self.input, Rows: self.rows,
             Late: self.late, Missed: self.missed, Ordered: self.ordered,
         }
@@ -2652,6 +2699,10 @@ class Rerun:
         if not methods:
             # what H3 lacks is then the values the guard reads at the run, not a method's
             if not guards:
+                if ran and not attribute and mark_handed(chosen.candidate.owner, chosen.line, question):
+                    # what made it run is its callers': the call that ran it, read on the run its own run is inside, by
+                    # what the call handed the run's mark (U3)
+                    return ArmCaller(q, chosen.candidate.owner, chosen.line, question)
                 self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
             if ran and not attribute and site is not None:
                 # a status's arm ran under its guards: where the values they held on came from, said where its run printed
@@ -4362,6 +4413,74 @@ class Rerun:
         conds = {tuple(pathcond.path_condition(s)) for s in stmts}
         self.need(T.Said("one-call-statement-at", {"site": f"{rel}:{line}", "n": len(stmts)}), len(conds) == 1, "K55")
         return list(conds.pop())
+
+    def arm_caller(self, q: ArmCaller):
+        """U3: an arm its run shows ran, with no guard of its own, ran because a call of its function's ran it.  The
+        run's mark holds what that call handed it -- updateUnmergedJobs < PandaID=... > is the merge job's, not the
+        row's -- and each call ``called_from`` lists hands the mark's parameter a name of the caller's (the map's
+        ``call_bindings``): a run of the caller marked by that name holds the same value.  Those runs are asked over the
+        arm's run on its machine; the innermost holding it whole is the call that ran it, and the call's guard held
+        there (K54): where its values came from is read in that run, as H3 reads an arm's (KNOWN_ISSUES.md K56)."""
+        self.start("U3", "which call ran the arm")
+        rel, func = q.owner.split("::", 1)
+        run = q.run
+        handed = self.need(T.Said("the-arm-s-run-mark", {"fn": func, "token": run.token}), mark_handed(q.owner, q.line, run), "K56")
+        self.say(f"{func}'s run {run.token!r}: its mark holds {handed}")
+        graph = self._graph()
+        rows = self.need(T.Said("the-map-s-call-bindings"), graph[2] if graph else None, "K56")
+        writers = asyncio.run(self._writers_of(q.asked.subject))
+        sites = list(dict.fromkeys(s for e in _entries_of(writers, q.owner) if (s := _site(e.split(" -> ")[-1]))))
+        tied: dict[tuple[str, int], dict[str, tuple[str, ...]]] = {}  # (caller, call line) -> {value: its marks}
+        for site in sites:
+            crel, line = site.rsplit(":", 1)[0], int(site.rsplit(":", 1)[1])
+            node = R.def_holding(crel, line)
+            if node is None:
+                continue
+            cowner = f"{crel}::{node.name}"
+            passed = {b.parameter: b.path for row in rows if row.owner.partition("::")[0] == crel
+                      for b in row.call_bindings or [] if b.line == line and _same_function(b.to, q.owner)}
+            for expr, value in handed:
+                param, _, rest = expr.partition(".")
+                name = passed.get(param)
+                marks = marks_holding(cowner, line, _expression_is(f"{name}.{rest}"), value) if name else ()
+                self.say(f"  {site} ({node.name}): hands {param} {name!r}; its run marks holding {name}.{rest}: {list(marks)}")
+                if marks:
+                    tied.setdefault((cowner, line), {})[value] = marks
+        self.need(T.Said("a-call-handing-the-mark-on", {"fn": func, "sites": sites}), tied, "K56")
+        files = sorted({f for cowner, line in tied for f in self.files_of(cowner, sorted(
+            {f for st in getattr(R._prints_of(cowner, [line]), "statements", None) or [] for f in st.log_files}), [line])})
+        to_hand = self.need(T.Said("a-log-of-to-hand", {"func": func, "files": files}), self.logs.names(files))
+        window = (run.first[:19], run.last[:19])
+        found, missed = [], []
+        for value in sorted({v for marks in tied.values() for v in marks}):
+            marks = tuple(sorted({m for by in tied.values() for m in by.get(value, ())}))
+            asking = W.Asking(window, run.machine, T.Said("over-the-arm-s-run", {"start": window[0], "end": window[1], "marks": list(marks)}), marks)
+            got, unanswered, _ = self._ask(value, to_hand, asking)
+            missed += unanswered
+            found += [r for runs in got.values() for r in runs]
+        self._stop_unanswered(missed)
+        # a caller's run holds the arm's whole where the call ran it: the innermost of those is the call's
+        holding = [(cowner, line, r) for cowner, line in tied for r in found
+                   if of_mover(r, cowner) and r.machine == run.machine and r.first <= run.first and r.last >= run.last]
+        self.need(T.Said("a-caller-s-run-holding-the-arm-s", {"fn": func, "callers": sorted({c.split("::")[-1] for c, _ in tied}),
+                                                              "start": run.first, "end": run.last, "n": len(found)}), holding, "K56")
+        cowner, _, crun = max(holding, key=lambda h: h[2].first)
+        lines = sorted({line for c, line, r in holding if c == cowner and r is crun})
+        crel, cname = cowner.split("::", 1)
+        self.need(T.Said("which-call-of-the-caller", {"caller": cname, "fn": func, "lines": lines}), len(lines) == 1, "K56")
+        line = lines[0]
+        self.say(f"{func}:{q.line} ran in {run.describe()}, inside {cname}'s call at {line}: {crun.describe()}")
+        guards = self._call_guards(crel, line)
+        self.say(f"guards of {cname}:{line}: {guards}")
+        self.need(T.Said("the-call-has-no-guard", {"caller": cname, "line": line, "fn": func}), guards, "K56")
+        cfn = R.function(crel, cname, [line])
+        at = R.statement_at(cfn.node, line)
+        stmt = self.need(T.Said("one-call-statement-at", {"site": f"{crel}:{line}", "n": 0 if at is None else 1}),
+                         at if at is not None and pathcond.path_condition(at) == guards else None, "K56")
+        held_on, read_false = self._held_on(cfn, stmt, guards, crun)
+        what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
+                else T.Said("values-held-on", {"held": held_on}))
+        self.need(T.Said("the-call-that-ran-it", {"fn": func, "line": q.line, "caller": cname, "call_line": line, "what": what}), None, "K56")
 
     def _caller_absent(self, c: Caller, up: Callers, to_hand: list[str], asking: W.Asking, holes: dict):
         """U2 where no pass of the caller *c* took the row in the window: judgement 3 for it -- it did not run on the row
