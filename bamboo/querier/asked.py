@@ -33,11 +33,19 @@ from bamboo.querier import rows as R  # noqa: E402
 made: list[Asked] = []
 
 
+def _frozen(v):
+    """A dumped value as a key: a dict or a list at any depth as a tuple (a step's ``calls``, models dumped as dicts)."""
+    if isinstance(v, dict):
+        return tuple((k, _frozen(x)) for k, x in v.items())
+    if isinstance(v, (list, tuple)):
+        return tuple(_frozen(x) for x in v)
+    return v
+
+
 def _key(step) -> tuple:
     """A step as the readers read it: two answers can hand back one step, at another depth or role."""
     return tuple(
-        (k, tuple(v) if isinstance(v, list) else v)
-        for k, v in step.model_dump(exclude={"depth", "role"}).items()
+        (k, _frozen(v)) for k, v in step.model_dump(exclude={"depth", "role"}).items()
     )
 
 
