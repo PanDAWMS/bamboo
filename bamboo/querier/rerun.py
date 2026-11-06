@@ -1217,6 +1217,13 @@ def _premise_json(p: object) -> object:
     return p
 
 
+def _condition_read(p: object, read: set[str]) -> bool:
+    """Whether *p* is a condition an arm was left resting on (:meth:`StandIn.left`) that a later step read as holding,
+    by its record's guard (KNOWN_ISSUES.md K62)."""
+    return (isinstance(p, Premise) and isinstance(p.said, T.Said) and p.said.kind == "its-condition-not-read"
+            and p.said.facts.get("guard") in read)
+
+
 def tree_stamp(path: Path) -> str:
     """``git describe --dirty`` of *path*, or what it is when it is not a git tree (a pinned copy)."""
     done = subprocess.run(["git", "-C", str(path), "describe", "--dirty", "--always"], capture_output=True, text=True)
@@ -2669,6 +2676,11 @@ class Rerun:
             # one through a method goes on to H4, which says why the arm ran
             by_run = ([g for g, got in read.items() if got is not True]
                       if ran and not any(got is False for got in read.values()) and not through(env) else [])
+            # a condition H2 left the arm resting on that is read here as holding is what this reading says, not a
+            # premise left open (KNOWN_ISSUES.md K62)
+            if branch:
+                done = {g for g, got in read.items() if got is True} | set(by_run)
+                a.premises = [p for p in a.premises or [] if not _condition_read(p, done)]
             if all(got is True or g in by_run for g, got in read.items()):
                 lo, hi = w.window
                 at = (T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else

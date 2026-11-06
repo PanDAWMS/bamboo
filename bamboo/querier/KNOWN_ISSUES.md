@@ -1526,7 +1526,33 @@ Left:
 bare twin.
 *Revisit:* with the evaluator running the map's runnables; with the rule above for an arm left with unread guards.
 
-### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
+### K62. A condition an arm was left resting on is not what it rests on once H3 reads it holding
+
+H2 leaves a writer that prints nothing (K25) as one that may have written, resting on each of its guards the pass's
+values do not read (`StandIn.left`: "its condition X not read").  H3 then reads the same guards (`pathcond.arm_condition`)
+at the same row, in the values, in a column the rows file holds (K49) or as its run shows it ran (K54).  The premise
+stayed: `arms_left` carried H2's premises to the END, and an END with one is a one-of, "it rests on: its condition X
+not read", though its own sentence said the guard held.
+
+Now H3 drops, for an arm H2 left, each "its condition X not read" whose guard it reads as holding, by the record's
+guard.  The END rests on that reading (a held column's premise is in its sentence, K49).  What H3 does not read stays:
+the functions between a call and the arm, the run not showing the line ran, the key named by no line, an older row.  A
+guard read false is as before: the next row, or excluded.  A status's arm is not ended at H3, and its premises are not
+touched.
+
+Measured as pm1 (this on ex1's tree: codemap-xxiv bf88f71 + K60 + K61, dump x13xxivXm) against ex1:
+- No run crashed; asks 78 -> 78, rows_asks 18 -> 18.
+- 8 of the 144 cases move, all MR-T attributes of m-cut2 that TaskRefinerBase.extractCommon writes under
+  `'<key>' in taskParamMap`, read in task_params (K49): each END loses "it rests on: its condition ... not read" and
+  its code one-of.  reqID keeps its older row, walltime its excluded arm.  The 65, the attribute 60 and MT: no file
+  moves.
+- By question (the 155 the sets hold): answers 23 -> 31, one-of not answers 39 -> 31.
+
+Left: these ENDs, as every extractCommon one, rest on the store a later call makes (K41: registerTaskInOneShot_JEDI).
+
+*Shows:* "it rests on" in an END, and the branches' premises in result.json.
+
+
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
 (`rows.share_loop`): a printed row's arms then do not leave the site out, and rule 3 does not order them.  A loop

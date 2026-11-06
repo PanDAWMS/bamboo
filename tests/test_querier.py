@@ -8425,3 +8425,69 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
     # H2 leaves no arm: its stop, as before
     assert got["none"]["said"] == ["STOP", "H2: a pass that wrote JediTaskSpec.transUses='A' at the 2 statuslog row(s) its writers' "
                                            "passes can write (none shows a writer's pass: KNOWN_ISSUES.md K38)", "one-of"]
+
+
+def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+                        entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            guards = {("extract", 5): ["task.x"], ("gen", 9): ["task.x", "task.y"]}
+            rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
+                               exits_above_at=lambda site: [])
+            row = {"status": "defined", "time": "2026-10-29 07:42:23"}
+            # task.x holds in the rows' values; task.y is read nowhere
+            envs = {row["time"]: E.Env({"task.x": E.Value(True, "row")})}
+            readings = [N(file=f"pandajedi/{f}.py", owner=f"pandajedi/{f}.py::{func}") for f, func in (("r", "extract"), ("g", "gen"))]
+
+            def cond(g):
+                return rerun.Premise(rerun.T.Said("its-condition-not-read", {"guard": g}), rerun.NOT_READ)
+
+            between = rerun.Premise(rerun.T.Said("functions-between-not-read", {"n": 1}), rerun.NOT_READ)
+
+            def may(f, func, line, premises):
+                branch = rerun.Wrote(readings, None, [], None, Verdict(Candidate(f"pandajedi/{f}.py", func, [line]), line, "unexamined", []),
+                                     row=row, window=(row["time"], row["time"]))
+                return rerun.Possible(f"{f}.py::{func}:{line}", row, False, list(premises), branch=branch)
+
+            def walk(left):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.ends, r.touched, r.row_facts, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], {}, "H2", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
+                r.question, r.branches, r.end_code, r._walking = None, [], None, None
+                r.base_env = lambda at=None: envs.get(at, E.Env({}))
+                r._which_wrote = lambda *x: rerun.OneOf(left, 1)
+                r.steps = {rerun.WroteBy: r.wrote_by}
+                q = r.asked(rerun.Asked("JediTaskSpec.transUses", "A", "7"))
+                while q is not None:
+                    q = r.steps.get(type(q), getattr(r, "arms_left"))(q)
+                return {"ends": [f"END {said}" for _, said in r.ends], "code": r.end_code,
+                        "branches": [{"kind": e["kind"], "premises": [str(p) for p in e["premises"]], "kinds": e["kinds"]}
+                                     for e in r.branches]}
+
+            print(json.dumps({"read": walk([may("r", "extract", 5, [cond("task.x")])]),
+                              "between": walk([may("r", "extract", 5, [cond("task.x"), between])]),
+                              "one unread": walk([may("g", "gen", 9, [cond("task.x"), cond("task.y")])])}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    end = ("END JediTaskSpec.transUses='A' written last by extract:5 (no run shows the line ran; its guards hold in the rows' "
+           "values), in the pass of the statuslog row 'defined' at 2026-10-29 07:42:23")
+    # the condition H2 left the arm resting on is read holding at H3: the END rests on that reading, not on it (K62)
+    assert got["read"] == {"ends": [end], "code": None, "branches": [{"kind": "end", "premises": [], "kinds": []}]}
+    # what H3 does not read stays: the functions between the call and the arm
+    between = "the 1 function(s) between the call and it not read"
+    assert got["between"]["ends"] == [f"{end}; it rests on: {between}"] and got["between"]["code"] == "one-of"
+    assert got["between"]["branches"] == [{"kind": "end", "premises": [between], "kinds": ["not read"]}]
+    # an arm H3 stops on keeps the condition it did not read, and only that one
+    assert got["one unread"]["branches"] == [{"kind": "stop", "premises": ["its condition 'task.y' not read"], "kinds": ["not read"]}]
+    assert got["one unread"]["code"] == "one-of"
