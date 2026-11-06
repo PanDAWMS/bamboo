@@ -62,6 +62,7 @@ from bamboo.codemap.panda.pathcond import (
     arm_condition,
     assigned_expressions,
     attach_parents,
+    binding_tests,
     enclosing_class,
     enclosing_function,
     entries,
@@ -661,7 +662,7 @@ def _resolve(
         if reached:
             found: list[Resolved] = []
             for one in reached:
-                tests = tuple(test for test in one.conditions if test not in dominating)
+                tests = tuple(binding_tests(one.conditions, dominating, one.site, at))
                 if one.values:
                     found.extend(Resolved(literal, 1, tests) for literal in one.values)
                 else:

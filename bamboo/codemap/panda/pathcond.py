@@ -1064,18 +1064,46 @@ def exits_above(node: ast.AST) -> list[str]:
     a task with ``if tmpStat is not True: continue`` and sets ``tmpStat``
     afresh further down the same loop.
     """
+    return list(_exits_rendered(node))
+
+
+def _exits_rendered(node: ast.AST) -> dict[str, list[ast.stmt]]:
+    """:func:`exits_above`'s entries, each with the exit statements rendering it, by line."""
     func = enclosing_function(node)
     if func is None:
-        return []
-    found: list[str] = []
+        return {}
+    found: dict[str, list[ast.stmt]] = {}
     for implied, exit_if in sorted(_early_exit_ifs(node), key=lambda one: one[1].lineno):
         if _given_between(func, exit_if, node):  # type: ignore[arg-type]
             implied = f"{implied}  [at {exit_if.lineno}]"
         else:
             implied = _substitute_bare_name(implied, exit_if.test, func)  # type: ignore[attr-defined]
-        if implied not in found:
-            found.append(implied)
+        found.setdefault(implied, []).append(exit_if)
     return found
+
+
+def binding_tests(
+    conditions: Sequence[str], held: Sequence[str], binding: Optional[ast.AST], at: ast.AST
+) -> list[str]:
+    """The *conditions* of a binding (:attr:`Reached.conditions`) that *held*, the :func:`arm_condition` of *at*
+    where the binding's value is read, does not say already.
+
+    One of the same text is said.  So is an early exit above both the binding and *at*: *held* says it as *at*
+    reads it, ``  [at <the exit's line>]`` where a name it reads is given a new value between, and the binding's
+    reading of the same exit would list it twice.  ``setup_destination`` skips a failed job above both the binding
+    of ``name`` and the write that reads it.  Another exit rendering the same text, as a second
+    ``if not self._commit()`` does, is its own test and stays.
+    """
+    shared: set[str] = set()
+    if binding is not None:
+        above_at = {id(one) for ones in _exits_rendered(at).values() for one in ones}
+        own = set(path_condition(binding))
+        shared = {
+            text
+            for text, ones in _exits_rendered(binding).items()
+            if text not in own and all(id(one) in above_at for one in ones)
+        }
+    return [one for one in conditions if one not in held and one not in shared]
 
 
 def arm_condition(node: ast.AST) -> list[str]:
@@ -1674,6 +1702,8 @@ class Reached(NamedTuple):
     conditions: list[str]
     #: the binding's line; None for a parameter, which the call decides
     line: Optional[int]
+    #: the binding: its statement or target; the function's ``arguments`` for a parameter
+    site: Optional[ast.AST] = None
 
 
 def reaching_values(
@@ -1773,6 +1803,7 @@ def reaching_values(
                 None if literals else value,
                 guards,
                 getattr(site, "lineno", None),  # the entry, ``args``, has none
+                site,
             )
         )
     return found if any(one.values for one in found) else []
