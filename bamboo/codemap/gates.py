@@ -1783,8 +1783,14 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     only safe while none of them reaches a write.  One that does needs its
     edges, and one the record has edges into is asked like any function --
     ``JobSpec.__setattr__``, entered from each store on a ``JobSpec``
-    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  One whose closure has
-    a hole is not known either way, and is counted in the note, not failed.
+    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  An operator's dunder
+    is asked the same way, whether or not an edge enters it: the record reads
+    each operation's dispatch (``reach.HOW_OPERATOR``), so one no edge enters
+    is run by no operation on an operand a reading places there --
+    ``Share.__mul__``, which multiplies the share's ``value``, by no ``share *
+    x`` -- and an operand no reading says anything of has no edge, as a store
+    on such an object has none.  One whose closure has a hole is not known
+    either way, and is counted in the note, not failed.
     """
     from bamboo.codemap import reach
 
@@ -1796,7 +1802,7 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     for row in fragment.reach_graph:
         if row.function not in reach.IMPLICIT_DUNDERS:
             continue
-        if row.owner in entered:
+        if row.owner in entered or row.function in reach.OPERATOR_DUNDER_NAMES:
             asked += 1
             continue
         checked += 1
@@ -1815,7 +1821,8 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
         failures=failures,
         note=(
             f"{undecided} of them have a hole in their closure and are not known either way; "
-            f"{asked} more have edges into them and are asked as any function is."
+            f"{asked} more have edges into them, or are an operator's whose dispatch the record reads, "
+            "and are asked as any function is."
         ),
     )
 
