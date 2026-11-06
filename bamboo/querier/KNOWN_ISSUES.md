@@ -1444,12 +1444,45 @@ Left:
   copyArchive.log (MJ-sent-late), base_module's `rollback EC:...` in DBProxy.log (MJE-7394762518, MJE-7397173613).
   The map's marks cannot tell such a word from the value of a mark that is a hole alone (DBProxy.log has `{}`).  The
   row that printed the line can.
-- The mark round asks a mark the calls share over the whole window: a JEDI worker's `process <host_pid-thread>`
+- The mark round asked a mark the calls share over the whole window: a JEDI worker's `process <host_pid-thread>`
   (MT-scouting-stuck, 5.3 h), `getTasksToExecCommand_JEDI < vo=None label=None >` (MT-passed-late's L2), and
-  `#ATM #KV doForPreStaging label=user`.
+  `#ATM #KV doForPreStaging label=user`.  It asks one near the key's records now (K60).
 
 *Shows:* nothing of its own: the run under the whole mark (`token=update_job PandaID=... PID=...`).
-*Revisit:* with the two left above; when the map says how each builder prints its mark.
+*Revisit:* with the line with no mark; when the map says how each builder prints its mark.
+
+### K60. A mark the calls share is asked only near the key's records, one ask a machine
+
+The mark round (`recorded._read`) asks each mark under which a key record lies, the mark not holding the key, over the
+window.  One the calls share returns every call's lines over it: a JEDI worker's `process <host_pid-thread>`
+(MT-scouting-stuck, 5.3 h), getTasksToBeProcessed_JEDI's tag on MT-ready-stuck's snapshot (9 asks, 51.4 h).
+
+Now a mark that every map mark of a run printing into the log reading it says the calls share -- none of its holes
+holds a column that is a table's identity (`TableRecord.identity_attrs`), and it is no time stamp (`RUN_KEY_TIME`) --
+is asked only within 2 EDGE of the key's records under it on its machine, inside the window.  The windows of one
+machine are joined where they overlap, one ask each with their marks' strings (`recorded._calls_share`,
+`_share_index`, over `records.runs_into`, which K59's `_bare_marks` reads too).  An asker that reads a run at a row's
+moment (`whole`) asks as before; so does a mark no map mark reads, and one holding a table's identity.
+- Not asking such a mark (a probe, sh1) lost the key's own pass under it: getTasksToExecCommand_JEDI's 13 records at
+  09:33 in MT-exhausted-late, and the arms MT-exhausted-stuck and MT-paused-stuck excluded by it came back kept.
+- One ask a machine and mark (a probe, sh2) made more asks: MT-ready-stuck 9 -> 34.
+
+Measured as sh3 (this rule on 58db119's files, xxii's T) against mk1 (58db119):
+- No verdict, END or stop moves: 144 cases, the 65, attr, MT.  The asks move, with the notes on them, and
+  MT-ready-stuck's STOP S1 count (9 -> 10 asks).
+- The asks of the key's runs under a mark not holding the key, all sets: 41 over 129.7 h -> 42 over 45.2 h.
+  MT-scouting-stuck 5.3 h -> 0.3 h, MT-ready-stuck 51.4 h -> 10.9 h.
+
+Left:
+- The rule's premise: a key's run under a shared mark prints its lines within 2 EDGE of the key's records.  A run
+  printing them farther apart is read cut.  None in the sets.
+- A shared mark whose key records spread over the window is asked over it: MT-throttled-late's
+  `#ATM #KV doForPreStaging label=user`, on every machine every few minutes from before the window to after it (7 asks,
+  12.2 h).
+
+*Shows:* the note "<n> mark(s) the calls share (the map) asked only within 20 min of the key's records", and the asks'
+why "..., near them: a mark the calls share".
+*Revisit:* when the map says where a call's run starts and ends, so that an ask is one call's span.
 
 ### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
 
