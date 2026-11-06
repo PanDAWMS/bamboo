@@ -61,20 +61,19 @@ from bamboo.codemap.panda.attribution import (
 from bamboo.codemap.panda.pathcond import (
     arm_condition,
     assigned_expressions,
+    assigned_targets,
     attach_parents,
     binding_tests,
     enclosing_class,
     enclosing_function,
     entries,
     exclusive,
-    field_additions,
     field_replacements,
     functions_with_owner,
     parted,
     path_condition,
     reaching_values,
     targets_of,
-    written_value,
 )
 from bamboo.codemap.panda.recognizers.alias import find_aliases, setters_of
 from bamboo.codemap.panda.recognizers.selection import log_level
@@ -168,8 +167,15 @@ def declared_vocabularies(
 
 def _attribute_writes(
     tree: ast.Module,
-) -> Iterator[tuple[ast.Attribute, ast.expr, ast.Assign]]:
-    """Yield ``(target, right-hand side, node)`` for every ``x.attr = <value>``.
+) -> Iterator[tuple[ast.Attribute, ast.expr, ast.stmt]]:
+    """Yield ``(target, right-hand side, node)`` for every write of ``x.attr``.
+
+    ``x.attr = <value>``; ``x.attr`` among a tuple's or list's targets, with
+    the value its place gets (:func:`assigned_targets`); and ``x.attr +=
+    <value>``, with the right-hand side it adds.  ``jobSpec.minRamCount,
+    jobSpec.minRamUnit = ...`` and ``self.splitRule += "," + token`` were no
+    branch: the one is no target the slice took, the other a branch only where
+    an ``=`` of the field in its function reached it.
 
     The whole target is yielded, not just its name: attributing the write needs
     the object expression, which is where the class comes from.  The right-hand
@@ -177,11 +183,12 @@ def _attribute_writes(
     question, and it needs the enclosing function this does not have.
     """
     for node in walk(tree):
-        value = written_value(node)
-        if value is None:
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Attribute):
+                yield node.target, node.value, node
             continue
-        for target in targets_of(node):
-            if isinstance(target, ast.Attribute):
+        for target, value in assigned_targets(node):
+            if isinstance(target, ast.Attribute) and value is not None:
                 yield target, value, node
 
 
@@ -925,8 +932,6 @@ def extract(
     settle = values.resolver()
     aliases = find_aliases(modules, declarations)
     memo: dict = {}
-    # The ``+=`` already a branch of a junction, which a value written before in two arms reaches twice.
-    added_at: set[tuple[str, int]] = set()
 
     # The subject universe is what the spec classes declare.  Without this
     # bound every ``x.attr = "literal"`` in the corpus becomes a junction --
@@ -950,7 +955,11 @@ def extract(
         for target, value, node in _attribute_writes(module.tree):
             if target.attr not in spec_attribute_names:
                 continue
-            if _defers_to_return_alias(value):
+            # A ``+=`` adds to what the field held: its right-hand side is a
+            # fragment, no value of the field, which the return-alias slice,
+            # the diagnostics and the enumerations read.
+            augmented = isinstance(node, ast.AugAssign)
+            if not augmented and _defers_to_return_alias(value):
                 continue
             func = enclosing_function(node)
             owner_class = enclosing_class(node)
@@ -987,7 +996,7 @@ def extract(
                 blob_sha=module.blob_sha,
             )
 
-            template = values.diagnostic_template(value)
+            template = None if augmented else values.diagnostic_template(value)
             if template:
                 diagnostics.append(
                     DiagnosticTemplate(
@@ -1000,7 +1009,7 @@ def extract(
                     )
                 )
 
-            constant = _named_constant(value)
+            constant = None if augmented else _named_constant(value)
             if constant in enumerations:
                 bindings.append(
                     EnumerationWrite(
@@ -1018,24 +1027,24 @@ def extract(
             # four times before ``if self.attributes == "":`` -- and an entry per
             # later write that can replace it.
             callee = setters_of(aliases, attributor, target.attr)
-            replaced = (
-                field_replacements(node, target.value, target.attr, value, callee, memo)
-                if func is not None
-                else []
-            )
-            # And each ``+=`` that adds to the value and leaves: what leaves there is what the
-            # function makes of it -- ``setDatasetAttribute``'s ``self.attributes += attr`` after
-            # ``self.attributes = ""``, a count from ``0``.
-            adding = [
-                one
-                for one in (
-                    field_additions(node, target.value, target.attr, callee, memo)
+            if augmented:
+                # A ``+=`` whose sum leaves is a write of what the function
+                # makes of the field, whatever it added to: ``self.attributes
+                # = ""`` then ``+= attr`` in ``setDatasetAttribute``, and
+                # ``self.splitRule += "," + token`` on the value the task came
+                # with in ``setLimitedSites``.  Module level reads none.
+                replaced = (
+                    field_replacements(node, target.value, target.attr, None, callee, memo)
+                    if func is not None
+                    else None
+                )
+            else:
+                replaced = (
+                    field_replacements(node, target.value, target.attr, value, callee, memo)
                     if func is not None
                     else []
                 )
-                if (name, id(one)) not in added_at
-            ]
-            if replaced is None and not adding:
+            if replaced is None:
                 continue
 
             structural = attributor.structural_class(target, func, owner_class)
@@ -1055,16 +1064,28 @@ def extract(
                 )
                 junctions[name] = junction
 
-            if replaced is not None:
-                # The write's own guards, shared by every outcome its right-hand
-                # side can produce: reaching a write is necessary for any of them.
-                dominating = arm_condition(node)
-                later = entries(replaced, dominating)
-                tags, messages = (
-                    recorded_signature(node, func, setters, target.attr)
-                    if func is not None
-                    else ([], [])
+            # The write's own guards, shared by every outcome its right-hand
+            # side can produce: reaching a write is necessary for any of them.
+            dominating = arm_condition(node)
+            later = entries(replaced, dominating)
+            tags, messages = (
+                recorded_signature(node, func, setters, target.attr)
+                if func is not None
+                else ([], [])
+            )
+            if isinstance(node, ast.AugAssign):
+                junction.branches.append(
+                    Branch(
+                        outcome=_runtime(ast.BinOp(left=node.target, op=node.op, right=node.value)),
+                        path_condition=dominating + later,
+                        order=len(junction.branches),
+                        tier=2,
+                        tags=tags,
+                        messages=messages,
+                        line=node.lineno,
+                    )
                 )
+            else:
                 for resolved in _resolve(
                     value,
                     func=func,
@@ -1090,22 +1111,6 @@ def extract(
                             value_cuts=list(resolved.cuts),
                         )
                     )
-            for one in adding:
-                added_at.add((name, id(one)))
-                guards = arm_condition(one)
-                left = field_replacements(one, target.value, target.attr, None, callee, memo) or []
-                one_tags, one_messages = recorded_signature(one, func, setters, target.attr)
-                junction.branches.append(
-                    Branch(
-                        outcome=_runtime(ast.BinOp(left=one.target, op=one.op, right=one.value)),
-                        path_condition=guards + entries(left, guards),
-                        order=len(junction.branches),
-                        tier=2,
-                        tags=one_tags,
-                        messages=one_messages,
-                        line=one.lineno,
-                    )
-                )
         if candidates:
             coverage.append(
                 CoverageStat(
@@ -1170,7 +1175,10 @@ def unattributed_outcomes(
     declared = set().union(*vocabularies.values()) if vocabularies else set()
     unattributed: dict[str, set[str]] = {}
     for module in modules:
-        for target, value, _node in _attribute_writes(module.tree):
+        for target, value, node in _attribute_writes(module.tree):
+            # A ``+=`` adds a fragment, no value of the field.
+            if isinstance(node, ast.AugAssign):
+                continue
             if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
                 continue
             if value.value not in declared:
