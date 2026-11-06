@@ -71,6 +71,7 @@ from bamboo.codemap.models import (
     THROUGH_TEXT,
     THROUGH_UNKNOWN,
     AfterChange,
+    EnteredFrom,
     GuardFrom,
     HeldChange,
     HeldSource,
@@ -927,8 +928,10 @@ def guard_froms(
     calls: Optional[Calls],
     record,
     writes: Iterable[SetFrom] = (),
+    entered: Iterable[EnteredFrom] = (),
 ) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom]]:
-    """A :class:`GuardFrom` for each test on the way to each junction's arm and each name it reads; each of *writes*
+    """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
+    :attr:`GuardFrom.calls`), and each name it reads; each of *writes*
     (:func:`sqlwrite.extract`'s) whose column a guard's way ends at -- through the ParameterFroms -- its ways read as
     the guards', and on a guard's way ending where one of its column's does, what may change the object between
     (:func:`_after_reads`); and a :class:`ParameterFrom` for each parameter a way of any ends at, and those reach.
@@ -974,6 +977,40 @@ def guard_froms(
                         )
                     if line not in guard.arms:
                         guard.arms.append(line)
+    for way in entered:
+        for site in way.sites:
+            if site.unread:
+                continue
+            file, _, name = site.owner.partition("::")
+            tree = trees.get(file)
+            func = next(
+                (
+                    node
+                    for node in (walk(tree) if tree is not None else ())
+                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                ),
+                None,
+            )
+            stmt = _statement_holding(func, site.line) if func is not None else None
+            if func is None or stmt is None:
+                continue
+            for test in pathcond.tests_on(stmt, func):
+                for read, node in _names(test, func).items():
+                    key = (site.owner, test.lineno, test.col_offset, read)
+                    guard = found.get(key)
+                    if guard is None:
+                        sources, stops = _said(reader._safely(node, node, file, func))
+                        reader.queue(sources)
+                        guard = found[key] = GuardFrom(
+                            owner=site.owner,
+                            test_line=test.lineno,
+                            test=ast.unparse(test),
+                            name=read,
+                            sources=sources,
+                            stops=stops,
+                        )
+                    if site.line not in guard.calls:
+                        guard.calls.append(site.line)
     reader.settle()
     ended = _ended_columns(found.values(), reader.parameters)
     sets = [one for one in writes if one.column in ended]
@@ -1004,6 +1041,7 @@ def guard_froms(
     reader.settle()
     for guard in found.values():
         guard.arms.sort()
+        guard.calls.sort()
     return (
         sorted(found.values(), key=lambda one: (one.owner, one.test_line, one.name)),
         sorted(

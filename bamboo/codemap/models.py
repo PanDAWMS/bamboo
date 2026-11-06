@@ -3897,6 +3897,7 @@ class MapFragment(BaseModel):
     parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
     set_froms: list["SetFrom"] = Field(default_factory=list)
     runnables: list["Runnable"] = Field(default_factory=list)
+    entered_froms: list["EnteredFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5781,6 +5782,13 @@ class GuardFrom(BaseModel):
     arms: list[int] = Field(
         default_factory=list, description="The lines of the junction branches the test is on the way to."
     )
+    calls: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the calls the test is on the way to that enter a function holding arms: the sites of an "
+            ":class:`EnteredFrom` whose caller is this one's *owner*."
+        ),
+    )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
     stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
 
@@ -5917,6 +5925,74 @@ class RunStop(BaseModel):
             "and why."
         ),
     )
+
+
+#: Why an :class:`EnteredFrom`'s sites may not be every way into its function, each with its place
+#: (:attr:`EnteredOpen.kind`).
+ENTERED_HOLE = "hole"
+ENTERED_OPEN_CALL = "open_call"
+ENTERED_TAKEN = "taken"
+ENTERED_NAMED_AT_RUN_TIME = "named_at_run_time"
+ENTERED_ENDPOINT = "endpoint"
+ENTERED_HANDLER = "handler"
+
+
+class EnteredOpen(BaseModel):
+    """One reason an :class:`EnteredFrom`'s sites may not be every way in, as a record: a reader words it."""
+
+    kind: str = Field(
+        description=(
+            f"``{ENTERED_HOLE}``: a call no reading placed, made with the function's name; ``{ENTERED_OPEN_CALL}``: a "
+            f"call placed elsewhere that may also land at a function of its name; ``{ENTERED_TAKEN}``: the function's "
+            f"value read where nothing calls it, outside a hand-off the reach record holds; "
+            f"``{ENTERED_NAMED_AT_RUN_TIME}``: a call of what a ``getattr`` with a name read at run time took, off an "
+            f"object of the function's class or off a module (or off one no reading places); ``{ENTERED_ENDPOINT}`` "
+            f"and ``{ENTERED_HANDLER}``: the server runs it for a request."
+        )
+    )
+    at: str = Field(description="``file:line`` of the call, the value read, the ``getattr``, or the ``def``.")
+    text: str = Field(default="", description="The callee, the expression or the route, as written.")
+
+
+class EnteredSite(BaseModel):
+    """One way into a function: a reach edge (:class:`ReachCall`) into it, and the tests the caller's statement sits
+    under there."""
+
+    owner: str = Field(description="The caller's owner, as a junction's (``file::name``).")
+    owner_line: int = Field(description="The line of the caller's ``def``.")
+    line: int = Field(description="The line of the statement that calls, hands, stores or operates (the edge's).")
+    how: str = Field(
+        description="The edge's :attr:`ReachCall.how`: ``call``, ``handed``, ``lambda``, ``setattr``, ``operator``."
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description=(
+            ":func:`~bamboo.codemap.panda.pathcond.arm_condition` of that statement's node in the caller: the caller's "
+            "tests, its marks the caller's lines.  They hold when that statement runs -- a hand-off's when it hands, "
+            "not when what it handed runs."
+        ),
+    )
+    unread: str = Field(default="", description="Why *conditions* were not read; empty where they were.")
+
+
+class EnteredFrom(BaseModel):
+    """Where a function holding a junction's arms is entered from -- for a reader ruling an arm out by the tests its
+    function was called under (the querier's R3).
+
+    One per function: *sites* is every edge of the reach record into it, each with the caller's tests at the
+    statement (:class:`EnteredSite`), and *open* each reason those may not be every way in (:class:`EnteredOpen`).
+    Where *open* is empty, the function ran only from one of *sites*: with one site its conditions held whenever an
+    arm of it ran; with several, one site's did.  ``doGeneratePrePro`` is entered from ``doGenerate`` 1151 alone, under
+    ``taskSpec.usePrePro()``.  The far end of a forwarder (:data:`bamboo.codemap.callfacts.FORWARDERS`) runs a call
+    its near end made, which the record holds already, so it is no way in.  One level: a caller's own ways in are its
+    record, where it holds arms.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    arms: list[int] = Field(default_factory=list, description="The lines of the junction branches it holds.")
+    sites: list[EnteredSite] = Field(default_factory=list)
+    open: list[EnteredOpen] = Field(default_factory=list)
 
 
 class Runnable(BaseModel):

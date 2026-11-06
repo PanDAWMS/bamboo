@@ -44,7 +44,7 @@ from __future__ import annotations
 import ast
 import builtins
 import re
-from typing import Iterable, NamedTuple, Optional
+from typing import Callable, Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.calls import Calls, Target, own_nodes
@@ -76,6 +76,7 @@ from bamboo.codemap.models import (
     RUN_LIBRARY,
     RUN_OUTSIDE,
     RUN_UNPLACED,
+    EnteredFrom,
     GuardFrom,
     HeldSource,
     JunctionNode,
@@ -625,11 +626,12 @@ _MARK = re.compile(r"\s+\[(in (?P<callee>\w+)\(\)|at \d+)\]$")
 
 
 def asked(
-    junctions: Iterable[JunctionNode], trees: dict[str, ast.AST], calls: Calls
+    junctions: Iterable[JunctionNode], trees: dict[str, ast.AST], calls: Calls, entered: Iterable[EnteredFrom] = ()
 ) -> tuple[dict[tuple, tuple[Target, list[str]]], int]:
-    """Each definition a call in an arm's path condition can land at, with each such call's place; and how many
-    calls of the conditions were found in no function they are read in.  A condition is read in the arm's function,
-    one marked ``[in f()]`` in each function of that name the corpus has."""
+    """Each definition a call in an arm's path condition can land at, or in the conditions of a way into a function
+    holding arms (*entered*), with each such call's place; and how many calls of the conditions were found in no
+    function they are read in.  A condition is read in the arm's function, one marked ``[in f()]`` in each function
+    of that name the corpus has, and a way in's in its caller."""
     from bamboo.codemap.panda.heldfrom import _function_at
 
     by_name: dict[str, list[tuple[str, ast.AST]]] = {}
@@ -650,6 +652,21 @@ def asked(
 
     found: dict[tuple, tuple[Target, list[str]]] = {}
     missed = 0
+    read: list[tuple[str, ast.AST, Iterable[str]]] = []
+    for way in entered:
+        for site in way.sites:
+            file, _, name = site.owner.partition("::")
+            caller_tree = trees.get(file)
+            defined = next(
+                (
+                    node
+                    for node in (ast.walk(caller_tree) if caller_tree is not None else ())
+                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                ),
+                None,
+            )
+            if defined is not None and site.conditions:
+                read.append((file, defined, site.conditions))
     for junction in junctions:
         file, _, name = junction.owner.partition("::")
         owner_tree = trees.get(file)
@@ -661,32 +678,48 @@ def asked(
             )
             if held_in is None:
                 continue
-            found_in: ast.AST = held_in
             for condition in branch.path_condition:
-                mark = _MARK.search(condition)
-                text = condition[: mark.start()] if mark is not None else condition
-                scopes = by_name.get(mark.group("callee"), []) if mark is not None and mark.group("callee") else [
-                    (file, found_in)
-                ]
-                try:
-                    parsed = ast.parse(text, mode="eval")
-                except SyntaxError:
-                    continue
-                for node in ast.walk(parsed):
-                    if not isinstance(node, ast.Call):
-                        continue
-                    spelling = ast.unparse(node)
-                    places = [(where, scope, one) for where, scope in scopes for one in calls_in(scope).get(spelling, [])]
-                    if not places and not (isinstance(node.func, ast.Name) and node.func.id in callfacts.BUILTIN_FUNCTIONS):
-                        missed += 1
-                    for where, scope, one in places:
-                        for target in calls.callees(where, scope, one).targets:
-                            key = (id(target.func), tuple(id(bound[1]) for bound in target.bound))
-                            held = found.setdefault(key, (target, []))
-                            place = f"{where}:{one.lineno}"
-                            if place not in held[1]:
-                                held[1].append(place)
+                missed += _read_condition(condition, file, held_in, by_name, calls_in, calls, found)
+    for file, scope, conditions in read:
+        for condition in conditions:
+            missed += _read_condition(condition, file, scope, by_name, calls_in, calls, found)
     return found, missed
+
+
+def _read_condition(
+    condition: str,
+    file: str,
+    func: ast.AST,
+    by_name: dict[str, list[tuple[str, ast.AST]]],
+    calls_in: Callable[[ast.AST], dict[str, list[ast.Call]]],
+    calls: Calls,
+    found: dict[tuple, tuple[Target, list[str]]],
+) -> int:
+    """Add to *found* each definition a call in *condition*, read in *func* of *file*, can land at; how many of its
+    calls were found in no function it is read in.  One marked ``[in f()]`` is read in each function of that name."""
+    missed = 0
+    mark = _MARK.search(condition)
+    text = condition[: mark.start()] if mark is not None else condition
+    scopes = by_name.get(mark.group("callee"), []) if mark is not None and mark.group("callee") else [(file, func)]
+    try:
+        parsed = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return 0
+    for node in ast.walk(parsed):
+        if not isinstance(node, ast.Call):
+            continue
+        spelling = ast.unparse(node)
+        places = [(where, scope, one) for where, scope in scopes for one in calls_in(scope).get(spelling, [])]
+        if not places and not (isinstance(node.func, ast.Name) and node.func.id in callfacts.BUILTIN_FUNCTIONS):
+            missed += 1
+        for where, scope, one in places:
+            for target in calls.callees(where, scope, one).targets:
+                key = (id(target.func), tuple(id(bound[1]) for bound in target.bound))
+                held = found.setdefault(key, (target, []))
+                place = f"{where}:{one.lineno}"
+                if place not in held[1]:
+                    held[1].append(place)
+    return missed
 
 
 def runnables(
@@ -696,6 +729,7 @@ def runnables(
     record,
     guard_froms: Iterable[GuardFrom] = (),
     parameter_froms: Iterable[ParameterFrom] = (),
+    entered: Iterable[EnteredFrom] = (),
 ) -> list[Runnable]:
     """A :class:`Runnable` for each definition a call in an arm's path condition can land at, each a JSON maker on a
     guard's way is handed as a hook, and each returning a JSON maker's value on a way.  Nothing without *calls* or
@@ -712,7 +746,7 @@ def runnables(
         if place and place not in held[2]:
             held[2].append(place)
 
-    conditions, _missed = asked(junctions, trees, calls)
+    conditions, _missed = asked(junctions, trees, calls, entered)
     for target, places in conditions.values():
         for place in places:
             add(target, RUN_CONDITION, place)

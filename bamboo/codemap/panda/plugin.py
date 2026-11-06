@@ -45,6 +45,7 @@ from bamboo.codemap.models import (
 )
 from bamboo.codemap.panda import (
     endpoints,
+    entered,
     flow,
     heldfrom,
     mustprints,
@@ -744,8 +745,20 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
         lap("key sources")
+        # Where each function holding an arm is entered from, the tests each way in sits under, and why those may not
+        # be every way: a reader rules an arm out by them, reading their names with the GuardFroms below.
+        fragment.entered_froms = entered.entered_froms(
+            fragment.junctions,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+            fragment.open_calls,
+            [(route, owner) for _version, route, owner in endpoints.routes(self._modules)],
+            endpoints.handlers(self._modules),
+        )
+        lap("ways in")
         # What each name an arm's tests read holds, way by way across calls: placed as the key sources' carry
-        # places calls, ending at the read sites' rows as theirs do.
+        # places calls, ending at the read sites' rows as theirs do -- and the tests of the ways in too.
         fragment.guard_froms, fragment.parameter_froms, fragment.set_froms = heldfrom.guard_froms(
             fragment.junctions,
             fragment.read_sites,
@@ -753,6 +766,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
             writes,
+            entered=fragment.entered_froms,
         )
         lap("guard sources")
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
@@ -764,6 +778,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             record,
             fragment.guard_froms,
             fragment.parameter_froms,
+            entered=fragment.entered_froms,
         )
         lap("runnables")
         # What the schema and the corpus say of each table named, for a reader asking rows: the write records all
