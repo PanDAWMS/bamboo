@@ -4400,6 +4400,7 @@ def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_
             """
             import ast, json, textwrap
             from types import SimpleNamespace as N
+            from bamboo.codemap.panda import pathcond
             from bamboo.codemap.panda.pathcond import attach_parents
             from bamboo.querier import evaluate as E
             from bamboo.querier import rerun as RR
@@ -4419,9 +4420,10 @@ def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_
                         self.job.jobStatus = "failed"
             ''')).body[0]
             attach_parents(func)  # as the corpus is read
-            after, handled = Arm(7, ["failed"], ["f.type == 'output'"]), Arm(11, ["failed"], [])
+            stmt, in_handler = (next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.lineno == line) for line in (7, 11))
+            # each arm's guards as the map's branches hold them: its ifs' tests, then the early exits above it
+            after, handled = Arm(7, ["failed"], pathcond.arm_condition(stmt)), Arm(11, ["failed"], pathcond.arm_condition(in_handler))
             (g1, h1), (g2, h2) = arm_guards(func, after), arm_guards(func, handled)
-            stmt = next(n for n in ast.walk(func) if isinstance(n, ast.Assign) and n.lineno == 7)
             guard = g1[1]
             read = [g1, [u.kind for u in h1], g2, [(u.kind, u.line) for u in h2],
                     guard_if(stmt, guard) is None, early_exit_if(func, stmt, guard).lineno]
@@ -4451,11 +4453,12 @@ def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_
     )
     g1, h1, g2, h2, not_enclosing, early_line = json.loads(out.splitlines()[-2])
     went_guard, went_line, stop = json.loads(out.splitlines()[-1])
-    # the path condition's guard, then the early exit's: what follows the return holds its test false
+    # the branch's guards as they are: the path condition's, then the early exit's (what follows the return holds its
+    # test false), each once (KNOWN_ISSUES.md K61)
     assert g1 == ["f.type == 'output'", "not (self.job_status in ['failed', 'cancelled', 'closed'])"] and h1 == []
     # an arm in a handler: the early exit above the try, and the handler itself, said apart (no guard says it)
     assert g2 == ["not (self.job_status in ['failed', 'cancelled', 'closed'])"] and h2 == [["except", 10]]
-    # S3 goes on from the early exit's if, which no if around the arm tests
+    # S3 goes on from the early exit's if, which no if around the arm tests, found by the line the map gives it
     assert not_enclosing and early_line == 3
     # the exit taken settles the early exit's test true, which keeps both arms off: S3 names it and goes on from 3
     assert went_guard == "not (self.job_status in ['failed', 'cancelled', 'closed'])" and went_line == 3
@@ -7718,7 +7721,8 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 chosen = Verdict(arm.candidate, arm.line, kind)
                 r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], E.Env({}) if env is None else env, chosen, via=via, row=row,
                                                         window=window, unsearched=unsearched or {})
-                rerun.pathcond = N(path_condition=lambda site: guards, ancestors=lambda node: iter(()))
+                rerun.pathcond = N(arm_condition=lambda site: guards, path_condition=lambda site: guards,
+                                   exits_above_at=lambda site: [], ancestors=lambda node: iter(()))
                 try:
                     got = r.asked(rerun.Asked(subject, "A", "7"))
                     said = (None if got is None else [type(got).__name__, got.owner, got.line] if isinstance(got, rerun.ArmCaller)
@@ -7918,6 +7922,109 @@ def test_a_status_arm_its_run_shows_ran_names_the_values_its_guards_held_on_wher
     assert got["contradicted"]["false"][1].startswith(" on n_tokens = '0' (row run:")
     assert got["twice"] == {"held": ["'not (n_tokens <= n_ok)' held", "'end < self.time_out' held", "\"diag != ''\" held"],
                             "false": None}
+
+
+_EXITER = """
+class Exiter:
+    def __init__(self):
+        self.logger = logger
+
+    def run(self, job):
+        mode = pick(job)
+        self.logger.debug(f"mode:{mode}")
+        if mode == "skip":
+            return
+        flag = job.flag
+        self.logger.debug(f"flag:{flag}")
+        if flag == "none":
+            return
+        flag = fix(flag)
+        if flag:
+            job.jobStatus = "failed"
+"""
+
+
+def test_h3_reads_an_arms_early_exits_as_its_guards_each_at_its_own_if(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "x.py").write_text(_EXITER)
+    lines = _EXITER.splitlines()
+    site = lines.index('            job.jobStatus = "failed"') + 1
+    skip, none = (lines.index(f'        if {t}:') + 1 for t in ('mode == "skip"', 'flag == "none"'))
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    logs = {"ran": ["mode:go", "flag:x"], "skipped": ["mode:skip", "flag:x"], "noned": ["mode:go", "flag:none"]}
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/x.py", "run", within=[SITE])
+        site = R.statement_at(fn.node, SITE)
+        guards = pathcond.arm_condition(site)
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode = [], "outside"
+        got = {"guards": guards}
+        for name in ("ran", "skipped", "noned"):
+            run, = runs_for(read_log(f"{name}.log"), "1")
+            held, false = r._held_on(fn, site, guards, run)
+            got[name] = {"held": [T.text(h) for h in held], "false": None if false is None else [false[0], T.text(false[1])]}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("SITE", str(site))))
+    got = json.loads(out.splitlines()[-1])
+    # the if around the write, then the exits above it; flag is given a new value between the second exit and the
+    # write, so that exit's test reads it as it is at its own if (KNOWN_ISSUES.md K61)
+    assert got["guards"] == ["flag", "not (mode == 'skip')", f"not (flag == 'none')  [at {none}]"]
+    row = {k: lines.index(next(x for x in lines if f'f"{k}:' in x)) + 1 for k in ("mode", "flag")}
+    # each exit's test is read at its own if, on the values the run printed before it; flag, given a new value after
+    # its print, is not read at the write's if
+    assert got["ran"]["held"] == [
+        "'flag' held",
+        f"\"not (mode == 'skip')\" held on mode = 'go' (row run:{row['mode']} at ran.log:1)",
+        f"\"not (flag == 'none')  [at {none}]\" held on flag = 'x' (row run:{row['flag']} at ran.log:2)",
+    ]
+    assert got["ran"]["false"] is None
+    # a pass that printed what takes an exit is read false at that exit: a misread, or not this pass
+    assert got["skipped"]["false"][0] == "not (mode == 'skip')"
+    assert got["noned"]["false"][0] == f"not (flag == 'none')  [at {none}]"
+    assert skip < none < site
+
+
+def test_rule_6_reads_an_early_exit_above_the_write_as_a_guard_on_the_way_to_it(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            class A:
+                def handle(self):
+                    if self.job.jobStatus != "failed":
+                        return
+                    self.job.jobStatus = "failed"
+            """
+        )
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E, rows as R
+            from bamboo.querier.which_ran import rewriter
+
+            node = R.functions("pandaserver/a.py", "handle")[0]
+            fn = N(rel="pandaserver/a.py", name="handle", node=node)
+            print(json.dumps(rewriter(fn, node.body[1], "jobStatus", "failed", E.Env({}, {"self.job": "job"}))))
+            """,
+        )
+    )
+    # the return above it leaves the write reached only when the job is already failed (KNOWN_ISSUES.md K61)
+    assert json.loads(out.splitlines()[-1]).startswith(
+        "rule 6: reached only when self.job.jobStatus is already 'failed' (guard \"not (self.job.jobStatus != 'failed')\"")
 
 
 _NONE_TAKEN = """
@@ -8197,7 +8304,8 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
             rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             guards = {("extract", 5): ["task.x"], ("gen", 9): ["task.y"], ("old", 3): ["task.z"], ("rec", 99): [], ("put", 7): []}
-            rerun.pathcond = N(path_condition=lambda site: guards[site])
+            rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
+                               exits_above_at=lambda site: [])
             new, old = {"status": "running", "time": "2026-10-29 11:38:00"}, {"status": "scouting", "time": "2026-10-29 10:06:00"}
             # task.x is false at the newer row, true at the older; task.z false at both; task.y read at neither
             envs = {new["time"]: E.Env({"task.x": E.Value(False, "row"), "task.z": E.Value(False, "row")}),

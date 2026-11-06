@@ -497,24 +497,23 @@ def guard_if(arm_stmt: ast.AST, guard: str) -> ast.If | ast.While | None:
 
 
 def arm_guards(func: ast.AST, arm: Arm) -> tuple[list[str], list]:
-    """``(guards, handlers)``: an arm's guards as S3 reads them -- its path condition's (the tests of the ``if``s around
-    it) and each early exit's above it in its blocks (``if t: return`` puts ``not (t)`` on what follows;
-    ``pathcond.enclosing_guards``) -- and the ``except`` handlers around it, which no guard says (an arm in one is
-    reached only where something above raised).  check_output_file_metadata's arms 200 / 209 follow the return at 181
-    the pass took: their path condition shows nothing the pass made false."""
+    """``(guards, handlers)``: an arm's guards as S3 reads them -- its branches' path condition, the tests of the
+    ``if``s around it and the early exits above it (``if t: return`` puts ``not (t)`` on what follows;
+    ``pathcond.arm_condition``, as the map writes them) -- and the ``except`` handlers around it, which no guard says
+    (an arm in one is reached only where something above raised).  check_output_file_metadata's arms 200 / 209 follow
+    the return at 181 the pass took (KNOWN_ISSUES.md K61)."""
     stmt = R.statement_at(func, arm.line)
     unseen = pathcond.enclosing_guards(stmt) if stmt is not None else []
-    early = [u.detail for u in unseen if u.kind == pathcond.UNSEEN_EARLY_EXIT and u.detail not in arm.guards]
-    return arm.guards + early, [u for u in unseen if u.kind == pathcond.UNSEEN_EXCEPT]
+    return list(arm.guards), [u for u in unseen if u.kind == pathcond.UNSEEN_EXCEPT]
 
 
 def early_exit_if(func: ast.AST, arm_stmt: ast.AST, guard: str) -> ast.If | None:
-    """The ``if`` of the early exit above *arm_stmt* whose condition on what follows is *guard* (:func:`arm_guards`):
-    where S3 goes on from such a guard, as ``guard_if`` finds an enclosing one."""
-    for u in pathcond.enclosing_guards(arm_stmt):
-        if u.kind == pathcond.UNSEEN_EARLY_EXIT and u.detail == E.strip_annotation(guard):
-            return next((n for n in ast.walk(func) if isinstance(n, ast.If) and n.lineno == u.line), None)
-    return None
+    """The ``if`` of the early exit above *arm_stmt* that puts *guard* on it (``pathcond.exits_above_at``): where S3
+    goes on from such a guard, as ``guard_if`` finds an enclosing one.  Of two exits that say it, the later: the last
+    test the passes went by before the arm.  None where no exit says it, or an ``if`` it names is not found."""
+    lines = dict(pathcond.exits_above_at(arm_stmt)).get(guard, ())
+    found = [n for n in ast.walk(func) if isinstance(n, ast.If) and n.lineno in lines]
+    return max(found, key=lambda n: n.lineno) if found and len(found) == len(lines) else None
 
 
 def raised_nothing(func: ast.AST, handler_line: int, printed: set[int]) -> int | None:
@@ -1500,11 +1499,20 @@ class Wrote:
 
 
 def _guard_read(text: str, env: E.Env) -> object:
-    """A path condition read in *env*: True or False where the values read decide it; anything else is not read."""
+    """A path condition read in *env*: True or False where the values read decide it; anything else is not read, one
+    whose names are as they are at another line (``E.read_elsewhere``) among them."""
+    if E.read_elsewhere(text):
+        return E.UNKNOWN
     try:
         return E.evaluate(text, env)
     except SyntaxError:
         return E.UNKNOWN
+
+
+def _at_its_line(text: str) -> str:
+    """A guard without the ``  [at N]`` that says its names are as they are when line N's test runs: its text as that
+    ``if`` reads it."""
+    return re.sub(r"\s+\[at \d+\]$", "", text)
 
 
 def _orders_texts(text: str, env: E.Env) -> bool:
@@ -2590,7 +2598,8 @@ class Rerun:
 
         # H3
         self.start("H3", "what its guard reads")
-        guards = pathcond.path_condition(site)
+        # the tests reaching it ran under: the ifs around it and the early exits above it (KNOWN_ISSUES.md K61)
+        guards = pathcond.arm_condition(site)
         self.say(f"guards of {site_fn.name}:{chosen.line}: {guards}")
         # an arm H2 left is one that may have written, not one left by elimination (K38)
         left = (T.Said("left-by-elimination") if not branch else T.Said("it-may-have", {"premises": [_said(p) for p in a.premises]}) if a.premises
@@ -2602,9 +2611,12 @@ class Rerun:
                 "why": T.Said("left-by-elimination-no-pass") if not branch else T.Said("no-pass-at-the-window", {"left": left}),
             })))
         def through(env: Any) -> list[tuple[str, str]]:
-            """The methods the guards read through whose values *env* leaves unknown: H4 reads which call set each."""
+            """The methods the guards read through whose values *env* leaves unknown: H4 reads which call set each.  A
+            guard read at another line (``E.read_elsewhere``) is not read in *env*."""
             out = []
             for g in guards:
+                if E.read_elsewhere(g):
+                    continue
                 for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
                     for n in ast.walk(atom):
                         if (
@@ -2716,20 +2728,31 @@ class Rerun:
         return SetBy(method, reading, question, guard_record, env)
 
     def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
-        """Each guard of *site* (``pathcond.path_condition``'s, outermost first) with the values its terms held at its
-        ``if``, where *fn*'s run printed them (:func:`CH.printed_at`, read as the map's evaluator reads a printed value),
-        and the first guard they read false, with its values (KNOWN_ISSUES.md K54).  Texts are not ordered: a guard
-        ordering a value read as text is not read.  In a loop that holds the site, a row is read only at a record the
-        key is on, and only where each of the loop's rows printed once among those: the key's one pass of the loop."""
-        ifs: list[ast.If] = []
+        """Each guard of *site* (``pathcond.arm_condition``'s: the ``if``s around it, outermost first, then the early
+        exits above it) with the values its terms held at its ``if`` -- an early exit's at the exit's own ``if``
+        (``pathcond.exits_above_at``), which is where a guard ``[at N]`` reads its names too -- where *fn*'s run printed
+        them (:func:`CH.printed_at`, read as the map's evaluator reads a printed value), and the first guard they read
+        false, with its values (KNOWN_ISSUES.md K54, K61).  Texts are not ordered: a guard ordering a value read as text
+        is not read.  In a loop that holds the site, a row is read only at a record the key is on, and only where each of
+        the loop's rows printed once among those: the key's one pass of the loop."""
+        around: list[ast.If] = []
         previous: ast.AST = site
         for anc in pathcond.ancestors(site):
             if isinstance(anc, ast.If) and (previous in anc.body or previous in anc.orelse):
-                ifs.append(anc)
+                around.append(anc)
             previous = anc
-        ifs.reverse()
-        if len(ifs) != len(guards):
-            # a test path_condition could not render: the guards are not placed, and no value is read
+        around.reverse()
+        written = pathcond.path_condition(site)
+        exits = dict(pathcond.exits_above_at(site))
+        ifs_of: list[list[ast.If]] = [[one] for one in around]
+        for g in guards[len(written):]:
+            lines = exits.get(g, ())
+            ifs_of.append([n for n in ast.walk(fn.node) if isinstance(n, ast.If) and n.lineno in lines])
+        if len(around) != len(written) or guards[: len(written)] != written or any(
+            not at or len(at) != len(exits.get(g, ())) for g, at in zip(guards[len(written):], ifs_of[len(written):], strict=True)
+        ):
+            # a test path_condition could not render, or an exit's if is not found: the guards are not placed, and no
+            # value is read
             return [T.Said("guard-held-on", {"guard": g, "on": ""}) for g in guards], None
         own = {id(n) for n in ast.walk(fn.node)}
         sn = R.seen(fn, run, self.mode)
@@ -2757,18 +2780,24 @@ class Rerun:
 
         held: list[T.Said] = []
         false: tuple[str, T.Said | str] | None = None
-        for n, g in enumerate(guards):
-            on, env = [], E.Env()
-            # an if outside the function (one the def sits in) is not this frame's
-            terms = sorted(PR.chains(g), key=lambda t: (g.find(t), t)) if id(ifs[n]) in own else []
-            for t in terms:
-                if (got := CH.printed_at(fn, sn, ifs[n], t, read, tuple(loops) if once else ())) is not None:
-                    on.append(T.Said("term-printed", {"term": t, "value": got[0], "where": got[1]}))
-                    env.put_printed(t, got[0], got[1])
-                    self.say(f"  {t} = {got[0]!r} ({got[1]})")
+        for g, at in zip(guards, ifs_of, strict=True):
+            on: list[T.Said] = []
+            read_false = False
+            text = _at_its_line(g)
+            for one in at:
+                here, env = [], E.Env()
+                # an if outside the function (one the def sits in) is not this frame's
+                terms = sorted(PR.chains(text), key=lambda t: (text.find(t), t)) if id(one) in own else []
+                for t in terms:
+                    if (got := CH.printed_at(fn, sn, one, t, read, tuple(loops) if once else ())) is not None:
+                        here.append(T.Said("term-printed", {"term": t, "value": got[0], "where": got[1]}))
+                        env.put_printed(t, got[0], got[1])
+                        self.say(f"  {t} = {got[0]!r} ({got[1]})")
+                on += here
+                read_false = read_false or bool(here and not _orders_texts(text, env) and _guard_read(text, env) is False)
             said: T.Said | str = T.Said("held-on-values", {"values": on}) if on else ""
             held.append(T.Said("guard-held-on", {"guard": g, "on": said}))
-            if false is None and on and not _orders_texts(g, env) and _guard_read(g, env) is False:
+            if false is None and read_false:
                 false = (g, said)
         return held, false
 
@@ -2886,7 +2915,7 @@ class Rerun:
                     continue
                 node = next((f for f in R.functions(r.file, func) if f.lineno <= line <= f.end_lineno), None)
                 stmt = R.statement_at(node, line) if node is not None else None
-                guards = tuple(pathcond.path_condition(stmt)) if stmt is not None else ()
+                guards = tuple(pathcond.arm_condition(stmt)) if stmt is not None else ()
                 for caller, point, level in sorted({(p.caller, p.point, p.level) for p in a.placed}):
                     rel, _, qual = caller.partition("::")
                     name = qual.rpartition(".")[2]
@@ -4404,10 +4433,11 @@ class Rerun:
         return blocked
 
     def _call_guards(self, rel: str, line: int) -> list[str]:
-        """The path condition of the call at *rel*:*line*, the statement the map's ``call_statements`` picks for the
-        hop (``called_from``'s own reader); two statements on the line that differ are not read."""
+        """The tests reaching the call at *rel*:*line* runs under (``pathcond.arm_condition``: its ``if``s and the early
+        exits above it), of the statement the map's ``call_statements`` picks for the hop (``called_from``'s own
+        reader); two statements on the line that differ are not read."""
         stmts = call_statements(R.CORPUS, f"{rel}:{line}")
-        conds = {tuple(pathcond.path_condition(s)) for s in stmts}
+        conds = {tuple(pathcond.arm_condition(s)) for s in stmts}
         self.need(T.Said("one-call-statement-at", {"site": f"{rel}:{line}", "n": len(stmts)}), len(conds) == 1, "K55")
         return list(conds.pop())
 
@@ -4473,7 +4503,7 @@ class Rerun:
         cfn = R.function(crel, cname, [line])
         at = R.statement_at(cfn.node, line)
         stmt = self.need(T.Said("one-call-statement-at", {"site": f"{crel}:{line}", "n": 0 if at is None else 1}),
-                         at if at is not None and pathcond.path_condition(at) == guards else None, "K56")
+                         at if at is not None and pathcond.arm_condition(at) == guards else None, "K56")
         held_on, read_false = self._held_on(cfn, stmt, guards, crun)
         what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
                 else T.Said("values-held-on", {"held": held_on}))
@@ -4527,7 +4557,8 @@ class Rerun:
             self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
         else:
             exit_stmt = R.statement_at(fn.node, q.exit_line)
-            path = pathcond.path_condition(exit_stmt)
+            # what held on the way to it, the early exits above it too; one read at another line is not solved here
+            path = [g for g in pathcond.arm_condition(exit_stmt) if not E.read_elsewhere(g)]
             self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         # an arm in an except handler is kept off where every pass's rows show its try raised nothing: no guard to read
@@ -4607,7 +4638,8 @@ class Rerun:
         return {row.line for row in fn.rows if sn.present(row)} if sn.single_call() else set()
 
     def _ways_printed(self, fn: R.Function, run) -> list[tuple[int, list[str]]]:
-        """``(row line, its path condition)`` of each row one call's pass *run* printed (unambiguous), outside any loop
+        """``(row line, the tests reaching it ran under)`` of each row one call's pass *run* printed (unambiguous; its
+        ``pathcond.arm_condition`` but a guard read at another line), outside any loop
         the pass may have gone round more than once (``which_ran.once_loops_of``): the tests of the ``if``s around it
         held when it printed -- activateJob's 111, in the else of 70, says ``not (len(res) == 0 or allOK)``, though
         the exit the pass left by (153, ``return True``) is reached either way (KNOWN_ISSUES.md K46).  None of a run of
@@ -4620,7 +4652,7 @@ class Rerun:
         once = once_loops_of(fn, sn, run, self.mode)
         return [(row.line, conds) for row in fn.rows
                 if sn.unambiguous.get(row.line) and R.loops_over(row.stmt, fn.node) <= set(once)
-                and (conds := pathcond.path_condition(row.stmt))]
+                and (conds := [g for g in pathcond.arm_condition(row.stmt) if not E.read_elsewhere(g)])]
 
     def _arm_taken(self, q: Blocked, arm: Arm) -> None:
         """S3 where every pass left by an arm that writes the subject: no guard kept the passes off it, so what kept the
