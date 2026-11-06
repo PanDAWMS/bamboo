@@ -68,13 +68,14 @@ from bamboo.codemap.panda.pathcond import (
     additions,
     arm_condition,
     attach_parents,
+    binding_tests,
     enclosing_class,
     enclosing_function,
     entries,
     field_replacements,
     field_writes,
     functions_with_owner,
-    literal_values,
+    reaching_values,
     replacements,
     site_of,
     targets_of,
@@ -183,7 +184,7 @@ def _returned_values(
     """``([(literal, conditions)], whether anything is unresolved)`` for *func*'s returns.
 
     Three shapes are read: a literal returned outright; a local returned after
-    a guarded chain assigned it, which is what :func:`literal_values` answers;
+    a guarded chain assigned it, which is what :func:`reaching_values` answers;
     and a call returned outright, followed into what *it* returns (see
     :func:`_produced`) -- ``return self.other(...)`` hands back that method's
     literals under that method's guards.  Anything else -- a computed
@@ -213,16 +214,17 @@ def _returned_values(
         if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             values.append((node.value.value, [marked(test) for test in returning]))
         elif isinstance(node.value, ast.Name):
-            resolved = literal_values(func, node.value.id, at=node)
-            if resolved:
+            reached = [one for one in reaching_values(func, node.value.id, None, node) if one.line is not None]
+            if any(one.values for one in reached):
                 # The return's own guards as well: a chain assigning the local
                 # can sit inside a branch of the function.
                 values.extend(
                     (
                         literal,
-                        [marked(test) for test in returning + [c for c in conditions if c not in returning]],
+                        [marked(test) for test in returning + binding_tests(one.conditions, returning, one.site, node)],
                     )
-                    for literal, conditions, _line in resolved
+                    for one in reached
+                    for literal in one.values
                 )
             else:
                 opaque = True

@@ -1,4 +1,4 @@
-"""The English-only check -- ``.githooks/no-japanese`` and the hooks that call it.
+"""The English-only check -- ``.githooks/english-only`` and the hooks that call it.
 
 Each test makes a small repository of its own.  Japanese is written here as
 escapes, so this file holds none.
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 HOOKS = Path(__file__).resolve().parents[1] / ".githooks"
-CHECK = HOOKS / "no-japanese"
+CHECK = HOOKS / "english-only"
 #: "Japanese", and a katakana file name
 JA, JA_NAME = "\u65e5\u672c\u8a9e", "\u30e1\u30e2.txt"
 

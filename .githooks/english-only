@@ -1,10 +1,10 @@
 #!/usr/bin/env perl
 # The repository is English only: no Japanese in a commit message, an added line or a file name.
 #
-#   no-japanese message FILE      a commit message as the commit-msg hook hands it ('#' lines are git's comments,
+#   english-only message FILE      a commit message as the commit-msg hook hands it ('#' lines are git's comments,
 #                                 and nothing below the scissors line of `git commit -v` is the message)
-#   no-japanese staged            the index against HEAD: added lines and added file names (the pre-commit hook)
-#   no-japanese range BASE HEAD   each commit message in BASE..HEAD and what BASE...HEAD adds (CI)
+#   english-only staged            the index against HEAD: added lines and added file names (the pre-commit hook)
+#   english-only range BASE HEAD   each commit message in BASE..HEAD and what BASE...HEAD adds (CI)
 #
 # Japanese here is CJK symbols and punctuation, kana, CJK ideographs and full- and half-width forms.  Other
 # non-ASCII (box drawing, dashes, arrows, check marks) is in the repository already and stays allowed; a test that
@@ -77,7 +77,7 @@ if ($mode eq 'message' && @ARGV == 1) {
     }
     check_added("$base...$head");
 } else {
-    die "usage: no-japanese message FILE | staged | range BASE HEAD\n";
+    die "usage: english-only message FILE | staged | range BASE HEAD\n";
 }
 
 if (@hits) {

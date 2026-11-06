@@ -44,7 +44,8 @@ What is read from a record:
 
 A run is the records of one machine with one mark (``runs_for``).  The search for the key returns every record of a
 run whose mark holds the key; a mark that does not (the setupper's stamp) is asked for on its own, where a record of
-the key under it lies within :data:`EDGE` of the window.  A run whose part
+the key under it lies within :data:`EDGE` of the window -- one the calls share, by the map, only within 2 EDGE of those
+records, one ask a machine (KNOWN_ISSUES.md K60).  A run whose part
 near the window (its records split where they stop for :data:`EDGE` or more, the pieces that reach the window +- EDGE)
 begins or ends within EDGE of an end of what was searched on its machine may go on past it.  Where its mark holds the
 key, the window is widened past that end, once: the end is one the asks over the window itself searched, so a run that
@@ -93,6 +94,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from bamboo.codemap.models import RUN_KEY_TIME
+from bamboo.querier import mapdump
 from bamboo.querier.records import (
     PREFIX,
     STAMP,
@@ -104,6 +107,7 @@ from bamboo.querier.records import (
     cut_mark,
     keyed,
     log_name,
+    runs_into,
 )
 
 EDGE = datetime.timedelta(minutes=10)
@@ -618,7 +622,30 @@ class RecordedLogs:
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
         narrowed = {} if whole else _narrowed(marks, owners)
         why = "the records of the key's runs whose mark does not hold the key"
-        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(marks.items())]
+        # a mark the calls share, by the map, only within 2 EDGE of the key's records under it on its machine, the
+        # windows of one machine joined where they overlap (KNOWN_ISSUES.md K60)
+        share = set() if whole else _calls_share(name, marks)
+        own_marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in share})}
+        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(own_marks.items())]
+        near: dict[str, list[tuple[datetime.datetime, datetime.datetime, str]]] = {}
+        for m, token in sorted(share):
+            stamps = sorted(_t(r.stamp) for r in got.records.values()
+                            if (r.machine, r.token) == (m, token) and pattern.search(r.message))
+            start, end = max(_t(window[0]), stamps[0] - 2 * EDGE), min(_t(window[1]), stamps[-1] + 2 * EDGE)
+            if start <= end:
+                near.setdefault(m, []).append((start, end, token))
+        for m, spans in sorted(near.items()):
+            joined: list[tuple[datetime.datetime, datetime.datetime, set[str]]] = []
+            for start, end, token in sorted(spans):
+                if joined and start <= joined[-1][1]:
+                    joined[-1] = (joined[-1][0], max(joined[-1][1], end), joined[-1][2] | {token})
+                else:
+                    joined.append((start, end, {token}))
+            asks += [(Ask(name, tuple(sorted(_strings(m, tokens, narrowed, owners))), (_text(start), _text(end)), m),
+                      why + ", near them: a mark the calls share") for start, end, tokens in joined]
+        if share:
+            notes.append(f"{len(share)} mark(s) the calls share (the map) asked only within "
+                         f"{int(2 * EDGE.total_seconds() // 60)} min of the key's records")
         for records in self._get(asks, notes):
             for record in records:
                 gather(record)
@@ -724,6 +751,55 @@ def _narrowed(marks: dict[str, set[str]], owners: Owners | None) -> dict[tuple[s
             method = _METHOD_MARK.match(token)
             if method is not None and owners.get(method[1]):
                 out[(machine, token)] = method[1]
+    return out
+
+
+#: the dump :func:`_calls_share` read its marks from, and those marks by log
+_SHARES: list = []
+_TIME = r"\d{4}-\d\d-\d\d[/ T]\d\d:\d\d:\d\d(?:\.\d+)?"
+
+
+def _calls_share(log: str, marks: dict[str, set[str]]) -> set[tuple[str, str]]:
+    """The ``(machine, mark)`` among *marks* that every map mark of a run printing into *log* reading it says the calls
+    share: none of the mark's holes holds a column that is a table's identity, and it is no time stamp
+    (:func:`_share_index`).  A JEDI worker's ``process <host_pid-thread>``, ``getTasksToExecCommand_JEDI < vo=None
+    label=None >``, AtlasAnalWatchDog's ``#ATM #KV doForPreStaging label=user``; not ``< PandaID=... >`` nor a
+    stamp.  None with no map installed, or for a mark no map mark reads."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return set()
+    if not _SHARES or _SHARES[0] is not fragment:
+        _SHARES[:] = [fragment, _share_index(fragment)]
+    index = _SHARES[1].get(log, [])
+    out = set()
+    for machine, tokens in marks.items():
+        for token in tokens:
+            hits = [shared for rx, shared in index if rx.fullmatch(token.strip())]
+            if hits and all(hits):
+                out.add((machine, token))
+    return out
+
+
+def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool]]]:
+    """For every log, each map mark of a run printing into it (``records.runs_into``) as a pattern of the token a line
+    carries -- ``method < tag >`` for create_tagged_logger and make_logger, ``<stamp>`` for a MsgWrapper's stamp, the
+    mark itself for the others, a hole any text -- and whether the calls share it."""
+    ident = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or []}
+    out: dict[str, list[tuple[re.Pattern[str], bool]]] = {}
+    for log, runs in runs_into(fragment).items():
+        for run in runs:
+            time = any(RUN_KEY_TIME in k.columns for k in run.key)
+            mark = run.mark.strip()
+            if not mark and not time:
+                continue
+            body = _TIME if time and not mark else ".*?".join(re.escape(p) for p in mark.split("{}"))
+            if run.builder in ("create_tagged_logger", "make_logger"):
+                rx = re.escape(run.at.split("::")[-1].split(".")[-1]) + r" <\s*" + body + r"\s*>"
+            elif run.builder == "MsgWrapper" and time and not mark:
+                rx = "<" + body + ">"
+            else:
+                rx = body
+            out.setdefault(log, []).append((re.compile(rx), not time and not any(ident & set(k.columns) for k in run.key)))
     return out
 
 

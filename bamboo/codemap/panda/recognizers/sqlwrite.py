@@ -152,6 +152,7 @@ from bamboo.codemap.panda.pathcond import (
     ancestors,
     arm_condition,
     attach_parents,
+    binding_tests,
     compatible,
     enclosing_function,
     entries,
@@ -1617,7 +1618,7 @@ def _outcomes(
                 if reached:
                     dominating = arm_condition(site)
                     for one in reached:
-                        extra = [c for c in one.conditions if c not in dominating] + [
+                        extra = binding_tests(one.conditions, dominating, one.site, site) + [
                             entry for entry in later if entry not in one.conditions
                         ]
                         # Where the value was chosen, which is not where it

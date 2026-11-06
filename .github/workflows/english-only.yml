@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  no-japanese:
+  english-only:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -30,4 +30,4 @@ jobs:
         run: |
           # a new branch's push has no before, and a force push's may be gone
           if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then BASE=$(git rev-parse "$HEAD~1"); fi
-          perl .githooks/no-japanese range "$BASE" "$HEAD"
+          perl .githooks/english-only range "$BASE" "$HEAD"

@@ -4647,6 +4647,77 @@ def test_an_early_exit_above_the_binding_a_bind_reads_is_on_that_value_s_branch(
     ]
 
 
+def test_an_early_exit_above_both_the_binding_and_the_write_is_said_once_as_the_write_reads_it():
+    """An exit above both the binding a write reads and the write is one test.  The write reads it at the exit's
+    line, since ``tmpStat`` is given a new value between, and the binding's reading of the same exit would list
+    it a second time without the mark (``setup_destination`` 971, EXD).
+    """
+    source = (
+        "def f(self, taskSpec, tmpStat):\n"
+        "    if tmpStat is not True:\n"
+        "        return\n"
+        "    newStatus = 'ready'\n"
+        "    tmpStat = self.prepare(taskSpec)\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert [(b.outcome, b.path_condition) for b in junctions[0].branches] == [
+        ("ready", ["not (tmpStat is not True)  [at 2]"])
+    ]
+
+
+def test_another_exit_of_the_same_text_above_the_binding_alone_stays():
+    """Two exits may render the same text, as a function committing twice does: the one above the binding alone is
+    a test of that value's branch, beside the write's own.
+    """
+    source = (
+        "def f(self, taskSpec, ready):\n"
+        "    ok = self.ready(taskSpec)\n"
+        "    if ready:\n"
+        "        if not ok:\n"
+        "            return\n"
+        "        newStatus = 'scouted'\n"
+        "    else:\n"
+        "        newStatus = 'running'\n"
+        "    if not ok:\n"
+        "        return\n"
+        "    ok = self.check(taskSpec)\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
+    assert [(b.outcome, b.path_condition) for b in junctions[0].branches] == [
+        ("scouted", ["not (not ok)  [at 9]", "ready", "not (not ok)"]),
+        ("running", ["not (not ok)  [at 9]", "not (ready)"]),
+    ]
+
+
+def test_each_early_exit_entry_comes_with_the_lines_of_the_ifs_implying_it():
+    """``pathcond.exits_above_at``: the entries ``exits_above`` gives, in its order, each with its ``if``'s line, so a
+    reader can read ``[at N]`` at N and trace a rewritten bare name to its test.  Two exits rendering one text are
+    one entry with both lines.
+    """
+    func = _func(
+        "def f(self, taskSpec, tmpStat, ready):\n"
+        "    if not ready:\n"
+        "        return\n"
+        "    if tmpStat is not True:\n"
+        "        return\n"
+        "    tmpStat = self.prepare(taskSpec)\n"
+        "    if not ready:\n"
+        "        return\n"
+        "    taskSpec.status = 'ready'\n"
+    )
+    write = func.body[-1]
+
+    assert pathcond.exits_above(write) == ["not (not ready)", "not (tmpStat is not True)  [at 4]"]
+    assert pathcond.exits_above_at(write) == [
+        ("not (not ready)", (2, 7)),
+        ("not (tmpStat is not True)  [at 4]", (4,)),
+    ]
+
+
 def test_a_bind_from_a_local_keeps_the_binding_that_settles_nothing():
     """``retryTask_JEDI``'s ``newTaskStatus = taskOldStatus`` beside its
     ``newTaskStatus = "exhausted"``: the bind's branches were the literal alone,
@@ -5241,9 +5312,10 @@ def test_a_name_a_test_above_the_read_says_holds_what_the_test_says():
     assert [(one.values, one.line) for one in reached] == [(("defined", "pending"), None), (("defined", "pending"), 3)]
     # No binding settles: the test alone says what the name holds.
     lone = _func("def f(self, spec):\n    old = spec.status\n    if old in ['finished', 'failed']:\n        return old\n")
-    assert pathcond.reaching_values(lone, "old", None, _returned(lone)) == [
-        pathcond.Reached(("finished", "failed"), None, [], 2)
-    ]
+    assert [
+        (one.values, one.expression, one.conditions, one.line)
+        for one in pathcond.reaching_values(lone, "old", None, _returned(lone))
+    ] == [(("finished", "failed"), None, [], 2)]
 
 
 # --------------------------------------------------------------------------- #

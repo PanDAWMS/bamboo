@@ -95,13 +95,11 @@ def _marks_of(log: str):
     return _MARKS[1].get(log)
 
 
-def _bare_marks(fragment) -> dict[str, tuple[dict[str, list[re.Pattern[str]]], list[tuple[str, re.Pattern[str]]]]]:
-    """:func:`_marks_of` for every log: the marks of the runs a statement prints through, its own and those handed to
-    it (``PrintStatement.runs``, ``handed_runs``), put under the files the map follows its logger to (basis
-    ``logger``).  Only a builder's that writes the mark bare, with a blank inside it and a literal: ``{} {}`` (a
-    file server's) would cut any two words."""
+def runs_into(fragment) -> dict[str, list]:
+    """The map's runs printing into each log: the runs a statement prints through, its own and those handed to it
+    (``PrintStatement.runs``, ``handed_runs``), put under the files the map follows its logger to (basis ``logger``)."""
     nodes = {n.owner: n for n in getattr(fragment, "function_prints", None) or []}
-    found: dict[str, set[str]] = {}
+    out: dict[str, list] = {}
     for node in nodes.values():
         runs = {r.line: r for r in node.runs}
         for st in node.statements:
@@ -110,11 +108,21 @@ def _bare_marks(fragment) -> dict[str, tuple[dict[str, list[re.Pattern[str]]], l
             held = [runs.get(line) for line in st.runs]
             held += [next((r for r in other.runs if r.line == ref.line), None)
                      for ref in st.handed_runs if (other := nodes.get(ref.owner)) is not None]
-            for run in held:
-                mark = run.mark.strip() if run is not None and run.builder in _BARE_BUILDERS else ""
-                if " " in mark and re.sub(r"\{\}|\s", "", mark):
-                    for log in st.log_files:
-                        found.setdefault(log, set()).add(mark)
+            for log in st.log_files:
+                out.setdefault(log, []).extend(run for run in held if run is not None)
+    return out
+
+
+def _bare_marks(fragment) -> dict[str, tuple[dict[str, list[re.Pattern[str]]], list[tuple[str, re.Pattern[str]]]]]:
+    """:func:`_marks_of` for every log: the marks of the runs printing into it (:func:`runs_into`), only a builder's
+    that writes the mark bare, with a blank inside it and a literal: ``{} {}`` (a file server's) would cut any two
+    words."""
+    found: dict[str, set[str]] = {}
+    for log, runs in runs_into(fragment).items():
+        for run in runs:
+            mark = run.mark.strip() if run.builder in _BARE_BUILDERS else ""
+            if " " in mark and re.sub(r"\{\}|\s", "", mark):
+                found.setdefault(log, set()).add(mark)
     out = {}
     for log, marks in found.items():
         first: dict[str, list[re.Pattern[str]]] = {}
