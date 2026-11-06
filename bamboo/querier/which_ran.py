@@ -443,7 +443,8 @@ def held_in_calls(
 
 
 def callers_guards(fn: R.Function) -> list[tuple[str, str]]:
-    """``(guard, where)`` on the way to every ``self.<fn>()`` call in the same class."""
+    """``(guard, where)`` on the way to every ``self.<fn>()`` call in the same class: the call's ``if``s and the early
+    exits above it (``pathcond.arm_condition``)."""
     tree = R.tree(fn.rel)
     cls = next((a for a in pathcond.ancestors(fn.node) if isinstance(a, ast.ClassDef)), None)
     if cls is None:
@@ -458,7 +459,7 @@ def callers_guards(fn: R.Function) -> list[tuple[str, str]]:
             and node.func.value.id == "self"
         ):
             caller = pathcond.enclosing_function(node)
-            for test in pathcond.path_condition(node):
+            for test in pathcond.arm_condition(node):
                 out.append((test, f"{caller.name if caller else '?'}:{node.lineno}"))
     del tree
     return out
@@ -568,10 +569,14 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
 
     Each guard is solved with ``<x>.<attr>`` unknown: whether the guard needs the value is the question, and a value
     *env* holds for it -- a hole another run printed after the move (DBProxy's archiveJob ``start status=failed``
-    inside the adder's call) -- would decide the term before the guard could, so it would never be settled.
+    inside the adder's call) -- would decide the term before the guard could, so it would never be settled.  The
+    guards are the statement's and its callers' ``pathcond.arm_condition``; one read at another line
+    (``E.read_elsewhere``) is not solved here.
     """
-    guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.path_condition(stmt)] + callers_guards(fn)
+    guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.arm_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
+        if E.read_elsewhere(guard):
+            continue
         asked = set(re.findall(rf"(?<![\w.])[\w.]+\.{re.escape(attr)}(?!\w)", guard))
         hidden = E.Env(values=dict(env.values), rows=dict(env.rows), table=env.table, stale={**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
                        unread=env.unread, at=env.at)
@@ -782,7 +787,11 @@ def judge(
                 v.kind = "excluded"
                 v.reasons.append(f"value: {wrong_value}")
             if env is not None:
-                for guard in pathcond.path_condition(stmt):
+                # the tests reaching it runs under, the early exits above it too; one whose names are as they are at
+                # another line (``[at N]``) is not read in the pass's values (KNOWN_ISSUES.md K61)
+                for guard in pathcond.arm_condition(stmt):
+                    if E.read_elsewhere(guard):
+                        continue
                     try:
                         if E.evaluate(guard, env) is False:
                             v.kind = "excluded"

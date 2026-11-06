@@ -1484,7 +1484,75 @@ Left:
 why "..., near them: a mark the calls share".
 *Revisit:* when the map says where a call's run starts and ends, so that an ask is one call's span.
 
-### K46. A loop is read as gone round once only where every way back prints a row the pass lacks
+### K61. The early exits above a statement are its guards, for every reader
+
+The map's branches say the tests a write runs under with the early exits above it (`pathcond.arm_condition`: an
+`if X: return` puts `not (X)` on what follows, `  [at N]` where a name it reads is given a new value between the exit
+and the write).  The querier's own readers computed `pathcond.path_condition` from the corpus, the `if`s around a
+statement alone, and S3 added `enclosing_guards`' exits to the branches' guards itself, so a guard `X  [at N]` stood
+beside its bare twin `X`, which S3 then read in the pass's values.
+
+Now every reader of a statement's guards reads `pathcond.arm_condition`: judge's step 5 and rule 6 (`rewriter`,
+`callers_guards`), H2's stand-ins, H3, U3's call guards, S3's exit taken (`blocked`) and the rows it printed on the way
+(`_ways_printed`).  An exit's guard is read at its own `if` (`_held_on`, the lines `pathcond.exits_above_at` gives), a
+guard `[at N]` only at line N: in a pass's or the rows' values it is not read (`E.read_elsewhere`).  S3 reads the
+branches' guards as the map writes them and goes on from an exit's `if` by its line (`early_exit_if`).
+- An arm whose only guards are exits has guards now: H3 reads them, as an `if` around it, and goes to U3 only for an
+  arm with none.  MJE-7398540916's killUnusedEventServiceConsumers:986 (`not (notToDelete)`, `not (not deletedFlag)`)
+  stops at H3, its exits held with nothing printed; before, U3 asked for the run of archiveJob that called it (K56).
+- An arm left that "may have" written, whose exits the rows' values do not read, stops for a run that shows it ran,
+  as one with an unread `if`: the doGenerate / doGenerateBuild arms of the MR-J attributes (`not (not readStat or
+  taskParamMap is None)`, `not (not tmpStat)`), which ended on "it has no guard".  Their one-of answers stand, the arms
+  open.  A writer read on its caller's run whose exit is unread may have written: extractCommon:501's `not (workQueue
+  is None)` (MR-T resource_type).
+- An exit that reads a method the evaluator does not run goes to H4: setupper:1105's `job.isCancelled()`
+  (MF-7398155528), which H4 finds no call setting.
+
+Measured as ex1 (this on codemap-xxiv bf88f71 + K60, dump x13xxivXm) against the same tree without it (xb1):
+- No run crashed.  The case outcomes: END 100 -> 100 (one-of 61 -> 63, plain 39 -> 37), U3's K56 stop 5 -> 4, H3's
+  one more.  Within the walks one-of arms ended 43 -> 13, open 99 -> 133.
+- No verdict of judge moves; adder_gen process_job_report:395, excluded by rule 4 already, gains its exit's test read
+  false (the job merging).
+- S3's bare twins are gone: MJ-assigned-stuck and MJ-defined-stuck stop at S3, not one step on at S4 from the twin
+  `not (len(self.jumbo_jobs) == 0)` read false at the write (its names are as they are at 1966).
+
+Left:
+- The ENDs that rested on not seeing an exit now rest on an open arm.  Ending an arm that may have written on its
+  unread guards as premises is another rule, for `if`s and exits alike.
+- An arm whose guards its run shows held, with nothing printed, stops at H3; U3 would ask on.
+- A method an exit reads (`isCancelled()`) is read only once the evaluator runs the map's runnables.
+
+*Shows:* the exits in "guards of f:N: [...]", each read at its own `if` in "held on ..."; S3's "needs [...]" without a
+bare twin.
+*Revisit:* with the evaluator running the map's runnables; with the rule above for an arm left with unread guards.
+
+### K62. A condition an arm was left resting on is not what it rests on once H3 reads it holding
+
+H2 leaves a writer that prints nothing (K25) as one that may have written, resting on each of its guards the pass's
+values do not read (`StandIn.left`: "its condition X not read").  H3 then reads the same guards (`pathcond.arm_condition`)
+at the same row, in the values, in a column the rows file holds (K49) or as its run shows it ran (K54).  The premise
+stayed: `arms_left` carried H2's premises to the END, and an END with one is a one-of, "it rests on: its condition X
+not read", though its own sentence said the guard held.
+
+Now H3 drops, for an arm H2 left, each "its condition X not read" whose guard it reads as holding, by the record's
+guard.  The END rests on that reading (a held column's premise is in its sentence, K49).  What H3 does not read stays:
+the functions between a call and the arm, the run not showing the line ran, the key named by no line, an older row.  A
+guard read false is as before: the next row, or excluded.  A status's arm is not ended at H3, and its premises are not
+touched.
+
+Measured as pm1 (this on ex1's tree: codemap-xxiv bf88f71 + K60 + K61, dump x13xxivXm) against ex1:
+- No run crashed; asks 78 -> 78, rows_asks 18 -> 18.
+- 8 of the 144 cases move, all MR-T attributes of m-cut2 that TaskRefinerBase.extractCommon writes under
+  `'<key>' in taskParamMap`, read in task_params (K49): each END loses "it rests on: its condition ... not read" and
+  its code one-of.  reqID keeps its older row, walltime its excluded arm.  The 65, the attribute 60 and MT: no file
+  moves.
+- By question (the 155 the sets hold): answers 23 -> 31, one-of not answers 39 -> 31.
+
+Left: these ENDs, as every extractCommon one, rest on the store a later call makes (K41: registerTaskInOneShot_JEDI).
+
+*Shows:* "it rests on" in an END, and the branches' premises in result.json.
+
+
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it
 (`rows.share_loop`): a printed row's arms then do not leave the site out, and rule 3 does not order them.  A loop
