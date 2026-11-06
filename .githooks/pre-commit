@@ -1,3 +1,3 @@
 #!/bin/sh
-# The repository is English only: refuse added lines or file names that hold Japanese (see no-japanese).
-exec perl "$(dirname "$0")/no-japanese" staged
+# The repository is English only: refuse added lines or file names that hold Japanese (see english-only).
+exec perl "$(dirname "$0")/english-only" staged
