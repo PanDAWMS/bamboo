@@ -1203,8 +1203,25 @@ registerTaskInOneShot_JEDI -- runImpl 211 (14 texts) and AtlasAnalTaskRefiner do
 doBasicPostProcess 114 (endTime, 1 text) by updateTask_JEDI, whose result it does not read: one arm in one text that
 no row can tell.
 
+An attribute's END at H3 says what it leaves unread of the value reaching the row (`_store_unread`, by the map's branch
+of the arm).  An attribute arm: "its row is written by a later statement or call, which is not read", where the map
+has no store of it to name -- insertNewJob's own INSERT at 3180 is not read either, though its run prints 3199 after
+it.  An SQL arm (the map's `not_an_attribute_arm`) read on its caller's run whose own function catches the statement's
+exception (`handlers.leave`): "its statement's failure is caught in f (except at N) and the call returns" --
+setSuperStatus_JEDI, which updateTask_JEDI calls without reading what it returns.  Neither says more: an SQL arm on
+its own run, a stop, an END with no arm, a status's END, an arm the map has no branch of.  The END is an answer as
+before.  The handler's line is said, not handlers' class: setSuperStatus_JEDI's `dump_error_message(tmpLog)` passes
+the tagged logger as an argument, which `run_loggers` does not count, so its handler reads UNTAGGED.
+
+Measured as km1 (this on pm1's tree: codemap-xxiv bf88f71 + K60 + K61 + K62, dump x13xxivXm) against pm1:
+- No run crashed; the asks and rows_asks files hold the same lines.
+- 32 of the 144 cases move, all MR-* of m-cut2: 27 in out.txt, 5 in result.json alone (the END's store record
+  empty: an SQL arm on its own run).  The attribute 60: 15 (11 in out.txt).  The 65 and MT: no file moves.
+- No outcome's kind, code or step moves, so the answers by question stay 31.  40 END lines take the attribute arm's
+  phrase, an ended arm's inside a one-of among them; 4 take the caught statement's (superStatus, except at 942).
+
 *Shows:* H2's verdicts: P's reason, and "read with the other verdicts: a call reaching no writer of '<value>' left
-standing does not write it" for a positive of the second P.
+standing does not write it" for a positive of the second P; an attribute's END, what it leaves unread of the row.
 *Revisit:* when a pass's runs of a called function's log are read as the caller's (K21's join, inside the call); when
 the map holds a call's write conditions; when RD lands.
 

@@ -157,7 +157,7 @@ TEMPLATES: dict[str, str] = {
     "a-run-that-shows-ran": "a run that shows {fn_name}:{chosen_line} ran ({why})",
     "left-by-elimination-no-pass": "left by elimination, no pass of it at the window",
     "no-pass-at-the-window": "no pass of it at the window; {left}",
-    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}",
+    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}",
     "by-elimination": "by elimination: ",
     "not-searched-there": "; not searched there: {holes:join=; }",
     "a-method-the-guard-reads-through": "a method the guard reads through{conditions}",
@@ -394,7 +394,11 @@ TEMPLATES: dict[str, str] = {
     "reading-to-give-every-count-the-passes": "reading 2 to give every count the passes printed",
     "s-print-at-among-its-rows": "{func}'s print at {printed_line} among its rows",
     "said": "{what} = {found}",
-    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}",
+    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}{store}",
+    # what an attribute's END leaves unread of its value reaching the row (KNOWN_ISSUES.md K41)
+    "row-written-later-not-read": "; its row is written by a later statement or call, which is not read (KNOWN_ISSUES.md K41)",
+    "failure-caught-not-read": "; its statement's failure is caught in {fn} (except at {line}) and the call returns: that it "
+                               "wrote is not read (KNOWN_ISSUES.md K41)",
     "the-answer-to-holding-the-column-s": "the answer to {ask!r} holding the column(s) {lacking} (it holds {held}; run the SQL above)",
     "the-answers-to-in-the-rows-file": "the answers to {asks} in the rows file",
     "the-client-builds": "the client {inner_rel} builds",
