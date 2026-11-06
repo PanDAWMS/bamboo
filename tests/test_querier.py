@@ -8491,3 +8491,69 @@ def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(t
     # an arm H3 stops on keeps the condition it did not read, and only that one
     assert got["one unread"]["branches"] == [{"kind": "stop", "premises": ["its condition 'task.y' not read"], "kinds": ["not read"]}]
     assert got["one unread"]["code"] == "one-of"
+
+
+def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun
+
+            src = '''
+            def set_status(self, task_id, status):
+                tmpLog = self.create_tagged_logger(comment, f"jediTaskID={task_id}")
+                try:
+                    varMap = {}
+                    varMap[":status"] = status
+                    self.cur.execute(sql, varMap)
+                    return True
+                except Exception:
+                    self.dump_error_message(tmpLog)
+                    return False
+
+            def set_bare(self, task_id, status):
+                varMap = {}
+                varMap[":status"] = status
+                self.cur.execute(sql, varMap)
+            '''
+            import textwrap
+            from bamboo.codemap.panda import pathcond
+            tree = ast.parse(textwrap.dedent(src))
+            pathcond.attach_parents(tree)
+            fns = {f.name: N(node=f, name=f.name) for f in tree.body}
+            sql_arm = [N(why="not_an_attribute_arm")]
+            mapdump._FRAGMENT[:] = [N(junctions=[
+                N(subject="T.status", owner="p/m.py::DB.set_status", branches=[N(line=6, rewrites_open=sql_arm)]),
+                N(subject="T.status", owner="p/m.py::DB.set_bare", branches=[N(line=15, rewrites_open=sql_arm)]),
+                N(subject="T.attr", owner="p/r.py::Refiner.extract", branches=[N(line=9, rewrites_open=[N(why="row_key")])]),
+            ])]
+
+            def said(subject, owner, line, fn, via):
+                got = rerun._store_unread(subject, owner, line, fns.get(fn), via)
+                return rerun.T.text(got) if got else ""
+
+            print(json.dumps({
+                "attribute": said("T.attr", "p/r.py::extract", 9, None, None),
+                "sql own run": said("T.status", "p/m.py::set_status", 6, "set_status", None),
+                "sql via, caught": said("T.status", "p/m.py::set_status", 6, "set_status", "a call"),
+                "sql via, not caught": said("T.status", "p/m.py::set_bare", 15, "set_bare", "a call"),
+                "no branch": said("T.attr", "p/r.py::extract", 10, None, None),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # an attribute arm's row is written by a later statement or call, which the END does not read (K41)
+    assert got["attribute"] == "; its row is written by a later statement or call, which is not read (KNOWN_ISSUES.md K41)"
+    # an SQL arm on its own run: its path is read with the statement's raise apart
+    assert got["sql own run"] == ""
+    # an SQL arm read on its caller's run, whose function catches its exception and returns: its failure is not read
+    assert got["sql via, caught"] == ("; its statement's failure is caught in set_status (except at 9) and the call returns: "
+                                      "that it wrote is not read (KNOWN_ISSUES.md K41)")
+    # its exception leaves the function: the caller's rows after the call do not print on it
+    assert got["sql via, not caught"] == ""
+    # no branch of the arm in the map: nothing said
+    assert got["no branch"] == ""

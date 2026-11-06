@@ -102,6 +102,7 @@ from bamboo.codemap.models import (
     KEY_UNKNOWN,
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
+    REWRITE_NOT_ATTRIBUTE,
     Symptom,
     required_values,
 )
@@ -116,6 +117,7 @@ from bamboo.querier import census as C
 from bamboo.querier import changed as CH
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
+from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
 from bamboo.querier import mapdump
@@ -1222,6 +1224,29 @@ def _condition_read(p: object, read: set[str]) -> bool:
     by its record's guard (KNOWN_ISSUES.md K62)."""
     return (isinstance(p, Premise) and isinstance(p.said, T.Said) and p.said.kind == "its-condition-not-read"
             and p.said.facts.get("guard") in read)
+
+
+def _store_unread(subject: str, owner: str, line: int, fn: Any, via: Any) -> T.Said | str:
+    """What an attribute's END at *owner*:*line* leaves unread of its value reaching the row (KNOWN_ISSUES.md K41), by
+    the map's branch of the arm: an attribute arm's row is written by a later statement or call, which is not read; an
+    SQL arm (``REWRITE_NOT_ATTRIBUTE``) read on its caller's run (*via*) whose own function *fn* catches its statement's
+    exception may have failed with the call returning.  Nothing for an SQL arm on its own run, whose path is read with
+    the statement's raise apart (``printed``'s E6), nor where the map has no branch of the arm.  A reading's owner is
+    ``file::function``, a junction's ``file::Class.function``: matched by the file, the function's name and the line."""
+    fragment = mapdump.fragment()
+    file, _, qual = owner.partition("::")
+    name = qual.rpartition(".")[2]
+    branch = next((b for j in (fragment.junctions if fragment else []) if j.subject == subject
+                   and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
+                   for b in j.branches if b.line == line), None)
+    if branch is None:
+        return ""
+    if not any(o.why == REWRITE_NOT_ATTRIBUTE for o in branch.rewrites_open or []):
+        return T.Said("row-written-later-not-read")
+    if via is None:
+        return ""
+    handler = H.leave(fn.node, f"call at {line}")[2]
+    return T.Said("failure-caught-not-read", {"fn": fn.name, "line": handler.lineno}) if handler is not None else ""
 
 
 def tree_stamp(path: Path) -> str:
@@ -2700,14 +2725,17 @@ class Rerun:
                            else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
                 said = T.Said("written-last-by", {"subject": q.subject, "observed": q.observed, "fn": site_fn.name,
                                                   "line": chosen.line, "via": via})
+                # what it leaves unread of the value reaching the row (KNOWN_ISSUES.md K41)
+                store = _store_unread(q.subject, chosen.candidate.owner, chosen.line, site_fn, w.via)
                 if shown:
-                    self.end(T.Said("shown-in-its-run", {"said": said, "how": how, "at": at, "question_describe": question.said()}))
+                    self.end(T.Said("shown-in-its-run", {"said": said, "how": how, "at": at, "question_describe": question.said(),
+                                                         "store": store}))
                     return None
                 holes = [T.Said("log-on", {"log": log, "machines": list(dict.fromkeys(h.partition(": ")[0] for h in hs))})
                          for log, hs in w.unsearched.items()]
                 self.end(T.Said("no-run-shows-the-line-ran", {
                     "said": said, "by_elimination": T.Said("by-elimination") if not branch else "", "how": how, "at": at,
-                    "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "",
+                    "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "", "store": store,
                 }))
                 return None
             unread = [T.Said("guard-read-false" if got is False else "guard-not-read-held" if g in held else "guard-not-read",
