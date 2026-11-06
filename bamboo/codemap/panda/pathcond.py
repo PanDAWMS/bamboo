@@ -1067,6 +1067,16 @@ def exits_above(node: ast.AST) -> list[str]:
     return list(_exits_rendered(node))
 
 
+def exits_above_at(node: ast.AST) -> list[tuple[str, tuple[int, ...]]]:
+    """:func:`exits_above`'s entries in its order, each with the line of every ``if`` implying it.
+
+    One line, unless two exits render the same text and :func:`exits_above` says them once.  A reader that reads an
+    entry where its test runs -- the querier reads ``  [at N]`` at line N -- reads it at each line: an entry that
+    two exits imply is false where either test is.
+    """
+    return [(text, tuple(one.lineno for one in ones)) for text, ones in _exits_rendered(node).items()]
+
+
 def _exits_rendered(node: ast.AST) -> dict[str, list[ast.stmt]]:
     """:func:`exits_above`'s entries, each with the exit statements rendering it, by line."""
     func = enclosing_function(node)

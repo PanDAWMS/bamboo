@@ -4693,6 +4693,31 @@ def test_another_exit_of_the_same_text_above_the_binding_alone_stays():
     ]
 
 
+def test_each_early_exit_entry_comes_with_the_lines_of_the_ifs_implying_it():
+    """``pathcond.exits_above_at``: the entries ``exits_above`` gives, in its order, each with its ``if``'s line, so a
+    reader can read ``[at N]`` at N and trace a rewritten bare name to its test.  Two exits rendering one text are
+    one entry with both lines.
+    """
+    func = _func(
+        "def f(self, taskSpec, tmpStat, ready):\n"
+        "    if not ready:\n"
+        "        return\n"
+        "    if tmpStat is not True:\n"
+        "        return\n"
+        "    tmpStat = self.prepare(taskSpec)\n"
+        "    if not ready:\n"
+        "        return\n"
+        "    taskSpec.status = 'ready'\n"
+    )
+    write = func.body[-1]
+
+    assert pathcond.exits_above(write) == ["not (not ready)", "not (tmpStat is not True)  [at 4]"]
+    assert pathcond.exits_above_at(write) == [
+        ("not (not ready)", (2, 7)),
+        ("not (tmpStat is not True)  [at 4]", (4,)),
+    ]
+
+
 def test_a_bind_from_a_local_keeps_the_binding_that_settles_nothing():
     """``retryTask_JEDI``'s ``newTaskStatus = taskOldStatus`` beside its
     ``newTaskStatus = "exhausted"``: the bind's branches were the literal alone,
