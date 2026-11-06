@@ -948,7 +948,8 @@ def test_a_bare_mark_holding_a_blank_is_cut_by_the_maps_marks_of_its_log(tmp_pat
             _, bare = ask_of([key_rec], "panda-x.log", "12345", W)
 
             def run(line, builder, mark, logs=("panda-x.log",)):
-                return N(owner=f"p/x.py::f{{line}}", runs=[N(line=line, builder=builder, mark=mark)],
+                return N(owner=f"p/x.py::f{{line}}",
+                         runs=[N(line=line, at=f"p/x.py::f{{line}}", builder=builder, mark=mark, key=[])],
                          statements=[N(log_files_basis="logger", runs=[line], handed_runs=[], log_files=list(logs))])
 
             mapdump._FRAGMENT[:] = [N(function_prints=[
@@ -975,6 +976,60 @@ def test_a_bare_mark_holding_a_blank_is_cut_by_the_maps_marks_of_its_log(tmp_pat
     assert local_records == [["#ATM #KV doForPreStaging label=user", "action=throttle jediTaskID=5"], ["get_file", "a b"]]
     # a mark is read only in the files its run prints into
     assert other_log == ["update_job"]
+
+
+def test_a_mark_the_calls_share_is_asked_only_near_the_keys_records_joined_per_machine(tmp_path):
+    # the key's lines under marks not holding it: two the calls share on M1 (a method's tag with no identity in it, a
+    # worker's), one holding a job's id, and a shared one on M2 near the window's end (K60)
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+
+            W = ("2026-09-28 08:00:00", "2026-09-28 12:00:00")
+            S1, S2, P = "getTasks_JEDI < vo=None label=None >", "process <h_1-2>", "updateJob < PandaID=777 >"
+            at = lambda i, t, tok: {**line(t, "task 12345", tok), "offset": i}
+            key_rec = record(Ask("panda-x.log", ("12345",), W), {
+                M1: answered({**TODAY, "records": [at(1, "09:00:00", S1), at(2, "09:05:00", S1), at(3, "09:20:00", S2),
+                                                   at(4, "10:00:00", P)]}),
+                M2: answered({**TODAY, "records": [at(5, "11:50:00", S1)]})})
+
+            def asks():
+                _, got = ask_of([key_rec], "panda-x.log", "12345", W)
+                return [(a["machine"], a["strings"], a["window"], why.rsplit(", ", 1)[-1]) for a, why in got]
+
+            bare = asks()
+
+            def run(at, builder, mark, columns):
+                return N(owner=at, runs=[N(line=1, at=at, builder=builder, mark=mark, key=[N(columns=c) for c in columns])],
+                         statements=[N(log_files_basis="logger", runs=[1], handed_runs=[], log_files=["panda-x.log"])])
+
+            mapdump._FRAGMENT[:] = [N(tables=[N(identity_attrs=["JobSpec.PandaID"])], function_prints=[
+                run("p/x.py::C.getTasks_JEDI", "create_tagged_logger", "vo={} label={}", [["JediTaskSpec.vo"], []]),
+                run("p/x.py::C.worker", "MsgWrapper", "process <{}>", [[]]),
+                run("p/x.py::C.updateJob", "create_tagged_logger", "PandaID={}", [["JobSpec.PandaID"]]),
+            ])]
+            print(json.dumps([bare, asks()]))
+            """),
+        )
+    )
+    bare, shared = json.loads(out)
+    hold = "the records of the key's runs whose mark does not hold the key"
+    # with no map every mark is asked over the window, one ask a machine
+    assert bare == [["aipanda093.cern.ch", ["getTasks_JEDI < vo=None label=None >", "process <h_1-2>", "updateJob < PandaID=777 >"],
+                     ["2026-09-28 08:00:00", "2026-09-28 12:00:00"], hold],
+                    ["aipanda094.cern.ch", ["getTasks_JEDI < vo=None label=None >"],
+                     ["2026-09-28 08:00:00", "2026-09-28 12:00:00"], hold]]
+    # the job's mark over the window; the shared ones within 20 min of the key's records under them, M1's two windows
+    # joined (08:40-09:25 and 09:00-09:40), M2's cut at the window's end
+    assert shared == [["aipanda093.cern.ch", ["updateJob < PandaID=777 >"], ["2026-09-28 08:00:00", "2026-09-28 12:00:00"], hold],
+                      ["aipanda093.cern.ch", ["getTasks_JEDI < vo=None label=None >", "process <h_1-2>"],
+                       ["2026-09-28 08:40:00", "2026-09-28 09:40:00"], "near them: a mark the calls share"],
+                      ["aipanda094.cern.ch", ["getTasks_JEDI < vo=None label=None >"],
+                       ["2026-09-28 11:30:00", "2026-09-28 12:00:00"], "near them: a mark the calls share"]]
 
 
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
