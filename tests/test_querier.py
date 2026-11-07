@@ -8910,6 +8910,8 @@ def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(t
                 r.lines, r.opened, r.ends, r.touched, r.row_facts, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], {}, "H2", {}, [], {}, "outside"
                 r.data = {}  # no rows file: no held column (heldcol, K49)
                 r.question, r.branches, r.end_code, r._walking = None, [], None, None
+                # another writer of the value H2 dropped by a guard: the arm left is not the only way to it (K66)
+                r._dropped_by_guard = frozenset({"x.py::other:1"})
                 r.base_env = lambda at=None: envs.get(at, E.Env({}))
                 r._which_wrote = lambda *x: rerun.OneOf(left, 1)
                 r.steps = {rerun.WroteBy: r.wrote_by}
@@ -8938,6 +8940,99 @@ def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(t
     # an arm H3 stops on keeps the condition it did not read, and only that one
     assert got["one unread"]["branches"] == [{"kind": "stop", "premises": ["its condition 'task.y' not read"], "kinds": ["not read"]}]
     assert got["one unread"]["code"] == "one-of"
+
+
+def test_an_attributes_one_writer_left_none_dropped_by_a_guard_is_the_only_way_to_the_value_its_guards_held(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+                        entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            guards = {("gen", 9): ["task.x", "task.y", "not (task.useScout())"], ("put", 7): ["task.z"]}
+            rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
+                               exits_above_at=lambda site: [])
+            new, old = {"status": "running", "time": "2026-10-29 11:38:00"}, {"status": "defined", "time": "2026-10-29 07:42:23"}
+            # task.x holds in the rows' values; task.y and the method are read nowhere; task.z is false at the newer row
+            envs = {new["time"]: E.Env({"task.x": E.Value(True, "row"), "task.z": E.Value(False, "row")}),
+                    old["time"]: E.Env({"task.x": E.Value(True, "row")})}
+            readings = [N(file=f"pandajedi/{f}.py", owner=f"pandajedi/{f}.py::{func}") for f, func in (("g", "gen"), ("s", "put"))]
+            unshown = rerun.Premise("no line of a.log in the records holds 7: its runs are not shown to name it", rerun.NOT_READ)
+            cond = rerun.Premise(rerun.T.Said("its-condition-not-read", {"guard": "task.y"}), rerun.NOT_READ)
+
+            def may(f, func, line, row, premises):
+                branch = rerun.Wrote(readings, None, [], None, Verdict(Candidate(f"pandajedi/{f}.py", func, [line]), line, "unexamined", []),
+                                     row=row, window=(row["time"], row["time"]))
+                return rerun.Possible(f"{f}.py::{func}:{line}", row, False, list(premises), branch=branch)
+
+            def walk(left, value="A", dropped=()):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.ends, r.touched, r.row_facts, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], {}, "H2", {}, [], {}, "outside"
+                r.data = {}  # no rows file: no held column (heldcol, K49)
+                r.question, r.branches, r.end_code, r._walking = None, [], None, None
+                if dropped:
+                    r._dropped_by_guard = frozenset(dropped)
+                r.base_env = lambda at=None: envs.get(at, E.Env({}))
+                r._which_wrote = lambda *x: rerun.OneOf(left, 2)
+                r.steps = {rerun.WroteBy: r.wrote_by}
+                q = r.asked(rerun.Asked("JediTaskSpec.transUses", value, "7"))
+                try:
+                    while q is not None:
+                        q = r.steps.get(type(q), getattr(r, "arms_left"))(q)
+                    said = None
+                except rerun.Stop as e:
+                    said = str(e)
+                return {"said": said, "ends": [f"END {said}" for _, said in r.ends], "code": r.end_code,
+                        "branches": [{"kind": e["kind"], "premises": [str(p) for p in e["premises"]]} for e in r.branches]}
+
+            gen = [may("g", "gen", 9, old, [unshown, cond])]
+            put = [may("s", "put", 7, new, [unshown]), may("s", "put", 7, old, [unshown])]
+            # what H2's judge drops by a guard: a candidate's own arm, or the arms a caller stands in for; not rule 4's
+            r = object.__new__(rerun.Rerun)
+            r._stand_ins = {("pandajedi/o.py::runImpl", 211): [N(arm="pandajedi/r.py::extract:5")]}
+            dropped = sorted(r._guard_dropped([
+                Verdict(Candidate("pandajedi/o.py", "runImpl", [211]), 211, "excluded", ["step 5: guard 'x' is false ({})"]),
+                Verdict(Candidate("pandajedi/g.py", "gen", [9]), 9, "excluded", ["rule 6: reached only when x is already 'A'"]),
+                Verdict(Candidate("pandajedi/s.py", "put", [7]), 7, "excluded", ["rule 4: must row(s) [3] not in the run"]),
+            ]))
+            print(json.dumps({
+                "dropped": dropped,
+                "the only way": walk(gen),
+                "itself dropped at a newer row": walk(gen, dropped={"g.py::gen:9"}),
+                "another dropped by a guard": walk(gen, dropped={"o.py::old:3"}),
+                "a default": walk(gen, value="0"),
+                "its guard false at the newer row": walk(put),
+                "two left": walk(gen + put),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["dropped"] == ["g.py::gen:9", "r.py::extract:5"]
+    end = ("END JediTaskSpec.transUses='A' written last by gen:9 (the one writer of the value left, none dropped by a guard: no "
+           "run shows the line ran; its guards held, the only way to the value ('task.y', 'not (task.useScout())'); the others "
+           "in the rows' values), in the pass of the statuslog row 'defined' at 2026-10-29 07:42:23")
+    # the one writer left, no other dropped by a guard: its guards the values leave unread held -- a method's too -- and
+    # nothing it rested on is open of who wrote it: an END, no one-of (K66)
+    assert got["the only way"] == {"said": None, "ends": [end], "code": None, "branches": [{"kind": "end", "premises": []}]}
+    # the arm itself dropped at another row by its guard is no other way to the value
+    assert got["itself dropped at a newer row"] == got["the only way"]
+    # another writer dropped by a guard, or a value a row holds with no write: not the only way, as before (K38, K62)
+    for name in ("another dropped by a guard", "a default"):
+        assert got[name]["code"] == "one-of" and got[name]["branches"][0]["kind"] == "stop", name
+    # a guard read false still decides: the next row, where it is the only way
+    assert got["its guard false at the newer row"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by put:7 (the one writer of the value left, none dropped by a guard: no run "
+        "shows the line ran; its guards held, the only way to the value ('task.z')), in the pass of the statuslog row 'defined' "
+        "at 2026-10-29 07:42:23"]
+    # two left: neither is the only way
+    assert got["two left"]["code"] == "one-of" and [b["kind"] for b in got["two left"]["branches"]] == ["stop", "stop"]
 
 
 def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_row(tmp_path):

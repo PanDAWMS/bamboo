@@ -1762,6 +1762,55 @@ kind, step, code and the asks do not move: each stays a stop at H3, now on the w
 - Where a status ends: with a term's value read from the rows file (the statuslog row before), that row and its time
   are where the value came from.  The next question is who wrote that row.
 
+### K66. An attribute's one writer left, none dropped by a guard, is the only way to the value: its guards held
+
+Where H2 leaves arms that may have written (K38), each walks on from H3.  Before, an arm whose guards the values did
+not read stopped there, open, even when it was the one arm left.  The answer was then "written last by the one arm
+left, which the data does not decide", code one-of, not counted as an answer.  JobSpec.diskIO=652 was one: the map
+has one writer of the column, doGenerate:1284, and JobGenerator's log names no job, so its guards (readStat, the task
+name at 1013, `not usePrePro()` at 1150) were read nowhere.
+
+Now (`Rerun.arms_left`, `WroteBy.only_way`) an attribute's one arm left is the only way to the value when:
+- no other writer of the value was dropped by a guard in H2 (`Rerun._dropped_by_guard`): the judge's step 5 or rule 6,
+  or a guard read false on a writer that prints nothing (K25).  For a stand-in, the dropped arms are those its caller
+  stands in for (`_guard_dropped`).  The arm itself dropped at a newer row is no other way.  Writers dropped by what
+  their runs printed or did not print (rule 4, rule 3, no pass of the key at the window) are evidence, not guards;
+- the value is no default (`_a_default`): not NULL, not 0.  A row holds NULL with no write, and 0 where a spec stores
+  an unset zero attribute (`JobSpec._zeroAttrs`).  The map does not say which columns default to 0, so every 0 is
+  taken as one.
+
+Its guards the values leave unread then held: no other way gives the value.  A guard read through a method held too.
+A guard read false still decides: the arm did not write at that row, and its next row is read.  Nothing the arm
+rested on is open of who wrote it (its run not shown, a condition not read, the functions between a call and it):
+the END has no premise and no code.  The older rows it may have written at are said, as before.  This is not
+circular (inf-design.md 8): no guard of another writer is read as held to drop it, and the value is observed.
+
+It rests on the map's arms being every way the value reaches the row.  One known way has no arm: the server's API
+(`job_api.submit_jobs`) restores a client's JobSpec whole (`JobSpec.load_from_json_serializable` -> `__setstate__`).
+Operationally, a job with a jediTaskID is never made that way, only by JEDI's JobGenerator.
+
+Measured as r5a (this on inf1's tree, K65, dump x13xxviiiQm) against inf1.  No run crashed; 14 of the 144 cases and
+the 9 attribute cases below move; the 65, MT and the asks: no file moves.
+- 17 outputs (13 questions) move from one-of to END with no premise and no code: attribute diskIO, inputFileProject,
+  nOutputDataFiles, inputFileType, coreCount, outDiskUnit, transPath, mergeCoreCount and ticketID; in the cases
+  diskIO, inputFileProject, nOutputDataFiles, jobMetrics, inputFileType, prodUserID and resource_type twice.
+- 6 MR-T cases gain the H2 line only: they end with their guards read (K49), so nothing is held by this.
+- transExitCode 0, twice, does not move: 0 is read as a possible default.
+
+*Shows:* "END <subject>='<v>' written last by <fn>:<line> (the one writer of the value left, none dropped by a guard:
+no run shows the line ran; its guards held, the only way to the value ('<guard>', ...)[; the others in the rows'
+values]), in the pass of ..."; a line "<arm> is the one writer of <subject>=<v> left, none dropped by a guard: the
+only way to the value".
+*Revisit:*
+- A column's default other than NULL and 0, and which columns default to 0: then a 0 the column cannot default to
+  (transExitCode) is no default.
+- A job without a jediTaskID: the API's restore as an arm of each column it carries.
+- A status: it does not end at H3 (K54), so the only way does not answer it there.
+- The row the END names first is the newest the arm may have written at (K38), and H2 keeps a row whose host holds
+  none of the writer's logs.  diskIO 7390316278's END names 'defined' (aipanda098, a server machine with no
+  panda-JobGenerator.log) before 'pending' (aipanda085, JEDI's insert); the statuslog's host is the machine of the
+  process that wrote the row, so the row is 'pending'.  Before, the walk stopped at H3 and named no row.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

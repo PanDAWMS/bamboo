@@ -1264,6 +1264,30 @@ def _in_caller(term: str, passed: dict[str, str]) -> str:
     return ast.unparse(_Rename().visit(ast.parse(term, mode="eval")))
 
 
+#: why the judge excludes a candidate by its guards: one read false in the pass's values (step 5), or one that needs the
+#: value already there (rule 6) -- not by what its run printed or did not
+_GUARD_REASONS = ("step 5:", "rule 6:")
+
+
+def _arm_name(arm: str) -> str:
+    """A ``file::function:line`` arm as :class:`Possible` names it: the file's name, not its path."""
+    owner, _, line = arm.rpartition(":")
+    rel, _, func = owner.partition("::")
+    return f"{Path(rel).name}::{func}:{line}"
+
+
+def _a_default(value: str) -> bool:
+    """Whether *value* is one a row holds with no write of the column: NULL, or 0 (a spec's zero attribute, as
+    ``JobSpec._zeroAttrs`` stores an unset one).  Any 0 is taken as one: the map does not say which columns default to it."""
+    text = str(value).strip()
+    if text in ("", "None", "NULL"):
+        return True
+    try:
+        return float(text) == 0
+    except ValueError:
+        return False
+
+
 def _status_before(states: list[dict], state: dict | None) -> dict | None:
     """The statuslog row just before *state*: what the row's status was as the pass that wrote *state* began, where no
     write between left no row (KNOWN_ISSUES.md K65).  Rows are told apart as ``held.row_before`` tells them."""
@@ -1686,6 +1710,9 @@ class WroteBy:
     wrote: Wrote
     premises: list[str] | None = None
     older: list[Possible] = field(default_factory=list)
+    #: the one writer of an attribute's value H2 left, the others dropped by no guard (``Rerun.arms_left``): its guards
+    #: the values leave unread held, the only way to the value (KNOWN_ISSUES.md K66)
+    only_way: bool = False
 
 
 @dataclass
@@ -2197,6 +2224,10 @@ def _union(spans: list) -> list:
 
 
 class Rerun:
+    #: the arms H2 dropped by a guard read false (``_guard_dropped``, a stand-in's in ``_possibles``), grown as H2 reads: an
+    #: arm left alone with one of these is not the only way to the value (KNOWN_ISSUES.md K66)
+    _dropped_by_guard: frozenset[str] = frozenset()
+
     def __init__(self, args: argparse.Namespace) -> None:
         mapdump.require("rerun")  # _investigate's walks and _writers_of ask mapdump.code_map
         A.made.clear()
@@ -2613,11 +2644,18 @@ class Rerun:
         at, ends, result = self.hop, len(self.ends), dict(self.result)
         kept = (list(self.touched), dict(self.row_facts), self.question)
         self.say(f"{len(arms)} arm(s) left: each walks on from H3, at the newest row it may have written at (KNOWN_ISSUES.md K38)")
+        # an attribute's one writer left, no other dropped by a guard and the value no default: the only way to the
+        # value, so its guards held (KNOWN_ISSUES.md K66)
+        only = (len(arms) == 1 and PT.history(subject) is None and not _a_default(value)
+                and not self._dropped_by_guard - set(arms))
+        if only:
+            self.say(f"{next(iter(arms))} is the one writer of {subject}={value!r} left, none dropped by a guard: the only "
+                     f"way to the value (KNOWN_ISSUES.md K66)")
         entries = []
         for n, (arm, ps) in enumerate(arms.items(), 1):
             label = T.Said("arm-label", {"arm": arm, "rows": _at_rows(ps)})
             said = len(self.ends)
-            stop = self._branch(n, len(arms), WroteBy(q.asked, ps[0].branch, list(ps[0].premises), ps[1:]), label, kept)
+            stop = self._branch(n, len(arms), WroteBy(q.asked, ps[0].branch, list(ps[0].premises), ps[1:], only), label, kept)
             walked = self._walking
             premises = list(walked.premises) if walked is not None else []
             kinds = {p.kind for p in premises if isinstance(p, Premise)}
@@ -2777,18 +2815,22 @@ class Rerun:
                 if a.older:
                     nxt = a.older[0]
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
-                    return WroteBy(q, nxt.branch, list(nxt.premises), a.older[1:])
+                    return WroteBy(q, nxt.branch, list(nxt.premises), a.older[1:], a.only_way)
                 raise Excluded(T.at(self.hop, T.Said("it-did-not-write-at-any-row", {"where": where})))
             # a guard the values leave unread held where the run shows the arm ran; one read false still decides, and
             # one through a method goes on to H4, which says why the arm ran
             by_run = ([g for g, got in read.items() if got is not True]
                       if ran and not any(got is False for got in read.values()) and not through(env) else [])
+            # the one writer of the value left, none dropped by a guard: a guard the values leave unread held, through a
+            # method too, since the value has no other way (KNOWN_ISSUES.md K66)
+            only = [g for g, got in read.items() if got is not True and g not in by_run] if a.only_way else []
             # a condition H2 left the arm resting on that is read here as holding is what this reading says, not a
-            # premise left open (KNOWN_ISSUES.md K62)
+            # premise left open (KNOWN_ISSUES.md K62); on the only way, nothing it rested on -- its run not shown, a
+            # condition not read -- is open of who wrote it
             if branch:
                 done = {g for g, got in read.items() if got is True} | set(by_run)
-                a.premises = [p for p in a.premises or [] if not _condition_read(p, done)]
-            if all(got is True or g in by_run for g, got in read.items()):
+                a.premises = [] if a.only_way else [p for p in a.premises or [] if not _condition_read(p, done)]
+            if all(got is True or g in by_run or g in only for g, got in read.items()):
                 lo, hi = w.window
                 at = (T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
                       T.Said("at-time", {"time": hi}) if lo == hi else T.Said("in-window", {"lo": lo, "hi": hi}))
@@ -2800,6 +2842,12 @@ class Rerun:
                     how = T.Said("its-guards-held-as-it-ran", {
                         "guards": [T.Said("guard-quoted", {"guard": g}) for g in by_run],
                         "rest": T.Said("the-rest-in-the-run") if any(read[g] is True and g not in used for g in guards) else "",
+                    })
+                if only:
+                    how = T.Said("its-guards-held-the-only-way", {
+                        "guards": [T.Said("guard-quoted", {"guard": g}) for g in only],
+                        "rest": (T.Said("the-rest-in-the-run" if shown else "the-rest-in-the-rows")
+                                 if any(read[g] is True and g not in used for g in guards) else ""),
                     })
                 if used:
                     premise = held[used[0]].premise(used)
@@ -2816,7 +2864,8 @@ class Rerun:
                 holes = [T.Said("log-on", {"log": log, "machines": list(dict.fromkeys(h.partition(": ")[0] for h in hs))})
                          for log, hs in w.unsearched.items()]
                 self.end(T.Said("no-run-shows-the-line-ran", {
-                    "said": said, "by_elimination": T.Said("by-elimination") if not branch else "", "how": how, "at": at,
+                    "said": said, "how": how, "at": at,
+                    "by_elimination": (T.Said("the-only-writer-left") if a.only_way else T.Said("by-elimination") if not branch else ""),
                     "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "", "store": store,
                 }))
                 return None
@@ -3102,6 +3151,16 @@ class Rerun:
                         stand.append(s)
         return list(found.values())
 
+    def _guard_dropped(self, verdicts: list) -> frozenset[str]:
+        """The arms *verdicts* say did not write by a guard (``_GUARD_REASONS``): a candidate's own, or, where it stands in
+        for writers that print nothing (``_stand_ins``), theirs -- its call did not run them."""
+        out: set[str] = set()
+        for v in verdicts:
+            if v.kind == "excluded" and any(r.startswith(_GUARD_REASONS) for r in v.reasons):
+                stands = self._stand_ins.get((v.candidate.owner, v.line))
+                out |= {_arm_name(s.arm) for s in stands} if stands else {_arm_name(f"{v.candidate.rel}::{v.candidate.func}:{v.line}")}
+        return frozenset(out)
+
     def _possibles(self, v, state: dict | None, env: E.Env, on: Wrote | None = None) -> list[Possible]:
         """The arms verdict *v* says wrote, or may have, in the pass of the row *state*: its own line, or the arms of the
         writers that print nothing it stands in for, less those a guard read false shows did not.  *on* is *v* as H2
@@ -3118,6 +3177,7 @@ class Rerun:
         for s in stands:
             left = s.left(env)
             if left is None:
+                self._dropped_by_guard = self._dropped_by_guard | {_arm_name(s.arm)}
                 continue
             premises = kept + left
             owner, _, line = s.arm.rpartition(":")
@@ -3292,6 +3352,7 @@ class Rerun:
             question_run=question, env=env, called_at=self._called_at, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
+        self._dropped_by_guard = self._dropped_by_guard | self._guard_dropped(j.verdicts)
         out = []
         for v in j.verdicts:
             if v.kind == "excluded" or (v.kind == "unexamined" and not any(f in holes for f in v.candidate.log_files)):
@@ -3440,6 +3501,7 @@ class Rerun:
             holds_write=asking.holds_write, keeps=self._keeps(subject),
         )
         self.say(j.report(question))
+        self._dropped_by_guard = self._dropped_by_guard | self._guard_dropped(j.verdicts)
         if j.chosen is None and not last and self.hop not in self.hand:
             self.say(f"  no writer of {subject} ran at {when}")
             return None
