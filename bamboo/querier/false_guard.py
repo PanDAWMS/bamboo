@@ -31,12 +31,18 @@ from __future__ import annotations
 
 import ast
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import pairwise
 
 from bamboo.querier import asked as A  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
+
+
+def _at(env: E.Env, step) -> E.Env:
+    """*env* reading *step*'s statement: a hole another function printed answers it only where the map hands that
+    object here (KNOWN_ISSUES.md K63)."""
+    return env.reading(step.owner, step.line) if getattr(step, "owner", "") else env
 
 LOOP = re.compile(r"loop at (\d+): for (.+?) in (.+)$")
 EARLY = re.compile(r"early-exit at (\d+): (.+)$")
@@ -164,9 +170,10 @@ class Walk:
             return self.env
         # the element's row is read as the collection holds it, so what the subject's row left unread is not its
         unread = {k: v for k, v in self.env.unread.items() if not k.startswith(f"<{element.entity}>.")}
-        env = E.Env(
-            values=dict(self.env.values), rows=dict(self.env.rows), table=dict(self.env.table), stale=dict(self.env.stale),
-            unread=unread, at=self.env.at,
+        env = replace(
+            self.env, values=dict(self.env.values), rows=dict(self.env.rows), table=dict(self.env.table),
+            stale=dict(self.env.stale), unread=unread, used={},
+            printed_in={k: set(v) for k, v in self.env.printed_in.items()},
         )
         env.rows[element.var] = element.entity
         env.table[element.entity] = {k: E.Value(v["value"], v["source"]) for k, v in element.row.items()}
@@ -185,7 +192,7 @@ class Walk:
             if (step.owner, what, test) in self.stale:
                 pending.append(f"{what} {test!r} (the row's value is from after the decision)")
                 continue
-            v = E.evaluate(test, env)
+            v = E.evaluate(test, _at(env, step))
             if v is False:
                 return False, f"{what} {test!r} is false", (what, test)
             if v is E.UNKNOWN:
@@ -215,7 +222,7 @@ class Walk:
                 if s.kind == "loop-target":
                     o.value = E.UNKNOWN
                 else:
-                    o.value = E.evaluate(s.value, env) if _parses(s.value) else E.UNKNOWN
+                    o.value = E.evaluate(s.value, _at(env, s)) if _parses(s.value) else E.UNKNOWN
                     if o.value is E.UNKNOWN and s.value.isidentifier():
                         o.via = self.origins(s.value, s.owner, el)
                 out.append(o)
@@ -251,7 +258,7 @@ class Walk:
             for el in elements:
                 env = self.env_for(el)
                 reached, why, failed = self.reach(s, env)
-                value = E.evaluate(key, env)
+                value = E.evaluate(key, _at(env, s))
                 o = Origin(s, key, el, value, reached, why, failed=failed)
                 if value is E.UNKNOWN and key.isidentifier():
                     o.via = self.origins(key, s.owner, el)
@@ -312,7 +319,7 @@ class Walk:
                 return None, [f"@{s.line} runs over rows this investigation does not have"]
             for el in elements:
                 env = self.env_for(el)
-                key = E.evaluate(key_expr, env)
+                key = E.evaluate(key_expr, _at(env, s))
                 if key is E.UNKNOWN and key_expr.isidentifier():
                     key, how = self._choose(key_expr, s.owner, el, prefer)
                     if how:
@@ -337,7 +344,7 @@ class Walk:
                         continue
                     if key in value:
                         continue  # setdefault leaves a key that is there as it is
-                v = E.evaluate(s.value, env) if _parses(s.value) else E.UNKNOWN
+                v = E.evaluate(s.value, _at(env, s)) if _parses(s.value) else E.UNKNOWN
                 value[key] = Opaque(f"{s.value} for {label}") if v is E.UNKNOWN else v
         notes = [f"{how} ({n} row(s))" for how, n in assumed.items()]
         notes.append(f"order: the rows file's order of {name}'s loop rows is taken as the code's")
@@ -350,8 +357,8 @@ class Walk:
         if forced:
             return forced[0].value, ""
         env = self.env_for(element)
-        live = [o for o in found if not any(E.evaluate(g, env) is False for g in o.step.guards)]
-        certain = [o for o in live if all(E.evaluate(g, env) is True for g in o.step.guards)]
+        live = [o for o in found if not any(E.evaluate(g, _at(env, o.step)) is False for g in o.step.guards)]
+        certain = [o for o in live if all(E.evaluate(g, _at(env, o.step)) is True for g in o.step.guards)]
         if len(certain) == 1 and len(live) == 1:
             return certain[0].value, ""
         if len(live) == 1:
@@ -514,7 +521,9 @@ def part(printed: object, key_side: list[Origin], keys: Keys, walk: Walk) -> tup
         if alt is leaf or alt.value is E.UNKNOWN or alt.value not in keys.certain():
             continue
         env = walk.env_for(alt.element)
-        false = [g for g in alt.step.guards if E.evaluate(g, env) is False]
+        at = _at(env, alt.step)
+        false = [g for g in alt.step.guards if E.evaluate(g, at) is False]
+        env.used.update(at.shared())
         for g in false:
             parts.append(Part((o, leaf), alt, g, env))
     return lines, parts

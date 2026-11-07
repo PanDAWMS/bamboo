@@ -34,10 +34,8 @@ FIELD = re.compile(r"\b((?:self\.)?[a-z_]+)\.([A-Za-z_]+)\b(?!\()")
 
 
 def local_env(fn: R.Function, run: Run, mode: str, line: int, base: E.Env) -> E.Env:
-    """*base* plus the holes *fn* printed above *line* in *run*, unbound since."""
-    env = E.Env(
-        values=dict(base.values), rows=dict(base.rows), table=base.table, stale=dict(base.stale), unread=base.unread, at=base.at
-    )
+    """*base* plus the holes *fn* printed above *line* in *run*, unbound since, reading *fn*'s statement at *line*."""
+    env = base.reading(fn.owner, line)
     sn = R.seen(fn, run, mode)
     for row in fn.rows:
         if row.line >= line:
@@ -47,7 +45,7 @@ def local_env(fn: R.Function, run: Run, mode: str, line: int, base: E.Env) -> E.
                 rebound = [b.lineno for b in R._binding_sites(fn.node, expr, line) if b.lineno > row.line]
                 if rebound:
                     continue
-                env.put_printed(expr, value.strip(), f"hole of {fn.name}:{row.line} at {run.records[i].span}")
+                env.put_hole(expr, value.strip(), f"hole of {fn.name}:{row.line} at {run.records[i].span}", [fn.owner])
     return env
 
 
