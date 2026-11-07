@@ -637,6 +637,7 @@ class Calls:
         self._forwarded_reads: Optional[set[int]] = None
         #: :meth:`stored` by the store, each call kept for as long as this reading is.
         self._stores: dict[int, ast.Call] = {}
+        self._operations: dict[tuple[int, int, str], ast.Call] = {}
         types.handed_to = self.handed_classes
 
     # -- where a call lands -------------------------------------------------
@@ -680,6 +681,28 @@ class Calls:
             ast.copy_location(held.func, store)
             held.parent = getattr(store, "parent", None)  # type: ignore[attr-defined]
             self._stores[id(store)] = held
+        return held
+
+    def operated(self, operation: ast.AST, receiver: ast.expr, dunder: str, other: Optional[ast.expr]) -> ast.Call:
+        """The call Python makes on one operand of an operation -- ``a * b``, ``a *= b``, ``-a`` -- for *dunder*:
+        ``type(a).__mul__(a, b)``.
+
+        Spelled ``a.__mul__(b)``, its receiver the operand, so :meth:`callees` places it as it places any method call
+        on ``a``, as :meth:`stored` does for a store: at a corpus class's dunder where ``a`` can be one that defines
+        it, at nothing elsewhere.  No call of the corpus is it.  One call per operation, operand and dunder, kept here.
+        """
+        key = (id(operation), id(receiver), dunder)
+        held = self._operations.get(key)
+        if held is None:
+            held = ast.Call(
+                func=ast.Attribute(value=receiver, attr=dunder, ctx=ast.Load()),
+                args=[other] if other is not None else [],
+                keywords=[],
+            )
+            ast.copy_location(held, operation)
+            ast.copy_location(held.func, operation)
+            held.parent = getattr(operation, "parent", None)  # type: ignore[attr-defined]
+            self._operations[key] = held
         return held
 
     def named_callables(

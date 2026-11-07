@@ -56,6 +56,21 @@ def test_a_call_is_looked_up_by_its_text_unless_the_reader_hands_the_function() 
     assert evaluate.evaluate("twice(m) == 6", run) is UNKNOWN
 
 
+def test_a_call_whose_whole_text_was_printed_takes_the_printed_value_before_it_is_run() -> (
+    None
+):
+    """``isJumboJob(job)`` printed as a hole is what the run saw: run on what is known of ``job`` it could say
+    otherwise, as the reader knows the job's row now; a print known stale is run as before."""
+    env = Env(call={"isJumboJob": lambda job: False}.get)
+    env.put("job", {"eventService": 4}, "rows")
+    env.put("isJumboJob(job)", True, "printed")
+    assert evaluate.evaluate("isJumboJob(job)", env) is True
+    assert env.used["isJumboJob(job)"] == "printed"
+    env.stale["isJumboJob(job)"] = "printed before the job changed"
+    assert evaluate.evaluate("isJumboJob(job)", env) is False
+    assert env.used["isJumboJob(job)"] == "called isJumboJob"
+
+
 def test_a_standard_function_is_run_on_a_known_value_and_says_what_it_raises() -> None:
     """Whether ``json.loads('')`` or ``int(None)`` raises is Python's to say; a function not run, or a value not
     known, is unknown."""

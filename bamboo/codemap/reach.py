@@ -148,7 +148,8 @@ _OPERATORS = callfacts.OPERATOR_DUNDERS
 #: build checks it (``implicit-dunders-reach-no-write``) -- but for
 #: ``__setattr__``, whose edges are recorded (:data:`HOW_SETATTR`):
 #: ``JobSpec.__setattr__`` sets ``stateChangeTime`` when ``jobStatus``
-#: changes.  Those edges are the reach record's alone -- :meth:`calls.Calls.callers`,
+#: changes; and for an operator's, whose edges are recorded too
+#: (:data:`HOW_OPERATOR`): ``Share.__mul__`` multiplies the share's ``value``.  Those edges are the reach record's alone -- :meth:`calls.Calls.callers`,
 #: and the walk and the trace with it, do not see the call, so a junction in a
 #: ``__setattr__`` has no ``called_from`` -- and a store on an object no
 #: reading says anything of has none (167 stores on pin k, 9 of them of
@@ -157,6 +158,10 @@ IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 
 #: How a reach edge says an attribute store runs its object's ``__setattr__`` (:meth:`calls.Calls.stored`).
 HOW_SETATTR = "setattr"
+#: How a reach edge says an operation runs an operand's dunder (:meth:`calls.Calls.operated`).
+HOW_OPERATOR = "operator"
+#: The operators' dunders, whose edges the record reads: one no edge enters is run by no operation.
+OPERATOR_DUNDER_NAMES = frozenset(name for names in _OPERATORS.values() for name in names)
 
 _BUILTIN, _OUTSIDE, _QUEUE, _UNKNOWN = "builtin", "outside", "queue", "unknown"
 #: A builtin's detail for a value ``json.loads`` makes (:data:`callfacts.JSON_MAKERS`): a builtin, and every value
@@ -2511,6 +2516,24 @@ def _stores_in(func: ast.AST) -> Iterator[tuple[ast.Attribute | ast.Call, ast.ex
             yield node, node.args[1], node.args[2]
 
 
+def _operations_in(
+    func: ast.AST,
+) -> Iterator[tuple[ast.BinOp | ast.AugAssign | ast.UnaryOp, ast.expr, str, Optional[ast.expr]]]:
+    """``(operation, operand, dunder, other)`` for each dunder an operation *func* makes itself may run on an operand:
+    ``a * b`` runs ``a.__mul__(b)``, and ``b.__rmul__(a)`` where that gives nothing back; ``a *= b`` runs
+    ``a.__imul__(b)``, else those two; ``-a`` runs ``a.__neg__()`` (:data:`callfacts.OPERATOR_DUNDERS`)."""
+    for node in C.own_nodes(func):
+        if isinstance(node, (ast.BinOp, ast.AugAssign)) and type(node.op) in _OPERATORS:
+            forward, reflected, inplace = _OPERATORS[type(node.op)]
+            left, right = (node.left, node.right) if isinstance(node, ast.BinOp) else (node.target, node.value)
+            if isinstance(node, ast.AugAssign):
+                yield node, left, inplace, right
+            yield node, left, forward, right
+            yield node, right, reflected, left
+        elif isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
+            yield node, node.operand, _OPERATORS[type(node.op)][0], None
+
+
 def _targets(statement: ast.Assign | ast.AugAssign | ast.AnnAssign) -> list[ast.expr]:
     return list(statement.targets) if isinstance(statement, ast.Assign) else [statement.target]
 
@@ -2706,6 +2729,27 @@ def graph(
                             spelled for one in target.bound if (spelled := names.of(one[1])) is not None
                         ]
                         row.edge(implicit, store, to, HOW_SETATTR, for_classes, runs_as, False)
+        # An operation runs its operands' dunders with no call naming them:
+        # ``share * 2`` runs ``Share.__mul__``, which multiplies the share's
+        # ``value``.  Placed as the calls Python may make, where an operand can
+        # be a class of the corpus that defines the dunder; a dunder no class
+        # defines is not placed, and has no edge (:data:`IMPLICIT_DUNDERS`).
+        for operation, receiver, dunder, other in _operations_in(func):
+            if dunder not in defined:
+                continue
+            implicit = calls.operated(operation, receiver, dunder, other)
+            for for_classes, bound in _groups(objects, classes, C._reads_self(implicit)):
+                try:
+                    placed = calls.callees(file, func, implicit, bound)
+                except Exception:  # noqa: BLE001 -- no edge, as for an object nothing says
+                    continue
+                for target in placed.targets:
+                    to = names.of(target.func)
+                    if to is not None and target.func.name == dunder:  # type: ignore[attr-defined]
+                        runs_as = [
+                            spelled for one in target.bound if (spelled := names.of(one[1])) is not None
+                        ]
+                        row.edge(implicit, operation, to, HOW_OPERATOR, for_classes, runs_as, False)
         settled = Counter(assumption for _line, _column, assumption in row.settled)
         nodes.append(
             ReachNode(

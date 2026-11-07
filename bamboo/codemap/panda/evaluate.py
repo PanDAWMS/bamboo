@@ -164,6 +164,10 @@ def text_of(node: ast.AST) -> str:
 
 
 def _call(node: ast.Call, env: Env) -> Any:
+    # A printed hole is known by its text first, as :func:`decidable` reads it: the value a run printed, not one
+    # run again from what else is known.
+    if env.knows(text_of(node)):
+        return env.lookup(text_of(node))
     name = text_of(node.func)
     run = env.call(name) if env.call is not None else None
     if run is None:

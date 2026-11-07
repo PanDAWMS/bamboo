@@ -1783,8 +1783,14 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     only safe while none of them reaches a write.  One that does needs its
     edges, and one the record has edges into is asked like any function --
     ``JobSpec.__setattr__``, entered from each store on a ``JobSpec``
-    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  One whose closure has
-    a hole is not known either way, and is counted in the note, not failed.
+    (``reach.HOW_SETATTR``), sets ``stateChangeTime``.  An operator's dunder
+    is asked the same way, whether or not an edge enters it: the record reads
+    each operation's dispatch (``reach.HOW_OPERATOR``), so one no edge enters
+    is run by no operation on an operand a reading places there --
+    ``Share.__mul__``, which multiplies the share's ``value``, by no ``share *
+    x`` -- and an operand no reading says anything of has no edge, as a store
+    on such an object has none.  One whose closure has a hole is not known
+    either way, and is counted in the note, not failed.
     """
     from bamboo.codemap import reach
 
@@ -1796,7 +1802,7 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
     for row in fragment.reach_graph:
         if row.function not in reach.IMPLICIT_DUNDERS:
             continue
-        if row.owner in entered:
+        if row.owner in entered or row.function in reach.OPERATOR_DUNDER_NAMES:
             asked += 1
             continue
         checked += 1
@@ -1815,7 +1821,8 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
         failures=failures,
         note=(
             f"{undecided} of them have a hole in their closure and are not known either way; "
-            f"{asked} more have edges into them and are asked as any function is."
+            f"{asked} more have edges into them, or are an operator's whose dispatch the record reads, "
+            "and are asked as any function is."
         ),
     )
 
@@ -1843,7 +1850,7 @@ def with_exits_are_read(fragment: MapFragment) -> GateResult:
 
 
 def _held_ways(fragment: MapFragment):
-    """Every way of the guards' and parameters' records, and of what each change on a way stores."""
+    """Every way of the guards', writes' and parameters' records, and of what each change on a way stores."""
 
     def each(where: str, sources):
         for source in sources:
@@ -1853,6 +1860,8 @@ def _held_ways(fragment: MapFragment):
 
     for guard in fragment.guard_froms:
         yield from each(f"{guard.owner}:{guard.test_line} {guard.name}", guard.sources)
+    for write in fragment.write_froms:
+        yield from each(f"{write.owner}:{write.line} {write.role} {write.expression}", write.sources)
     for parameter in fragment.parameter_froms:
         yield from each(f"{parameter.owner}:{parameter.line} {parameter.parameter}", parameter.sources)
 
@@ -2921,7 +2930,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(object_records_resolve(fragment))
     if fragment.managers_read:
         results.append(with_exits_are_read(fragment))
-    if fragment.guard_froms or fragment.parameter_froms:
+    if fragment.guard_froms or fragment.parameter_froms or fragment.write_froms:
         results.append(guard_rows_are_read_sites(fragment))
         results.append(guard_parameters_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))

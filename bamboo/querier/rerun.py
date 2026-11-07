@@ -1573,8 +1573,12 @@ class StandIn:
     def left(self, env: E.Env) -> list[str] | None:
         """What stays open of the arm once its call ran, or None where a guard is false in *env* (it did not write)."""
         out = []
+        # read at the arm: another function's hole only where the map hands its object here (KNOWN_ISSUES.md K63)
+        owner, _, line = self.arm.rpartition(":")
+        at = env.reading(owner, int(line)) if line.isdigit() else env
         for g in self.guards:
-            got = _guard_read(g, env)
+            got = _guard_read(g, at)
+            env.used.update(at.shared())
             if got is False:
                 return None
             if got is not True:
@@ -2144,8 +2148,9 @@ class Rerun:
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
         #: what the runs read so far printed about a row, with where and when -- a value
-        #: printed at one time and used for a decision at another says so in its source
-        self.row_facts: dict[str, tuple[str, str]] = {}
+        #: printed at one time and used for a decision at another says so in its source -- and the functions that
+        #: printed it (``Env.put_hole``, KNOWN_ISSUES.md K63)
+        self.row_facts: dict[str, tuple[str, str, frozenset[str]]] = {}
         self.question = None  # the run the symptom's value changed in
         #: (hop, ask, why) of every ask of the logs the door had no answer for; written to --asks at the end
         self.unanswered: list[tuple[str, object, str]] = []
@@ -2241,12 +2246,17 @@ class Rerun:
         env = E.Env(rows={s: entity for entity, spellings in sp.items() if entity != "about" for s in spellings})
         rows, env.unread = HD.at_run(self.data, self.args.subject.partition(".")[0], self.args.key, at)
         env.at = at
+        # the question's own column, under its row's name: another function's print of it is read only where the map
+        # holds one object (``Env._hidden``, KNOWN_ISSUES.md K63)
+        cls, _, column = self.args.subject.partition(".")
+        entity = next((e for e, c in (self.data.get("classes") or {}).items() if c == cls and e != "about"), None)
+        env.subject = f"<{entity}>.{column}" if entity and column else ""
         for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:
             env.table["file"] = {k: E.Value(v["value"], v["source"]) for k, v in file_row.items()}
-        for expr, (printed, source) in self.row_facts.items():
-            env.put_printed(expr, printed, source)
+        for expr, (printed, source, printers) in self.row_facts.items():
+            env.put_hole(expr, printed, source, printers)
         return env
 
     def learn(self, pairs: list[tuple[R.Function, object]]) -> None:
@@ -2257,7 +2267,8 @@ class Rerun:
         for expr, printed in put.items():
             key = env.canonical(expr)
             if key not in before and "<" in key:
-                self.row_facts[expr] = (printed, env.values[key].source)
+                printers = frozenset(o for o, e, _ in env.printed_in.get(key, ()) if e == expr)
+                self.row_facts[expr] = (printed, env.values[key].source, printers)
 
     def runs(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None) -> dict[str, list]:
         """The key's runs in each of the logs *names* the door can be asked for, over *asking*'s window and machine.
@@ -2670,7 +2681,11 @@ class Rerun:
                 # key's at the window, on any machine (a server's DBProxy log for a JEDI writer).  Its guards are read in
                 # the rows' values alone, and no run is named
                 env = self.base_env(at=w.row["time"] if w.row else None)
-            read = {g: _guard_read(g, env) for g in guards}
+            # read at the arm: another function's hole only where the map hands its object here (KNOWN_ISSUES.md K63)
+            at = env.reading(chosen.candidate.owner, chosen.line) if isinstance(env, E.Env) else env
+            read = {g: _guard_read(g, at) for g in guards}
+            if isinstance(env, E.Env) and isinstance(at, E.Env):
+                env.used.update(at.shared())
             # a guard over a column the rows file holds, read in it by the map's ways and their changes (K49)
             held = {}
             for g, got in read.items():
@@ -3581,8 +3596,11 @@ class Rerun:
         self.say(f"candidates: the make call {make.line}, and the branches around it {arms[1:]} + implicit else of {[i.lineno for i in implicit]}")
         # an implicit else has no statement to read rows from: its test is evaluated instead
         for i in implicit:
-            value = E.evaluate(ast.unparse(i.test), env7)
-            used = {k: v for k, v in env7.used.items() if k in ast.unparse(i.test)}
+            # read at the test: another function's hole only where the map hands its object here (KNOWN_ISSUES.md K63)
+            at7 = env7.reading(fn7.owner, i.lineno)
+            value = E.evaluate(ast.unparse(i.test), at7)
+            env7.used.update(at7.shared())
+            used = {k: v for k, v in {**env7.used, **at7.used}.items() if k in ast.unparse(i.test)}
             unread = env7.unread_in(ast.unparse(i.test))
             used |= {k: f"unknown: {why}" for k, why in unread.items()}
             self.say(f"  implicit else of {i.lineno}: test {ast.unparse(i.test)!r} is {value!r} {used}" + (" -> it did not run" if value is True else ""))
@@ -3773,8 +3791,14 @@ class Rerun:
         self.say(f"its inputs: {rest}; the loop's row: {context}")
         self.need(T.Said("one-input-of-the-guard-besides-the"), len(rest) == 1)
         expr = rest[0]
-        value = E.evaluate(expr, p.env)
-        self.say(f"  {expr} = {value!r} ({p.env.used.get(expr, 'unknown')})")
+        # read at the alternative's binding: another function's hole only where the map hands its object (K63)
+        step = p.alternative.step
+        step_owner: str = getattr(step, "owner", "")
+        step_line: int = getattr(step, "line", 0)
+        at = p.env.reading(step_owner, step_line) if step_owner else p.env
+        value = E.evaluate(expr, at)
+        p.env.used.update(at.shared())
+        self.say(f"  {expr} = {value!r} ({at.used.get(expr, p.env.used.get(expr, 'unknown'))})")
         how, leaves = G.derivation(expr, walk)
         for line in how:
             self.say(f"    {line}")

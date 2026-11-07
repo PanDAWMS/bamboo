@@ -129,6 +129,57 @@ def written_value(node: ast.AST) -> Optional[ast.expr]:
     return None
 
 
+def assigned_targets(node: ast.AST) -> list[tuple[ast.expr, Optional[ast.expr]]]:
+    """Each place an ``=`` statement writes, at any depth of a tuple or list target, with the value it gets there.
+
+    ``jobSpec.minRamCount, jobSpec.minRamUnit = JobUtils.getJobMinRamCount(...)`` writes two fields, and
+    :func:`targets_of` gives the tuple whole: a reader matching a field by its text missed both, so the attribute
+    slice made no branch of either and ``minRamUnit``, written nowhere else, had no junction.  An element's value is
+    the element at its place of a tuple or list right-hand side of the same length, else the right-hand side at that
+    place (``getJobMinRamCount(...)[1]``, ``self.cur.fetchone()[0]``).  At and past a starred element the places are
+    not known: the value is ``None``, as it is for the starred target itself.  The subscripts are made once a
+    statement and kept on it, so a reader keying on a node meets the same one each time.
+    """
+    kept: Optional[list[tuple[ast.expr, Optional[ast.expr]]]] = getattr(node, "_assigned_targets", None)
+    if kept is not None:
+        return kept
+    found: list[tuple[ast.expr, Optional[ast.expr]]] = []
+    value = written_value(node)
+    for target in targets_of(node):
+        _assigned(target, value, node, found)
+    node._assigned_targets = found  # type: ignore[attr-defined]
+    return found
+
+
+def _assigned(
+    target: ast.expr, value: Optional[ast.expr], node: ast.AST, found: list[tuple[ast.expr, Optional[ast.expr]]]
+) -> None:
+    if isinstance(target, ast.Starred):
+        found.append((target.value, None))
+        return
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        found.append((target, value))
+        return
+    starred = next((index for index, one in enumerate(target.elts) if isinstance(one, ast.Starred)), None)
+    spread = (
+        value.elts
+        if starred is None
+        and isinstance(value, (ast.Tuple, ast.List))
+        and len(value.elts) == len(target.elts)
+        and not any(isinstance(one, ast.Starred) for one in value.elts)
+        else None
+    )
+    for index, one in enumerate(target.elts):
+        held: Optional[ast.expr] = None
+        if value is not None and (starred is None or index < starred):
+            if spread is not None:
+                held = spread[index]
+            else:
+                held = ast.copy_location(ast.Subscript(value=value, slice=ast.Constant(index), ctx=ast.Load()), value)
+                held.parent = node  # type: ignore[attr-defined]
+        _assigned(one, held, node, found)
+
+
 def single_definition(
     func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
 ) -> Optional[ast.expr]:
@@ -2627,9 +2678,10 @@ def field_writes(
 ) -> tuple[list[ast.stmt], list[ast.stmt], dict[int, Callee]]:
     """``(writes, rereads, calls)``: the statements of *func* writing ``<holder>.<attribute>``.
 
-    ``h.f = v`` and ``h.f += v`` (a reread, which keeps what was there), and
-    a call on the holder of a method *callee* says writes the field -- those
-    are in *calls*, by statement, with what it says.
+    ``h.f = v``, ``h.f`` among a tuple's targets (:func:`assigned_targets`),
+    ``h.f += v`` (a reread, which keeps what was there), and a call on the
+    holder of a method *callee* says writes the field -- those are in *calls*,
+    by statement, with what it says.
     """
     place = f"{ast.unparse(holder)}.{attribute}"
     text = ast.unparse(holder)
@@ -2642,7 +2694,7 @@ def field_writes(
                 writes.append(statement)
                 rereads.append(statement)
             continue
-        if any(ast.unparse(target) == place for target in targets_of(statement)):
+        if any(ast.unparse(target) == place for target, _value in assigned_targets(statement)):
             writes.append(statement)
             continue
         if callee is None:
@@ -2763,28 +2815,6 @@ def additions(
         is not None
     ]
 
-
-def field_additions(
-    write: ast.AST,
-    holder: ast.expr,
-    attribute: str,
-    callee: Optional[Callable[[ast.Call], Optional[Callee]]] = None,
-    memo: Optional[dict] = None,
-) -> list[ast.AugAssign]:
-    """:func:`additions` for a write of an object's field, the field's ``+=`` read on the route
-    :func:`field_replacements` reads: to where the object leaves."""
-    held = _field_held(write, holder, attribute, callee, memo)
-    if held is None:
-        return []
-    writes, _rereads, _calls, out, renewed = held
-    return additions(
-        write,
-        writes,
-        _unique([*out, *renewed]),
-        place=f"{ast.unparse(holder)}.{attribute}",
-        killers=renewed,
-        returning=True,
-    )
 
 def _substitute_bare_name(
     rendered: str, test: ast.expr, func: ast.FunctionDef | ast.AsyncFunctionDef

@@ -21,7 +21,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
     "asked", "attr_time", "callers", "census", "census_p", "changed", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
-    "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "value_diff", "which_ran", "windows",
+    "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "same_object", "value_diff", "which_ran",
+    "windows",
 ]
 
 
@@ -8288,6 +8289,105 @@ def test_a_guard_over_a_column_the_rows_file_holds_is_read_in_it_by_the_ways_and
     assert got["a value"][:2] == ["True", [f"m['v'] 3 on run.py:20, anal.py:5, gen.py:4 (held as fetched; {gone})"]]
     # a test over no name whose ways reach a held column is not this reading's
     assert got["no GuardFrom"] is None
+
+
+def test_another_functions_print_of_the_questions_column_answers_a_statement_only_where_the_map_holds_one_object(tmp_path):
+    # KNOWN_ISSUES.md K63: MJE-7394762518's killJob packs a JobSpec of its own (997-998); the adder printed its own
+    # object's 'failed' at 444 after killJob ran, so that print of the question's column is not killJob's job's.  The
+    # adder's self.job is handed to updateJobs's jobs at adder_gen.py:472, and updateJobs hands archiveJob its job: one
+    # object.  A column no write changes in a job's life (prodSourceLabel) is read whichever object printed it.
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E, mapdump
+
+            ADD, TB, JC = ("pandaserver/dataservice/adder_gen.py", "pandaserver/taskbuffer/TaskBuffer.py",
+                           "pandaserver/taskbuffer/db_proxy_mods/job_complex_module.py")
+            src = lambda kind, name, route=(), site_owner="": N(kind=kind, name=name, route=list(route), site_owner=site_owner)
+            mapdump._FRAGMENT[:] = [N(
+                guard_froms=[N(owner=f"{TB}::updateJobs", test_line=639, test="job.jobStatus == 'failed'", name="job",
+                               arms=[654], sources=[src("parameter", "jobs", site_owner=f"{TB}::updateJobs")])],
+                parameter_froms=[
+                    N(owner=f"{TB}::updateJobs", parameter="jobs", sources=[src("self_field", "self.job", [f"{ADD}:472"])]),
+                    N(owner=f"{JC}::archiveJob", parameter="job", sources=[src("parameter", "jobs", [f"{TB}:667"], f"{TB}::updateJobs")]),
+                ],
+            )]
+            HOLES = {
+                "adder": ("self.job.jobStatus", "failed", "hole of process_job_report:444 at a", f"{ADD}::process_job_report"),
+                "archive": ("job.jobStatus", "failed", "hole of archiveJob:1268 at b", f"{JC}::archiveJob"),
+                "label": ("job.prodSourceLabel", "test", "hole of archiveJob:1268 at b", f"{JC}::archiveJob"),
+                "jumbo": ("EventServiceUtils.isJumboJob(self.job)", "False", "hole of parse_job_output_report:873 at a",
+                          f"{ADD}::parse_job_output_report"),
+                "status": ("self.job_status", "failed", "hole of process_job_report:444 at a", f"{ADD}::process_job_report"),
+            }
+
+            def env(*names, table=None, subject="<job>.jobStatus"):
+                e = E.Env(rows={"job": "job", "self.job": "job"}, call=None, subject=subject)  # a call is looked up by its text
+                e.table["job"] = dict(table or {})
+                for n in names:
+                    text, value, source, owner = HOLES[n]
+                    e.put_hole(text, value, source, [owner])
+                return e
+
+            def read(test, names, owner=None, line=0, **kw):
+                e = env(*names, **kw)
+                at = e.reading(owner, line) if owner else e
+                return [repr(E.evaluate(test, at)), at.used]
+
+            def shared():
+                e = env("adder", "label")
+                at = e.reading(f"{JC}::killJob", 1059)
+                E.evaluate("job.jobStatus != 'failed' and job.prodSourceLabel == 'test'", at)
+                e.used.update(at.shared())
+                return [sorted(at.used), sorted(e.used)]
+
+            KILL, UPD = (f"{JC}::killJob", 1059), (f"{TB}::updateJobs", 654)
+            print(json.dumps({
+                "killJob": read("job.jobStatus != 'failed'", ["adder"], *KILL),
+                "updateJobs": read("job.jobStatus == 'failed'", ["adder"], *UPD),
+                "the other way": read("self.job.jobStatus == 'failed'", ["archive"], f"{ADD}::process_job_report", 466),
+                "a loop and its callee": read("job.jobStatus == 'failed'", ["archive"], *UPD),
+                "the same function": read("self.job.jobStatus == 'failed'", ["adder"], f"{ADD}::process_job_report", 450),
+                "the rows file under it": read("job.jobStatus == 'holding'", ["adder"], *KILL,
+                                               table={"jobStatus": E.Value("holding", "the rows file")}),
+                "not the question's column": read("job.prodSourceLabel == 'test' and not EventServiceUtils.isJumboJob(job)",
+                                                  ["label", "jumbo"], *KILL),
+                "not about a row": read("self.job_status == 'failed'", ["status"], f"{ADD}::handle_failed_job", 374),
+                "no reader": read("job.jobStatus != 'failed'", ["adder"]),
+                "no question": read("job.jobStatus != 'failed'", ["adder"], *KILL, subject=""),
+                "knows": [env("adder").reading(*KILL).knows("job.jobStatus"), env("adder").reading(*UPD).knows("job.jobStatus")],
+                "shared": shared(),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    adder, archive = "hole of process_job_report:444 at a", "hole of archiveJob:1268 at b"
+    # killJob's job is not the adder's object by the map's records: the print of the question's column is not read
+    assert got["killJob"] == ["UNKNOWN", {"job.jobStatus": f"unknown: {adder} is another object's"}]
+    # updateJobs's job is: its GuardFrom's parameter jobs is handed the adder's self.job at adder_gen.py:472
+    assert got["updateJobs"] == ["True", {"job.jobStatus": adder}]
+    # the other way round: archiveJob's printed job is handed, through updateJobs's jobs, the adder's self.job
+    assert got["the other way"] == ["True", {"self.job.jobStatus": archive}]
+    # updateJobs loops over its jobs and hands archiveJob the job: both ways reach updateJobs's jobs
+    assert got["a loop and its callee"] == ["True", {"job.jobStatus": archive}]
+    # a hole the reader's own function printed is read as before
+    assert got["the same function"] == ["True", {"self.job.jobStatus": adder}]
+    # a print not read leaves the rows file's value to be read
+    assert got["the rows file under it"] == ["True", {"job.jobStatus": "the rows file"}]
+    # another column, and a call over the row, are read whichever object printed them
+    assert got["not the question's column"] == ["True", {"job.prodSourceLabel": archive,
+                                                         "EventServiceUtils.isJumboJob(job)": "hole of parse_job_output_report:873 at a"}]
+    # a hole not about a row, a reading of no statement, and a reading for no question are as before
+    assert got["not about a row"] == ["True", {"self.job_status": adder}]
+    assert got["no reader"] == ["False", {"job.jobStatus": adder}]
+    assert got["no question"] == ["False", {"job.jobStatus": adder}]
+    assert got["knows"] == [False, True]
+    # what a reading did not read stays its own: the env it was read from keeps only what it read
+    assert got["shared"] == [["job.jobStatus", "job.prodSourceLabel"], ["job.prodSourceLabel"]]
 
 
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):

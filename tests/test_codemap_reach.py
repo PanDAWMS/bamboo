@@ -1267,6 +1267,72 @@ def test_a_dunder_the_record_has_edges_into_is_asked_as_any_function_is(tmp_path
     assert "1 more have edges into them" in result.note
 
 
+_SHARE = (
+    "def now():\n"
+    "    return 1\n\n"
+    "class Share:\n"
+    "    def __mul__(self, other):\n"
+    "        self.value = now()\n"
+    "        return self.value\n\n"
+    "    def __rmul__(self, other):\n"
+    "        return self.__mul__(other)\n\n"
+    "    def __imul__(self, other):\n"
+    "        self.__mul__(other)\n"
+    "        return self\n"
+)
+
+
+def test_an_operation_runs_the_operand_s_dunder_where_its_class_defines_one(tmp_path):
+    """``share * 2`` runs ``Share.__mul__``, which multiplies the share's ``value``: an edge, ``operator``.
+
+    The left operand's dunder, the right's reflected one (``3 * share``), and for ``share *= n`` the in-place one and
+    the two of ``share * n``.  An operation on builtins runs nothing of the corpus, and a dunder no class defines
+    (``-n``) is not looked for.
+    """
+    record = _record(
+        tmp_path,
+        mod=_SHARE
+        + (
+            "\n"
+            "def scale(share: Share, n: int):\n"
+            "    doubled = share * 2\n"
+            "    tripled = 3 * share\n"
+            "    share *= n\n"
+            "    total = n * 2\n"
+            "    return -n\n"
+        ),
+    )
+
+    operations = [
+        (call.to, call.lines) for call in record.rows["pkg/mod.py::scale"].calls if call.how == reach.HOW_OPERATOR
+    ]
+
+    assert operations == [
+        ("pkg/mod.py::Share.__mul__", [17, 19]),
+        ("pkg/mod.py::Share.__rmul__", [18]),
+        ("pkg/mod.py::Share.__imul__", [19]),
+    ]
+    assert record.rows["pkg/mod.py::scale"].holes == []
+    assert [one.function for one in record.reach(["pkg/mod.py::scale"], _writing("pkg/mod.py::now")).writes] == [
+        "pkg/mod.py::now"
+    ]
+
+
+def test_an_operator_s_dunder_no_operation_enters_is_run_by_none(tmp_path):
+    """``Share.__mul__`` multiplies the share's ``value``, and nothing multiplies a ``Share``: the record reads each
+    operation's dispatch, so a dunder of an operator that no edge enters is run by no operation, and is not unasked."""
+    from bamboo.codemap import gates
+
+    record = _record(tmp_path, mod=_SHARE)
+    result = gates.implicit_dunders_reach_no_write(
+        _fragment(record, [_junction("pkg/mod.py::now", 2, [("done", [])])])
+    )
+
+    assert result.passed
+    assert result.checked == 0
+    assert "3 more have edges into them, or are an operator's" in result.note
+
+
 #: A class defining the methods the tests below call, so that a call on an unknown receiver is a hole, not settled as
 #: a method no class of the corpus defines.
 _TAKER = (

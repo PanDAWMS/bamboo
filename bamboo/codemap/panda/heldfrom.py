@@ -1,5 +1,6 @@
 """What a name a guard reads holds, way by way, read back across calls: :class:`GuardFrom` and :class:`ParameterFrom`;
-and what each write gives a column a guard's way ends at, read the same way: :class:`SetFrom`.
+what each write gives a column a guard's way ends at, read the same way: :class:`SetFrom`; and what the object an
+arm writes, and the value a passthrough arm hands on, hold: :class:`WriteFrom`.
 
 A reader deciding a junction's arm with a run's values -- the querier's H3, reading ``'reqID' in taskParamMap``
 in the rows it has -- needs to know what the name *is*: here the task's ``JEDI_TaskParams.taskParams``, decoded.
@@ -70,7 +71,10 @@ from bamboo.codemap.models import (
     THROUGH_DECODED,
     THROUGH_TEXT,
     THROUGH_UNKNOWN,
+    WRITE_OBJECT,
+    WRITE_VALUE,
     AfterChange,
+    EnteredFrom,
     GuardFrom,
     HeldChange,
     HeldSource,
@@ -80,6 +84,7 @@ from bamboo.codemap.models import (
     ParameterFrom,
     ReadSiteNode,
     SetFrom,
+    WriteFrom,
 )
 from bamboo.codemap.panda import changes as changes_mod
 from bamboo.codemap.panda import evaluate, flow, pathcond, sqltext
@@ -897,9 +902,11 @@ def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
     return None
 
 
-def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.Name]:
-    """The names *test* reads that are *func*'s parameters or locals -- not ``self``, a module's name or a
-    comprehension's own -- each at its first read."""
+def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
+    """The names *test* reads that are *func*'s parameters or locals -- not a module's name or a comprehension's
+    own -- each at its first read; and each object rooted at ``self`` or ``cls`` that a field or method is read off,
+    by its path: ``self`` for ``self.splitRule is None``, ``self.taskSpec`` for ``self.taskSpec.usePrePro()`` -- the
+    object a :class:`WriteFrom` of an arm writing ``self.splitRule`` or ``self.taskSpec.splitRule`` writes."""
     inner = {
         target.id
         for node in walk(test)
@@ -908,15 +915,97 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.Name]:
         if isinstance(target, ast.Name)
     }
     own = _parameters(func)
-    found: dict[str, ast.Name] = {}
+    found: dict[str, ast.expr] = {}
+    parts = {id(node.value) for node in walk(test) if isinstance(node, ast.Attribute)}
     for node in walk(test):
-        if (
+        if isinstance(node, ast.Attribute) and id(node) not in parts:
+            path = _self_path(node.value)
+            if path is not None:
+                found.setdefault(path, node.value)
+        elif (
             isinstance(node, ast.Name)
             and node.id not in ("self", "cls")
             and node.id not in inner
         ):
             if node.id in own or _bound_here(func, node.id):
                 found.setdefault(node.id, node)
+    return found
+
+
+def _self_path(node: ast.expr) -> Optional[str]:
+    """``self.taskSpec`` for that expression: attributes on ``self`` or ``cls``, or ``None``."""
+    here = node
+    while isinstance(here, ast.Attribute):
+        here = here.value
+    if isinstance(here, ast.Name) and here.id in ("self", "cls"):
+        return ast.unparse(node)
+    return None
+
+
+def _written(
+    statement: ast.stmt,
+    subject: str,
+    calls: Calls,
+    file: str,
+    func: ast.AST,
+    methods: dict[str, set[str]],
+) -> list[tuple[ast.expr, Optional[ast.expr]]]:
+    """The objects *statement*, an arm writing *subject*, writes the field of, each with the value it gives there:
+    ``(jobSpec, taskSpec.jediTaskID)`` for ``jobSpec.jediTaskID = taskSpec.jediTaskID``, at any depth of a tuple
+    target (:func:`pathcond.assigned_targets`); ``(o, v)`` for ``setattr(o, "f", v)``; the receiver and no value
+    for ``o.f += v`` and for a call at the line of a method of the subject's class (``taskSpec.setOnHold()``) --
+    placed there, or, a receiver the build tells no class of (``taskSpec, cloudName, inputChunk = tmpInputItem``),
+    named as a method the class defines (*methods*, by class name).  An SQL arm's statement fills a bind or the
+    statement's text (``varMap[":status"] = ...``), or hands the text on (``taskBuffer.querySQLS(...)``): none."""
+    owner, _, field = subject.rpartition(".")
+    found: list[tuple[ast.expr, Optional[ast.expr]]] = []
+    if isinstance(statement, ast.AugAssign):
+        reread = statement.target
+        if isinstance(reread, ast.Attribute) and reread.attr == field:
+            found.append((reread.value, None))
+        return found
+    for target, value in pathcond.assigned_targets(statement):
+        if isinstance(target, ast.Attribute) and target.attr == field:
+            found.append((target.value, value))
+    if found or not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        return found
+    call = statement.value
+    if isinstance(call.func, ast.Name) and call.func.id == "setattr":
+        if len(call.args) == 3 and isinstance(call.args[1], ast.Constant) and call.args[1].value == field:
+            found.append((call.args[0], call.args[2]))
+        return found
+    if isinstance(call.func, ast.Attribute):
+        placed = calls.callees(file, func, call)
+        if placed.targets:
+            if any(target.cls is not None and target.cls.name == owner for target in placed.targets):
+                found.append((call.func.value, None))
+        elif call.func.attr in methods.get(owner, ()):
+            found.append((call.func.value, None))
+    return found
+
+
+def _object_ways(
+    said: tuple[list[HeldSource], list[KeyStop]],
+) -> tuple[list[HeldSource], list[KeyStop]]:
+    """A write's ways without what may change the object on them (*changes*): which object a name holds, not what it
+    holds -- a reader binding it to a guard's compares where the ways end; ways the same once bare are one."""
+    sources: list[HeldSource] = []
+    for one in said[0]:
+        bare = one.model_copy(update={"changes": []})
+        if bare not in sources:
+            sources.append(bare)
+    return sources, said[1]
+
+
+def _methods(trees: dict[str, ast.AST]) -> dict[str, set[str]]:
+    """The names of the methods each class of the corpus defines, by the class's name."""
+    found: dict[str, set[str]] = {}
+    for tree in trees.values():
+        for node in walk(tree):
+            if isinstance(node, ast.ClassDef):
+                found.setdefault(node.name, set()).update(
+                    one.name for one in node.body if isinstance(one, _FUNCTIONS)
+                )
     return found
 
 
@@ -927,19 +1016,26 @@ def guard_froms(
     calls: Optional[Calls],
     record,
     writes: Iterable[SetFrom] = (),
-) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom]]:
-    """A :class:`GuardFrom` for each test on the way to each junction's arm and each name it reads; each of *writes*
+    entered: Iterable[EnteredFrom] = (),
+) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom]]:
+    """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
+    :attr:`GuardFrom.calls`), and each name it reads (:func:`_names`); each of *writes*
     (:func:`sqlwrite.extract`'s) whose column a guard's way ends at -- through the ParameterFroms -- its ways read as
     the guards', and on a guard's way ending where one of its column's does, what may change the object between
-    (:func:`_after_reads`); and a :class:`ParameterFrom` for each parameter a way of any ends at, and those reach.
-    Nothing without *calls* or *record*: the reading places calls and reads fetches by them."""
+    (:func:`_after_reads`); a :class:`WriteFrom` for the object each arm writes and the value each passthrough arm
+    hands on (:func:`_written`), read as the guards' names are; and a :class:`ParameterFrom` for each parameter a
+    way of any ends at, and those reach.  Nothing without *calls* or *record*: the reading places calls and reads
+    fetches by them."""
     if calls is None or record is None:
-        return [], [], []
+        return [], [], [], []
     junctions = list(junctions)
     reader = _Reader(
         calls, record, read_sites, {junction.owner for junction in junctions}, trees
     )
     found: dict[tuple[str, int, int, str], GuardFrom] = {}
+    written: dict[tuple[str, int, str, str, str], WriteFrom] = {}
+    read_once: dict[int, tuple[list[HeldSource], list[KeyStop]]] = {}
+    methods = _methods(trees)
     for junction in junctions:
         file, _, name = junction.owner.partition("::")
         tree = trees.get(file)
@@ -957,6 +1053,30 @@ def guard_froms(
             )
             if func is None or stmt is None or line is None:
                 continue
+            passes = branch.outcome.startswith("passthrough(")
+            for target_object, target_value in _written(stmt, junction.subject, calls, file, func, methods):
+                for role, part in ((WRITE_OBJECT, target_object), (WRITE_VALUE, target_value if passes else None)):
+                    if part is None:
+                        continue
+                    expression = ast.unparse(part)
+                    write_key = (junction.owner, line, junction.subject, role, expression)
+                    if write_key in written:
+                        continue
+                    part_ways = read_once.get(id(part))
+                    if part_ways is None:
+                        part_ways = read_once[id(part)] = _object_ways(
+                            _said(reader._safely(part, part, file, func))
+                        )
+                        reader.queue(part_ways[0])
+                    written[write_key] = WriteFrom(
+                        owner=junction.owner,
+                        line=line,
+                        subject=junction.subject,
+                        role=role,
+                        expression=expression,
+                        sources=part_ways[0],
+                        stops=part_ways[1],
+                    )
             for test in pathcond.tests_on(stmt, func):
                 for read, node in _names(test, func).items():
                     key = (junction.owner, test.lineno, test.col_offset, read)
@@ -974,6 +1094,40 @@ def guard_froms(
                         )
                     if line not in guard.arms:
                         guard.arms.append(line)
+    for way in entered:
+        for site in way.sites:
+            if site.unread:
+                continue
+            file, _, name = site.owner.partition("::")
+            tree = trees.get(file)
+            func = next(
+                (
+                    node
+                    for node in (walk(tree) if tree is not None else ())
+                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                ),
+                None,
+            )
+            stmt = _statement_holding(func, site.line) if func is not None else None
+            if func is None or stmt is None:
+                continue
+            for test in pathcond.tests_on(stmt, func):
+                for read, node in _names(test, func).items():
+                    key = (site.owner, test.lineno, test.col_offset, read)
+                    guard = found.get(key)
+                    if guard is None:
+                        sources, stops = _said(reader._safely(node, node, file, func))
+                        reader.queue(sources)
+                        guard = found[key] = GuardFrom(
+                            owner=site.owner,
+                            test_line=test.lineno,
+                            test=ast.unparse(test),
+                            name=read,
+                            sources=sources,
+                            stops=stops,
+                        )
+                    if site.line not in guard.calls:
+                        guard.calls.append(site.line)
     reader.settle()
     ended = _ended_columns(found.values(), reader.parameters)
     sets = [one for one in writes if one.column in ended]
@@ -1004,6 +1158,7 @@ def guard_froms(
     reader.settle()
     for guard in found.values():
         guard.arms.sort()
+        guard.calls.sort()
     return (
         sorted(found.values(), key=lambda one: (one.owner, one.test_line, one.name)),
         sorted(
@@ -1011,6 +1166,7 @@ def guard_froms(
             key=lambda one: (one.owner, one.line, one.parameter),
         ),
         sorted(sets, key=lambda one: (one.owner, one.statement, one.column, one.text)),
+        sorted(written.values(), key=lambda one: (one.owner, one.line, one.subject, one.role, one.expression)),
     )
 
 
@@ -1169,8 +1325,9 @@ def _held_name(hop: _Hop) -> Optional[str]:
 def _own_names(guard: GuardFrom, source: HeldSource) -> list[str]:
     """The names *guard*'s function holds the object of *source*'s way by: the guard's own where its value is the
     object or a part of it reached by items and attributes -- not an object built of its parts (*paths*), as
-    ``AtlasAnalTaskRefiner.doRefine``'s ``datasetSpec`` of ``taskParamMap`` --, and the parameter the way ends at."""
-    names = [] if source.paths else [guard.name]
+    ``AtlasAnalTaskRefiner.doRefine``'s ``datasetSpec`` of ``taskParamMap``, nor a path on ``self`` --, and the
+    parameter the way ends at."""
+    names = [] if source.paths or not guard.name.isidentifier() or guard.name in ("self", "cls") else [guard.name]
     if (
         source.kind == KEY_PARAMETER
         and source.site_owner == guard.owner

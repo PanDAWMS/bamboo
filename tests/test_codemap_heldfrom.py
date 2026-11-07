@@ -187,7 +187,7 @@ def _build(
             sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
         )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        guards, parameters, _writes = heldfrom.guard_froms(
+        guards, parameters, _writes, _written = heldfrom.guard_froms(
             junctions,
             sites,
             {module.rel_path: module.tree for module in modules},

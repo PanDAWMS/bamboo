@@ -669,6 +669,55 @@ FACADES = {
         "pandajedi/jedicore/JediDBProxy.py::DBProxy",
     ),
 }
+#: The far ends of PanDA's one-to-one forwarders -> their near ends.  A near end stands in for an object in another
+#: process or thread: a method looked up on it sends its name, and the far end calls the method of that name on the
+#: object it stands for.  Only the near end sends a name, so each call at a far end is a call the near end made, which
+#: the reach record holds there (an edge by the declared class, or a hole by the name): the far end is no way into a
+#: function of its own (:class:`bamboo.codemap.models.EnteredFrom`).  ``ConBridge`` sends ``self.name`` only from
+#: ``bridge_masterMethod.__call__``, its other sends being the child's answers; ``TaskBufferMethod`` sends its
+#: ``methodName``; ``CommandObject`` is built only by ``MethodClass``.
+FORWARDERS = {
+    "pandaserver/taskbuffer/ConBridge.py::ConBridge.bridge_run": (
+        "pandaserver/taskbuffer/ConBridge.py::ConBridge.__getattribute__"
+    ),
+    "pandaserver/taskbuffer/TaskBufferInterface.py::TaskBufferInterface.thread_run": (
+        "pandaserver/taskbuffer/TaskBufferInterface.py::TaskBufferInterfaceChild.__getattr__"
+    ),
+    "pandajedi/jedicore/Interaction.py::CommandReceiveInterface.start": (
+        "pandajedi/jedicore/Interaction.py::CommandSendInterface.__getattr__"
+    ),
+}
+#: What a ``getattr`` with a name read at run time takes off a module, where the code says it: ``(the function
+#: holding it, the module's name there)`` -> ``(kind, what)``.  A plugin loader imports a module the configuration
+#: names and takes a class off it; what the class can be is in the code, not in the configuration:
+#:
+#: - :data:`TAKES_TYPE_PARAMETER`: a subclass of each class the corpus binds the generic's type parameter to --
+#:   ``FactoryBase(Generic[T])``, and ``TaskRefiner(JediKnight, FactoryBase[TaskRefinerBase])`` and the like;
+#: - :data:`TAKES_SUBCLASSES`: a subclass of the class named -- Interaction's launcher builds the receiving end of a
+#:   forwarder (:data:`FORWARDERS`) with its channel and starts it;
+#: - :data:`TAKES_CLASSES`: a class, any -- the server's ``g_pluginMap`` is declared
+#:   ``dict[str, dict[str, type[Any]]]``;
+#: - :data:`TAKES_NAMED_IN`: a class the table named writes -- ``PLUGIN_RAW_MAP``'s ``(module, class)`` pairs;
+#: - :data:`TAKES_ENDPOINTS`: an endpoint's function -- the API modules ``module_mapping`` and the MCP server's
+#:   ``endpoints_to_expose`` name.
+#:
+#: A name listed here holds a module whatever its bindings say (``module_mapping(...)["module"]``).
+TAKES_TYPE_PARAMETER, TAKES_SUBCLASSES, TAKES_CLASSES = "type_parameter", "subclasses", "classes"
+TAKES_NAMED_IN, TAKES_ENDPOINTS = "named_in", "endpoints"
+MODULE_TAKES = {
+    ("pandajedi/jedicore/FactoryBase.py::FactoryBase.initializeMods", "mod"): (TAKES_TYPE_PARAMETER, "FactoryBase"),
+    ("pandajedi/jedicore/Interaction.py::CommandSendInterface.launcher", "mod"): (
+        TAKES_SUBCLASSES,
+        "pandajedi/jedicore/Interaction.py::CommandReceiveInterface",
+    ),
+    ("pandaserver/config/panda_config.py::parsePluginConf", "mod"): (TAKES_CLASSES, ""),
+    ("pandaserver/workflow/workflow_core.py::_get_flavor_plugin_class_map", "module"): (
+        TAKES_NAMED_IN,
+        "pandaserver/workflow/workflow_core.py::PLUGIN_RAW_MAP",
+    ),
+    ("pandaserver/server/panda.py::application", "module"): (TAKES_ENDPOINTS, ""),
+    ("pandaserver/pandamcp/mcp_main.py::<module>", "api_module"): (TAKES_ENDPOINTS, ""),
+}
 #: The spec methods that set every column from a row the database returned.  Declared rather than read: that ``pack``
 #: is handed a row is PanDA's convention, and nothing in its body says where its values came from.
 ROW_READ = ("pack",)

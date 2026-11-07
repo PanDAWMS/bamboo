@@ -6195,6 +6195,87 @@ def test_a_plus_equals_that_adds_to_a_value_is_a_write_of_what_it_makes():
     }
 
 
+def test_a_plus_equals_no_write_of_its_function_reaches_is_a_write_of_what_it_makes():
+    """``setLimitedSites`` adds its token to the rule the task came with: the
+    ``=`` is under ``splitRule is None`` and the ``+=`` in the other arm, which
+    no ``=`` of the method reaches.  It is a write of what the method makes all
+    the same, under its own test, as a ``+=`` after an ``=`` is.
+    """
+    spec = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'splitRule')\n"
+        "\n"
+        "    def setLimitedSites(self, tag):\n"
+        "        if self.splitRule is None:\n"
+        "            self.splitRule = 'limitedSites=' + tag\n"
+        "        else:\n"
+        "            self.splitRule += ',limitedSites=' + tag\n"
+    )
+    modules = [_module(spec, "pandaserver/taskbuffer/JediTaskSpec.py")]
+    _subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+
+    assert [
+        (j.subject, [(b.outcome, b.tier, b.path_condition, b.line) for b in j.branches])
+        for j in junctions
+    ] == [
+        (
+            "JediTaskSpec.splitRule",
+            [
+                ("runtime('limitedSites=' + tag)", 2, ["self.splitRule is None"], 6),
+                # ``x += a + b`` adds the sum: ``x + (a + b)``.
+                (
+                    "runtime(self.splitRule + (',limitedSites=' + tag))",
+                    2,
+                    ["not (self.splitRule is None)"],
+                    8,
+                ),
+            ],
+        )
+    ]
+
+
+def test_each_field_among_a_tuples_targets_is_a_write_of_the_value_at_its_place():
+    """``jobSpec.minRamCount, jobSpec.minRamUnit = getJobMinRamCount(...)``
+    writes two fields, and neither was a branch: the slice took no tuple
+    target.  Each is a write of the right-hand side at its place, a literal
+    pair gives each its own element, and before a starred target the place is
+    known.  A field among a tuple's targets also replaces what an earlier
+    write put there: ``jobsetID = 0`` never leaves ``build``.
+    """
+    spec = (
+        "class JobSpec(object):\n"
+        "    _attributes = ('PandaID', 'minRamCount', 'minRamUnit', 'cloud', 'computingSite', 'jobsetID')\n"
+        "\n"
+        "def generate(task, cur):\n"
+        "    jobSpec = JobSpec()\n"
+        "    jobSpec.minRamCount, jobSpec.minRamUnit = getJobMinRamCount(task)\n"
+        "    jobSpec.cloud, jobSpec.computingSite = 'CERN', task.site\n"
+        "    jobSpec.PandaID, *rest = cur.fetchall()\n"
+        "    return jobSpec\n"
+        "\n"
+        "def build(cur):\n"
+        "    job = JobSpec()\n"
+        "    job.jobsetID = 0\n"
+        "    (job.jobsetID,) = cur.fetchone()\n"
+        "    return job\n"
+    )
+    modules = [_module(spec, "pandaserver/taskbuffer/JobSpec.py")]
+    _subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+
+    branches = {
+        (j.subject, j.owner.rsplit("::", 1)[-1]): [(b.outcome, b.line) for b in j.branches]
+        for j in junctions
+    }
+    assert branches == {
+        ("JobSpec.minRamCount", "generate"): [("runtime(getJobMinRamCount(task)[0])", 6)],
+        ("JobSpec.minRamUnit", "generate"): [("runtime(getJobMinRamCount(task)[1])", 6)],
+        ("JobSpec.cloud", "generate"): [("CERN", 7)],
+        ("JobSpec.computingSite", "generate"): [("runtime(task.site)", 7)],
+        ("JobSpec.PandaID", "generate"): [("runtime(cur.fetchall()[0])", 8)],
+        ("JobSpec.jobsetID", "build"): [("runtime(cur.fetchone()[0])", 14)],
+    }
+
+
 # --------------------------------------------------------------------------- #
 # return alias -- a helper that returns the value the caller writes
 # --------------------------------------------------------------------------- #

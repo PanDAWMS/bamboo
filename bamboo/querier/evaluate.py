@@ -5,7 +5,9 @@ reader's, solving backwards.  The querier reads it as ``E.ev``, ``E.solve`` and 
 says:
 
 * **the rows a run read**, under the names its question binds (:class:`Env`): ``self.job`` in the adder and
-  ``job`` in the task buffer are one row, and a field the rows file holds answers a guard that reads it;
+  ``job`` in the task buffer are one row, and a field the rows file holds answers a guard that reads it.  A hole of
+  the question's own column one function printed answers another function's statement only where the map's records
+  hold one object (:mod:`same_object`, KNOWN_ISSUES.md K63);
 * **helpers** are called from the local panda-server tree only when they are on
   :data:`PURE`, a list of functions read one by one and found to have no
   effect (``getSerialNumber`` looks like a read and advances a sequence);
@@ -21,8 +23,8 @@ from __future__ import annotations
 import ast
 import re
 import sys
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from bamboo.codemap.panda import evaluate as shared
@@ -84,6 +86,70 @@ class Env(shared.Env):
     #: when the run the values are read for began (``Rerun.base_env``); None where no run is named
     at: str | None = None
     call: Callable[[str], Callable[..., Any] | None] | None = pure
+    #: which function printed each hole about a row, as what, with the hole's source: "<job>.jobStatus" ->
+    #: {("pandaserver/dataservice/adder_gen.py::process_job_report", "self.job.jobStatus", "hole of ...")}
+    #: (:meth:`put_hole`)
+    printed_in: dict[str, set[tuple[str, str, str]]] = field(default_factory=dict)
+    #: the function whose statement is read, and the statement's line (:meth:`reading`); None where no one statement is
+    reader: tuple[str, int] | None = None
+    #: what this reading did not read of another function's holes (:meth:`_hidden`): true of this statement only
+    hidden_here: set[str] = field(default_factory=set)
+    #: the question's own column under its row's name ("<job>.jobStatus", ``Rerun.base_env``): the one the statuslog
+    #: shows changing at the question's time; "" where no question is read
+    subject: str = ""
+
+    def put_hole(self, text: str, printed: str, source: str, owners: Iterable[str]) -> None:
+        """:meth:`put_printed`, with the functions that printed it where it is about a row."""
+        keys = [self.canonical(text)]
+        inner = re.fullmatch(r"str\((.+)\)", text)
+        if inner:
+            keys.append(self.canonical(inner[1]))
+        self.put_printed(text, printed, source)
+        for key in keys:
+            if "<" in key and key in self.values and self.values[key].source.startswith(source):
+                self.printed_in.setdefault(key, set()).update((owner, text, source) for owner in owners)
+
+    def reading(self, owner: str, line: int) -> Env:
+        """This env, reading *owner*'s statement at *line*: a hole another function printed about a row answers only a
+        name the map's records hand that object to (:meth:`_hidden`)."""
+        return replace(self, values=dict(self.values), stale=dict(self.stale), used={}, hidden_here=set(),
+                       printed_in={k: set(v) for k, v in self.printed_in.items()}, reader=(owner, line))
+
+    def shared(self) -> dict[str, str]:
+        """:attr:`used` less what this reading did not read of another function's holes: what the env it was read
+        from may keep."""
+        return {k: v for k, v in self.used.items() if k not in self.hidden_here}
+
+    def spelled(self, text: str) -> tuple[str, ...]:
+        """The spellings of a row variable *text* holds (``job``, ``self.job``)."""
+        if not self.rows:
+            return ()
+        spellings = "|".join(re.escape(s) for s in sorted(self.rows, key=len, reverse=True))
+        return tuple(sorted(set(re.findall(rf"(?<![\w.<])({spellings})(?!\w)", text))))
+
+    def _hidden(self, text: str) -> bool:
+        """Whether *text* reads the question's own column (:attr:`subject`) from a hole printed only by functions whose
+        object the map's records do not show is the one *text*'s names hold in the :attr:`reader`'s statement.
+
+        Only the question's column: the statuslog shows it change at the question's time, so another object's print
+        of it is not the value at the statement.  A column no write changes in a job's life (``prodSourceLabel``) is
+        the row's value whichever object printed it.  Telling the other changing columns needs the writes between the
+        print and the read (KNOWN_ISSUES.md K63, *Revisit*)."""
+        if self.reader is None or not self.subject:
+            return False
+        key = self.canonical(text)
+        if not re.search(rf"{re.escape(self.subject)}(?!\w)", key):
+            return False
+        held = self.values.get(key)
+        found = [(o, e) for o, e, s in self.printed_in.get(key, ()) if held is not None and held.source.startswith(s)]
+        if not found:
+            return False
+        # imported here: heldcol, which same_object reads, imports this module
+        from bamboo.querier import same_object
+
+        owner, line = self.reader
+        names = self.spelled(text)
+        return not any(same_object.same(owner, line, names, printer, self.spelled(expr)) for printer, expr in found)
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.
@@ -98,23 +164,33 @@ class Env(shared.Env):
         spellings = "|".join(re.escape(s) for s in sorted(self.rows, key=len, reverse=True))
         return re.sub(rf"(?<![\w.<])({spellings})(?!\w)", lambda m: f"<{self.rows[m[1]]}>", text)
 
-    def _field(self, text: str) -> Value | None:
-        """The row field *text* reads, where nothing put and nothing stale says otherwise."""
+    def _field(self, text: str, hidden: bool = False) -> Value | None:
+        """The row field *text* reads, where nothing put (*hidden* aside) and nothing stale says otherwise."""
         key = self.canonical(text)
-        if key in self.values or text in self.stale or key in self.stale:
+        if (key in self.values and not hidden) or text in self.stale or key in self.stale:
             return None
         m = re.fullmatch(r"<(\w+)>\.(\w+)", key)
         return self.table.get(m[1], {}).get(m[2]) if m else None
 
     def lookup(self, text: str) -> Any:
-        held = self._field(text)
-        if held is None:
+        hidden = self._hidden(text)
+        held = self._field(text, hidden)
+        if held is not None:
+            self.used[text] = held.source
+            if hidden:
+                self.hidden_here.add(text)
+            return held.value
+        if not hidden:
             return super().lookup(text)
-        self.used[text] = held.source
-        return held.value
+        key = self.canonical(text)
+        stale = self.stale.get(text, self.stale.get(key))
+        self.used[text] = f"unknown: {stale}" if stale else f"unknown: {self.values[key].source} is another object's"
+        self.hidden_here.add(text)
+        return UNKNOWN
 
     def knows(self, text: str) -> bool:
-        return super().knows(text) or self._field(text) is not None
+        hidden = self._hidden(text)
+        return (super().knows(text) and not hidden) or self._field(text, hidden) is not None
 
     def unread_in(self, text: str) -> dict[str, str]:
         """The row fields *text* reads that nothing here holds and the rows file holds at another time, with why."""
@@ -211,7 +287,10 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
                 else:
                     out.other_class.append(step)
             continue
-        false = next((g for g in step.guards if evaluate(g, env) is False), None)
+        # read at the step's statement: another function's hole only where the map hands its object here (K63)
+        at = env.reading(owner, step.line) if getattr(step, "line", 0) else env
+        false = next((g for g in step.guards if evaluate(g, at) is False), None)
+        env.used.update(at.shared())
         if false is not None:
             out.dropped.append((step, false))
         else:
@@ -224,7 +303,9 @@ def taken(steps: list, name: str, env: Env, *, owner: str) -> Taken:
         elif out.step.owner and out.step.owner != owner:
             out.value = _literal(out.step.value)
         else:
-            out.value = _value_of(out.step.value, env)
+            at = env.reading(owner, out.step.line) if getattr(out.step, "line", 0) else env
+            out.value = _value_of(out.step.value, at)
+            env.used.update(at.shared())
     return out
 
 

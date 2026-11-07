@@ -3897,6 +3897,8 @@ class MapFragment(BaseModel):
     parameter_froms: list["ParameterFrom"] = Field(default_factory=list)
     set_froms: list["SetFrom"] = Field(default_factory=list)
     runnables: list["Runnable"] = Field(default_factory=list)
+    entered_froms: list["EnteredFrom"] = Field(default_factory=list)
+    write_froms: list["WriteFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5757,7 +5759,9 @@ class GuardFrom(BaseModel):
     the test with a run's values: the querier's H3 reading an arm's guards in the rows' values.
 
     One per test on the way to a junction's arm (:func:`pathcond.tests_on`) and name it reads that is a parameter
-    or a local of the function; *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
+    or a local of the function, or an object rooted at ``self`` it reads a field or method of (``self`` for
+    ``self.splitRule is None``, ``self.taskSpec`` for ``not self.taskSpec.splitRule``: what a :class:`WriteFrom`
+    of an arm there writes); *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
     ``TaskRefinerBase.extractCommon`` 156 reads ``taskParamMap``, a parameter: its one source is kind ``parameter``,
     and its :class:`ParameterFrom` says what the callers hand it.  Read by :mod:`bamboo.codemap.panda.heldfrom`:
 
@@ -5777,9 +5781,18 @@ class GuardFrom(BaseModel):
     owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
     test_line: int = Field(description="The line of the test.")
     test: str = Field(description="The test, as written (``'reqID' in taskParamMap``).")
-    name: str = Field(description="The name the test reads.")
+    name: str = Field(
+        description="The name the test reads, or the path of the object on ``self`` it reads off (``self.taskSpec``)."
+    )
     arms: list[int] = Field(
         default_factory=list, description="The lines of the junction branches the test is on the way to."
+    )
+    calls: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the calls the test is on the way to that enter a function holding arms: the sites of an "
+            ":class:`EnteredFrom` whose caller is this one's *owner*."
+        ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
     stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
@@ -5802,6 +5815,35 @@ class ParameterFrom(BaseModel):
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
 
+
+#: What a :class:`WriteFrom` reads of its arm: the object the arm writes a field of, or the value a passthrough arm
+#: hands on.
+WRITE_OBJECT = "object"
+WRITE_VALUE = "value"
+WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
+
+
+class WriteFrom(BaseModel):
+    """What the object a junction's arm writes holds, or the value a passthrough arm hands on, way by way -- read as
+    :class:`GuardFrom` reads a name, for a reader binding a guard's name to the row the arm writes by these records
+    rather than by how the name is spelled.
+
+    ``jobSpec.jediTaskID = taskSpec.jediTaskID`` at ``JobGenerator.doGenerate`` writes ``jobSpec`` (role ``object``),
+    a local whose one way ends at the ``JobSpec`` built at 1197, and hands on ``taskSpec.jediTaskID`` (role
+    ``value``), whose way ends at doGenerate's parameter ``taskSpec`` with the step ``.jediTaskID``: the parameter the
+    guard ``taskSpec.usePrePro()`` reads, so a reader holding both knows the guard reads the task whose ID the job is
+    given.  ``setattr(o, "f", v)`` writes ``o``; a call of a method of the subject's class at the arm's line
+    (``taskSpec.setOnHold()``) writes its receiver.  An SQL arm writes its statement's rows, and has none.  A way
+    says where it ends, not what may change the object on it (no *changes*): which object, not what it holds.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    line: int = Field(description="The branch's line.")
+    subject: str = Field(description="The junction's subject.")
+    role: str = Field(description=f"What is read: one of {', '.join(WRITE_ROLES)}.")
+    expression: str = Field(description="The expression read, as written (``jobSpec``, ``self.taskSpec``).")
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
 
 #: How a write gives a column its value (:attr:`SetFrom.value`): as the statement's text says it -- the kinds
 #: ``sqltext.ColumnValue`` reads -- or an object's field, where the statement writes the object's map.
@@ -5917,6 +5959,78 @@ class RunStop(BaseModel):
             "and why."
         ),
     )
+
+
+#: Why an :class:`EnteredFrom`'s sites may not be every way into its function, each with its place
+#: (:attr:`EnteredOpen.kind`).
+ENTERED_HOLE = "hole"
+ENTERED_OPEN_CALL = "open_call"
+ENTERED_TAKEN = "taken"
+ENTERED_NAMED_AT_RUN_TIME = "named_at_run_time"
+ENTERED_ENDPOINT = "endpoint"
+ENTERED_HANDLER = "handler"
+
+
+class EnteredOpen(BaseModel):
+    """One reason an :class:`EnteredFrom`'s sites may not be every way in, as a record: a reader words it."""
+
+    kind: str = Field(
+        description=(
+            f"``{ENTERED_HOLE}``: a call no reading placed, made with the function's name; ``{ENTERED_OPEN_CALL}``: a "
+            f"call placed elsewhere that may also land at a function of its name; ``{ENTERED_TAKEN}``: the function's "
+            f"value read where nothing calls it, outside a hand-off the reach record holds; "
+            f"``{ENTERED_NAMED_AT_RUN_TIME}``: a call of what a ``getattr`` with a name read at run time took, off an "
+            f"object of the function's class or off a module (or off one no reading places); ``{ENTERED_ENDPOINT}`` "
+            f"and ``{ENTERED_HANDLER}``: the server runs it for a request."
+        )
+    )
+    at: str = Field(description="``file:line`` of the call, the value read, the ``getattr``, or the ``def``.")
+    text: str = Field(default="", description="The callee, the expression or the route, as written.")
+
+
+class EnteredSite(BaseModel):
+    """One way into a function: a line of a reach edge (:class:`ReachCall`) into it, and the tests the caller's
+    statement there sits under.  An edge stands for every call going one way and holds each one's line; each line is a
+    site, under its own tests (``doGenerate`` may call one function under ``usePrePro()`` and again under
+    ``useBuild()``)."""
+
+    owner: str = Field(description="The caller's owner, as a junction's (``file::name``).")
+    owner_line: int = Field(description="The line of the caller's ``def``.")
+    line: int = Field(
+        description="The line of the statement that calls, hands, stores or operates: one of the edge's lines."
+    )
+    how: str = Field(
+        description="The edge's :attr:`ReachCall.how`: ``call``, ``handed``, ``lambda``, ``setattr``, ``operator``."
+    )
+    conditions: list[str] = Field(
+        default_factory=list,
+        description=(
+            ":func:`~bamboo.codemap.panda.pathcond.arm_condition` of that statement's node in the caller: the caller's "
+            "tests, its marks the caller's lines.  They hold when that statement runs -- a hand-off's when it hands, "
+            "not when what it handed runs."
+        ),
+    )
+    unread: str = Field(default="", description="Why *conditions* were not read; empty where they were.")
+
+
+class EnteredFrom(BaseModel):
+    """Where a function holding a junction's arms is entered from -- for a reader ruling an arm out by the tests its
+    function was called under (the querier's R3).
+
+    One per function: *sites* is every edge of the reach record into it, each with the caller's tests at the
+    statement (:class:`EnteredSite`), and *open* each reason those may not be every way in (:class:`EnteredOpen`).
+    Where *open* is empty, the function ran only from one of *sites*: with one site its conditions held whenever an
+    arm of it ran; with several, one site's did.  ``doGeneratePrePro`` is entered from ``doGenerate`` 1151 alone, under
+    ``taskSpec.usePrePro()``.  The far end of a forwarder (:data:`bamboo.codemap.callfacts.FORWARDERS`) runs a call
+    its near end made, which the record holds already, so it is no way in.  One level: a caller's own ways in are its
+    record, where it holds arms.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    line: int = Field(description="The line of its ``def``.")
+    arms: list[int] = Field(default_factory=list, description="The lines of the junction branches it holds.")
+    sites: list[EnteredSite] = Field(default_factory=list)
+    open: list[EnteredOpen] = Field(default_factory=list)
 
 
 class Runnable(BaseModel):
