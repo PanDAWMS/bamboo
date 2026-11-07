@@ -778,9 +778,11 @@ class Fixer:
 def test_the_record_keeps_every_path_and_follow_says_where_its_cap_stops_it(
     tmp_path,
 ):
-    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: the
-    parts cap is what stops the cycle, and follow says where it did; may_change names ``follow_capped``.  The
-    record keeps a path however long -- how far one is read is follow's."""
+    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: past
+    the parts cap a turn of that loop is read once (objects._folded), so setOwner's
+    ``self._owner.Files[]._owner.Files[]._owner`` is no stop; a path longer than the cap with no loop of fields in
+    it is still stopped, follow says where, and may_change names ``follow_capped``.  The record keeps a path however
+    long -- how far one is read is follow's."""
     owned = """\
 class FileSpec:
     def setOwner(self, owner):
@@ -822,14 +824,18 @@ class Runner:
         (site.owner, site.line, site.how[len(spent) :]) for site in found.capped
     } == {
         (run, _line(owned, "deep = "), deep),
+        # deep + ".Files[]._owner.Files[]._owner" is read as this one, past the cap still.
         (run, _line(owned, "deep = "), deep + ".Files[]._owner"),
-        (run, _line(owned, "deep = "), deep + ".Files[]._owner.Files[]._owner"),
-        (
-            "pkg/owned.py::FileSpec.setOwner",
-            _line(owned, "self._owner = owner"),
-            "self._owner.Files[]._owner.Files[]._owner",
-        ),
     }
+    assert (
+        objects._folded("self._owner.Files[]._owner.Files[]._owner")
+        == "self._owner.Files[]._owner"
+    )
+    # Within the cap, and a block of elements alone (the object, or a list holding it), are not folded.
+    assert objects._folded("job.Files[]._owner.Files[]._owner") == (
+        "job.Files[]._owner.Files[]._owner"
+    )
+    assert objects._folded("self.vos[][][][][][][]") == "self.vos[][][][][][][]"
     assert all(
         objects._parts(path) <= objects.MAX_PARTS
         for paths in found.held.values()

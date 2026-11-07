@@ -40,10 +40,12 @@ read as run), which can only say an object reaches more than it does.  The other
 record does not read (:mod:`bamboo.codemap.panda.objects` lists it) the
 object is not followed through, and it can reach more than this says.  Nor
 is it followed past its caps -- a path longer than :data:`MAX_PARTS` parts,
-which is what stops a cycle (a job's file's owner is the job), more than
-:data:`MAX_HELD` paths in one function, :data:`MAX_STATES` states --, each
-said where it is met (:attr:`ObjectReach.capped`, :attr:`ObjectReach.cut`);
-:func:`may_change` names ``follow_capped`` where one was.
+more than :data:`MAX_HELD` paths in one function, :data:`MAX_STATES` states
+--, each said where it is met (:attr:`ObjectReach.capped`,
+:attr:`ObjectReach.cut`); :func:`may_change` names ``follow_capped`` where
+one was.  A path past the parts cap that goes round a loop of fields again
+-- a job's file's owner is the job, so ``job.Files[]._owner.Files[]._owner``
+-- is read as one turn of it (:func:`_folded`), not stopped.
 
 A path's parts are matched one by one (:func:`_under`): ``[]``, an element
 at a position not known, matches a tuple's ``[i]`` and a literal key's
@@ -209,6 +211,7 @@ def follow(
 
     def into(child: _State, link: _Link) -> None:
         """Bring the object into *child* by *link*; what *child* already says of it goes back at once."""
+        child = (child[0], _folded(child[1]))
         if _parts(child[1]) > MAX_PARTS:
             capped[
                 Site(
@@ -380,6 +383,7 @@ def _hand_back(
                 receivers = [link.via]
             names = [receiver + below for receiver in receivers]
         for name in names:
+            name = _folded(name)
             if name == link.caller[1] or name in held:
                 continue
             if _parts(name) > MAX_PARTS:
@@ -474,7 +478,7 @@ def _held_steps(
                         continue
                     if way == _BACK and entered.get(one):
                         continue
-                    taken = to + rest
+                    taken = _folded(to + rest)
                     if way == _FORWARD and (taken in entered or taken not in held):
                         entered[taken].add(index)
                     if taken in held:
@@ -605,6 +609,36 @@ def _holds(held: set[str], path: str) -> bool:
         return True
     keyed = held if not _plain(path) else [one for one in held if not _plain(one)]
     return any(_under(one, path) == "" for one in keyed)
+
+
+def _folded(path: str) -> str:
+    """*path*, where it is longer than :data:`MAX_PARTS`, with each block of parts that runs twice in a row, a field
+    among them, read once: ``self._owner.Files[]._owner.Files[]._owner`` is ``self._owner.Files[]._owner``.
+
+    Such a path goes round a loop of fields again -- :meth:`JobSpec.addFile` hands the job to the file's
+    ``setOwner``, so a job's file's owner is the job, and each pass through the call held the job one turn deeper
+    -- and one turn says where every turn holds the object.  Read once, the follow comes back to a path it holds
+    instead of growing to the cap.  A block of elements alone (``vos[][]``: the object, or a list holding it) is no
+    loop of fields, nor is a path within the cap: both are *path* itself."""
+    if _parts(path) <= MAX_PARTS:
+        return path
+    tokens = list(_tokens(path))
+    changed = True
+    while changed:
+        changed = False
+        parts = tokens[1:]
+        for size in range(1, len(parts) // 2 + 1):
+            for at in range(len(parts) - 2 * size + 1):
+                block = parts[at : at + size]
+                if block == parts[at + size : at + 2 * size] and any(
+                    one.startswith(".") for one in block
+                ):
+                    tokens = [tokens[0], *parts[: at + size], *parts[at + 2 * size :]]
+                    changed = True
+                    break
+            if changed:
+                break
+    return "".join(tokens)
 
 
 def _parts(path: str) -> int:
