@@ -2585,6 +2585,125 @@ def test_a_call_handed_a_list_the_arm_s_object_is_put_in_is_read_for_later_write
     assert ("Proxy.archiveJob", line("S3"), "row", ["failed"], True) in c4[3]
 
 
+PRIOR_SPEC = """\
+class JobSpec:
+    _attributes = ("PandaID", "jobName", "jobStatus")
+"""
+
+PRIOR_WRITTEN = """\
+import re
+
+from pkg.spec import JobSpec
+
+
+class Store:
+    def insertNewJob(self, job: JobSpec, originPandaID):
+        newJobName = re.sub("\\\\$ORIGINPANDAID", str(originPandaID), job.jobName)
+        if newJobName != job.jobName:
+            job.jobName = newJobName  # L1
+
+
+class Gen:
+    def augmented(self, job: JobSpec, flag):
+        job.jobName = "t"  # A1
+        if flag:
+            job.jobName += ".x"  # G1
+
+    def direct(self, job: JobSpec, flag):
+        job.jobName = "t"  # A2
+        if flag:
+            job.jobName = job.jobName.strip()  # D1
+
+    def other(self, job: JobSpec, src: JobSpec, flag):
+        job.jobName = "t"  # A3
+        if flag:
+            job.jobName = src.jobName  # O1
+
+    def two(self, job: JobSpec, flag, more):
+        job.jobName = "t"  # A4
+        if flag:
+            name = job.jobName + "a"
+        else:
+            name = job.jobName + "b"
+        if more:
+            job.jobName = name  # T1
+
+    def handed(self, store: Store, n):
+        job = JobSpec()
+        job.jobName = "t.$ORIGINPANDAID"  # A5
+        store.insertNewJob(job, n)  # C1
+
+    def name_it(self, job: JobSpec):
+        job.jobName = "t"  # A6
+
+    def outer(self):
+        job = JobSpec()
+        self.name_it(job)  # C2
+        job.jobName = job.jobName + ".1"  # U1
+"""
+
+
+def test_a_store_reading_the_value_it_replaces_says_its_value_as_an_expression_of_it(
+    tmp_path: Path,
+) -> None:
+    """A later store whose value reads the same holder's column -- in the value, by an augmented assignment, or in
+    the one binding reaching the local it is -- says its value with the replaced one as ``PRIOR``, in the arm's
+    function, in a call's run, and in a caller; another object's column, or a local two bindings reach, says
+    nothing.  The arm's own function's later stores are under a test, so the arm's value reaches a read."""
+    owners = ["augmented", "direct", "other", "two", "handed", "name_it"]
+    arms = [
+        ("prior", f"Gen.{owner}", f"A{n}", "JobSpec.jobName")
+        for n, owner in enumerate(owners, 1)
+    ]
+    fragment = _build(tmp_path, arms, spec=PRIOR_SPEC, prior=PRIOR_WRITTEN)
+    line = lambda marker: _line(PRIOR_WRITTEN, marker)  # noqa: E731
+
+    def said(marker: str) -> list[tuple]:
+        return [
+            (
+                one.level,
+                one.how,
+                one.line,
+                [
+                    (site.owner.rpartition("::")[2], site.line, site.of_prior)
+                    for site in one.sites
+                ],
+            )
+            for one in _branch(fragment, marker).rewrites or []
+            if one.column == "jobName"
+        ]
+
+    assert said("A1") == [
+        (0, "store", line("G1"), [("Gen.augmented", line("G1"), "PRIOR + '.x'")])
+    ]
+    assert said("A2") == [
+        (0, "store", line("D1"), [("Gen.direct", line("D1"), "PRIOR.strip()")])
+    ]
+    assert said("A3") == [(0, "store", line("O1"), [("Gen.other", line("O1"), "")])]
+    assert said("A4") == [(0, "store", line("T1"), [("Gen.two", line("T1"), "")])]
+    # 3175's shape: the local's one binding reads the prior value; the store is under a test, not carried.
+    assert said("A5") == [
+        (
+            0,
+            "call",
+            line("C1"),
+            [
+                (
+                    "Store.insertNewJob",
+                    line("L1"),
+                    r"re.sub('\\$ORIGINPANDAID', str(originPandaID), PRIOR)",
+                )
+            ],
+        )
+    ]
+    assert said("A6") == [
+        (1, "store", line("U1"), [("Gen.outer", line("U1"), "PRIOR + '.1'")])
+    ]
+    # The value the store writes is said as before.
+    (g1,) = _branch(fragment, "A1").rewrites or []
+    assert g1.sites[0].values == ["runtime(job.jobName + '.x')"]
+
+
 LOGGED = """\
 from pkg.spec import JobSpec
 

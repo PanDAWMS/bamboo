@@ -110,6 +110,9 @@ LATER = frozenset(
     }
 )
 
+#: The name :attr:`RewriteSite.of_prior` gives the value a store replaces.
+PRIOR = "PRIOR"
+
 #: The column a class's row is named by, for :func:`objects.may_change`'s key: a history table's, and a file's.
 ROW_KEYS: dict[str, str] = {**runs.HISTORY_KEYS, "FileSpec": "row_ID"}
 
@@ -382,7 +385,12 @@ class _Later:
             got, frames = self._written_value(one.site, func, column)
             line = one.site.lineno
             site = RewriteSite(
-                owner=owner, line=line, how=REWRITE_STORE, values=got, frames=frames
+                owner=owner,
+                line=line,
+                how=REWRITE_STORE,
+                values=got,
+                frames=frames,
+                of_prior=_of_prior(one.site, func, column),
             )
             _found(
                 found,
@@ -452,6 +460,7 @@ class _Later:
                         how=REWRITE_STORE,
                         values=got,
                         frames=frames,
+                        of_prior=_of_prior(statement, func, column),
                     )
                     _found(
                         found,
@@ -668,6 +677,7 @@ class _Later:
             values=got,
             frames=frames,
             written=written,
+            of_prior=_of_prior(statement, held[1], column),  # type: ignore[index]
         )
 
     def _row_values(
@@ -749,6 +759,75 @@ class _Later:
             return sorted(set(settled)), []
         reading = values.value_reading(expression, func)  # type: ignore[arg-type]
         return [progress._runtime(expression)], list(reading.frames)
+
+
+def _of_prior(statement: ast.stmt, func: Optional[ast.AST], column: str) -> str:
+    """What *statement*, a store of *column*, writes as an expression of the value it replaces, that value spelled
+    :data:`PRIOR`, where it reads it -- the same holder's *column* -- in its value (``x.col = f(x.col)``, ``x.col +=
+    v``) or in the value of the one binding reaching the local its value is (``newJobName = re.sub(..., job.jobName)``
+    before ``job.jobName = newJobName``); else ``""``."""
+    if isinstance(statement, ast.AugAssign):
+        augmented = statement.target
+        if not (isinstance(augmented, ast.Attribute) and augmented.attr == column):
+            return ""
+        prior = ast.Name(id=PRIOR, ctx=ast.Load())
+        return ast.unparse(
+            ast.BinOp(left=prior, op=statement.op, right=statement.value)
+        )
+    if (
+        not isinstance(statement, (ast.Assign, ast.AnnAssign))
+        or statement.value is None
+    ):
+        return ""
+    targets = (
+        statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+    )
+    target = next(
+        (
+            one
+            for one in targets
+            if isinstance(one, ast.Attribute) and one.attr == column
+        ),
+        None,
+    )
+    if target is None:
+        return ""
+    holder = ast.unparse(target.value)
+    value = statement.value
+    spelled = _with_prior(value, holder, column)
+    if spelled or not isinstance(value, ast.Name):
+        return spelled
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    sites = pathcond.held_at(func, value.id, statement).sites
+    if len(sites) != 1:
+        return ""
+    (site,) = sites
+    if (
+        isinstance(site, ast.Assign)
+        and len(site.targets) == 1
+        and isinstance(site.targets[0], ast.Name)
+    ) or (isinstance(site, ast.AnnAssign) and isinstance(site.target, ast.Name)):
+        return _with_prior(site.value, holder, column) if site.value is not None else ""
+    return ""
+
+
+def _with_prior(value: ast.expr, holder: str, column: str) -> str:
+    """*value* with :data:`PRIOR` for each read of *holder*'s *column* (``holder.column``, by its text); ``""`` where
+    it reads none."""
+    fresh = ast.parse(ast.unparse(value), mode="eval").body
+    found = False
+
+    class _Prior(ast.NodeTransformer):
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            nonlocal found
+            if node.attr == column and ast.unparse(node.value) == holder:
+                found = True
+                return ast.Name(id=PRIOR, ctx=ast.Load())
+            return self.generic_visit(node)
+
+    spelled = _Prior().visit(fresh)
+    return ast.unparse(spelled) if found else ""
 
 
 def _spelled(text: str) -> str:

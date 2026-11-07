@@ -745,6 +745,15 @@ class RewriteSite(BaseModel):
             "pass may still take."
         ),
     )
+    of_prior: str = Field(
+        default="",
+        description=(
+            "For a store whose value reads the value it replaces -- the same holder's column, in the value or in the "
+            "value of the one binding reaching the local it is --: that value as an expression of the replaced one, "
+            "spelled ``PRIOR`` (:data:`bamboo.codemap.panda.rewrites.PRIOR`): ``re.sub('\\\\$ORIGINPANDAID', "
+            "str(originPandaID), PRIOR)``.  ``\"\"`` else, and for a row."
+        ),
+    )
 
 
 class Rewrite(BaseModel):
