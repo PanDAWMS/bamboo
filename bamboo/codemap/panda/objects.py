@@ -1187,15 +1187,23 @@ class _Values:
                 continue
             given = C.bind(call, target, placed.on_class)
             for argument, held, at in passed:
-                taken = [name for name, value in given.items() if value is argument]
-                if not taken and isinstance(argument, ast.Starred):
-                    taken = [""]
+                taken = [
+                    (name, held, at)
+                    for name, value in given.items()
+                    if value is argument
+                ]
                 if not taken:
-                    taken = [_rest_parameter(target.func, argument in call.args)]
-                for name in taken:
+                    taken = _spread(call, target, placed.on_class, argument, held, at)
+                if not taken:
+                    taken = [
+                        (_rest_parameter(target.func, argument in call.args), held, at)
+                    ]
+                for name, path, inside in taken:
                     _add(
                         self.handed,
-                        CallBinding(line=line, to=to, parameter=name, path=held, at=at),
+                        CallBinding(
+                            line=line, to=to, parameter=name, path=path, at=inside
+                        ),
                     )
             # The receiver is ``self`` only where the method called is the one named: ``self.plugin_class(job)``
             # builds a new object, which is the call's result, not ``self``.
@@ -1400,6 +1408,76 @@ def _scalar(expr: Optional[ast.expr]) -> bool:
 def _cut(node: ast.AST) -> str:
     text = ast.unparse(node)
     return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _spread(
+    call: ast.Call,
+    target: C.Target,
+    on_class: bool,
+    argument: ast.expr,
+    held: str,
+    at: str,
+) -> list[tuple[str, str, str]]:
+    """The parameters a ``*x`` or ``**y`` argument fills: each with the path it takes and where in its value.
+
+    ``f(a, *x)``: the parameter at the second position takes ``x[0]``, the next ``x[1]``, and so on; what *held*
+    puts at a position of x goes to that position's parameter, and at a position not known -- or after another
+    ``*`` -- to each of them.  ``f(**y)``: a parameter the call fills neither by position nor by name takes
+    ``y['name']``; what is under a key goes to the parameter of that name.  A ``*args`` / ``**kwargs`` of the callee
+    takes what no named parameter can.  Empty where *argument* is no spread; ``("", held, at)`` -- the call does not
+    say which parameter -- where no parameter can take it.
+    """
+    func = target.func
+    params = func.args  # type: ignore[attr-defined]
+    positional = [one.arg for one in C._positional(target, on_class)]
+    named = {keyword.arg for keyword in call.keywords if keyword.arg}
+    stars = [
+        index for index, one in enumerate(call.args) if isinstance(one, ast.Starred)
+    ]
+    plain = stars[0] if stars else len(call.args)
+    first, _, below = at.partition("]")
+    first, below = (first + "]", below) if at.startswith("[") else ("", at)
+    found: list[tuple[str, str, str]] = []
+    if isinstance(argument, ast.Starred) and argument in call.args:
+        index = call.args.index(argument)
+        known = index == plain
+        slots = [
+            (position - index, name)
+            for position, name in enumerate(positional)
+            if position >= (index if known else plain) and name not in named
+        ]
+        position = int(first[1:-1]) if known and first[1:-1].isdigit() else None
+        for offset, name in slots:
+            if not at:
+                found.append((name, f"{held}[{offset}]" if known else f"{held}[]", ""))
+            elif position is None or position == offset:
+                found.append((name, held, below if first else at))
+        rest = params.vararg
+        if rest is not None and (
+            position is None or position not in {offset for offset, _ in slots}
+        ):
+            found.append((f"*{rest.arg}", held, at))
+    elif any(
+        keyword.arg is None and keyword.value is argument for keyword in call.keywords
+    ):
+        keyable = [
+            name
+            for position, name in enumerate(positional)
+            if position >= plain and name not in {one.arg for one in params.posonlyargs}
+        ] + [one.arg for one in params.kwonlyargs]
+        free = [name for name in keyable if name not in named]
+        key = first[2:-2] if first.startswith(("['", '["')) else None
+        for name in free:
+            if not at:
+                found.append((name, f"{held}['{name}']", ""))
+            elif key is None or key == name:
+                found.append((name, held, below if first else at))
+        rest = params.kwarg
+        if rest is not None and (key is None or key not in free):
+            found.append((f"*{rest.arg}", held, at))
+    else:
+        return []
+    return found or [("", held, at)]
 
 
 def _rest_parameter(func: ast.AST, positional: bool) -> str:

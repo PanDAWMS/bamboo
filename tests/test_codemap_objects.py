@@ -941,6 +941,27 @@ class Forms:
 
     def columns(self, job: JobSpec):
         job.jobStatus, job.PandaID = "x", 1
+
+    def take(self, first: JobSpec, second, mode=None):
+        first.jobStatus = "taken"
+        second.ddmErrorCode = 5
+
+    def spread(self, job: JobSpec, other):
+        args = (job, other)
+        self.take(*args)
+
+    def spread_named(self, job: JobSpec, other):
+        kw = {"second": job}
+        self.take(other, **kw)
+
+    def spread_rows(self, rows):
+        for args, kwargs in rows:
+            self.take(*args, **kwargs)
+
+    def spread_bulk(self, job: JobSpec, other):
+        rows = []
+        rows.append(((job, other), {"mode": 1}))
+        self.spread_rows(rows)
 """
 
 _FORMS = "pkg/forms.py::Forms"
@@ -1081,6 +1102,40 @@ def test_a_list_made_of_a_tuple_is_read_at_any_position(tmp_path):
     _fragment, rows = _forms(tmp_path)
     owner = f"{_FORMS}.reordered"
     assert "second" in objects.follow(rows, owner, "job").held[owner]
+
+
+def test_a_spread_hands_each_parameter_what_is_at_its_position_or_key(tmp_path):
+    """``self.take(*args)`` with ``args = (job, other)``: first is the job, second is not.  ``**kw`` with
+    ``kw = {"second": job}``: second is.  Rows of ``(args, kwargs)`` handed to a loop that spreads them: the same."""
+    _fragment, rows = _forms(tmp_path)
+    take = f"{_FORMS}.take"
+    bound = {
+        (one.parameter, one.path, one.at)
+        for one in rows[f"{_FORMS}.spread"].call_bindings
+        if one.to == take
+    }
+    assert {("first", "args[0]", ""), ("second", "args[1]", "")} <= bound
+    assert not any(not parameter for parameter, _path, _at in bound)
+    by_key = {
+        (one.parameter, one.path)
+        for one in rows[f"{_FORMS}.spread_named"].call_bindings
+        if one.to == take
+    }
+    assert {
+        ("first", "other"),
+        ("second", "kw['second']"),
+        ("mode", "kw['mode']"),
+    } <= by_key
+    assert ("first", "kw['first']") not in by_key  # first is filled by position
+    for owner, attr, other in (
+        ("spread", "jobStatus", "ddmErrorCode"),
+        ("spread_named", "ddmErrorCode", "jobStatus"),
+        ("spread_bulk", "jobStatus", "ddmErrorCode"),
+    ):
+        found = objects.follow(rows, f"{_FORMS}.{owner}", "job")
+        assert _assigned(found).get(attr) == {"Forms.take"}, owner
+        assert other not in _assigned(found), owner
+        assert not found.holes, owner
 
 
 def test_a_tuple_targets_columns_are_assigned(tmp_path):
