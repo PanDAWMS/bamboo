@@ -267,8 +267,9 @@ def test_the_records_are_paths_of_the_function(tmp_path):
         for c in process.call_bindings
         if c.to == "pkg/proxy.py::TaskBuffer.updateJobs"
     ]
+    # updateJobs([self.job]): a list literal keeps its positions, so the job is jobs[0]
     assert {(c.parameter, c.path, c.at) for c in updated} == {
-        ("jobs", "self.job", "[]"),
+        ("jobs", "self.job", "[0]"),
         ("self", "self.tb", ""),
     }
     assert not any(c.path.startswith("threading") for c in process.call_bindings)
@@ -962,6 +963,33 @@ class Forms:
         rows = []
         rows.append(((job, other), {"mode": 1}))
         self.spread_rows(rows)
+
+    def spread_list(self, job: JobSpec, other):
+        rows = []
+        rows.append([[job, other], {"mode": 1}])
+        self.spread_rows(rows)
+
+    def listed(self, job: JobSpec, other):
+        pair = [job, other]
+        first = pair[0]
+        second = pair[1]
+        first.jobStatus = "first"
+        second.ddmErrorCode = 6
+
+    def sorted_pair(self, job: JobSpec, other):
+        pair = [job, other]
+        pair.sort()
+        second = pair[1]
+        second.ddmErrorCode = 7
+
+    def sort_it(self, pair):
+        pair.sort()
+
+    def handed_sorted(self, job: JobSpec, other):
+        pair = [job, other]
+        self.sort_it(pair)
+        second = pair[1]
+        second.ddmErrorCode = 8
 """
 
 _FORMS = "pkg/forms.py::Forms"
@@ -1136,6 +1164,22 @@ def test_a_spread_hands_each_parameter_what_is_at_its_position_or_key(tmp_path):
         assert _assigned(found).get(attr) == {"Forms.take"}, owner
         assert other not in _assigned(found), owner
         assert not found.holes, owner
+
+
+def test_a_list_literal_keeps_its_positions_until_a_method_moves_them(tmp_path):
+    """``pair = [job, other]``: ``pair[0]`` is the job, ``pair[1]`` is not -- until ``pair.sort()``, here or in a
+    function it is handed to, after which any position can be.  Rows of ``[args, kwargs]`` lists spread as tuples."""
+    _fragment, rows = _forms(tmp_path)
+    listed = _assigned(objects.follow(rows, f"{_FORMS}.listed", "job"))
+    assert listed.get("jobStatus") == {"Forms.listed"}
+    assert "ddmErrorCode" not in listed
+    for owner in ("sorted_pair", "handed_sorted"):
+        moved = _assigned(objects.follow(rows, f"{_FORMS}.{owner}", "job"))
+        assert moved.get("ddmErrorCode") == {f"Forms.{owner}"}, owner
+    found = objects.follow(rows, f"{_FORMS}.spread_list", "job")
+    assert _assigned(found).get("jobStatus") == {"Forms.take"}
+    assert "ddmErrorCode" not in _assigned(found)
+    assert not found.holes
 
 
 def test_a_tuple_targets_columns_are_assigned(tmp_path):

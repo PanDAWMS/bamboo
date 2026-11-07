@@ -39,7 +39,8 @@ def _puts(name: str, text: str) -> list[tuple[str, str, str]]:
 
 def test_a_builtin_method_is_said_once_by_its_type_and_by_its_name_for_every_type_having_it():
     """``setdefault`` is a dict's: its key and the value under it.  ``update`` by its name is a dict's merge and a
-    set's elements together; ``pop`` puts nothing, changes its receiver and hands back one of what it holds."""
+    set's elements together; ``pop`` puts nothing, changes its receiver, hands back one of what it holds, and -- a
+    list's -- moves what it holds."""
     setdefault = callfacts.builtin_method("dict", "setdefault")
     assert setdefault is not None and [put.into for put in setdefault.puts] == [callfacts.KEY, callfacts.VALUE]
     assert {put.into for put in callfacts.by_name("update").puts} == {
@@ -47,7 +48,12 @@ def test_a_builtin_method_is_said_once_by_its_type_and_by_its_name_for_every_typ
         callfacts.VALUE,
         callfacts.ELEMENTS,
     }
-    assert callfacts.by_name("pop") == callfacts.Method((), True, callfacts.Give(callfacts.AT, 0, 1))
+    # a list's pop moves what it holds (pop(0)); by its name it is every type's
+    assert callfacts.by_name("pop") == callfacts.Method((), True, callfacts.Give(callfacts.AT, 0, 1), True)
+    assert callfacts.builtin_method("set", "pop") == callfacts.Method((), True, callfacts.Give(callfacts.AT))
+    assert {"insert", "pop", "remove", "sort", "reverse"} == {
+        name for (one, name), method in callfacts.BUILTIN_METHODS.items() if one == "list" and method.moves
+    }
     assert callfacts.by_name("format") is None
     assert {"append", "add", "insert", "extend", "update", "setdefault"} <= callfacts.PUTTING
     assert "pop" not in callfacts.PUTTING and {"pop", "remove", "clear", "sort"} <= callfacts.CHANGING

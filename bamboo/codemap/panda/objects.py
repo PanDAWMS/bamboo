@@ -45,9 +45,17 @@ container's elements: a slice moves positions), a subscript or an attribute
 of any of them, an await, a walrus, a call's result; the targets of an
 assignment (a tuple target at any depth, ``*rest``), an augmented
 assignment, a loop, a return and a yield, a call's arguments and receiver.
-Only a tuple makes ``[i]`` -- it cannot be reordered, and whatever else puts
-into a container puts at ``[]``, which every position matches -- and a
-literal int written to (``x[0] = v``) is ``[]``.
+A tuple or list literal makes ``[i]``, until a ``*`` in it; a method that
+moves what its list holds -- ``insert``, ``pop``, ``remove``, ``sort``,
+``reverse`` (callfacts' ``Method.moves``) -- binds ``x[] <- x[]``: every
+element may be at any position after, before it too, as bindings are read
+without order; a call handing the list to a parameter its callee moves
+itself (``rses.sort()``, one hop) binds the same at the call.  Not
+read as a move: ``del x[i]``, a slice assignment, ``random.shuffle`` (no
+case of the corpus reaches a list literal by them, and ``del d[k]`` would
+lose a dict's keys).  Whatever else puts into a container puts at ``[]``,
+which every position matches, and a literal int written to (``x[0] = v``)
+is ``[]``.
 
 A call that lands in a function of the corpus is that call: its result is
 bound with the functions it lands in (``PathBinding.to``), not with the
@@ -576,7 +584,7 @@ class _Values:
         held = self.versions.paths(expr)
         if held:
             return [_Carry("", one) for one in held]
-        if isinstance(expr, ast.Tuple):
+        if isinstance(expr, (ast.Tuple, ast.List)):
             found: list[_Carry] = []
             known = True  # a position after a starred element is not known
             for index, one in enumerate(expr.elts):
@@ -586,7 +594,7 @@ class _Values:
                 else:
                     found += _shift(self.carried(one), f"[{index}]" if known else "[]")
             return found
-        if isinstance(expr, (ast.List, ast.Set)):
+        if isinstance(expr, ast.Set):
             return [carry for one in expr.elts for carry in self._element(one)]
         if isinstance(expr, ast.Dict):
             found = []
@@ -632,7 +640,7 @@ class _Values:
         return []
 
     def _element(self, one: ast.expr) -> list[_Carry]:
-        """What an element of a list or set literal puts at a position not known: ``[a, *b]``."""
+        """What an element of a set literal puts at a position not known: ``{a, *b}``."""
         if isinstance(one, ast.Starred):
             return _shift(_index(self.carried(one.value), "[]"), "[]")
         return _shift(self.carried(one), "[]")
@@ -1072,6 +1080,10 @@ class _Values:
         )
         if meant.method is None or meant.kind not in _FILLING:
             return
+        if meant.method.moves:
+            # sort, insert, pop ...: what the receiver held at a position may now be at any
+            for base in self.target_paths(called.value):  # type: ignore[attr-defined]
+                self._bind(line, base + "[]", base + "[]", BIND_FILL)
         items = []
         for value, put, key, keyword in callfacts.put_arguments(meant.method, call):
             if put.into == callfacts.ELEMENT:
@@ -1205,6 +1217,9 @@ class _Values:
                             line=line, to=to, parameter=name, path=path, at=inside
                         ),
                     )
+                    if not inside and name and _moves_parameter(target.func, name):
+                        # rses.sort() in the callee: what the caller handed may be at any position after
+                        self._bind(line, path + "[]", path + "[]", BIND_FILL)
             # The receiver is ``self`` only where the method called is the one named: ``self.plugin_class(job)``
             # builds a new object, which is the call's result, not ``self``.
             if (
@@ -1255,8 +1270,8 @@ def _attribute(items: list[_Carry], name: str) -> list[_Carry]:
 def _subscript(key: ast.expr, store: bool = False) -> str:
     """The part a subscript reads: ``['k']`` for a literal str key, ``[i]`` for a literal int read, else ``[]``.
 
-    An int written to (``x[0] = v``) is ``[]``: a list it is written in can
-    be reordered later, and only a tuple, which cannot, keeps its positions.
+    An int written to (``x[0] = v``) is ``[]``: no reader needs the position
+    a value is written at.
     """
     if isinstance(key, ast.Constant):
         if isinstance(key.value, str):
@@ -1478,6 +1493,27 @@ def _spread(
     else:
         return []
     return found or [("", held, at)]
+
+
+#: The builtin containers' methods that move what they hold to other positions (callfacts' ``Method.moves``).
+_MOVING = frozenset(
+    called
+    for (_type, called), method in callfacts.BUILTIN_METHODS.items()
+    if method.moves
+)
+
+
+def _moves_parameter(func: ast.AST, name: str) -> bool:
+    """Whether *func* calls a moving method (:data:`_MOVING`) on its parameter *name* itself: one hop, read by the
+    method's name, as a receiver whose class is not said is read (``rses.sort()``)."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _MOVING
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == name
+        for node in C.own_nodes(func)
+    )
 
 
 def _rest_parameter(func: ast.AST, positional: bool) -> str:

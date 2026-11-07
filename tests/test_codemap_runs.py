@@ -533,7 +533,7 @@ def test_a_row_written_for_each_element_of_a_list_can_be_the_arms(
     )
     archive_all = "pkg/proxy.py::DBProxy.archive_all"
     assert pair.row_via == [
-        f"pkg/proxy.py::DBProxy.finish:{_line(PROXY, 'C4')} -> {archive_all} jobs[]",
+        f"pkg/proxy.py::DBProxy.finish:{_line(PROXY, 'C4')} -> {archive_all} jobs[0]",
         f"{archive_all}:{_line(PROXY, 'B1')} element job",
         f"{archive_all}:{_line(PROXY, 'B2')} fill done[]",
         f"{archive_all}:{_line(PROXY, 'B3')} element one",
@@ -764,10 +764,10 @@ def test_a_way_goes_by_the_path_that_reaches_the_write_not_the_first_one_in(
     update, both = "pkg/ways.py::Ways.update_both", "pkg/ways.py::Ways.archive_both"
     assert (pair.row, pair.object) == (HISTORY_ROW_CAN, "job.PandaID")
     assert pair.row_via == [
-        f"pkg/ways.py::Ways.kill_both:{_line(WAYS, 'V2')} -> {update} jobs[].PandaID",
+        f"pkg/ways.py::Ways.kill_both:{_line(WAYS, 'V2')} -> {update} jobs[0].PandaID",
         f"{update}:{_line(WAYS, 'V11')} element job.PandaID",
         f"{update}:{_line(WAYS, 'V13')} -> {both} job.PandaID",
-        f"{both}:{_line(WAYS, 'V3')} fill done[].PandaID",
+        f"{both}:{_line(WAYS, 'V3')} fill done[0].PandaID",
         f"{both}:{_line(WAYS, 'V4')} element one.PandaID",
         f"{both}:{_line(WAYS, 'V5')} one.PandaID",
     ]
@@ -793,7 +793,7 @@ def test_a_way_through_a_call_that_hands_the_object_back_says_how_it_went_in(
     ways, kill_ids = "pkg/ways.py::Ways", "pkg/ways.py::Ways.kill_ids"
     assert (pair.row, pair.object) == (HISTORY_ROW_CAN, "panda_id")
     assert pair.row_via == [
-        f"{ways}.kill_one:{_line(WAYS, 'V10')} -> {kill_ids} ids[]",
+        f"{ways}.kill_one:{_line(WAYS, 'V10')} -> {kill_ids} ids[0]",
         f"{kill_ids}:{_line(WAYS, 'V6')} element one_id",
         f"{kill_ids}:{_line(WAYS, 'V7')} <- {ways}.peek_job found.PandaID",
         f"{kill_ids}:{_line(WAYS, 'V8')} found.PandaID",
