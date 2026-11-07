@@ -3898,6 +3898,7 @@ class MapFragment(BaseModel):
     set_froms: list["SetFrom"] = Field(default_factory=list)
     runnables: list["Runnable"] = Field(default_factory=list)
     entered_froms: list["EnteredFrom"] = Field(default_factory=list)
+    write_froms: list["WriteFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5758,7 +5759,9 @@ class GuardFrom(BaseModel):
     the test with a run's values: the querier's H3 reading an arm's guards in the rows' values.
 
     One per test on the way to a junction's arm (:func:`pathcond.tests_on`) and name it reads that is a parameter
-    or a local of the function; *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
+    or a local of the function, or an object rooted at ``self`` it reads a field or method of (``self`` for
+    ``self.splitRule is None``, ``self.taskSpec`` for ``not self.taskSpec.splitRule``: what a :class:`WriteFrom`
+    of an arm there writes); *arms* are the branches it is on the way to.  ``'reqID' in taskParamMap`` at
     ``TaskRefinerBase.extractCommon`` 156 reads ``taskParamMap``, a parameter: its one source is kind ``parameter``,
     and its :class:`ParameterFrom` says what the callers hand it.  Read by :mod:`bamboo.codemap.panda.heldfrom`:
 
@@ -5778,7 +5781,9 @@ class GuardFrom(BaseModel):
     owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
     test_line: int = Field(description="The line of the test.")
     test: str = Field(description="The test, as written (``'reqID' in taskParamMap``).")
-    name: str = Field(description="The name the test reads.")
+    name: str = Field(
+        description="The name the test reads, or the path of the object on ``self`` it reads off (``self.taskSpec``)."
+    )
     arms: list[int] = Field(
         default_factory=list, description="The lines of the junction branches the test is on the way to."
     )
@@ -5810,6 +5815,35 @@ class ParameterFrom(BaseModel):
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
 
+
+#: What a :class:`WriteFrom` reads of its arm: the object the arm writes a field of, or the value a passthrough arm
+#: hands on.
+WRITE_OBJECT = "object"
+WRITE_VALUE = "value"
+WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
+
+
+class WriteFrom(BaseModel):
+    """What the object a junction's arm writes holds, or the value a passthrough arm hands on, way by way -- read as
+    :class:`GuardFrom` reads a name, for a reader binding a guard's name to the row the arm writes by these records
+    rather than by how the name is spelled.
+
+    ``jobSpec.jediTaskID = taskSpec.jediTaskID`` at ``JobGenerator.doGenerate`` writes ``jobSpec`` (role ``object``),
+    a local whose one way ends at the ``JobSpec`` built at 1197, and hands on ``taskSpec.jediTaskID`` (role
+    ``value``), whose way ends at doGenerate's parameter ``taskSpec`` with the step ``.jediTaskID``: the parameter the
+    guard ``taskSpec.usePrePro()`` reads, so a reader holding both knows the guard reads the task whose ID the job is
+    given.  ``setattr(o, "f", v)`` writes ``o``; a call of a method of the subject's class at the arm's line
+    (``taskSpec.setOnHold()``) writes its receiver.  An SQL arm writes its statement's rows, and has none.  A way
+    says where it ends, not what may change the object on it (no *changes*): which object, not what it holds.
+    """
+
+    owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
+    line: int = Field(description="The branch's line.")
+    subject: str = Field(description="The junction's subject.")
+    role: str = Field(description=f"What is read: one of {', '.join(WRITE_ROLES)}.")
+    expression: str = Field(description="The expression read, as written (``jobSpec``, ``self.taskSpec``).")
+    sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
+    stops: list[KeyStop] = Field(default_factory=list, description="Each way not read to its end.")
 
 #: How a write gives a column its value (:attr:`SetFrom.value`): as the statement's text says it -- the kinds
 #: ``sqltext.ColumnValue`` reads -- or an object's field, where the statement writes the object's map.

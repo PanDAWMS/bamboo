@@ -759,7 +759,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         lap("ways in")
         # What each name an arm's tests read holds, way by way across calls: placed as the key sources' carry
         # places calls, ending at the read sites' rows as theirs do -- and the tests of the ways in too.
-        fragment.guard_froms, fragment.parameter_froms, fragment.set_froms = heldfrom.guard_froms(
+        # And what the object each arm writes, and the value each passthrough arm hands on, hold: a reader binds a
+        # guard's name to the arm's row where the two ways end alike.
+        (
+            fragment.guard_froms,
+            fragment.parameter_froms,
+            fragment.set_froms,
+            fragment.write_froms,
+        ) = heldfrom.guard_froms(
             fragment.junctions,
             fragment.read_sites,
             {module.rel_path: module.tree for module in self._modules},
