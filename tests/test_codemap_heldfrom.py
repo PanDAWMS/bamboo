@@ -4,6 +4,7 @@ refiner's guards."""
 
 from __future__ import annotations
 
+import ast
 import textwrap
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from bamboo.codemap.models import (
     ParameterFrom,
     SourceModule,
 )
-from bamboo.codemap.panda import attribution, heldfrom, sql
+from bamboo.codemap.panda import attribution, heldfrom, sql, sqltext
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
@@ -655,3 +656,157 @@ def test_a_call_gone_through_says_what_its_value_is_and_a_literal_it_raises_on_s
         for name in ("first", "item")
         for source in guards[name].sources
     ] == [[1], [0]]
+
+
+RETURNS_SPEC = "pandaserver/taskbuffer/JediTaskSpec.py"
+RETURNS_PROXY = "pandaserver/taskbuffer/db_proxy_mods/task_utils_module.py"
+
+RETURNS = {
+    RETURNS_SPEC: """\
+        class JediTaskSpec(object):
+            _attributes = ("jediTaskID", "status", "splitRule")
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    attr = self._attributes[i]
+                    val = values[i]
+                    object.__setattr__(self, attr, val)
+        """,
+    RETURNS_PROXY: """\
+        from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+        comment = " /* x */"
+
+
+        class TaskUtilsModule:
+            def getTaskWithID_JEDI(self, jediTaskID):
+                sql = "SELECT jediTaskID,status,splitRule FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                self.cur.execute(sql + comment, varMap)  # SELECT
+                res = self.cur.fetchone()
+                if res is None:
+                    return False, None
+                taskSpec = JediTaskSpec()
+                taskSpec.pack(res)
+                return True, taskSpec
+
+            def fresh(self, jediTaskID):
+                taskSpec = JediTaskSpec()
+                taskSpec.jediTaskID = jediTaskID
+                return True, taskSpec
+
+            def facade(self, jediTaskID):
+                return self.getTaskWithID_JEDI(jediTaskID)  # FACADE
+
+            def caller(self, jediTaskID):
+                tmpStat, taskSpec = self.getTaskWithID_JEDI(jediTaskID)
+                unpacked = taskSpec.splitRule  # UNPACKED
+                tmpStat, other = self.fresh(jediTaskID)
+                built = other.splitRule  # BUILT
+                indexed = self.getTaskWithID_JEDI(jediTaskID)[1].splitRule  # INDEXED
+                tmpStat, viaFacade = self.facade(jediTaskID)
+                faced = viaFacade.splitRule  # FACED
+                status = taskSpec.status  # STATUS
+        """,
+}
+
+
+@pytest.fixture(scope="module")
+def returned(tmp_path_factory: pytest.TempPathFactory) -> dict[str, set[tuple]]:
+    """What each local of ``caller`` holds, read as the build reads it: by the reader over the read sites, the corpus's
+    calls and the reach record, under the schema."""
+    tmp_path: Path = tmp_path_factory.mktemp("returned")
+    modules = []
+    for rel, text in RETURNS.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(text))
+        parsed = calls_mod.parsed(path)
+        assert parsed is not None
+        _source, tree = parsed
+        modules.append(
+            SourceModule(
+                package="pandaserver",
+                rel_path=rel,
+                tree=tree,
+                source=textwrap.dedent(text),
+                blob_sha=blob_sha(text),
+            )
+        )
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    assert calls is not None
+    trees = {module.rel_path: module.tree for module in modules}
+    caller = next(
+        node
+        for node in ast.walk(trees[RETURNS_PROXY])
+        if isinstance(node, ast.FunctionDef) and node.name == "caller"
+    )
+    schema = {"jedi_tasks": frozenset({"jeditaskid", "status", "splitrule"})}
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(schema, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+    ):
+        attributor = attribution.SpecAttributor(
+            progress.spec_attributes(modules), attribution.class_bases(modules)
+        )
+        attributor.learn_table_classes(modules)
+        sites = sqlwrite.read_site_nodes(
+            sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+        )
+        record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        reader = heldfrom._Reader(calls, record, sites, set(), trees)
+        found: dict[str, set[tuple]] = {}
+        for stmt in caller.body:
+            target = stmt.targets[0] if isinstance(stmt, ast.Assign) else None
+            if isinstance(target, ast.Name) and target.id != "tmpStat":
+                found[target.id] = {
+                    (
+                        one.kind,
+                        one.name.rpartition("::")[2],
+                        one.steps,
+                        one.column,
+                        tuple(int(where.rpartition(":")[2]) for where in one.route),
+                    )
+                    for one in reader.read(stmt.value, stmt, RETURNS_PROXY, caller)
+                }
+    return found
+
+
+def test_a_field_of_what_a_call_returns_is_read_in_the_callee_at_its_returns(
+    returned: dict[str, set[tuple]],
+) -> None:
+    """``taskSpec.splitRule`` of ``tmpStat, taskSpec = self.getTaskWithID_JEDI(jediTaskID)``: the callee packs the
+    row it selects into the object it returns, so the field is the row's column -- read there, at the return, not
+    as the object the caller would see built (``JediTaskSpec()``).  So too a call's element read directly and through
+    a facade; the failed ``return False, None`` gives a field of ``None``.  An object the callee builds itself stays
+    an object with the field's step."""
+
+    def at(marker: str) -> int:
+        return _line(RETURNS_PROXY, marker, RETURNS)
+
+    select = f"getTaskWithID_JEDI@{at('SELECT')}"
+
+    def row(column: str, *route: int) -> set[tuple]:
+        return {
+            ("rows", select, (), f"jedi_tasks.{column}", route),
+            (
+                "constant",
+                "None",
+                (f".{'splitRule' if column == 'splitrule' else column}",),
+                "",
+                route,
+            ),
+        }
+
+    assert returned["unpacked"] == row("splitrule", at("UNPACKED") - 1)
+    assert returned["indexed"] == row("splitrule", at("INDEXED"))
+    assert returned["faced"] == row("splitrule", at("FACED") - 1, at("FACADE"))
+    assert returned["status"] == row("status", at("UNPACKED") - 1)
+    assert returned["built"] == {
+        ("object", "JediTaskSpec", (".splitRule",), "", (at("BUILT") - 1,))
+    }

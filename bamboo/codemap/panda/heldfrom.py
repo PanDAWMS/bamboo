@@ -201,6 +201,16 @@ def _index(expr: ast.expr) -> Optional[int]:
     return None
 
 
+def _field_of(value: ast.expr, field: Optional[str]) -> ast.expr:
+    """*value*'s *field* (``value.field``), a node standing where *value* does; *value* itself with no *field*."""
+    if not field:
+        return value
+    node = ast.Attribute(value=value, attr=field, ctx=ast.Load())
+    ast.copy_location(node, value)
+    node.parent = getattr(value, "parent", None)  # type: ignore[attr-defined]
+    return node
+
+
 def _literal_of(site: ast.AST, name: str) -> Optional[ast.expr]:
     """The tuple or list literal *site*, an ``=`` to *name* alone, gives it; else ``None``."""
     targets = pathcond.targets_of(site)
@@ -245,8 +255,8 @@ class _Reader:
             self.sites_of.setdefault(site.owner, []).append(site)
         self._filled: dict[int, object] = {}
         self._cursor_fields: dict[int, set[str]] = {}
-        self._returns: dict[int, list[_Way]] = {}
-        self._returns_at: dict[tuple[int, int], list[_Way]] = {}
+        self._returns: dict[tuple[int, Optional[str]], list[_Way]] = {}
+        self._returns_at: dict[tuple[int, int, Optional[str]], list[_Way]] = {}
         self._yields: dict[int, list[_Way]] = {}
         self._generators: dict[int, bool] = {}
         self._active: set[tuple[int, int]] = set()
@@ -400,6 +410,10 @@ class _Reader:
                 chosen = self._element(expr.value, position, at, file, func)
                 if chosen is not None:
                     return chosen
+            if isinstance(expr, ast.Attribute):
+                returned = self._returned_field(expr, at, file, func)
+                if returned is not None:
+                    return returned
             if isinstance(expr, ast.Subscript):
                 index = expr.slice
                 step = (
@@ -427,22 +441,74 @@ class _Reader:
             )
         ]
 
+    def _returned_field(self, expr: ast.Attribute, at: ast.AST, file: str, func: ast.AST) -> Optional[list[_Way]]:
+        """The ways of a field of what a call of the corpus returns, read in the callee at its returns as that field
+        -- a field the callee filled from a row (``taskSpec.pack(res)``) is the row's column --: of the call, of its
+        element at a constant index, or of a name every reaching binding of which gives it one of these
+        (``tmpStat, taskSpec = self.taskBufferIF.getTaskWithID_JEDI(jediTaskID)``); ``None`` else, for the field's
+        step to be taken on the value's ways."""
+        value = expr.value
+        called = self._called_at(value, file, func)
+        if called is not None:
+            return self._call(called[0], file, func, called[1], field=expr.attr)
+        if not isinstance(value, ast.Name) or value.id in ("self", "cls") or not _bound_here(func, value.id):
+            return None
+        point = value if getattr(value, "parent", None) is not None else at
+        bound: list[tuple[ast.AST, tuple[ast.Call, Optional[int]]]] = []
+        for site in pathcond.held_at(func, value.id, point).sites:  # type: ignore[arg-type]
+            if not isinstance(site, (ast.Assign, ast.AnnAssign)):
+                return None
+            given = next(
+                (
+                    held
+                    for target, held in pathcond.assigned_targets(site)
+                    if isinstance(target, ast.Name) and target.id == value.id
+                ),
+                None,
+            )
+            called = self._called_at(given, file, func) if given is not None else None
+            if called is None:
+                return None
+            bound.append((site, called))
+        if not bound:
+            return None
+        last = _statement_of(point)
+        found: list[_Way] = []
+        for site, (call, index) in bound:
+            ways = self._call(call, file, func, index, field=expr.attr)
+            found += self._with_changes(value, site, ways, file, func, last)
+        return found
+
+    def _called_at(self, expr: ast.expr, file: str, func: ast.AST) -> Optional[tuple[ast.Call, Optional[int]]]:
+        """*expr* as a call of the corpus that returns (not the database's, not a generator's), with the constant
+        index of its element *expr* takes, if any; else ``None``."""
+        index = _index(expr)
+        call = expr.value if index is not None else expr  # type: ignore[attr-defined]
+        if not isinstance(call, ast.Call):
+            return None
+        if self.record is not None and self.record.is_database(file, call):
+            return None
+        placed = self.calls.callees(file, func, call)
+        if not placed.targets or placed.thread or any(self._is_generator(one) for one in placed.targets):
+            return None
+        return call, index
+
     def _element(
-        self, value: ast.expr, index: int, at: ast.AST, file: str, func: ast.AST
+        self, value: ast.expr, index: int, at: ast.AST, file: str, func: ast.AST, field: Optional[str] = None
     ) -> Optional[list[_Way]]:
         """The ways of *value*'s element at a constant *index* where a tuple or list literal gives it: the literal's
         own, a name's binding to one (each binding: the others' ways with the step ``[index]``), a call's returns
         (each return: the same); ``None`` where nothing does, for the caller to add the step.  ``retEvS, retNewPandaID
         = self.ppEventServiceJob(...)`` reads the call's returned ``(9, jobSpec.PandaID)``'s ``jobSpec.PandaID``, not
-        the tuple."""
+        the tuple.  With *field*, the ways of that field of the element (:meth:`_returned_field`)."""
         if isinstance(value, (ast.Tuple, ast.List)):
             element = _literal_element(value, index)
-            return self.read(element, at, file, func) if element is not None else None
+            return self.read(_field_of(element, field), at, file, func) if element is not None else None
         if isinstance(value, ast.Call):
             placed = self.calls.callees(file, func, value)
             if not placed.targets or placed.thread:
                 return None
-            return self._call(value, file, func, index)
+            return self._call(value, file, func, index, field=field)
         if not isinstance(value, ast.Name) or value.id in ("self", "cls") or not _bound_here(func, value.id):
             return None
         point = value if getattr(value, "parent", None) is not None else at
@@ -454,9 +520,10 @@ class _Reader:
         for site in sites:
             element = _literal_element(_literal_of(site, value.id), index)
             if element is not None:
-                found += self.read(element, site, file, func)
+                found += self.read(_field_of(element, field), site, file, func)
             else:
-                found += self._stepped(self._site_ways(value, point, site, file, func, last), f"[{index!r}]")
+                ways = self._stepped(self._site_ways(value, point, site, file, func, last), f"[{index!r}]")
+                found += self._of_field(ways, field)
         return found
 
     def _name(
@@ -482,7 +549,12 @@ class _Reader:
     ) -> list[_Way]:
         """The ways *site*, a binding reaching the read at *point*, gives *expr*, with what may change the object
         in place between."""
-        ways = self._bound(expr, point, site, file, func)
+        return self._with_changes(expr, site, self._bound(expr, point, site, file, func), file, func, last)
+
+    def _with_changes(
+        self, expr: ast.Name, site: ast.AST, ways: list[_Way], file: str, func: ast.AST, last: Optional[ast.stmt]
+    ) -> list[_Way]:
+        """*ways*, what *site* gives *expr*, with what may change the object in place between it and the read."""
         changed = () if _unchanging(func, expr.id, site, ways) else self._changed(file, func, expr.id, site, last)
         return [one._replace(changes=one.changes + changed) if changed and one.kind != _STOP else one for one in ways]
 
@@ -583,6 +655,11 @@ class _Reader:
     @staticmethod
     def _stepped(ways: list[_Way], step: str) -> list[_Way]:
         return [one if one.kind == _STOP else _step(one, step) for one in ways]
+
+    @classmethod
+    def _of_field(cls, ways: list[_Way], field: Optional[str]) -> list[_Way]:
+        """*ways* with the step ``.field`` where a *field* is asked."""
+        return cls._stepped(ways, f".{field}") if field else ways
 
     def _slot_column(self, way: _Way, slot: int, expr: ast.Name, file: str, func: ast.AST) -> _Way:
         """*way*, a statement's rows a loop unpacks, with the column of the select item at *slot* where it has none."""
@@ -727,12 +804,19 @@ class _Reader:
         return self._hop_at[(key, at)]
 
     def _call(
-        self, call: ast.Call, file: str, func: ast.AST, index: Optional[int] = None, yielded: bool = False
+        self,
+        call: ast.Call,
+        file: str,
+        func: ast.AST,
+        index: Optional[int] = None,
+        yielded: bool = False,
+        field: Optional[str] = None,
     ) -> list[_Way]:
         """The ways of what *call* returns -- of its element at a constant *index*, where one is read
         (:meth:`_element`).  A generator's call is the generator, not what the generator returns: with *yielded*,
         what it yields (:meth:`_yielded`) -- the element a loop over it takes, the value a ``with`` over it enters
-        (:meth:`_entered`) --, else a stop."""
+        (:meth:`_entered`) --, else a stop.  With *field*, the ways of that field of it, read in the callee at its
+        returns (:meth:`_returned_field`)."""
         placed = self.calls.callees(file, func, call)
         here = f"{file}:{call.lineno}"
         if placed.targets:
@@ -745,7 +829,8 @@ class _Reader:
                         else owner_of(target.file, target.func)
                     )
                     made = _Way(KEY_OBJECT, built, call.lineno)
-                    found.append(made if index is None else made._replace(steps=(f"[{index!r}]",)))
+                    steps = ((f"[{index!r}]",) if index is not None else ()) + ((f".{field}",) if field else ())
+                    found.append(made._replace(steps=steps))
                     continue
                 generator = self._is_generator(target)
                 if generator and not yielded:
@@ -754,11 +839,11 @@ class _Reader:
                 handed = bind(call, target, placed.on_class)
                 callee = (owner_of(target.file, target.func), target.func.lineno)  # type: ignore[attr-defined]
                 if generator:
-                    returned = self._yielded(target)
+                    returned = self._of_field(self._yielded(target), field)
                 elif index is not None:
-                    returned = self._returned_at(target, index)
+                    returned = self._returned_at(target, index, field)
                 else:
-                    returned = self._returned(target)
+                    returned = self._returned(target, field)
                 for inner in returned:
                     if (
                         inner.kind == KEY_PARAMETER
@@ -792,15 +877,15 @@ class _Reader:
             return found
         named = self._through(call, file, func)
         if named is not None:
-            return [
+            ways = [
                 one._replace(
                     through=(named._replace(steps=len(one.steps)),) + one.through
                 )
                 for one in self.read(call.args[0], call, file, func)
             ]
-        return [
-            _Way(KEY_CALL, ast.unparse(call.func), call.lineno, what=placed.unplaced)
-        ]
+        else:
+            ways = [_Way(KEY_CALL, ast.unparse(call.func), call.lineno, what=placed.unplaced)]
+        return self._of_field(ways, field)
 
     def _through(self, call: ast.Call, file: str, func: ast.AST) -> Optional[_Through]:
         """A call outside the corpus that is handed one positional argument -- a function or a module's
@@ -847,11 +932,13 @@ class _Reader:
             runs,
         )
 
-    def _returned(self, target: Target) -> list[_Way]:
-        held = self._returns.get(id(target.func))
+    def _returned(self, target: Target, field: Optional[str] = None) -> list[_Way]:
+        """The ways of what *target* returns -- of its *field*, read at each return, where one is asked."""
+        key = (id(target.func), field)
+        held = self._returns.get(key)
         if held is not None:
             return held
-        self._returns[id(target.func)] = [
+        self._returns[key] = [
             _stop(
                 "cycle",
                 owner_of(target.file, target.func),
@@ -860,14 +947,15 @@ class _Reader:
         ]
         found: list[_Way] = []
         for value in returns(target.func):
-            found += self._safely(value, value, target.file, target.func)
-        self._returns[id(target.func)] = found
+            found += self._safely(_field_of(value, field), value, target.file, target.func)
+        self._returns[key] = found
         return found
 
-    def _returned_at(self, target: Target, index: int) -> list[_Way]:
+    def _returned_at(self, target: Target, index: int, field: Optional[str] = None) -> list[_Way]:
         """:meth:`_returned`'s, of each return's element at *index*: the element where a tuple or list literal gives
-        it (:meth:`_element`), else the return's ways with the step ``[index]``."""
-        key = (id(target.func), index)
+        it (:meth:`_element`), else the return's ways with the step ``[index]`` -- and its *field*, where one is
+        asked."""
+        key = (id(target.func), index, field)
         held = self._returns_at.get(key)
         if held is not None:
             return held
@@ -881,7 +969,7 @@ class _Reader:
         found: list[_Way] = []
         for value in returns(target.func):
             try:
-                chosen = self._element(value, index, value, target.file, target.func)
+                chosen = self._element(value, index, value, target.file, target.func, field)
             except Exception as error:  # noqa: BLE001 -- as _safely
                 chosen = [
                     _stop(
@@ -891,11 +979,10 @@ class _Reader:
                         at=f"{target.file}:{getattr(value, 'lineno', '')}",
                     )
                 ]
-            found += (
-                chosen
-                if chosen is not None
-                else self._stepped(self._safely(value, value, target.file, target.func), f"[{index!r}]")
-            )
+            if chosen is None:
+                whole = self._safely(value, value, target.file, target.func)
+                chosen = self._of_field(self._stepped(whole, f"[{index!r}]"), field)
+            found += chosen
         self._returns_at[key] = found
         return found
 
