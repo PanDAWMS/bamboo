@@ -8390,6 +8390,256 @@ def test_another_functions_print_of_the_questions_column_answers_a_statement_onl
     assert got["shared"] == [["job.jobStatus", "job.prodSourceLabel"], ["job.prodSourceLabel"]]
 
 
+def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_what_the_arm_writes(tmp_path):
+    # KNOWN_ISSUES.md K64: killEventServiceConsumers 818 writes dJob, a consumer it packs, while its guard reads job, the
+    # parameter it was handed; the rows file spells job as the row, the records do not bind it.  setupper's loop
+    # `for job in self.jobs + [None]` binds job once, so its sentinel test reads the row the arm wrote.
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json, os
+            from pathlib import Path
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E, mapdump, row_names
+
+            Path(os.environ["PANDA_PIN"], "pandaserver", "tb.py").write_text('''class T:
+                def kill(self, job, pandaIDs):
+                    for pandaID in pandaIDs:
+                        if pandaID == job.PandaID:
+                            continue
+                        dJob = JobSpec()
+                        if dJob.jobsetID != job.jobsetID:
+                            continue
+                        dJob.jobStatus = "failed"
+
+                def setup(self, jobs):
+                    for job in jobs + [None]:
+                        if job is None:
+                            break
+                        job.jobStatus = "assigned"
+
+                def two(self, jobs, other):
+                    job = other
+                    if job.jobStatus == "x":
+                        job = jobs[0]
+                        job.jobStatus = "y"
+
+                def refine(self, files):
+                    spec = self.taskSpec
+                    if spec.status == "x" and self.taskSpec.splitRule:
+                        for file in self.taskSpec.Files:
+                            if file.type == "input":
+                                self.taskSpec.status = "z"
+            ''')
+            TB = "pandaserver/tb.py"
+            def src(kind, name, site_owner="", site_line=None, line=None, steps=(), through=(), column=""):
+                return N(kind=kind, name=name, site_owner=site_owner, site_line=site_line, line=line, steps=list(steps),
+                         through=list(through), column=column, route=[])
+            def g(func, test_line, name, arms, *sources):
+                return N(owner=f"{TB}::{func}", test_line=test_line, test="", name=name, arms=arms, sources=list(sources))
+            def w(func, line, subject, expr, *sources):
+                return N(owner=f"{TB}::{func}", line=line, subject=subject, role="object", expression=expr, sources=list(sources))
+            par = lambda func, name, *steps: src("parameter", name, f"{TB}::{func}", 2, steps=steps)
+            SEL = src("rows", "panda:select@40", f"{TB}::sql", 40)
+            mapdump._FRAGMENT[:] = [N(
+                write_froms=[
+                    w("kill", 9, "JobSpec.jobStatus", "dJob", src("object", "JobSpec", line=6)),
+                    w("setup", 15, "JobSpec.jobStatus", "job", par("setup", "jobs", "[*]")),
+                    w("two", 21, "JobSpec.jobStatus", "job", par("two", "jobs", "[0]")),
+                    w("refine", 28, "JediTaskSpec.status", "self.taskSpec", src("self_field", "self.taskSpec", line=28)),
+                ],
+                guard_froms=[
+                    g("kill", 4, "job", [9], par("kill", "job")),
+                    g("kill", 7, "dJob", [9], src("object", "JobSpec", line=6)),
+                    g("kill", 7, "job", [9], par("kill", "job")),
+                    g("setup", 13, "job", [15], par("setup", "jobs", "[*]"), src("constant", "None", line=12)),
+                    g("two", 19, "job", [21], par("two", "other")),
+                    g("refine", 25, "spec", [28], src("self_field", "self.taskSpec", line=24)),
+                    g("refine", 27, "file", [28], src("self_field", "self.taskSpec", line=26, steps=[".Files", "[*]"])),
+                    g("refine", 25, "jobs", [28], src("self_field", "self.jobs", line=24, steps=["[*]"])),
+                    g("sql", 41, "job", [43], SEL),
+                    g("sql", 41, "status", [43], src("rows", "panda:select@40", f"{TB}::sql", 40, column="jobsDefined4.jobStatus")),
+                    g("sql2", 51, "job", [53], SEL),
+                    g("sql3", 61, "job", [63], par("sql3", "job")),
+                ],
+                key_froms=[
+                    N(owner=f"{TB}::sql", writes={"JobSpec.jobStatus": [43]},
+                      sources=[src("rows", "panda:select@40", f"{TB}::sql", 40, column="jobsDefined4.PandaID")]),
+                    N(owner=f"{TB}::sql2", writes={"JobSpec.jobStatus": [53]},
+                      sources=[src("rows", "panda:select@50", f"{TB}::sql2", 50), src("parameter", "pandaID", line=52)]),
+                    # archiveJob 1851's shape: its job parameter, and two selects its callers filled it from
+                    N(owner=f"{TB}::sql3", writes={"JobSpec.jobStatus": [63]},
+                      sources=[src("parameter", "job", line=62), src("rows", "panda:a@10", f"{TB}::caller_a", 10),
+                               src("rows", "panda:b@20", f"{TB}::caller_b", 20)]),
+                ],
+            )]
+            names = lambda func, line, subject="JobSpec.jobStatus", entity="job": row_names.names(
+                f"{TB}::{func}", line, subject, entity, {"Files": "file"})
+
+            def printers():
+                # K63's gate reads a printing function's names by the rows file's spellings, not by the arm's
+                from bamboo.querier import same_object
+                seen = []
+                same_object.same = lambda reader, line, names, printer, printed: seen.append([list(names), list(printed)]) or True
+                e = E.Env(rows={"job": "job", "self.job": "job"}, call=None, subject="<job>.jobStatus",
+                          written="JobSpec.jobStatus")
+                e.put_hole("job.jobStatus", "failed", "hole of archive:1268 at a", [f"{TB}::archive"])
+                at = e.reading(f"{TB}::kill", 9, arm=(f"{TB}::kill", 9))
+                return [repr(E.evaluate("dJob.jobStatus == 'failed'", at)), seen]
+
+            def read(test, func, line, values):
+                e = E.Env(rows={"job": "job", "self.job": "job", "file": "file"}, call=None, subject="<job>.jobStatus",
+                          written="JobSpec.jobStatus", elements={"Files": "file"})
+                e.table["job"] = {k: E.Value(v, "the rows file") for k, v in values.items()}
+                at = e.reading(f"{TB}::{func}", line, arm=(f"{TB}::{func}", line))
+                return [repr(E.evaluate(test, at)), sorted(at.rows.items())]
+
+            print(json.dumps({
+                "kill": names("kill", 9),
+                "setup": names("setup", 15),
+                "two": names("two", 21),
+                "refine": names("refine", 28, "JediTaskSpec.status", "task"),
+                "sql": names("sql", 43),
+                "sql2": names("sql2", 53),
+                "sql3": names("sql3", 63),
+                "nothing written": names("plugin", 92),
+                "read kill": read("job.PandaID == 7", "kill", 9, {"PandaID": 7}),
+                "read setup": read("job.jobStatus == 'defined'", "setup", 15, {"jobStatus": "defined"}),
+                "read nothing written": read("self.job.jobStatus == 'defined'", "plugin", 92, {"jobStatus": "defined"}),
+                "printer's names": printers(),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the written expression is the row; job, the parameter killEventServiceConsumers was handed, is another job
+    assert got["kill"] == {"dJob": "job"}
+    # one binding of job in setup: the sentinel test reads the row the arm wrote
+    assert got["setup"] == {"job": "job"}
+    # job at the test is `other`, at the arm `jobs[0]`: not the object the arm writes, so not the row
+    assert got["two"] == {}
+    # spec ends where self.taskSpec does; file is an element of its Files; jobs, an element of another list, is not
+    assert got["refine"] == {"file": "file", "self.taskSpec": "task", "spec": "task"}
+    # an SQL arm: the name holding the whole row the one key is read off; a column of it is not the row
+    assert got["sql"] == {"job": "job"}
+    # a key with two sources in its own function binds nothing
+    assert got["sql2"] == {}
+    # a parameter of the statement's function, its callers' selects aside: the parameter's name holds the row
+    assert got["sql3"] == {"job": "job"}
+    # an arm the map records nothing written for (a call on another object): no record to narrow by
+    assert got["nothing written"] is None
+    assert got["read nothing written"] == ["True", [["file", "file"], ["job", "job"], ["self.job", "job"]]]
+    # the print's names are read as the printing function spells them
+    assert got["printer's names"] == ["True", [[["dJob"], ["job"]]]]
+    # the rows file's job is not read for killEventServiceConsumers' job: the row's PandaID does not decide its guard
+    assert got["read kill"] == ["UNKNOWN", [["dJob", "job"]]]
+    # setup's job is the row: its jobStatus is the row's
+    assert got["read setup"] == ["True", [["job", "job"]]]
+
+
+# updateUnmergedJobs, cut down: f writes umJob, an unmerged job, and prints its key in the same pass; g prints it after
+# the loop, the last element's; h is f where the map records nothing the arm writes
+_UNMERGED = """
+def f(self, job, ids):
+    self.logger.debug("f updates the unmerged jobs of the merge job")
+    for tmpPandaID in ids:
+        umJob = JobSpec()
+        umJob.jobStatus = job.jobStatus
+        self.logger.debug(f"f updated the unmerged PandaID={umJob.PandaID}")
+    self.logger.debug("f finished updating the unmerged jobs")
+
+
+def g(self, job, ids):
+    self.logger.debug("g updates the unmerged jobs of the merge job")
+    for tmpPandaID in ids:
+        umJob = JobSpec()
+        umJob.jobStatus = job.jobStatus
+    self.logger.debug(f"g updated the unmerged PandaID={umJob.PandaID}")
+    self.logger.debug("g finished updating the unmerged jobs")
+
+
+def h(self, job, ids):
+    self.logger.debug("h updates the unmerged jobs of the merge job")
+    for tmpPandaID in ids:
+        umJob = JobSpec()
+        umJob.jobStatus = job.jobStatus
+        self.logger.debug(f"h updated the unmerged PandaID={umJob.PandaID}")
+    self.logger.debug("h finished updating the unmerged jobs")
+
+
+def k(self, job, ids):
+    self.logger.debug("k updates the unmerged jobs of the merge job")
+    for tmpPandaID in ids:
+        umJob = JobSpec()
+        umJob.jobStatus = job.jobStatus
+        self.cur.execute(sql)
+        self.logger.debug(f"k updated the unmerged PandaID={umJob.PandaID}")
+    self.logger.debug("k finished updating the unmerged jobs")
+"""
+
+
+def test_a_row_printing_the_key_of_what_the_arm_writes_shows_another_key_in_every_record_printed_for_other_objects(tmp_path):
+    # KNOWN_ISSUES.md K64: under the merge job's mark, updateUnmergedJobs 1252 printed the unmerged jobs' keys only, so
+    # 1236, which writes umJob, did not write the merge job (MJE-7398264739)
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_UNMERGED)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    def log(func, *keys, after=False):
+        lines = [f"{func} updates the unmerged jobs of the merge job"]
+        lines += [f"{func} updated the unmerged PandaID={k}" for k in keys]
+        lines += [f"{func} finished updating the unmerged jobs"]
+        return "".join(stamp.format(i, text) for i, text in enumerate(lines))
+    for name, text in {"others": log("f", 5, 6), "mine": log("f", 5, 1), "after": log("g", 6), "none": log("h", 5, 6),
+                       "between": log("k", 5, 6)}.items():
+        (tmp_path / f"{name}.log").write_text(text)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E, mapdump
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            A = "pandaserver/a.py"
+            def w(func, line):
+                return N(owner=f"{A}::{func}", line=line, subject="JobSpec.jobStatus", role="object", expression="umJob",
+                         sources=[N(kind="object", name="JobSpec", site_owner="", site_line=None, line=line - 1, steps=[],
+                                    through=[], column="", route=[])])
+            mapdump._FRAGMENT[:] = [N(write_froms=[w("f", 6), w("g", 15), w("k", 33)], guard_froms=[], key_froms=[],
+                                      function_prints=[])]
+            got = {}
+            for name, func, line in (("others", "f", 6), ("mine", "f", 6), ("after", "g", 15), ("none", "h", 24),
+                                     ("between", "k", 33)):
+                env = E.Env(rows={"job": "job", "self.job": "job"}, call=None, subject="<job>.jobStatus",
+                            written="JobSpec.jobStatus", keys=frozenset({"PandaID"}))
+                env.table["job"] = {"PandaID": E.Value(1, "the rows file")}
+                run, = runs_for(read_log(f"{name}.log"), "1")
+                c = Candidate(A, func, [line], [run.log.name], run=run)
+                v, = judge([c], {run.log.name: [run]}, question_run=run, env=env).verdicts
+                got[name] = [v.kind, v.reasons]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # every record of 7 holds another unmerged job's key: the pass wrote other objects, not the row
+    assert got["others"] == ["excluded", ["rule 4: must row(s) [7] not in the run",
+                                          "row 7 printed only for other values of umJob.PandaID (2 time(s)), not '1'"]]
+    # one record holds the row's key: a pass may have written it, and 7 proves the arm
+    assert got["mine"] == ["positive", ["row(s) [7] print only on a path through it"]], got["mine"]
+    # a print after the loop shows the last element's key, whichever pass wrote the row
+    assert not any("other values" in r for r in got["after"][1]), got["after"]
+    # the map records nothing h's arm writes: umJob is not bound to the row
+    assert got["none"][0] != "excluded" and not any("other values" in r for r in got["none"][1]), got["none"]
+    # updateUnmergedJobs' own shape: a call between the arm and 35 may leave, so 35 is no must row and rule 4 does not
+    # read it; printed for other objects only, it proves nothing either, in no proof (rows around it, printed.py's)
+    assert got["between"][0] == "kept", got["between"]
+
+
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
     out = _ok(
         _run(

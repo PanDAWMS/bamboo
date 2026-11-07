@@ -1530,6 +1530,27 @@ class Wrote:
         return next(r for r in self.readings if r.file == c.rel and r.owner.endswith("::" + c.func))
 
 
+def _element_rows(data: dict, cls: str) -> dict[str, str]:
+    """The rows file's collections of a *cls* row, as attribute -> the name its element rows go by (``Files`` ->
+    ``file``): the class a linked row of *cls* is, named by ``classes``, else by the spelling of its class's name
+    without ``Spec`` (``FileSpec`` -> ``file``) where the rows file spells one."""
+    classes = {c: e for e, c in (data.get("classes") or {}).items() if e != "about"}
+    spelled = {e for e in (data.get("spellings") or {}) if e != "about"}
+    out = {}
+    for text in data.get("collections") or {}:
+        if text == "about" or "." not in text:
+            continue
+        attr = text.rpartition(".")[2]
+        for linked in data.get("linked") or []:
+            if str((linked.get("via") or {}).get("from", "")).partition(".")[0] != cls:
+                continue
+            name = classes.get(linked.get("class", ""))
+            guess = str(linked.get("class", "")).removesuffix("Spec").lower()
+            if name or guess in spelled:
+                out[attr] = name or guess
+    return out
+
+
 def _guard_read(text: str, env: E.Env) -> object:
     """A path condition read in *env*: True or False where the values read decide it; anything else is not read, one
     whose names are as they are at another line (``E.read_elsewhere``) among them."""
@@ -1575,7 +1596,7 @@ class StandIn:
         out = []
         # read at the arm: another function's hole only where the map hands its object here (KNOWN_ISSUES.md K63)
         owner, _, line = self.arm.rpartition(":")
-        at = env.reading(owner, int(line)) if line.isdigit() else env
+        at = env.reading(owner, int(line), arm=(owner, int(line))) if line.isdigit() else env
         for g in self.guards:
             got = _guard_read(g, at)
             env.used.update(at.shared())
@@ -2251,6 +2272,10 @@ class Rerun:
         cls, _, column = self.args.subject.partition(".")
         entity = next((e for e, c in (self.data.get("classes") or {}).items() if c == cls and e != "about"), None)
         env.subject = f"<{entity}>.{column}" if entity and column else ""
+        # an arm's guards read as the row only the names the map's records bind to what the arm writes (K64)
+        env.written = self.args.subject if env.subject else ""
+        env.elements = _element_rows(self.data, cls)
+        env.keys = frozenset(c.partition(".")[2] for c in self._key_columns(self.args.subject, self.args.key))
         for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:
@@ -2682,7 +2707,8 @@ class Rerun:
                 # the rows' values alone, and no run is named
                 env = self.base_env(at=w.row["time"] if w.row else None)
             # read at the arm: another function's hole only where the map hands its object here (KNOWN_ISSUES.md K63)
-            at = env.reading(chosen.candidate.owner, chosen.line) if isinstance(env, E.Env) else env
+            at = (env.reading(chosen.candidate.owner, chosen.line, arm=(chosen.candidate.owner, chosen.line))
+                  if isinstance(env, E.Env) else env)
             read = {g: _guard_read(g, at) for g in guards}
             if isinstance(env, E.Env) and isinstance(at, E.Env):
                 env.used.update(at.shared())

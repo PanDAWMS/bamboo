@@ -305,7 +305,10 @@ class _Reader:
             return None
         # read at the test (or the arm): another function's hole only where the map hands its object here (K63)
         at = line if line is not None else arm
-        reading.value = E.evaluate(_put(tree, decided), self.env.reading(owner, at) if at is not None else self.env)
+        reading.value = E.evaluate(
+            _put(tree, decided),
+            self.env.reading(owner, at, arm=(owner, arm) if arm is not None else None) if at is not None else self.env,
+        )
         return reading
 
 

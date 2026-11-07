@@ -1642,6 +1642,73 @@ What is still read as a loop that may go round:
 `RERUN_S3_ROWS=0` read as before.
 *Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
 
+### K64. An arm's guard reads as the row only the names the map's records bind to what the arm writes
+
+The rows file names the spellings of a row (`job`, `self.job`), and every such name in any arm's guard read the row's
+values.  The spelling is not the object.  `killEventServiceConsumers` 818 writes `dJob`, a consumer it packs from a
+SELECT (787-788), while its guards `pandaID == job.PandaID` and `dJob.jobsetID != job.jobsetID` read `job`, the job it
+was handed: another job.  And the object an arm writes was no row where no rows file spells it: `doGenerate`'s
+`jobSpec`, a setter's `self`, `killEventServiceConsumers`' `dJob`.
+
+Now the guards of an arm are read in an env for that arm (`Env.for_arm`, from `Env.reading(..., arm=...)` where H2 reads
+a candidate at its statement and H3 reads the chosen arm).  Its row names are the ones the map's records bind to the
+object the arm writes (`row_names`), under the premise every such reading makes: this arm wrote the question's row.
+- The arm's written expression (its `WriteFrom` of role `object`).  A guard name that is the same expression holds the
+  row where the bindings that reach the guard's test are the ones that reach the arm (`pathcond.held_at`).  A field of
+  `self` is one place in the method.  setupper's `for job in self.jobs + [None]` binds `job` once, so in the iteration
+  whose arm ran, its sentinel test reads the row.
+- A name with one way, through no call outside the corpus, ending where the written object's way ends, with equal
+  steps.  An element step (`[*]`, `[1]`) alone binds nothing: two elements of one list may be two objects.
+- A name whose way is the written object's plus a collection the rows file holds (`Files`) and an element: one of
+  the collection's rows (`file`).
+- An SQL arm, which writes through a statement and has no written object: a name holding the whole row the statement's
+  one key source is read off (the same select, no column, no steps).  Only the sources in the statement's own
+  function count: a parameter of it, or a select it runs.  The selects its callers filled that parameter from are the
+  same object followed up (archiveJob 1851: its `job`, and two callers' selects).  A key with several sources in its
+  own function binds no name.
+A name the rows file spells and the records do not bind is not read as the row.  The rows file's other rows keep their
+spellings.  An arm the map records nothing written for (no `WriteFrom` of role `object`, no `KeyFrom`: the adder
+plugin's `self.result.set_fatal()`) has no record to narrow by, and its guards read the spellings.
+
+Rule 6 (`which_ran.rewriter`) solves a guard for the question's column only on an atom the arm's env reads as the row.
+It had taken any `x.jobStatus`: at archiveJob 1783, a caller of updateUnmergedJobs, whose arm 1236 writes `umJob`, it
+solved `job.jobStatus == 'finished'`, the merge job's.
+
+The same names read the run's prints (`which_ran.other_objects`).  A row printing the key (`PandaID`, `Env.keys`) of a
+name bound to the object the arm writes, under the binding that reaches the arm and in the arm's pass (every loop
+holding the arm holds the row), shows which object that pass wrote.  Where every record of it in the run holds another
+key than the row's, the row printed for other objects only.  It is not in the run for the row (rule 4, where it is a
+must row), and every proof of the arm reads the run without it (`Seen.without`): the rows printed only on a path
+through the arm, two rows printed in a row around it, and `printed.py`'s P.  updateUnmergedJobs 1236 writes `umJob`,
+an unmerged job.  Under the merge job's mark (MJE-7398264739), its 1252 `update unmerged PandaID={umJob.PandaID}`
+printed the eleven unmerged jobs' keys and never the merge job's.  Rule 6 had excluded 1236 only by reading the merge
+job's `job.jobStatus` as the row's.  Once rule 6 read only the row's names, 1252 made 1236 positive.  1252 is no must
+row of 1236 (the calls between may leave), so 1236 is now kept, not excluded.  Read in one proof only, 1252 still
+proved it in another: 1179 and 1252 printed in a row around it.  Only the key is compared: another column's value at
+the print need not be the rows file's.
+
+Measured on the map's codemap-xxviii b386318 dump against master's querier on it (qb1), as r0b4, on the 144 cases, the
+65, attr and MT: 5 of the 144 move, and no END is gained or lost.
+- Four cases (MJE-7395049236, 7396077018, 7396725720, 7398394561) lose a reason of archiveJob 1379's exclusion, which
+  stays by rule 4.  1379 writes `dJob`, a downstream job packed from a select, and its step 5 had read the parameter
+  `job`'s values (the upstream job) as the row's.
+- MJE-7398264739: updateUnmergedJobs 1236 goes from excluded, by rule 6's reading of the merge job's status, to kept.
+  It stops at H2 as before, with no "may have changed it last" pair: that pair rested on the exclusion.
+- The 65, attr and MT: no file moves.
+
+Not changed: a reading for no arm (`printed.py`, the S and U steps, `learn`'s row facts) reads the spellings as before;
+a printed hole is keyed by the printing function's spelling, as its run is the key's run.
+
+*Shows:* a guard of a name the records do not bind is not read in the row's values ("not read"); "row N printed only
+for other values of X.PandaID".
+*Revisit:*
+- a pass that left between the arm and a print of other objects (1236's calls before 1252) wrote the object only in
+  memory: archiveJob(umJob), which stores it, follows the print.  Reading the store stage would exclude 1236 there;
+- the task row a job's arm links to by the value it hands on (`taskSpec.jediTaskID`, `WriteFrom` of role `value`):
+  bound once the rows file holds the job's task row (R1);
+- a name bound only by a builtin's loop (`for i, job in enumerate(jobs)`) whose function binds it more than once:
+  its ways stop at the builtin call.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one
