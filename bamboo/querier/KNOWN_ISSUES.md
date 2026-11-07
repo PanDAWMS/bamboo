@@ -1569,6 +1569,52 @@ Left: these ENDs, as every extractCommon one, rest on the store a later call mak
 
 *Shows:* "it rests on" in an END, and the branches' premises in result.json.
 
+### K63. Another function's print of the question's column is read only where the map holds one object
+
+The rows file names the spellings of a row (`job`, `self.job`), and the querier read a hole any function printed
+about the row (`self.job.jobStatus` in the adder) for every statement that spells it (`job.jobStatus` in the task
+buffer's `killJob`).  That reads the same row as the same object.  In MJE-7394762518 and MJE-7397173613, `killJob`
+(code 60) packs a `JobSpec` of its own from a SELECT (job_complex_module 997-998).  The SELECT read `holding`, and
+`killJob` wrote `closed` at 1059: the statuslog's `closed` row has `killJob`'s time and machine.  The adder printed its
+own object's `failed` at process_job_report:444, 0.7 s and 1.4 s after `killJob` ran.  H2 read that hole for 1017's
+`job.jobStatus != 'failed'` and excluded `killJob`'s five arms, so the writer was not among the 15 left.
+
+Now a statement is read with its function and line (`Env.reading`).  A hole of the question's own column (`--subject`,
+`Env.subject`) that another function printed answers it only where the map's records hold one object (`same_object`).
+Each side's ways are followed to the places they reach: the name itself, its `GuardFrom` at the line and its
+`ParameterFrom`, through the `ParameterFrom` chain.  They hold one object where they share a place.  The adder's
+`self.job` handed into `updateJobs`'s `jobs` at adder_gen.py:472 makes 873's print updateJobs's `job`.  `updateJobs`
+hands `archiveJob` the `job` it loops over (TaskBuffer.py:667), so 1268's print is updateJobs's `job`.  Where no record
+holds one object, the hole is not read, and the rows file's value is read as it would be with no hole.
+
+Only the question's column: the statuslog shows it change at the question's time, so another object's print of it is
+not the value at the statement.  Every column would be too narrow (measured as ra1).  In the 65's A, setup_destination
+794's `job.prodSourceLabel == 'user'` was read in the adder plugin's print (register_files:778), another process's
+object.  Not reading it left tmp_dst_ddm unknown and turned the END into a stop, yet prodSourceLabel does not change in
+a job's life.  The rows file cannot tell the columns that change: `held.at_run` leaves every column of a row fetched
+after the run unread (all 125 of MJE-7394762518's job).
+
+Measured as ra2 on the 144 cases, the 65, attr and MT: only MJE-7394762518 and MJE-7397173613 move.  Both keep
+`killJob`'s five arms (20 left), and both still stop at H2, since nothing reads the row's value before 1059's write.
+
+Not changed:
+- a hole the statement's own function printed;
+- a hole of another column, or not about a row (rule 6's `self.job_status`);
+- a reading of no one statement (`learn`'s kept row facts), or for no question;
+- `printed.py`'s own reading.
+What one reading did not read stays its own (`Env.shared`): another statement's reasons do not show it.
+
+Limits: an element of one list is read as the list's one object (the map does not say which element a loop is at); a
+field of `self` is matched by its file and name.
+
+*Shows:* "unknown: hole of F:N at ... is another object's" among a guard's values.
+*Revisit:*
+- another column that changes in the window (`jobSubStatus`, the time columns): it needs the writes between the print
+  and the read;
+- a print after the statement on the same object, with a write between (updateJobs 639's guard read in archiveJob's
+  1268 print, after 649-654 may write the column);
+- the row's value at a time before a write, from the statuslog, which would let `killJob`:1059 be chosen.
+
 
 
 S2 (`which_ran.judge`) reads a row and a site in one loop as possibly printed in different rounds of it

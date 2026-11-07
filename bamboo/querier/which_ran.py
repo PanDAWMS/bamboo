@@ -295,6 +295,7 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
     """
     seen_values: dict[str, set[str]] = {}
     where: dict[str, str] = {}
+    printers: dict[str, set[str]] = {}
     for sn in R.claim(seens):
         own = class_of(sn.fn)
         for row in sn.fn.rows:
@@ -310,6 +311,7 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
                         continue
                     seen_values.setdefault(expr, set()).add(value.strip())
                     where.setdefault(expr, f"hole of {sn.fn.name}:{row.line} at {sn.run.records[i].span}")
+                    printers.setdefault(expr, set()).add(sn.fn.owner)
     put = {}
     for expr, values in seen_values.items():
         if len(values) == 1:
@@ -317,7 +319,7 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
                 ast.parse(expr, mode="eval")
             except SyntaxError:
                 continue
-            env.put_printed(expr, next(iter(values)), where[expr])
+            env.put_hole(expr, next(iter(values)), where[expr], printers[expr])
             put[expr] = next(iter(values))
     return put
 
@@ -578,8 +580,10 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
         if E.read_elsewhere(guard):
             continue
         asked = set(re.findall(rf"(?<![\w.])[\w.]+\.{re.escape(attr)}(?!\w)", guard))
-        hidden = E.Env(values=dict(env.values), rows=dict(env.rows), table=env.table, stale={**env.stale, **{s: ASKED for x in asked for s in (x, env.canonical(x))}},
-                       unread=env.unread, at=env.at)
+        # read in the function the guard is tested in: the statement's, or the caller's (``where`` is "name:line")
+        name, _, line = where.rpartition(":")
+        hidden = env.reading(f"{fn.rel}::{name}", int(line))
+        hidden.stale.update({s: ASKED for x in asked for s in (x, env.canonical(x))})
         try:
             solved = E.solve(guard, True, hidden)
         except SyntaxError:
@@ -775,9 +779,7 @@ def judge(
                     v.kind = "excluded"
                     v.reasons.append(f"rule 3: runs inside the call at {site}, before {outer.records[hi].span}, when {subject} still showed another value")
             if subject and observed and env is not None:
-                own = E.Env(
-                    values=dict(env.values), rows=dict(env.rows), table=env.table, stale=dict(env.stale), unread=env.unread, at=env.at
-                )
+                own = env.reading(fn.owner, stmt.lineno)
                 stable_holes([x for x in seens.values() if x.run is run], own, class_of(fn))
                 why = rewriter(fn, stmt, subject, observed, own)
                 if why:
@@ -788,18 +790,21 @@ def judge(
                 v.reasons.append(f"value: {wrong_value}")
             if env is not None:
                 # the tests reaching it runs under, the early exits above it too; one whose names are as they are at
-                # another line (``[at N]``) is not read in the pass's values (KNOWN_ISSUES.md K61)
+                # another line (``[at N]``) is not read in the pass's values (KNOWN_ISSUES.md K61); a hole another
+                # function printed is read only where the map hands its object here (KNOWN_ISSUES.md K63)
+                genv = env.reading(fn.owner, stmt.lineno)
                 for guard in pathcond.arm_condition(stmt):
                     if E.read_elsewhere(guard):
                         continue
                     try:
-                        if E.evaluate(guard, env) is False:
+                        if E.evaluate(guard, genv) is False:
                             v.kind = "excluded"
-                            used = {k: val for k, val in env.used.items() if k in guard}
+                            used = {k: val for k, val in {**env.used, **genv.used}.items() if k in guard}
                             v.reasons.append(f"step 5: guard {guard!r} is false ({used})")
                             break
                     except SyntaxError:
                         continue
+                env.used.update(genv.shared())
             if loops_empty := empty_loops(fn, stmt, callee):
                 v.kind = "excluded"
                 v.reasons.append(loops_empty)
