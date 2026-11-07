@@ -169,6 +169,15 @@ TEMPLATES: dict[str, str] = {
     "term-printed": "{term} = {value!r} ({where})",
     "printed-values-read-false": "its run's printed values read {guard!r} false{on}, though its run shows it ran",
     "no-guard-to-read": "{fn}:{line} has no guard of its own to read: what made it run is its callers'",
+    "the-only-way-to-the-value": (
+        "{fn}:{line}'s value {value!r} comes from {callee}(): the one of its {n} way(s) to it the values read leave, its "
+        "run showing it ran ({terms:join=; })"
+    ),
+    "ways-left-to-the-value": "{fn}:{line}'s value {value!r} comes from {callee}(): {k} of its {n} way(s) to it the values read leave ({ways:join= | })",
+    "no-way-to-the-value-holds": "{fn}:{line}'s value {value!r} comes from {callee}(): each of its {n} way(s) to it reads a term false ({ways:join= | }){shown}",
+    "though-its-run-shows-it-ran": ", though its run shows it ran",
+    "one-way": "{terms:join=, }",
+    "guard-held-the-only-way": "{guard!r} held, the only way to the value",
     "guard-not-read-held": "{guard!r} not read ({keys:join=; })",
     "its-guards-hold-with-held": "{how}; {held}",
     "its-guards-hold-held": "its guards hold: {held}",

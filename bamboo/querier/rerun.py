@@ -1226,19 +1226,60 @@ def _condition_read(p: object, read: set[str]) -> bool:
             and p.said.facts.get("guard") in read)
 
 
+def _branches_at(subject: str, owner: str, line: int) -> list:
+    """The map's branches of *subject* at *owner*'s *line*.  A reading's owner is ``file::function``, a junction's
+    ``file::Class.function``: matched by the file, the function's name and the line."""
+    fragment = mapdump.fragment()
+    file, _, qual = owner.partition("::")
+    name = qual.rpartition(".")[2]
+    return [b for j in (fragment.junctions if fragment else []) if j.subject == subject
+            and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
+            for b in j.branches if b.line == line]
+
+
+#: a path condition's term tested in a method the arm's statement calls, in that method's names: ``X  [in f()]``
+#: (``pathcond``'s mark, ``E.read_elsewhere``)
+_IN_CALLEE = re.compile(r"(?P<term>.*?)\s+\[in (?P<fn>\w+)\(\)\]")
+
+
+def callee_ways(subject: str, owner: str, line: int, observed: str) -> list[list[str]]:
+    """The map's ways to *observed* at *owner*'s *line* -- its branches there of that outcome, each as its path
+    condition -- where one holds a term tested in a method the statement calls (``_IN_CALLEE``): the value is that
+    method's, and each way one of its returns (KNOWN_ISSUES.md K65).  ``[]`` where none does."""
+    ways = [list(b.path_condition or []) for b in _branches_at(subject, owner, line) if b.outcome == observed]
+    return ways if any(_IN_CALLEE.fullmatch(t) for way in ways for t in way) else []
+
+
+def _in_caller(term: str, passed: dict[str, str]) -> str:
+    """*term*, a condition in the names of a method the arm's statement calls, in the caller's: a parameter the call
+    hands a path (the map's ``call_bindings``) reads that path; any other name -- the method's own local, a parameter
+    left to its default, a module it imports -- one no env holds, so a term needing it is not read."""
+
+    class _Rename(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.AST:
+            if node.id in passed:
+                return ast.parse(passed[node.id], mode="eval").body
+            return ast.copy_location(ast.Name(id=f"_callee_{node.id}", ctx=node.ctx), node)
+
+    return ast.unparse(_Rename().visit(ast.parse(term, mode="eval")))
+
+
+def _status_before(states: list[dict], state: dict | None) -> dict | None:
+    """The statuslog row just before *state*: what the row's status was as the pass that wrote *state* began, where no
+    write between left no row (KNOWN_ISSUES.md K65).  Rows are told apart as ``held.row_before`` tells them."""
+    if not state:
+        return None
+    before = [s for s in states if HD.row_before([s], state)]
+    return max(before, key=lambda s: W.when(s.get("time_extended") or s["time"]), default=None)
+
+
 def _store_unread(subject: str, owner: str, line: int, fn: Any, via: Any) -> T.Said | str:
     """What an attribute's END at *owner*:*line* leaves unread of its value reaching the row (KNOWN_ISSUES.md K41), by
     the map's branch of the arm: an attribute arm's row is written by a later statement or call, which is not read; an
     SQL arm (``REWRITE_NOT_ATTRIBUTE``) read on its caller's run (*via*) whose own function *fn* catches its statement's
     exception may have failed with the call returning.  Nothing for an SQL arm on its own run, whose path is read with
-    the statement's raise apart (``printed``'s E6), nor where the map has no branch of the arm.  A reading's owner is
-    ``file::function``, a junction's ``file::Class.function``: matched by the file, the function's name and the line."""
-    fragment = mapdump.fragment()
-    file, _, qual = owner.partition("::")
-    name = qual.rpartition(".")[2]
-    branch = next((b for j in (fragment.junctions if fragment else []) if j.subject == subject
-                   and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
-                   for b in j.branches if b.line == line), None)
+    the statement's raise apart (``printed``'s E6), nor where the map has no branch of the arm."""
+    branch = next(iter(_branches_at(subject, owner, line)), None)
     if branch is None:
         return ""
     if not any(o.why == REWRITE_NOT_ATTRIBUTE for o in branch.rewrites_open or []):
@@ -2793,6 +2834,11 @@ class Rerun:
                     # what made it run is its callers': the call that ran it, read on the run its own run is inside, by
                     # what the call handed the run's mark (U3)
                     return ArmCaller(q, chosen.candidate.owner, chosen.line, question)
+                # its value is what a method its statement calls returns: the map's ways to it through that method
+                # (KNOWN_ISSUES.md K65)
+                ways = callee_ways(q.subject, chosen.candidate.owner, chosen.line, q.observed)
+                if ways:
+                    self._read_ways(q, w, site_fn, chosen, ways, ran)
                 self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
             if ran and not attribute and site is not None:
                 # a status's arm ran under its guards: where the values they held on came from, said where its run printed
@@ -2807,6 +2853,56 @@ class Rerun:
         method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
                            methods[0][0])
         return SetBy(method, reading, question, guard_record, env)
+
+    def _read_ways(self, q: Asked, w: Wrote, fn: R.Function, chosen: Verdict, ways: list[list[str]], ran: bool) -> None:
+        """H3 for a status's arm with no guard of its own whose value a method its statement calls returns: the map's
+        ways to the observed value through it (``callee_ways``).  Each term is read in the caller's names at the call
+        (``_in_caller``), in the run's values and, for the row's own column, the statuslog row before the question's
+        (``_status_before``).  A way a term reads false is not the one taken.  Where one is left and the run shows the
+        arm ran, its terms the values leave unread held: it is the only way to the value (inf-design.md 8).  It stops as
+        K54's status does: with that way's terms, or the ways left and what they leave unread, or none left though the
+        run shows the arm ran (KNOWN_ISSUES.md K65)."""
+        owner, line = chosen.candidate.owner, chosen.line
+        callee = next(m["fn"] for way in ways for t in way if (m := _IN_CALLEE.fullmatch(t)))
+        graph = self._graph()
+        passed: dict[str, dict[str, str]] = {}
+        for node in graph[2] if graph else []:
+            if _same_function(node.owner, owner):
+                for b in node.call_bindings or []:
+                    if b.line == line and b.parameter and b.to:
+                        passed.setdefault(b.to.rpartition(".")[2].rpartition("::")[2], {})[b.parameter] = b.path
+        env = w.env if isinstance(w.env, E.Env) else self.base_env(at=w.row["time"] if w.row else None)
+        at = env.reading(owner, line, arm=(owner, line))
+        at = replace(at, table={k: dict(v) for k, v in at.table.items()})
+        before = _status_before((self.data.get("statuslog") or {}).get("states") or [], w.row)
+        if before is not None and (m := re.fullmatch(r"<(\w+)>\.(\w+)", at.subject)):
+            at.table.setdefault(m[1], {})[m[2]] = E.Value(
+                before["status"], f"the statuslog row before it, {before['status']!r} at {before.get('time_extended') or before['time']}")
+
+        def read(term: str) -> tuple[object, T.Said]:
+            m = _IN_CALLEE.fullmatch(term)
+            one = replace(at, used={})
+            got = _guard_read(_in_caller(m["term"], passed.get(m["fn"], {})) if m else term, one)
+            if got is True:
+                on = [f"{k} ({v})" for k, v in one.used.items()]
+                return got, T.Said("guard-held-on", {"guard": term, "on": T.Said("held-on-values", {"values": on}) if on else ""})
+            return got, T.Said("guard-read-false" if got is False else "guard-not-read", {"guard": term})
+
+        readings = [[read(t) for t in way] for way in ways]
+        left = [i for i, way in enumerate(readings) if not any(got is False for got, _ in way)]
+        self.say(f"{fn.name}:{line}'s value {q.observed!r} through {callee}(): {len(ways)} way(s) to it, "
+                 f"{len(left)} left by the values read")
+        facts = {"fn": fn.name, "line": line, "value": q.observed, "callee": callee, "n": len(ways)}
+        if not left:
+            self.need(T.Said("no-way-to-the-value-holds", facts | {
+                "ways": [T.Said("one-way", {"terms": [s for _, s in way]}) for way in readings],
+                "shown": T.Said("though-its-run-shows-it-ran") if ran else ""}), None)
+        if len(left) == 1 and ran:
+            terms = [s if got is True else T.Said("guard-held-the-only-way", {"guard": t})
+                     for t, (got, s) in zip(ways[left[0]], readings[left[0]], strict=True)]
+            self.need(T.Said("the-only-way-to-the-value", facts | {"terms": terms}), None)
+        self.need(T.Said("ways-left-to-the-value", facts | {
+            "k": len(left), "ways": [T.Said("one-way", {"terms": [s for _, s in readings[i]]}) for i in left]}), None)
 
     def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
         """Each guard of *site* (``pathcond.arm_condition``'s: the ``if``s around it, outermost first, then the early

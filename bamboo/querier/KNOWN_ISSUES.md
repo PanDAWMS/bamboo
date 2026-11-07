@@ -1709,6 +1709,59 @@ for other values of X.PandaID".
 - a name bound only by a builtin's loop (`for i, job in enumerate(jobs)`) whose function binds it more than once:
   its ways stop at the builtin call.
 
+### K65. A status's arm whose value a method it calls returns is read by the map's ways to that value
+
+PostProcessorBase.doBasicPostProcess:77 is `taskSpec.status = self.getFinalTaskStatus(taskSpec, update_error_dialog=True)`.
+No `if` encloses it, so H3 stopped there: "has no guard of its own" (the 8 MTE of m-gaps).  The value is decided in the
+method.  The map holds a branch at 77 for each of the method's returns, 13 in all, each with the method's tests marked
+`  [in getFinalTaskStatus()]`.
+
+H3 now reads these ways (`Rerun._read_ways`, `callee_ways`).  This holds for a status's arm with no guard of its own,
+where the map's branches at its line to the observed value hold such a term:
+- Each branch to the value is a way.
+- Each term is read in the caller's names at the call (`_in_caller`).  A parameter the call hands a path (the map's
+  `call_bindings`) reads that path.  Any other name reads nothing: the method's own local, a parameter left to its
+  default, a module it imports.
+- The row's own column, the question's (`Env.subject`), is read as the statuslog row before the question's held it
+  (`_status_before`).  This rests on two things: no write between left no row, and no write of the column in the pass
+  came before the call.
+- A way where a term reads false is not the one taken.
+- One way left, and the run shows the arm ran (H2's positive on its own run): each term the values leave unread held,
+  since no other way gives the value.  This is not a premise: were the term false, the value would differ.  It rests
+  on the map's branches being every way there is.
+- H3 stops as K54's status does (a status does not end at H3).  The stop holds that way's terms; or the ways left and
+  what they leave unread; or no way left, though the run shows the arm ran.  The last is a contradiction: a value read,
+  or the map's ways, are wrong.
+
+Not read here:
+- a spec's method (`taskSpec.is_hpo_workflow()`, `failGoalUnreached()`), which needs the map's runnables read;
+- a class constant (`self.failOnZeroOkFile`, which a plugin sets);
+- a column the rows file holds as read at another time (K22): `parent_tid` is read only where its value is the key;
+- the method's own locals (`nFiles`, `parent_status`).
+
+Measured as inf1 (this on the tree of codemap-xxviii b386318 with K64, dump x13xxviiiQm) against the same without it
+(r0b4).  No run crashed; 8 of the 144 cases move, the 8 MTE; the 65, the attribute 60 and MT: no file moves.  Outcome
+kind, step, code and the asks do not move: each stays a stop at H3, now on the ways.
+- One way left in 3: 53374152 broken and 53417999 aborted (one way each to the value), and 53425234 done.  For done,
+  the way through the parent reads false, since parent_tid is the task's own ID; both are read as fetched, the value
+  being the key (K22).
+- Ways left in 5: failed 3 of 4 twice, finished 2 of 4 and 4 of 4, done 2 of 2.  They need what no value here reads:
+  the counts, the parent's status, the plugin, the spec's methods.
+
+*Shows:*
+- "STOP H3: <fn>:<line>'s value '<v>' comes from <f>(): the one of its n way(s) to it the values read leave, its run
+  showing it ran ('<term>' held on <name> (<source>); '<term>' held, the only way to the value)";
+- "... k of its n way(s) to it the values read leave (<terms> | ...)";
+- "... each of its n way(s) to it reads a term false (...), though its run shows it ran".
+
+*Revisit:*
+- An arm with guards of its own and `[in f()]` terms besides: S3 meets them at TaskRefiner.runImpl, in no case of
+  ours.  Read its own guards as H3 does and the terms as here.
+- A spec's method on the row as fetched, where the column's changes are not recorded (splitRule's marks): an answer
+  per value -- the way under the value as fetched, the other way under the other -- is an answer while they are not.
+- Where a status ends: with a term's value read from the rows file (the statuslog row before), that row and its time
+  are where the value came from.  The next question is who wrote that row.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

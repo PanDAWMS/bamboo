@@ -7836,6 +7836,103 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
         "STOP", "H3: the values its guard reads at its run (its conditions: 'task.x < 3' not read)"]
 
 
+def test_a_status_arm_whose_value_a_called_method_returns_reads_the_maps_ways_to_it_and_the_one_left_held(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+                        entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            rerun.pathcond = N(arm_condition=lambda site: [], path_condition=lambda site: [],
+                               exits_above_at=lambda site: [], ancestors=lambda node: iter(()))
+            rerun.mark_handed = lambda owner, line, run: []
+            run = N(log=N(name="panda-PostProcessor.log"), machine="aipanda086.cern.ch", token="<jediTaskID=7>", records=[0, 1],
+                    first="2026-11-02 15:38:55,463", last="2026-11-02 15:38:55,831", describe=lambda: "the run", said=lambda: "the run")
+            readings = [N(file="pandajedi/p.py", owner="pandajedi/p.py::post")]
+            IN = "  [in final()]"
+            # post:5 is `taskSpec.status = self.final(taskSpec)`: the callee's parameter is 'spec', the call hands it
+            # 'taskSpec' (the map's call_bindings); 'check' is left to its default and 'stat' and 'n' are the callee's own
+            ways = {
+                "broken": [["spec.status == 'tobroken'" + IN, "not (spec.is_hpo() and stat)" + IN]],
+                "done": [["check and spec.parent_tid not in [None, spec.jediTaskID]" + IN, "parent == 'done'" + IN],
+                         ["not (check and spec.parent_tid not in [None, spec.jediTaskID])" + IN, "n == done_n" + IN]],
+                "finished": [["n == done_n" + IN, "parent != 'done'" + IN], ["not (n == done_n)" + IN, "not (done_n == 0)" + IN]],
+            }
+            rerun.mapdump = N(fragment=lambda: N(junctions=[N(
+                subject="JediTaskSpec.status", owner="pandajedi/p.py::Post.post",
+                branches=[N(line=5, outcome=value, path_condition=way) for value, ws in ways.items() for way in ws]
+                         + [N(line=9, outcome="broken", path_condition=["x"])])]))
+            bindings = [N(line=5, to="pandajedi/p.py::Post.final", parameter="spec", path="taskSpec"),
+                        N(line=5, to="pandajedi/p.py::Post.final", parameter="self", path="self")]
+
+            def asked(value, before, line=5, kind="positive"):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.ends, r.touched, r.hop, r.hand, r.hand_used, r.result, r.mode = [], [], [], [], "", {}, [], {}, "outside"
+                state = {"status": value, "time": "2026-11-02 15:38:55"}
+                r.data = {"statuslog": {"states": [{"status": "running", "time": "2026-11-02 14:00:00"},
+                                                   {"status": before, "time": "2026-11-02 15:38:44"}, state]}}
+                env = E.Env({}, rows={"taskSpec": "task"}, subject="<task>.status")
+                env.table["task"] = {"jediTaskID": E.Value(7, "the key"), "parent_tid": E.Value(7, "the task's row")}
+                r.base_env = lambda at=None: env
+                r._graph = lambda: (None, None, [N(owner="pandajedi/p.py::Post.post", call_bindings=bindings)])
+                arm = Verdict(Candidate("pandajedi/p.py", "post", [line]), line, kind)
+                r._which_wrote = lambda *a: rerun.Wrote(readings, run, [], env, arm, row=state,
+                                                        window=("2026-11-02 15:38:55", "2026-11-02 15:38:55"))
+                try:
+                    r.asked(rerun.Asked("JediTaskSpec.status", value, "7"))
+                except rerun.Stop as e:
+                    return str(e)
+                return None
+
+            print(json.dumps({
+                "the only way": asked("broken", "tobroken"),
+                "the only way, read false": asked("broken", "running"),
+                "two ways, one read false": asked("done", "prepared"),
+                "two ways left": asked("finished", "prepared"),
+                "one way left, its run not showing it ran": asked("broken", "tobroken", kind="kept"),
+                "no way through a method": asked("broken", "tobroken", line=9),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    before = "the statuslog row before it, 'tobroken' at 2026-11-02 15:38:44"
+    # the one way to the value: its term read in the caller's names -- the row's status as the statuslog row before the
+    # question's held it -- and the term no value reads held, since no other way gives the value (K65)
+    assert got["the only way"] == (
+        "H3: post:5's value 'broken' comes from final(): the one of its 1 way(s) to it the values read leave, its run "
+        f"showing it ran (\"spec.status == 'tobroken'  [in final()]\" held on taskSpec.status ({before}); "
+        "'not (spec.is_hpo() and stat)  [in final()]' held, the only way to the value)")
+    # ... a term read false on the only way is no answer: the run shows the arm ran
+    assert got["the only way, read false"] == (
+        "H3: post:5's value 'broken' comes from final(): each of its 1 way(s) to it reads a term false (\"spec.status == "
+        "'tobroken'  [in final()]\" read false, 'not (spec.is_hpo() and stat)  [in final()]' not read), though its run "
+        "shows it ran")
+    # the call hands 'spec' the row: the parent is the task itself, so the way through the parent is not the one taken,
+    # whatever 'check' was
+    only = got["two ways, one read false"]
+    assert only.startswith("H3: post:5's value 'done' comes from final(): the one of its 2 way(s) to it the values read leave, ")
+    assert "'not (check and spec.parent_tid not in [None, spec.jediTaskID])  [in final()]' held on " in only
+    assert "taskSpec.parent_tid (the task's row)" in only and "taskSpec.jediTaskID (the key)" in only
+    assert only.endswith("'n == done_n  [in final()]' held, the only way to the value)")
+    # two ways the values leave: named, with what they leave unread
+    assert got["two ways left"] == (
+        "H3: post:5's value 'finished' comes from final(): 2 of its 2 way(s) to it the values read leave ('n == done_n  "
+        "[in final()]' not read, \"parent != 'done'  [in final()]\" not read | 'not (n == done_n)  [in final()]' not read, "
+        "'not (done_n == 0)  [in final()]' not read)")
+    # one way left of an arm no run shows ran: it may not have written, so nothing is held
+    assert got["one way left, its run not showing it ran"].startswith(
+        "H3: post:5's value 'broken' comes from final(): 1 of its 1 way(s) to it the values read leave (")
+    # a branch whose terms are its own: the arm has no guard to read, as before
+    assert got["no way through a method"] == "H3: post:9 has no guard of its own to read: what made it run is its callers'"
+
+
 _FINISHER = """
 class Finisher:
     def __init__(self, jobs, time_out):
