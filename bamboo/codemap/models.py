@@ -5989,12 +5989,16 @@ class EnteredOpen(BaseModel):
 
 
 class EnteredSite(BaseModel):
-    """One way into a function: a reach edge (:class:`ReachCall`) into it, and the tests the caller's statement sits
-    under there."""
+    """One way into a function: a line of a reach edge (:class:`ReachCall`) into it, and the tests the caller's
+    statement there sits under.  An edge stands for every call going one way and holds each one's line; each line is a
+    site, under its own tests (``doGenerate`` may call one function under ``usePrePro()`` and again under
+    ``useBuild()``)."""
 
     owner: str = Field(description="The caller's owner, as a junction's (``file::name``).")
     owner_line: int = Field(description="The line of the caller's ``def``.")
-    line: int = Field(description="The line of the statement that calls, hands, stores or operates (the edge's).")
+    line: int = Field(
+        description="The line of the statement that calls, hands, stores or operates: one of the edge's lines."
+    )
     how: str = Field(
         description="The edge's :attr:`ReachCall.how`: ``call``, ``handed``, ``lambda``, ``setattr``, ``operator``."
     )

@@ -102,12 +102,11 @@ def _own_nodes(func: ast.AST) -> Iterable[ast.AST]:
             todo.extend(ast.iter_child_nodes(node))
 
 
-def _site_node(func: ast.AST, call: ReachCall) -> Optional[ast.AST]:
-    """The node an edge was read at: a call of its callee, or the expression it names, on its lines."""
-    lines = set(call.lines or [call.line])
+def _site_node(func: ast.AST, call: ReachCall, line: int) -> Optional[ast.AST]:
+    """The node an edge was read at on *line*, one of its lines: a call of its callee, or the expression it names."""
     found: list[ast.expr] = []
     for node in _own_nodes(func):
-        if getattr(node, "lineno", None) not in lines:
+        if getattr(node, "lineno", None) != line:
             continue
         if isinstance(node, ast.Call) and _cut(node.func) == call.callee:
             return node
@@ -429,11 +428,13 @@ def entered_froms(
         for caller, call in edges:
             if call.how in ("handed", "lambda"):
                 handed |= {(_file(caller.owner), one) for one in call.lines or [call.line]}
-            key = (caller.owner, call.line, call.how)
-            if key in seen:
-                continue
-            seen.add(key)
-            sites.append(_site(trees, caller, call))
+            # A row stands for every call going one way, with each one's line: each is a site, under its own tests.
+            for line in call.lines or [call.line]:
+                key = (caller.owner, line, call.how)
+                if key in seen:
+                    continue
+                seen.add(key)
+                sites.append(_site(trees, caller, call, line))
         opened = _open(row, func, file, record, taken, run_time, stops, served, handed, edges)
         found.append(
             EnteredFrom(
@@ -447,18 +448,16 @@ def entered_froms(
     return sorted(found, key=lambda one: (one.owner, one.line))
 
 
-def _site(trees: dict[str, ast.AST], caller: ReachNode, call: ReachCall) -> EnteredSite:
+def _site(trees: dict[str, ast.AST], caller: ReachNode, call: ReachCall, line: int) -> EnteredSite:
     func = _definition(trees, caller)
     owner = f"{_file(caller.owner)}::{caller.function}"
     if func is None:
-        return EnteredSite(owner=owner, owner_line=0, line=call.line, how=call.how, unread=UNREAD_NO_CALLER)
-    node = _site_node(func, call)
+        return EnteredSite(owner=owner, owner_line=0, line=line, how=call.how, unread=UNREAD_NO_CALLER)
+    node = _site_node(func, call, line)
     if node is None:
-        return EnteredSite(
-            owner=owner, owner_line=func.lineno, line=call.line, how=call.how, unread=UNREAD_NO_STATEMENT
-        )
+        return EnteredSite(owner=owner, owner_line=func.lineno, line=line, how=call.how, unread=UNREAD_NO_STATEMENT)
     return EnteredSite(
-        owner=owner, owner_line=func.lineno, line=call.line, how=call.how, conditions=pathcond.arm_condition(node)
+        owner=owner, owner_line=func.lineno, line=line, how=call.how, conditions=pathcond.arm_condition(node)
     )
 
 

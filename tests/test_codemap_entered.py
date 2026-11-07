@@ -294,6 +294,46 @@ def test_a_method_a_way_in_s_test_calls_is_asked_whether_it_is_runnable(built: M
     assert use_pre_pro.asked_at == [f"{GEN}:{_line(SOURCES, GEN, 'C-PP') - 1}"]
 
 
+#: one caller calling the arm's function at two lines, under different tests: the reach record holds the two calls
+#: as one row (same callee, way and classes) with both lines.
+TWICE = {
+    SPEC: SOURCES[SPEC],
+    GEN: """\
+        from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+
+        class JobGeneratorThread:
+            def doGenerate(self, taskSpec: JediTaskSpec) -> None:
+                if taskSpec.usePrePro():  # T-1
+                    self.doGenerateBuild(taskSpec)  # C-1
+                if taskSpec.useBuild():  # T-2
+                    self.doGenerateBuild(taskSpec)  # C-2
+                return None
+
+            def doGenerateBuild(self, taskSpec: JediTaskSpec) -> None:
+                taskSpec.attemptNr = 3  # B1
+        """,
+}
+
+
+def test_a_function_called_at_two_lines_of_one_caller_has_a_site_at_each_under_its_own_tests(tmp_path: Path) -> None:
+    fragment = _build(tmp_path, TWICE, ((GEN, "doGenerateBuild", "B1"),))
+    way = _way(fragment, GEN, "doGenerateBuild")
+    assert way.open == []
+    assert [(site.line, site.conditions) for site in way.sites] == [
+        (_line(TWICE, GEN, "C-1"), ["taskSpec.usePrePro()"]),
+        (_line(TWICE, GEN, "C-2"), ["taskSpec.useBuild()"]),
+    ]
+    (second,) = [
+        one
+        for one in fragment.guard_froms
+        if one.owner == f"{GEN}::doGenerate" and one.test_line == _line(TWICE, GEN, "T-2") and one.name == "taskSpec"
+    ]
+    assert second.calls == [_line(TWICE, GEN, "C-2")]
+    (use_build,) = [one for one in fragment.runnables if one.owner == f"{SPEC}::useBuild"]
+    assert use_build.asked_at == [f"{GEN}:{_line(TWICE, GEN, 'T-2')}"]
+
+
 def test_a_hole_made_with_the_function_s_name_may_enter_it(built: MapFragment) -> None:
     way = _way(built, SPEC, "setOnHold")
     assert [(one.kind, one.at, one.text) for one in way.open] == [
