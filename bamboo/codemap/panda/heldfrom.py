@@ -148,6 +148,30 @@ def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
     return _Way(_STOP, name=name, stop=stop, what=what, at=at)
 
 
+#: A comprehension and the name its value's ``through`` is called by, as Python names its code.
+_COMPREHENSIONS = {
+    ast.ListComp: "<listcomp>",
+    ast.SetComp: "<setcomp>",
+    ast.DictComp: "<dictcomp>",
+    ast.GeneratorExp: "<genexpr>",
+}
+_ELEMENT_COMPREHENSIONS = frozenset({"<listcomp>", "<setcomp>", "<genexpr>"})
+
+
+def _step(way: _Way, step: str) -> _Way:
+    """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
+    (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``), as a tuple literal's is
+    (:meth:`_Reader._element`); a dict's elements are its keys, not the values it is read as."""
+    if (
+        step.startswith("[")
+        and way.through
+        and way.through[0].call in _ELEMENT_COMPREHENSIONS
+        and way.through[0].steps == len(way.steps)
+    ):
+        return way._replace(through=way.through[1:])
+    return way._replace(steps=way.steps + (step,))
+
+
 def owner_of(file: str, func: ast.AST) -> str:
     return f"{file}::{getattr(func, 'name', '<module>')}"
 
@@ -383,9 +407,16 @@ class _Reader:
                 )
             else:
                 step = f".{expr.attr}"
+            return [_step(one, step) for one in self.read(expr.value, at, file, func)]
+        if isinstance(expr, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # A new collection of the element's values: the element's ways, through the comprehension.
+            element = expr.value if isinstance(expr, ast.DictComp) else expr.elt
+            made = _Through(_COMPREHENSIONS[type(expr)], f"{file}:{line}", THROUGH_COMPUTED)
             return [
-                one._replace(steps=one.steps + (step,))
-                for one in self.read(expr.value, at, file, func)
+                one
+                if one.kind == _STOP
+                else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
+                for one in self.read(element, element, file, func)
             ]
         found = self._sources(expr, at, file, func)
         return found or [
@@ -433,9 +464,13 @@ class _Reader:
     ) -> list[_Way]:
         if expr.id in ("self", "cls"):
             return [_Way(KEY_SELF_FIELD, name=expr.id, line=expr.lineno)]
-        if expr.id not in _parameters(func) and not _bound_here(func, expr.id):
-            return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         point = expr if getattr(expr, "parent", None) is not None else at
+        if (
+            expr.id not in _parameters(func)
+            and not _bound_here(func, expr.id)
+            and pathcond.comprehension_clause(func, expr.id, point) is None
+        ):
+            return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         last = _statement_of(point)
         found: list[_Way] = []
         for site in pathcond.held_at(func, expr.id, point).sites:  # type: ignore[arg-type]
@@ -487,7 +522,8 @@ class _Reader:
         value is, so they keep the steps, ``through`` and route an assignment's way has: an unpacking ``=``'s element
         at the name's place (:func:`pathcond.assigned_targets`), a loop's element of its iterable (``[*]``, then the
         name's slot where the target unpacks), a ``with``'s ``__enter__()`` of its context -- a generator's yields
-        where the iterable or the context is a call to one (:meth:`_entered`).
+        where the iterable or the context is a call to one (:meth:`_entered`).  A comprehension's ``for`` clause is a
+        loop (:func:`pathcond.comprehension_clause`): ``f`` in ``[f for f in self.job.Files]`` is a file there too.
 
         ``update_jobs``' ``for job in job_list`` read ``job`` as the list whole; ``retEvS, retNewPandaID =
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
@@ -497,9 +533,13 @@ class _Reader:
         carried = self._sources(expr, point, file, func) or [
             _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
         ]
-        binding = next(
-            (one for one in pathcond.bindings(func, expr.id) if one.site is site and not one.nested),
-            None,
+        binding = (
+            pathcond.clause_binding(site, expr.id)
+            if isinstance(site, ast.comprehension)
+            else next(
+                (one for one in pathcond.bindings(func, expr.id) if one.site is site and not one.nested),
+                None,
+            )
         )
         if binding is None or binding.kind in (pathcond.BIND_AUGMENTED, pathcond.BIND_EXCEPT):
             return carried
@@ -542,7 +582,7 @@ class _Reader:
 
     @staticmethod
     def _stepped(ways: list[_Way], step: str) -> list[_Way]:
-        return [one if one.kind == _STOP else one._replace(steps=one.steps + (step,)) for one in ways]
+        return [one if one.kind == _STOP else _step(one, step) for one in ways]
 
     def _slot_column(self, way: _Way, slot: int, expr: ast.Name, file: str, func: ast.AST) -> _Way:
         """*way*, a statement's rows a loop unpacks, with the column of the select item at *slot* where it has none."""

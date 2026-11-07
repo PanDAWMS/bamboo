@@ -1537,6 +1537,41 @@ class Held(NamedTuple):
 _SCALARS = (str, bytes, int, float, complex, bool, type(None))
 
 
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def comprehension_clause(func: ast.AST, name: str, at: ast.AST) -> Optional[ast.comprehension]:
+    """The ``for`` clause binding *name* that *at* reads inside a comprehension, as Python scopes it: the innermost
+    comprehension around *at* one of whose clauses before the read binds it -- every clause for the element and the
+    ``if`` s, the earlier ones for a clause's iterable (the first iterable runs outside), the clause itself and the
+    earlier ones for its target and its ``if`` s; the last such clause.  ``None`` outside one."""
+    child, node, from_iter = at, getattr(at, "parent", None), False
+    while node is not None and child is not func:
+        if isinstance(node, _COMPREHENSIONS):
+            clauses = node.generators
+            if isinstance(child, ast.comprehension):
+                place = next(index for index, one in enumerate(clauses) if one is child)
+                visible = clauses[:place] if from_iter else clauses[: place + 1]
+            else:
+                visible = clauses
+            for clause in reversed(visible):
+                if any(bound == name for bound, _slot, _unpacked in names_bound_by(clause.target)):
+                    return clause
+        from_iter = isinstance(node, ast.comprehension) and child is node.iter
+        child, node = node, getattr(node, "parent", None)
+    return None
+
+
+def clause_binding(clause: ast.comprehension, name: str) -> Optional[Binding]:
+    """The :class:`Binding` of *name* a comprehension's ``for`` *clause* makes, in the comprehension's own scope
+    (:func:`comprehension_clause`); ``None`` where it binds no such name.  Not among :func:`bindings`: the
+    function's own names are not bound by it."""
+    for bound, slot, unpacked in names_bound_by(clause.target):
+        if bound == name:
+            return Binding(name, clause, BIND_FOR, None, slot, unpacked, True)
+    return None
+
+
 def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST) -> Held:
     """What the local *name* holds where *at* reads it -- an ``if`` or ``while`` at its test: the bindings of it
     that can reach the read (:func:`bamboo.codemap.panda.reaching.reaching`, the function's entry among them).
@@ -1547,7 +1582,8 @@ def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST
     does -- ``statusInDB, frozenTime = res`` under ``if res is not None:`` leaves ``frozenTime = None`` one of two
     -- and so do a ``try`` body's bindings before its ``finally``; a ``toSkip = True`` followed by ``continue``
     reaches nothing past the loop's body, so ``if not toSkip:`` there reads ``toSkip = False`` alone.  A ``+=``
-    is a binding of its own, of something computed.
+    is a binding of its own, of something computed.  Inside a comprehension, a name one of its ``for`` clauses binds
+    is that clause's (:func:`comprehension_clause`), as Python scopes it: no binding of the function reaches it.
 
     Read off ``parent`` links, as :func:`reaching` places the read by them: without them every read looks reached
     from the entry, so a tree without them is refused (:func:`attach_parents`).
@@ -1558,6 +1594,9 @@ def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST
     arguments = func.args
     parameters = {one.arg for one in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]}
     parameters |= {one.arg for one in (arguments.vararg, arguments.kwarg) if one is not None}
+    clause = comprehension_clause(func, name, target)
+    if clause is not None:
+        return Held(HELD_COMPUTED, None, (clause,))
     sites = _unique([binding.site for binding in bindings(func, name) if not binding.nested])
     reached = tuple(reaching(target, [arguments, *sites]))
     if reached == (arguments,):
