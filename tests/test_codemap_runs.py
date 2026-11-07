@@ -2585,6 +2585,51 @@ def test_a_call_handed_a_list_the_arm_s_object_is_put_in_is_read_for_later_write
     assert ("Proxy.archiveJob", line("S3"), "row", ["failed"], True) in c4[3]
 
 
+CALLED = """\
+from pkg.spec import JobSpec
+
+
+class Proxy:
+    def store(self, jobs, bulk=False):
+        for job in jobs:
+            if not bulk:
+                job.jobStatus = "direct"  # B1
+            else:
+                job.ddmErrorDiag = "bulk"  # B2
+
+
+class Maker:
+    def __init__(self, proxy: Proxy):
+        self.proxy = proxy
+
+    def make(self, job: JobSpec):
+        job.jobStatus = "defined"  # M1
+        self.proxy.store([job], bulk=True)  # M2
+
+    def make_direct(self, job: JobSpec):
+        job.jobStatus = "defined"  # M3
+        self.proxy.store([job])  # M4
+"""
+
+
+def test_a_call_s_constants_rule_out_what_its_callee_s_ifs_keep_from_running(
+    tmp_path: Path,
+) -> None:
+    """``store([job], bulk=True)`` never runs store's ``if not bulk:`` block, so its jobStatus is no later write of
+    that call; ``store([job])`` leaves bulk False and runs it."""
+    arms = [
+        ("called", "Maker.make", "M1", "JobSpec.jobStatus"),
+        ("called", "Maker.make_direct", "M3", "JobSpec.jobStatus"),
+    ]
+    fragment = _build(tmp_path, arms, spec=REWRITE_SPEC, called=CALLED)
+    line = lambda marker: _line(CALLED, marker)  # noqa: E731
+    bulk = _said(_branch(fragment, "M1"), "jobStatus")
+    assert not [one for one in bulk if one[2] == line("M2")]
+    direct = _said(_branch(fragment, "M3"), "jobStatus")
+    (m4,) = [one for one in direct if one[2] == line("M4")]
+    assert ("Proxy.store", line("B1"), "store", ["direct"], False) in m4[3]
+
+
 PRIOR_SPEC = """\
 class JobSpec:
     _attributes = ("PandaID", "jobName", "jobStatus")

@@ -41,7 +41,16 @@ a list it is put in -- ``upJobs.append(job)`` before ``updateJobs(upJobs)``
 - a call handed the object: what its run can write
   (:func:`bamboo.codemap.objects.may_change`) -- its assignments of the
   column on the object, each said written or not by a write of the run, and
-  its statements writing the column on the object's row by its key;
+  its statements writing the column on the object's row by its key -- read
+  as that call runs the function it lands in: the constants the call hands
+  (:meth:`Calls.route_constant`: a literal, or a default it leaves) to
+  parameters the function's ``if`` tests read and it never binds again rule
+  out what those tests keep from running (:func:`pathcond.ruled_out_by`),
+  and what is on those lines -- calls, bindings, writes, holes,
+  assignments -- is not read.  JobGenerator's ``storeJobs(...,
+  toPending=True, bulk_job_insert=True)`` does not run the direct
+  ``insertNewJob`` nor the Setupper.  One level: the function's own callees
+  are read for any call.
 - a row: a statement there writing the column on a row its key names by a
   path holding the object.
 
@@ -65,6 +74,7 @@ import re
 from functools import partial
 from typing import TYPE_CHECKING, Optional
 
+from bamboo.codemap import calls as C
 from bamboo.codemap import objects
 from bamboo.codemap.models import (
     REWRITE_CALL,
@@ -149,6 +159,37 @@ def attach(reader: "runs._Reader", modules: list[SourceModule]) -> int:
     return found
 
 
+def _tested(func: ast.AST) -> list[str]:
+    """The names *func*'s own ``if`` tests read."""
+    return sorted(
+        {
+            name.id
+            for node in C.own_nodes(func)
+            if isinstance(node, ast.If)
+            for name in ast.walk(node.test)
+            if isinstance(name, ast.Name)
+        }
+    )
+
+
+def _statements_by_line(func: ast.AST) -> dict[int, ast.stmt]:
+    """Each line of *func*'s own body, with the innermost of its statements holding it."""
+    found: dict[int, ast.stmt] = {}
+    for node in C.own_nodes(func):
+        if not isinstance(node, ast.stmt):
+            continue
+        end = node.end_lineno or node.lineno
+        for line in range(node.lineno, end + 1):
+            there = found.get(line)
+            if (
+                there is None
+                or (there.end_lineno or there.lineno) - there.lineno
+                >= end - node.lineno
+            ):
+                found[line] = node
+    return found
+
+
 def open_kind(how: str) -> str:
     """The ``REWRITE_*`` reason of what :func:`objects.may_change` leaves open (:attr:`objects.Change.open`)."""
     for pattern, kind in _OPEN_PATTERNS:
@@ -167,7 +208,11 @@ class _Later:
         self.recorded: frozenset[str] = frozenset().union(
             *(declared.get(name, set()) for name in panda_objects.COLUMN_CLASSES)
         )
-        self._changes: dict[tuple[str, str, str, str], "Change"] = {}
+        self._changes: dict[tuple, "Change"] = {}
+        #: The constants a call hands its callee's tested parameters, by (caller, line, callee).
+        self._constants: dict[tuple[str, int, str], tuple[tuple[str, object], ...]] = {}
+        #: The record and may_change's memo with a callee's row read as a call hands it (:meth:`_as_called`).
+        self._called: dict[tuple, tuple[dict[str, ReachNode], dict]] = {}
         self._replaced: dict = {}
         self._helds: dict[tuple[str, frozenset[str]], tuple[set[str], bool]] = {}
         self._names = objects._function_names(self.rows)
@@ -563,7 +608,7 @@ class _Later:
                 continue
             sites: dict[tuple[str, int, str], RewriteSite] = {}
             for path in sorted(paths):
-                change = self._change(to, path, column, cls)
+                change = self._change(to, path, column, cls, step.owner, line)
                 for one in change.because:
                     site = self._site(one, column, True)
                     if site is not None:
@@ -620,20 +665,106 @@ class _Later:
             self._helds[key] = (found | set(held), spent)
         return self._helds[key]
 
-    def _change(self, owner: str, path: str, column: str, cls: str) -> "Change":
-        key = (owner, path, column, cls)
+    def _change(
+        self,
+        owner: str,
+        path: str,
+        column: str,
+        cls: str,
+        caller: str = "",
+        line: int = 0,
+    ) -> "Change":
+        """:func:`objects.may_change` of *owner*'s run, as the call at *caller*:*line* runs it (:meth:`_as_called`)."""
+        handed = self._handed_constants(caller, line, owner) if caller else ()
+        key = (owner, path, column, cls, handed)
         if key not in self._changes:
+            rows, memo = self._as_called(owner, handed)
             self._changes[key] = objects.may_change(
-                self.rows,
+                rows,
                 owner,
                 path,
                 column,
                 key_column=ROW_KEYS.get(cls, "PandaID"),
                 spec_class=cls,
                 table_classes=self.tables,
-                memo=self._record,
+                memo=memo,
             )
         return self._changes[key]
+
+    def _handed_constants(
+        self, caller: str, line: int, owner: str
+    ) -> tuple[tuple[str, object], ...]:
+        """The constants the one call at *caller*:*line* into *owner* hands the parameters *owner*'s ``if`` tests
+        read and it never binds again: a literal, or the default the call leaves (:meth:`Calls.route_constant`).
+        Empty where the line holds no call into it or more than one."""
+        key = (caller, line, owner)
+        if key not in self._constants:
+            found: dict[str, object] = {}
+            held = self.reader.funcs.get(owner)
+            sites = (
+                self.reader._sites_into(owner, caller, line)
+                if held is not None and caller in self.reader.funcs
+                else []
+            )
+            if len(sites) == 1:
+                func = held[1]  # type: ignore[index]
+                target = self.reader._target(owner)
+                for name in _tested(func):
+                    if not panda_objects.is_parameter(func, name) or C._rebinds(
+                        func, name
+                    ):
+                        continue
+                    value = self.reader.calls.route_constant(name, target, (sites[0],))
+                    if isinstance(value, (str, int, float, bool, type(None))):
+                        found[name] = value
+            self._constants[key] = tuple(sorted(found.items(), key=lambda one: one[0]))
+        return self._constants[key]
+
+    def _as_called(
+        self, owner: str, handed: tuple[tuple[str, object], ...]
+    ) -> tuple[dict[str, ReachNode], dict]:
+        """The record, and a memo for :func:`objects.may_change`, with *owner*'s row read as a call handing *handed*
+        runs it: what is on a line the constants rule out (:func:`pathcond.ruled_out_by`) is not read -- a call all of
+        whose lines are, a call binding, a write all of whose lines are, a hole, a binding, an assignment.  The
+        record itself where none is ruled out."""
+        key = (owner, handed)
+        if key not in self._called:
+            self._called[key] = (self.rows, self._record)
+            held = self.reader.funcs.get(owner)
+            row = self.rows.get(owner)
+            if handed and held is not None and row is not None:
+                func, values = held[1], dict(handed)
+                dead = {
+                    line
+                    for line, statement in _statements_by_line(func).items()
+                    if pathcond.ruled_out_by(statement, func, values)
+                }
+                if dead:
+                    rows = dict(self.rows)
+                    rows[owner] = row.model_copy(
+                        update={
+                            "calls": [
+                                one
+                                for one in row.calls
+                                if not set(one.lines or [one.line]) <= dead
+                            ],
+                            "call_bindings": [
+                                one for one in row.call_bindings if one.line not in dead
+                            ],
+                            "writes": [
+                                one for one in row.writes if not set(one.lines) <= dead
+                            ],
+                            "holes": [one for one in row.holes if one.line not in dead],
+                            "bindings": [
+                                one for one in row.bindings if one.line not in dead
+                            ],
+                            "assigns": [
+                                one for one in row.assigns if one.line not in dead
+                            ],
+                        }
+                    )
+                    self._called[key] = (rows, {})
+        return self._called[key]
 
     def _site(
         self, one: objects.Site, column: str, written: bool
