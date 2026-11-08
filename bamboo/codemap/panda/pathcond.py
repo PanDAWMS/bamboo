@@ -1670,14 +1670,8 @@ def held_since(
     target = at.test if isinstance(at, (ast.If, ast.While)) else at
     if getattr(target, "parent", None) is None or getattr(since, "parent", None) is None:
         raise ValueError(f"held_since needs parent links on the tree holding line {getattr(at, 'lineno', '?')}")
-    # A ``:=`` writes where the statement holding it does (:func:`reaching` places an ``if``'s at its test).
     sites = _unique(
-        [
-            binding.site if isinstance(binding.site, (ast.stmt, ast.ExceptHandler)) else site_of(binding.site)
-            for binding in bindings(func, name)
-            if not binding.nested
-        ]
-        + _deletions(func, name)
+        [binding.site for binding in bindings(func, name) if not binding.nested] + _deletions(func, name)
     )
     candidates = [func.args, since, *sites]
     others: list[ast.AST] = []

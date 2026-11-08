@@ -132,7 +132,9 @@ def reaching(
     other statement once it has run -- and the function's parameter list
     (its ``args``) on entry, where the call hands the parameters their
     values.  So a parameter rebound on some paths only comes back beside
-    the rebinding: ``if days is None: days = 3`` leaves both.
+    the rebinding: ``if days is None: days = 3`` leaves both.  A ``:=``
+    handed in as itself, the expression :func:`pathcond.bindings` names,
+    writes where the statement holding it does, and comes back as itself.
 
     The scope is the one *target* is in.  A write inside a nested function is
     to another variable and reaches nothing here.  If no write is in this
@@ -184,9 +186,16 @@ def reaching_each(
         flow, bits = held
         state = flow.entry.get(id(statement))
         found.append(
-            [site for site in sites if state and state & bits.get(id(site), 0)]
+            [site for site in sites if state and state & bits.get(id(_placed(site)), 0)]
         )
     return found
+
+
+def _placed(node: ast.AST) -> ast.AST:
+    """Where a write sits in the flow: a ``:=`` at the statement holding it, any other write as itself."""
+    if isinstance(node, ast.NamedExpr):
+        return _statement_of(node) or node
+    return node
 
 
 def _writes(
@@ -198,15 +207,15 @@ def _writes(
     once: Sequence[ast.AST] = (),
 ) -> Optional[tuple[_Flow, dict[int, int]]]:
     """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
-    own = [node for node in (*sites, *killers) if _scope_of(node) is scope]
+    own = [_placed(node) for node in (*sites, *killers) if _scope_of(node) is scope]
     if not own:
         return None
-    again = {id(node) for node in rereads if _scope_of(node) is scope}
+    again = {id(_placed(node)) for node in rereads if _scope_of(node) is scope}
     ids = sorted({id(node) for node in own} | again)
     bits = {key: 1 << index for index, key in enumerate(ids)}
     # A ``+=`` handed in as a killer kills, as every killer does: the caller
     # knows the value goes no further as itself.
-    killed = {id(node) for node in killers} - again
+    killed = {id(_placed(node)) for node in killers} - again
     keeps = 0
     for node in own:
         adds = isinstance(node, ast.AugAssign) and id(node) not in killed
@@ -214,7 +223,7 @@ def _writes(
             keeps |= bits[id(node)]
     for key in again:
         keeps |= bits[key]
-    on_entry = frozenset(id(node) for node in entered if id(node) in bits)
+    on_entry = frozenset(id(_placed(node)) for node in entered if id(_placed(node)) in bits)
     return _flow(scope, bits, keeps, on_entry, frozenset(id(node) for node in once)), bits
 
 
@@ -238,7 +247,7 @@ def reaching_exit(
     state = flow.exit
     if not state:
         return []
-    return [site for site in sites if state & bits.get(id(site), 0)]
+    return [site for site in sites if state & bits.get(id(_placed(site)), 0)]
 
 
 def _scope_of(node: ast.AST) -> Optional[ast.AST]:

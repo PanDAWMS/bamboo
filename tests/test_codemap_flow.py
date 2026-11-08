@@ -76,6 +76,24 @@ def frozen(ddm, log, spec):
         ddm.freeze(spec.name)  # G2
     except Exception:
         log.warning("failed")  # G3
+
+
+def setup(log, items, flag):
+    log.debug("running")  # P1
+    if flag:
+        prepare(1)  # P2
+    else:
+        prepare(2)  # P3
+    log.debug("prepared")  # P4
+    for item in items:
+        log.debug("item")  # P5
+        prepare(item)  # P6
+    try:
+        log.debug("trying")  # P7
+        prepare(0)  # P8
+    except Exception:
+        log.error("failed")  # P9
+    log.debug(f"done {prepare(3)}")  # P10
 """
 
 
@@ -142,6 +160,27 @@ def test_one_call_runs_both_only_on_a_way_that_holds_both() -> None:
     assert flow.together(S["R4"], S["R3"])
 
 
+def test_a_print_every_way_to_which_passes_a_call_says_the_call_ran() -> None:
+    """``prepared`` follows either arm's call: handed both, every way passes one, and one alone is not enough.
+    A loop's call is passed by no print before it in the pass, nor by one after a loop that may run none; a call
+    the print holds is passed before it prints."""
+    assert flow.passes_before(S["P4"], [S["P2"], S["P3"]])
+    assert not flow.passes_before(S["P4"], [S["P2"]])
+    assert not flow.passes_before(
+        S["P1"], [S["P2"], S["P3"], S["P6"], S["P8"], S["P10"]]
+    )
+    assert not flow.passes_before(S["P5"], [S["P6"]])
+    assert not flow.passes_before(S["P7"], [S["P6"]])
+    assert flow.passes_before(S["P10"], [S["P10"]])
+
+
+def test_a_handler_print_says_a_call_ran_only_if_nothing_before_it_can_raise() -> None:
+    """``log.debug("trying")`` can raise before ``prepare(0)`` is entered, so the handler's ``failed`` does not
+    say the call ran; the logger call itself, entered before it can raise, is passed."""
+    assert not flow.passes_before(S["P9"], [S["P8"]])
+    assert flow.passes_before(S["P9"], [S["P7"]])
+
+
 def test_a_loop_the_run_went_round_once_has_no_way_back() -> None:
     loop = S["O1"]
     assert flow.together(S["O2"], S["O3"])
@@ -155,6 +194,20 @@ def test_the_flow_is_asked_of_one_function_on_a_tree_with_parent_links() -> None
     bare = ast.parse(FLOW).body[0].body[0]  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="parent links"):
         flow.runs_after(bare, bare)
+
+
+def test_a_print_from_another_parse_is_refused_not_answered() -> None:
+    """The same print read off a tree of its own is another function's: without the refusal no way from that
+    function's entry would meet the calls, and every print would say they ran."""
+    other = ast.parse(FLOW)
+    pathcond.attach_parents(other)
+    again = next(
+        node
+        for node in ast.walk(other)
+        if isinstance(node, ast.stmt) and node.lineno == S["P1"].lineno
+    )
+    with pytest.raises(ValueError, match="one function"):
+        flow.passes_before(again, [S["P2"], S["P3"]])
 
 
 MANAGERS = """\
