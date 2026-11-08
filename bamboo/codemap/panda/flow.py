@@ -116,6 +116,25 @@ def passes_through(
     return not reaching(last, [first], [*stops, site], entered=[site], once=once)
 
 
+def passes_before(
+    printed: ast.stmt, sites: Sequence[ast.stmt], *, once: Sequence[ast.AST] = ()
+) -> bool:
+    """Whether every way from the entry of the function holding the print *printed* to its end passes one of
+    *sites*, so its record says the call ran one of them: ``setupper_atlas_plugin.run`` prints ``end`` at 206
+    only after calling ``setup_jumbo_jobs`` at 202, which prints nothing.
+
+    Each of *sites* is passed once entered, a raise inside it to a handler included, and a site the print holds
+    (``log.debug(f"{fn()}")``) is passed before it prints.  Hand every site of the question at once: after
+    ``if a: fn(1)`` / ``else: fn(2)`` each way passes one, and neither alone."""
+    _one_function(printed, *sites)
+    if any(site is printed for site in sites):
+        return True
+    func = _scope(printed)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise ValueError("the flow answers from a function's entry")
+    return not reaching(printed, [func.args], sites, entered=sites, once=once)
+
+
 def together(
     printed: ast.stmt, site: ast.stmt, *, once: Sequence[ast.AST] = ()
 ) -> bool:
