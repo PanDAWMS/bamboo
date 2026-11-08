@@ -691,6 +691,7 @@ class RecordedLogs:
         log.narrowed = narrowed
         log.without = frozenset(got.without)
         log.unlisted = unlisted
+        log.jedi = frozenset(m for m, service in got.services.items() if service == "jedi")
         if partial:
             kinds = sorted(set(partial.values()))
             notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")

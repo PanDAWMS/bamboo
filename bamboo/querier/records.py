@@ -442,6 +442,10 @@ class Log:
     #: the machine an ask named that no recorded list has (``not listed``): the log was asked of every machine in its
     #: place (K13), so nothing is known of a file of it there
     unlisted: frozenset[str] = frozenset()
+    #: the machines a recorded answer names JEDI's: their clocks were measured against the database's on some only, so
+    #: a time on them is the database's within the windows' slack, not to the second (``recorded.JEDI_CLOCKS``; empty
+    #: in a file handed in)
+    jedi: frozenset[str] = frozenset()
 
     @property
     def name(self) -> str:

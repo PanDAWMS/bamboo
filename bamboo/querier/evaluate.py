@@ -110,6 +110,9 @@ class Env(shared.Env):
     #: (``Rerun._key_columns``).  A print of one under a name bound to the object an arm writes says which object the
     #: arm's pass wrote (``which_ran.other_objects``)
     keys: frozenset[str] = frozenset()
+    #: the rows file's statuslog rows of the question's key (``Rerun.base_env``): the state the question's column was in
+    #: when a pass read it (``which_ran.row_state``, H2 step 2 (iii)); empty where none is read
+    statuslog: list[dict] = field(default_factory=list)
 
     def put_hole(self, text: str, printed: str, source: str, owners: Iterable[str]) -> None:
         """:meth:`put_printed`, with the functions that printed it where it is about a row."""

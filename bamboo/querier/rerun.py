@@ -2461,6 +2461,8 @@ class Rerun:
         env.written = self.args.subject if env.subject else ""
         env.elements = _element_rows(self.data, cls)
         env.keys = frozenset(c.partition(".")[2] for c in self._key_columns(self.args.subject, self.args.key))
+        # the question's column as a pass read it from the row: the statuslog's state before the pass (H2 step 2 (iii))
+        env.statuslog = list((self.data.get("statuslog") or {}).get("states") or [])
         for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:

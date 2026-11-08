@@ -9327,6 +9327,125 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
     assert got["heads"] == ["failed", "start", "", "a-b", ""], got
 
 
+_ROW_SPEC = """\
+class JobSpec:
+    _attributes = ("PandaID", "jobStatus")
+
+    def __init__(self):
+        for attr in self._attributes:
+            object.__setattr__(self, attr, None)
+
+    def pack(self, values):
+        for i in range(len(self._attributes)):
+            object.__setattr__(self, self._attributes[i], values[i])
+
+    @classmethod
+    def columnNames(cls):
+        return ",".join(cls._attributes)
+"""
+
+_ROW_PROXY = """\
+from pandaserver.spec import JobSpec
+
+
+class Proxy:
+    def killJob(self, pandaID, code):
+        sql2 = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql2, varMap)
+        res = self.cur.fetchall()
+        if len(res) == 0:
+            return
+        job = JobSpec()
+        job.pack(res[0])
+        if job.jobStatus != "failed":
+            if code == "2":
+                job.jobStatus = "closed"
+            if job.jobStatus != "closed":
+                job.jobStatus = "cancelled"
+"""
+
+
+def test_a_guard_reading_the_questions_column_the_pass_filled_from_the_row_reads_the_statuslogs_state_before_it(tmp_path):
+    # killJob reads job.jobStatus at 1017 after job.pack(res[0]) at 998, res the rows of 992's SELECT WHERE
+    # PandaID=:PandaID: the value is the row's as the pass read it, the statuslog's state before the pass
+    # (MJE-7383377087: 'merging'); at the guard after the stores the stores reach it too (H2 step 2 (iii);
+    # KNOWN_ISSUES.md K71)
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "proxy.py").write_text(_ROW_PROXY)
+    (tmp_path / "x.log").write_text(
+        "2026-01-01 00:00:05,000 panda.log.X: DEBUG    < PandaID=1 > start\n"
+        "2026-01-01 00:00:05,100 panda.log.X: DEBUG    < PandaID=1 > done\n"
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import Log, Record, Run, read_log, runs_for
+            from bamboo.querier.which_ran import row_state, state_before
+
+            R.ROWS_FROM = "walk"
+            fn = R.function("pandaserver/proxy.py", "killJob")
+            closed, cancelled = (next(s for s in ast.walk(fn.node) if isinstance(s, ast.stmt) and ast.unparse(s) == t)
+                                 for t in ("job.jobStatus = 'closed'", "job.jobStatus = 'cancelled'"))
+            run, = runs_for(read_log("x.log"), "1")
+
+            def at(status, time, host):
+                return {"status": status, "time": time[:19], "time_extended": time, "host": host}
+
+            before = at("merging", "2026-01-01 00:00:00.000000", "m1")
+            after = at("closed", "2026-01-01 00:00:30.000000", "m2")
+            inside = at("holding", "2026-01-01 00:00:05.050000", "m2")
+
+            def env(states, **known):
+                e = E.Env(rows={"job": "job"}, subject="<job>.jobStatus", keys=frozenset({"PandaID"}), statuslog=states)
+                for k, v in known.items():
+                    e.put(k, v, "a print")
+                return e
+
+            got = {
+                "closed": row_state(fn, closed, run, env([before, after])),
+                "cancelled": row_state(fn, cancelled, run, env([before, after])),
+                "inside": row_state(fn, closed, run, env([before, inside, after])),
+                "known": row_state(fn, closed, run, env([before, after], **{"job.jobStatus": "running"})),
+                "none_before": row_state(fn, closed, run, env([after])),
+            }
+            e = env([before, after])
+            row_state(fn, closed, run, e)
+            got["source"] = e.values[e.canonical("job.jobStatus")].source
+            # five minutes before a pass: past a second of the server's clock, within the windows' slack on JEDI's
+            # (fifteen minutes before it, the first row is past both)
+            records = [Record(file="y.log", lineno=1, stamp="2026-01-01 00:15:00,000", logger="panda.log.Y",
+                              level="DEBUG", token="<t>", message="m", machine="j1")]
+            near = at("ready", "2026-01-01 00:10:00.000000", "m2")
+            jedi = Run(Log(path="y.log", records=records, jedi=frozenset({"j1"})), "<t>", records, records)
+            server = Run(Log(path="y.log", records=records), "<t>", records, records)
+            got["jedi"] = state_before(jedi, [before, near])[1]
+            got["server"] = state_before(server, [before, near])[0]["status"]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the guard's read is filled only from the key's row: the state before the pass
+    assert got["closed"] == {"job.jobStatus": "merging"}, got
+    assert got["source"] == "the statuslog row before the pass, 'merging' at 2026-01-01 00:00:00.000000", got
+    # the second guard is reached by the store of 'closed' too: the text is not put for the arm
+    assert got["cancelled"] == {}, got
+    # another machine's row within the pass: the read may have come after it
+    assert got["inside"] == {}, got
+    # a value a print showed is kept; no row before the pass, nothing
+    assert got["known"] == {} and got["none_before"] == {}, got
+    assert got["jedi"] == "statuslog row(s) ['ready'] of another machine within the pass", got
+    assert got["server"] == "ready", got
+
+
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
     out = _ok(
         _run(

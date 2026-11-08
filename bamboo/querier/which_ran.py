@@ -56,12 +56,13 @@ from bamboo.codemap import trace  # noqa: E402
 from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import evaluate as SE  # noqa: E402
-from bamboo.codemap.panda import flow, pathcond  # noqa: E402
+from bamboo.codemap.panda import fills, flow, pathcond  # noqa: E402
 from bamboo.querier import asked, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
+from bamboo.querier import windows as W  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
 
@@ -491,6 +492,137 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
             env.put(name, value, f"{source}, through {turned}")
             put[name] = text
     return put
+
+
+#: how far a log's stamps are from the database's clock on the server's machines: their statuslog rows fell inside
+#: their runs' log times to the second (``recorded``, bamboo-e1); JEDI's are read within the windows' slack
+CLOCK = datetime.timedelta(seconds=1)
+
+
+def state_before(run: Run, states: list[dict]) -> tuple[dict | None, str]:
+    """``(row, "")``: the statuslog row in force when *run* began, the last one before its first record; or ``(None,
+    why)``: none is before it, or a row of another machine falls within its span -- a write the pass's read may have
+    come before or after.  A row within the span written by the run's own machine is taken for the pass's own write,
+    after its read: A-rec's updateJobStatus pass (aipanda092, 10:14:50,068 .. ,077) prints "old=starting new=running"
+    and the statuslog holds running at 10:14:50.111 from aipanda092, starting at 10:14:39.53 before it.  A run's stamps
+    are the database's clock within :data:`CLOCK` on the server's machines and within ``windows.SLACK`` on JEDI's
+    (``Log.jedi``)."""
+    margin = W.SLACK if run.machine in run.log.jedi else CLOCK
+    first, last = W.when(run.first) - margin, W.when(run.last) + margin
+
+    def at(s: dict) -> datetime.datetime:
+        return W.when(s.get("time_extended") or s["time"])
+
+    within = [s for s in states if first <= at(s) <= last and (s.get("host") or "") != run.machine]
+    if within:
+        return None, f"statuslog row(s) {sorted({s['status'] for s in within})} of another machine within the pass"
+    before = [s for s in states if at(s) < first]
+    if not before:
+        return None, "no statuslog row before the pass"
+    return max(before, key=at), ""
+
+
+def row_state(fn: R.Function, stmt: ast.stmt, run: Run, env: E.Env) -> dict[str, str]:
+    """Put in *env* the question's column where a test reaching *stmt* reads it from the row the function fetched in
+    this pass: an attribute chain spelling the question's row and column (``job.jobStatus``, ``env.subject``) whose
+    every write reaching the read is a fill from a fetched row (the map's ``fills.row_fills``) -- one row
+    (``fetchone``'s, or the rows' element at a constant index), of a statement testing a key column equal to a bind,
+    the column the subject's, no call changing it in place on the way.  The value is the statuslog's state when the pass
+    began (:func:`state_before`): the row's value as the pass read it.  killJob reads ``job.jobStatus`` at 1017 after
+    ``job.pack(res[0])`` at 998, ``res`` 992's rows ``WHERE PandaID=:PandaID``; at 1071 the stores 1028 .. 1063 reach
+    too, so it is not put there.  Not a name *env* knows (a print showed it).  A local filled from a select item
+    (updateJobStatus's ``oldJobStatus``) is not read: the map's parts do not say which table the item is of.
+
+    Premises: every change of the column leaves a statuslog row (the current PanDA version); a key column tested equal
+    reads the question's row.  KNOWN_ISSUES.md K71."""
+    if not env.subject or not env.statuslog:
+        return {}
+    column = env.subject.rpartition(".")[2].lower()
+    keys = {k.lower() for k in env.keys}
+    reads: dict[str, list[ast.expr]] = {}
+    try:
+        types = asked._types()
+        tree = types.tree(fn.rel)
+        if tree is None:
+            return {}
+        func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
+        node = R.statement_at(func, stmt.lineno)
+        if node is None:
+            return {}
+        for test in pathcond.tests_on(node, func):
+            for read in _chains(test):
+                text = ast.unparse(read)
+                if env.canonical(text) == env.subject and not env.knows(text):
+                    reads.setdefault(text, []).append(read)
+        if not reads:
+            return {}
+        calls = PR._calls_index(types)
+        owned = types.method_class(fn.rel, func)
+    except (StopIteration, LookupError, ValueError):
+        return {}
+    bound = tuple(calls.objects_of(owned)) if owned else ()
+    put: dict[str, str] = {}
+    state: dict | None = None
+    for text, nodes in reads.items():
+        if not all(_row_filled(calls, fn.rel, func, read, bound, column, keys) for read in nodes):
+            continue
+        if state is None:
+            state, _why = state_before(run, env.statuslog)
+            if state is None:
+                return put
+        when = state.get("time_extended") or state["time"]
+        env.put(text, state["status"], f"the statuslog row before the pass, {state['status']!r} at {when}")
+        put[text] = state["status"]
+    return put
+
+
+def _chains(test: ast.expr) -> list[ast.Attribute]:
+    """The attribute chains on a name *test* reads, each whole (``job.jobStatus``, not ``job``), a method's receiver
+    among them (``job.jobStatus.lower()`` reads ``job.jobStatus``)."""
+    out: list[ast.Attribute] = []
+
+    def visit(n: ast.AST) -> None:
+        if isinstance(n, ast.Attribute):
+            base = n.value
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name):
+                out.append(n)
+                return
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            visit(n.func.value)
+            for a in [*n.args, *(k.value for k in n.keywords)]:
+                visit(a)
+            return
+        for child in ast.iter_child_nodes(n):
+            visit(child)
+
+    visit(test)
+    return out
+
+
+#: :func:`_row_filled`'s answers, by the read's place and what it is asked of
+_FILLED: dict[tuple[str, int, int, str, frozenset[str]], bool] = {}
+
+
+def _row_filled(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tuple, column: str, keys: set[str]) -> bool:
+    """Whether every write of *read* reaching it fills it from one row of a statement testing a key column equal to a
+    bind, as *column*, with no in-place change on the way (``fills.row_fills``)."""
+    key = (rel, read.lineno, read.col_offset, column, frozenset(keys))
+    if key in _FILLED:
+        return _FILLED[key]
+    try:
+        held = fills.row_fills(calls, rel, func, read, bound)  # type: ignore[arg-type]
+    except ValueError:
+        held = None
+    ok = held is not None and bool(held.fills) and not held.others and all(
+        fill.pick in (fills.PICK_ONE, fills.PICK_AT) and not fill.changes and fill.reads and all(
+            one.column.lower() == column
+            and any(t.test.kind == "equal" and t.test.column.lower() in keys and t.binds for t in one.tests)
+            for one in fill.reads)
+        for fill in held.fills)
+    _FILLED[key] = ok
+    return ok
 
 
 #: what a conversion's tests and value may call: builtins with no effect, and the builtin types a test names
@@ -1088,6 +1220,8 @@ def judge(
                 genv = env.reading(fn.owner, stmt.lineno, arm=(fn.owner, line))
                 # the bare locals a print before it on every path showed, not bound again on the way (KNOWN_ISSUES.md K68)
                 printed_before(fn, psn, stmt, before, genv)
+                # the question's column as the pass read it from the row: the statuslog's state then (K71)
+                row_state(fn, stmt, psn.run, genv)
                 for guard in pathcond.arm_condition(stmt):
                     if E.read_elsewhere(guard):
                         continue

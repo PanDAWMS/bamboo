@@ -2057,6 +2057,45 @@ chosen 158 by positive evidence.
 *Revisit:* the dump holds 630 such rows (60 logs, 334 log-and-word pairs); a line of one word, with no blank, is not
 read (it holds no key, so it makes no run of the key).
 
+### K71. A guard reading the question's column the pass filled from the row reads the statuslog's state before the pass
+
+Judge's step 5 reads an arm's guards in the pass's values.  The question's own column (`<job>.jobStatus`) was not
+among them where a guard reads it from the row the function fetched: the rows file holds it at another time
+(`Env.unread`, K22), and no print of the pass shows it.  killJob reads `job.jobStatus != "failed"` at 1017 after
+`job.pack(res[0])` at 998, `res` the rows of 992's `SELECT ... WHERE PandaID=:PandaID`; J (H2's step 3) needs it to
+read the chain 1017 .. 1072 down to the arm the pass took.
+
+Now (`which_ran.row_state`, after K68's `printed_before`): a chain a test reaching the arm reads (`pathcond.tests_on`
+on the map's tree), spelling the question's row and column (`Env.subject`), is put with the statuslog row in force
+when the pass began (`which_ran.state_before`), where the map says every write of it reaching the read
+(`fills.row_fills`) fills it from one row -- `fetchone`'s, or the rows' element at a constant index -- of a statement
+testing a key column equal to a bind, as the subject's column, with no call changing it in place on the way.  Any
+other write reaching the read -- a store (killJob's 1028 .. 1063 before 1071), a parameter, a binding not from a row
+-- leaves the chain unput for the arm; a value a print showed is kept.  The state: the last statuslog row before the
+pass's first record; none where a row of another machine falls within the pass's span (the read may come after it).
+A row within the span written by the pass's own machine is its own write, after its read (A-rec's updateJobStatus
+prints "old=starting new=running", the statuslog holding running at 10:14:50.111 from aipanda092 inside the pass
+10:14:50,068 .. ,077, starting at 10:14:39.53 before it).  A pass's stamps are the database's clock within a second on
+the server's machines (`which_ran.CLOCK`: their statuslog rows fell inside their runs to the second, bamboo-e1) and
+within the windows' slack on JEDI's (`Log.jedi`, from the records' services).
+
+Premises: every change of the column leaves a statuslog row (the current PanDA version); a key column tested equal
+reads the question's row.
+Narrowed from the design: a local filled from a select item (updateJobStatus's `oldJobStatus`, unpacked from 119's
+row at 123) is not read -- the map's parts do not say which table the item is of, and another table keyed by the same
+column holds a column of the same name (JEDI's datasets' `status` by `jediTaskID`).
+
+Measured as u71n against u70n (querier-v cc8903d: ac31839 with the map's ede4a1d; xxix's dump 5c1172d, pin m), every
+set: no run crashed, and no output moves, as predicted -- alone it chooses no stop (it is J's premise), and no guard
+it feeds reads false in a pass.  In MJE-7383377087, run in-process with `row_state` wrapped, killJob's arms 1028,
+1047, 1053, 1059 and 1063 are handed `job.jobStatus` = 'merging', the statuslog row before the pass (aipanda095,
+2026-11-02 15:14:55); 1017's `job.jobStatus != "failed"` holds.  The time is the same (+2 %).
+
+*Shows:* "step 5: guard 'job.jobStatus != ...' is false ({'job.jobStatus': "the statuslog row before the pass, '...'
+at ..."})" where the state makes a guard false; nothing where it holds.
+*Revisit:* the select item's table (a part to ask the map), and a value filled in another function (the adder's
+`self.job`, filled in `run()` at 111 and read in `process_job_report` at 415: the map's next part).
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one
