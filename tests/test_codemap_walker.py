@@ -94,6 +94,34 @@ def asked(job, task: Task, items, m, flag: bool, held):
     put(m)  # C7
     held.append(job)  # C8
     fill(flag)  # C9
+
+
+def guarded(job, log):
+    try:
+        if job:  # S6
+            x = 1  # T1
+            job.close()  # T2
+    except Exception:
+        log.error("failed")  # T3
+
+
+def forgot(job, flag, kind, log):
+    if flag:  # G1
+        log.debug("on")
+    if kind == "a":  # G2
+        log.debug("a")
+    if job.ready and not flag:  # G3
+        job.status = "b"  # G4
+
+
+def witness(kind, log):
+    if kind == "a":  # W1
+        log.debug("a")
+    if kind.upper() == "A":  # W2
+        log.debug("upper")
+    fill(kind)  # W3
+    if kind.upper() == "A":  # W4
+        log.debug("again")  # W5
 """
 
 
@@ -300,15 +328,87 @@ def test_a_branch_taken_settles_its_atoms(module, calls):
         relevant={"toSkip"},
         decide=_decide,
         require_all=False,
+        track=True,
     )
     paths = w.run(walker.region_of(_at(module, "S4")))
     # the second if is decided by what taking the first one settled: two ways, not four (beside the copies left
-    # where a statement can raise)
+    # where a statement can raise); after the last statement nothing reads a fact, so none is held
     through = [p for p in paths if not p.left]
-    assert len(through) == 2
-    assert sorted((p.facts.get("toSkip"), p.arm) for p in through) == [
-        (False, False),
-        (True, True),
+    s4, s5 = _at(module, "S4").lineno, _at(module, "S5").lineno
+    assert sorted((p.tests, p.arm) for p in through) == [
+        (((s4, False), (s5, True)), True),
+        (((s4, True), (s5, False)), False),
+    ]
+    assert [p.facts for p in through] == [{}, {}]
+
+
+def _asked(module, calls, func, arm, mark, relevant):
+    """The walk of *func* from its first ``if``, with what each path at the ``if`` at *mark* held and the ways it went
+    there."""
+    asked = []
+
+    def decide(w: walker.Walker, s: ast.If, p: walker.Path) -> list[bool]:
+        ways = _decide(w, s, p)
+        if s is _at(module, mark):
+            asked.append((dict(p.facts), ways))
+        return ways
+
+    w = _walker(
+        module,
+        calls,
+        func,
+        arm,
+        relevant=relevant,
+        decide=decide,
+        require_all=False,
+    )
+    paths = w.run(walker.region_of(_func(module, func).body[0]))
+    return paths, asked
+
+
+def test_a_path_keeps_only_the_facts_a_later_test_reads(module, calls):
+    """No later test reads ``kind == 'a'``: the two ways through G2 are one at G3, for each way through G1.  G3 reads
+    ``flag`` as the operand of a ``not`` in an ``and``: kept, it decides G3 where ``flag`` held.  After G3 nothing
+    reads a fact, and the ways that missed G4 are one."""
+    paths, asked = _asked(
+        module, calls, "forgot", "G4", "G3", {"flag", "kind", "job.ready", "job.status"}
+    )
+    assert sorted(asked, key=repr) == [
+        ({"flag": False}, [True, False]),
+        ({"flag": True}, [False]),
+    ]
+    through = [p for p in paths if not p.left]
+    assert sorted(p.arm for p in through) == [False, True]
+    assert walker.lookups(ast.parse("a and not (b or c)", mode="eval").body) == {
+        "a and (not (b or c))",
+        "a",
+        "not (b or c)",
+        "b or c",
+        "b",
+        "c",
+    }
+
+
+def test_a_witness_stays_while_a_later_call_is_handed_its_name(module, calls):
+    """``kind == 'a'`` says ``kind`` holds a ``str``, which no call changes.  No test reads it again, but W3 hands
+    ``kind`` to a call: kept, it keeps ``kind.upper() == 'A'`` across that call, and W4 goes the way W2 went.  Where
+    ``kind == 'a'`` did not hold, the call drops what W2 settled, and W4 goes both ways."""
+    assert walker.witnessed("kind == 'a'", True) == {"kind"}
+    assert walker.witnessed("kind == 'a'", False) == set()
+    assert walker.witnessed("kind != 'a'", False) == {"kind"}
+    assert walker.witnessed("kind.upper() == 'A'", True) == set()
+    _, asked = _asked(module, calls, "witness", "W5", "W4", {"kind"})
+    held = sorted(
+        (
+            (facts.get("kind == 'a'"), facts.get("kind.upper() == 'A'"), ways)
+            for facts, ways in asked
+        ),
+        key=repr,
+    )
+    assert held == [
+        (None, None, [True, False]),
+        (True, False, [False]),
+        (True, True, [True]),
     ]
 
 
@@ -526,3 +626,46 @@ def test_a_statement_can_raise_as_the_map_reads_exceptions():
     loop = ast.parse("for i in xs:\n    y = i\n").body[0]
     pathcond.attach_parents(loop)
     assert not walker.may_divert(loop)
+
+
+def test_a_run_s_marks_say_where_a_path_can_leave_by_an_exception(module, calls):
+    """Handed the handlers a run entered, any statement of their try leaves -- the test, ``x = 1`` --, whatever
+    it holds; handed none, none does; the map's own reading leaves at the call alone."""
+    handler = _at(module, "T3").parent  # type: ignore[attr-defined]
+    lines = {mark: _at(module, mark).lineno for mark in ("S6", "T1", "T2")}
+
+    def left(**kw) -> list[str]:
+        w = _walker(module, calls, "guarded", "T1", require_all=False, **kw)
+        return sorted(p.left for p in w.run(walker.region_of(_at(module, "S6"))))
+
+    assert left() == ["", "", f"call at {lines['T2']}"]
+    assert left(raised=[]) == ["", ""]
+    # the copy leaving at ``x = 1`` is alike to the one leaving at the test, and merges into it
+    assert left(raised=[handler]) == [
+        "",
+        "",
+        f"call at {lines['S6']}",
+        f"call at {lines['T2']}",
+    ]
+    literal = _at(module, "T1")
+    readers = [
+        _walker(module, calls, "guarded", "T1", raised=raised)
+        for raised in (None, [], [handler])
+    ]
+    assert [w.raises(literal) for w in readers] == [False, False, True]
+
+
+def test_a_statement_passed_whole_diverts_by_a_raise_only_to_a_handler_around_it():
+    """A loop inside a try whose handler the run entered can be left by a raise; the try passed whole keeps its
+    own handler's raise inside; with no handler entered nothing raises."""
+    tree = ast.parse(
+        "try:\n    for i in xs:\n        y = f(i)\nexcept Exception:\n    pass\n"
+    )
+    pathcond.attach_parents(tree)
+    guarded = tree.body[0]
+    assert isinstance(guarded, ast.Try)
+    loop, handler = guarded.body[0], guarded.handlers[0]
+    assert walker.may_divert(loop)
+    assert walker.may_divert(loop, [handler])
+    assert not walker.may_divert(loop, [])
+    assert not walker.may_divert(guarded, [handler])

@@ -10,7 +10,9 @@ and how it left.
 * **Leaving.**  A ``return``, ``raise``, ``break`` or ``continue`` ends the path (``left``), and a statement that
   can raise, as the map reads exceptions (:func:`reaching.may_raise`: any expression but a literal, a name or a
   display of them, an unpacking, an ``assert``, ``del`` or ``import`` -- a logger's call too), forks a copy that
-  leaves there, ``left`` saying ``call at <line>`` (:meth:`Walker.raises`).
+  leaves there, ``left`` saying ``call at <line>`` (:meth:`Walker.raises`).  Handed *raised*, the handlers whose
+  marks a run shows, a statement leaves so only where its raise reaches one of them, whatever it holds
+  (:func:`reaching.catching_try`): a run that shows none ran every ``try`` to its end.
 * **Passed whole.**  A loop, a ``try`` or a ``match`` is one step: what it binds becomes unknown, the rows in it
   are passed in their order, and a copy leaves where it can divert.  A ``with`` is entered.
 * **Calls.**  A call changes what it is handed, as the map reads the call (:func:`changes.call_changes`): a value
@@ -22,7 +24,10 @@ and how it left.
 * **Rows.**  The reader's *order* -- the rows it asks of, by line, each with its rank -- is passed in that order: a
   path passing a row out of it, or missing one where *require_all*, is dropped, and the reader's *check_row* may
   drop it at each.
-* **Many paths.**  Equal paths are one (:func:`merge`).  Beyond :data:`WIDEN_AT`, paths that agree on what the
+* **Many paths.**  After each statement a path keeps only the facts a statement walked after it can read
+  (:meth:`Walker.drop_unread`): a later test looks it up, or a later call may be asked about the name it says
+  cannot change.  Equal paths are one (:func:`merge`), so paths that differ only in what nobody reads are one.
+  Beyond :data:`WIDEN_AT`, paths that agree on what the
   reader reads are joined into one that knows only what all of them knew (:func:`widen`): joining can lose a
   verdict, never make one.  Beyond :data:`MAX_PATHS` the walk stops (:class:`TooMany`).
 
@@ -44,7 +49,7 @@ import functools
 import weakref
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.callfacts import LOG_LEVELS
@@ -165,12 +170,23 @@ def is_log_call(node: ast.AST) -> bool:
     )
 
 
-def may_divert(stmt: ast.stmt) -> bool:
+def may_divert(
+    stmt: ast.stmt, raised: Optional[Collection[ast.ExceptHandler]] = None
+) -> bool:
     """Whether control can leave *stmt* other than by falling through it: a jump in it, or a statement in it that
-    can raise (:func:`can_raise`)."""
+    can raise (:func:`can_raise`) -- handed *raised*, the handlers a run entered, one whose raise reaches one of
+    them in a ``try`` around *stmt* (:func:`reaching.catching_try`)."""
     if isinstance(stmt, JUMPS) or contains(stmt, JUMPS):
         return True
-    return any(isinstance(n, ast.stmt) and can_raise(n) for n in own_nodes(stmt))
+    if raised is None:
+        return any(isinstance(n, ast.stmt) and can_raise(n) for n in own_nodes(stmt))
+    around = {id(node) for node in pathcond.ancestors(stmt)}
+    for node in own_nodes(stmt):
+        if isinstance(node, ast.stmt):
+            caught = reaching.catching_try(node, raised)
+            if caught is not None and id(caught) in around:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------- reading expressions
@@ -530,6 +546,32 @@ def _fact_immutable(name: str, facts: dict[str, bool]) -> bool:
     return False
 
 
+def lookups(test: ast.AST) -> set[str]:
+    """The texts :func:`evaluate.truth` looks *test* up by among a path's facts: the test itself, the values of an
+    ``and`` / ``or`` and the operand of a ``not``, through each other."""
+    found = {evaluate.text_of(test)}
+    if isinstance(test, ast.BoolOp):
+        for one in test.values:
+            found |= lookups(one)
+    elif isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        found |= lookups(test.operand)
+    return found
+
+
+@functools.lru_cache(maxsize=None)
+def witnessed(atom: str, truth: bool) -> frozenset[str]:
+    """The names a fact *atom* holding *truth* says hold a value no change in place can touch
+    (:func:`_fact_immutable`)."""
+    body = expression(atom)
+    if body is None:
+        return frozenset()
+    return frozenset(
+        n.id
+        for n in ast.walk(body)
+        if isinstance(n, ast.Name) and _fact_immutable(n.id, {atom: truth})
+    )
+
+
 class _Asked:
     """What the map said of a corpus's calls and names, kept while the corpus's calls live: each answer with the
     node it was asked of, so that its id is not reused."""
@@ -843,8 +885,11 @@ class Walker:
         bound: tuple = (),
         track: bool = False,
         require_all: bool = True,
+        raised: Optional[Collection[ast.ExceptHandler]] = None,
     ) -> None:
         self.func = func
+        #: the handlers whose marks the run shows (:func:`reaching.catching_try`); None reads (a)
+        self.raised = raised
         self.corpus = corpus
         self.file = file
         self.bound_classes = bound
@@ -867,6 +912,10 @@ class Walker:
         self.most = 0
         self.facts: dict[str, str] = {}
         self.region: list[ast.stmt] = []
+        #: each statement of the region the walk steps into: (line, what its test looks facts up by, the names it
+        #: hands a call) (:meth:`read_after`)
+        self.steps: list[tuple[int, set[str], set[str]]] = []
+        self._after: dict[int, tuple[set[str], set[str]]] = {}
 
     # -- hooks: what a reader adds
 
@@ -878,8 +927,11 @@ class Walker:
         """Put in *env* what the reader knows on *p* beyond what the path bound."""
 
     def raises(self, node: ast.AST) -> bool:
-        """Whether a path may leave at *node* by an exception (:func:`can_raise`)."""
-        return can_raise(node)
+        """Whether a path may leave at *node* by an exception (:func:`can_raise`); handed *raised*, whether a raise
+        at *node* reaches one of them (:func:`reaching.catching_try`)."""
+        if self.raised is None:
+            return can_raise(node)
+        return reaching.catching_try(node, self.raised) is not None
 
     def roots(self, node: ast.AST) -> set[str]:
         """The names the calls in *node* are handed or called on (:func:`mutating_roots`)."""
@@ -937,6 +989,8 @@ class Walker:
             last = max(_place(stmt, region) for stmt, _ in self.order.values())
             region = region[: last + 1]
         self.region = region
+        self.steps = self.stepped(region)
+        self._after = {}
         start = self.path_type(state=entry_state(self.func, region[0], self.relevant))
         paths = self.block(region, [start])
         if not self.require_all:
@@ -954,6 +1008,7 @@ class Walker:
             nxt: list[Path] = []
             for p in paths:
                 nxt.extend([p] if p.left else self.stmt(s, p))
+            self.drop_unread(s, nxt)
             paths = merge(nxt)
             if len(paths) > WIDEN_AT:
                 paths = widen(paths, self.target)
@@ -963,6 +1018,72 @@ class Walker:
             if len(paths) > MAX_PATHS:
                 raise TooMany(len(paths))
         return paths
+
+    def stepped(self, region: list[ast.stmt]) -> list[tuple[int, set[str], set[str]]]:
+        """Each statement of *region* the walk steps into -- an ``if``'s body and ``else`` and a ``with``'s body
+        are entered, the rest is one step -- by its line, with the texts its test looks facts up by
+        (:func:`lookups`, an ``if``'s) and the names it hands a call (:meth:`roots`: of an ``if``'s test, of a
+        ``with``'s items, of any other statement whole)."""
+        out: list[tuple[int, set[str], set[str]]] = []
+
+        def visit(stmts: list[ast.stmt]) -> None:
+            for s in stmts:
+                if isinstance(s, ast.If):
+                    out.append((s.lineno, lookups(s.test), self.roots(s.test)))
+                    visit(s.body)
+                    visit(s.orelse)
+                elif isinstance(s, (ast.With, ast.AsyncWith)):
+                    handed = set().union(*(self.roots(i.context_expr) for i in s.items))
+                    out.append((s.lineno, set(), handed))
+                    visit(s.body)
+                else:
+                    out.append((s.lineno, set(), self.roots(s)))
+
+        visit(region)
+        return out
+
+    def read_after(self, s: ast.stmt) -> tuple[set[str], set[str]]:
+        """What the statements walked after *s* can read of a path's facts: the texts their tests look facts up
+        by, and the names they hand a call.  After is by line: a loop, a ``try`` or a ``match`` is one step, so
+        no way leads back, and another arm's statements count too, so it holds more than a path reads."""
+        end = s.end_lineno or s.lineno
+        held = self._after.get(end)
+        if held is None:
+            texts: set[str] = set()
+            handed: set[str] = set()
+            for line, read, names in self.steps:
+                if line > end:
+                    texts |= read
+                    handed |= names
+            held = self._after[end] = (texts, handed)
+        return held
+
+    def drop_unread(self, s: ast.stmt, paths: list[Path]) -> None:
+        """Drop from *paths* the facts nothing walked after *s* can read, so that paths which differ only in them
+        merge.  A fact is read by :meth:`truth`, by its text (:func:`lookups`), and by :meth:`immutable` as a
+        witness that a name holds a value no call can change (:func:`witnessed`), which only :meth:`call` asks, of
+        a name a statement hands a call.  So a fact stays while a later test looks it up, or, as a witness of a
+        name, while a later statement hands the name to a call, the name roots the target, or the path holds a
+        value at a chain under the name."""
+        texts, handed = self.read_after(s)
+        for q in paths:
+            if any(k not in texts for k in q.facts):
+                q.facts = {
+                    k: v
+                    for k, v in q.facts.items()
+                    if k in texts or self.witness_asked(k, v, handed, q)
+                }
+
+    def witness_asked(self, atom: str, truth: bool, handed: set[str], q: Path) -> bool:
+        """Whether *atom* holding *truth*, a witness of a name (:func:`witnessed`), can still be asked on *q*: a
+        later statement hands the name to a call (*handed*), the name roots the target, or *q* holds a value at a
+        chain under it."""
+        return any(
+            name in handed
+            or name == self.target_root
+            or any(t != name and root(t) == name for t in q.state)
+            for name in witnessed(atom, truth)
+        )
 
     def leave(self, p: Path, why: str) -> Path:
         q = p.copy()
@@ -1058,7 +1179,7 @@ class Walker:
 
     def opaque(self, s: ast.stmt, p: Path) -> list[Path]:
         out = []
-        if may_divert(s):
+        if may_divert(s, self.raised):
             jumps = contains(s, (ast.Return, ast.Raise))
             out.append(
                 self.leave(
