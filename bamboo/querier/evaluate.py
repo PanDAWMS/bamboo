@@ -97,6 +97,19 @@ class Env(shared.Env):
     #: the question's own column under its row's name ("<job>.jobStatus", ``Rerun.base_env``): the one the statuslog
     #: shows changing at the question's time; "" where no question is read
     subject: str = ""
+    #: the question's subject as the map names it ("JobSpec.jobStatus"), whose arms :meth:`for_arm` binds names for
+    written: str = ""
+    #: a row's collection attribute -> its element rows' name ("Files" -> "file"), from the rows file
+    elements: dict[str, str] = field(default_factory=dict)
+    #: the arm whose guards this env reads (:meth:`for_arm`): its function and line; None where it reads no one arm's
+    arm: tuple[str, int] | None = None
+    #: the rows file's spellings (:attr:`rows` before :meth:`for_arm` narrowed it): how a printing function's names are
+    #: read, since a print is the run's object as its function spells it
+    spellings: dict[str, str] | None = None
+    #: the row's key columns ("PandaID"): its class's columns whose value in the rows file is the question's key
+    #: (``Rerun._key_columns``).  A print of one under a name bound to the object an arm writes says which object the
+    #: arm's pass wrote (``which_ran.other_objects``)
+    keys: frozenset[str] = frozenset()
 
     def put_hole(self, text: str, printed: str, source: str, owners: Iterable[str]) -> None:
         """:meth:`put_printed`, with the functions that printed it where it is about a row."""
@@ -109,11 +122,34 @@ class Env(shared.Env):
             if "<" in key and key in self.values and self.values[key].source.startswith(source):
                 self.printed_in.setdefault(key, set()).update((owner, text, source) for owner in owners)
 
-    def reading(self, owner: str, line: int) -> Env:
+    def reading(self, owner: str, line: int, arm: tuple[str, int] | None = None) -> Env:
         """This env, reading *owner*'s statement at *line*: a hole another function printed about a row answers only a
-        name the map's records hand that object to (:meth:`_hidden`)."""
-        return replace(self, values=dict(self.values), stale=dict(self.stale), used={}, hidden_here=set(),
-                       printed_in={k: set(v) for k, v in self.printed_in.items()}, reader=(owner, line))
+        name the map's records hand that object to (:meth:`_hidden`).  With *arm*, for that arm's guards
+        (:meth:`for_arm`)."""
+        env = replace(self, values=dict(self.values), stale=dict(self.stale), used={}, hidden_here=set(),
+                      printed_in={k: set(v) for k, v in self.printed_in.items()}, reader=(owner, line))
+        return env.for_arm(*arm) if arm is not None else env
+
+    def for_arm(self, owner: str, line: int) -> Env:
+        """This env, reading the guards of *owner*'s arm at *line*: the names that hold the question's row are the ones
+        the map's records bind to the object the arm writes (:mod:`row_names`, KNOWN_ISSUES.md K64), not every name the
+        rows file spells it with.  The rows file's other rows keep their spellings."""
+        m = re.fullmatch(r"<(\w+)>\.\w+", self.subject)
+        if m is None or not self.written or self.arm == (owner, line):
+            return self
+        # imported here: row_names reads the map's records through rows, which imports this module
+        from bamboo.querier import row_names
+
+        entity = m[1]
+        bound = row_names.names(owner, line, self.written, entity, self.elements)
+        spellings = self.spellings if self.spellings is not None else self.rows
+        if bound is None:
+            # the map records nothing the arm writes (a call on another object, ``self.result.set_fatal()``): no
+            # record to narrow by, so the rows file's spellings
+            return replace(self, rows=dict(spellings), arm=(owner, line), spellings=spellings)
+        rows = {s: e for s, e in spellings.items() if e != entity and e not in self.elements.values()}
+        rows.update(bound)
+        return replace(self, rows=rows, arm=(owner, line), spellings=spellings)
 
     def shared(self) -> dict[str, str]:
         """:attr:`used` less what this reading did not read of another function's holes: what the env it was read
@@ -149,7 +185,8 @@ class Env(shared.Env):
 
         owner, line = self.reader
         names = self.spelled(text)
-        return not any(same_object.same(owner, line, names, printer, self.spelled(expr)) for printer, expr in found)
+        printed = replace(self, rows=self.spellings) if self.spellings is not None else self
+        return not any(same_object.same(owner, line, names, printer, printed.spelled(expr)) for printer, expr in found)
 
     def canonical(self, text: str) -> str:
         """*text* with every spelling of a row variable replaced by the row's name.
