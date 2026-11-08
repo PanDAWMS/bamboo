@@ -94,6 +94,11 @@ ASSUMPTIONS: dict[str, str] = {
         "A call running the statement its function was handed runs its callers' statement, read where they "
         "run it, and nothing of the corpus."
     ),
+    "runner_runs_callees_sql": (
+        "A call running the statements its function's callees put into a container it handed them, each beside a "
+        "run of the same text the callee makes itself, runs those statements, read where the callees run them, "
+        "and nothing of the corpus."
+    ),
     "driver_talks_only_to_db": "A call on the database driver -- a cursor, a connection -- goes only to the database.",
     "select_reads_only": (
         "A statement every text of which begins SELECT reads rows and writes none: the call running it is the "

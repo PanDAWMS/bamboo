@@ -83,6 +83,23 @@ statement, the calls with the same values and keys one write.  A spec's
 reset of its changed attributes (``resetChangedAttr``, ``resetChangedList``)
 is read with them, not as an assignment, and :func:`order.attach` reads the
 order of each function's lines and what its resets clear.
+
+A statement a function defers -- puts into a container it was handed,
+``extracted_sqls["job"] = {"sql": sql1 + comment, "vars": [...]}`` or
+``extracted_sqls.setdefault(key, {"sql": ..., "vars": []})``, on one side
+of an ``if`` whose other side runs the same text itself (``ast.dump``
+equal) -- is that run made at the put as well: the run's writes take the
+put's line (:func:`_deferred_runs`).  Its values are the run's; the put's
+own are not compared (the corpus's ten hand the same).  A runner call
+whose statement is not read and is an element of a container, no text the
+function builds (:func:`_drawn`), is the database where
+:func:`bamboo.codemap.objects.follow` carries its statement to where a
+callee defers one: ``bulk_insert_new_jobs`` runs, after all its jobs, what
+each ``insertNewJob`` put (:data:`RUNS_DEFERRED`).  The
+statement runs there, later than the put: after the writes the function
+makes after the put.  Read once every function's records are -- follow
+needs them --, so the readers before :func:`attach` (the crossings, the key
+sources, the ways in) read that call as the hole it was.
 """
 
 from __future__ import annotations
@@ -108,7 +125,7 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
-from bamboo.codemap.objects import RETURN, table_classes
+from bamboo.codemap.objects import RETURN, ObjectReach, _under, follow, table_classes
 from bamboo.codemap.panda import mapentries, order, pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
@@ -146,29 +163,245 @@ def attach(
     """Read every function's object records into its :class:`ReachNode`; how many assigns, bindings, call bindings and writes.
 
     Inside the build's reading context (:func:`sql.across_calls`), so the
-    statements are the ones every slice read.  Then the order of their lines
-    and the resets between them (:func:`order.attach`).
+    statements are the ones every slice read.  Then the runner calls that run
+    what their callees defer (:func:`_run_deferred`), and the order of the
+    records' lines and the resets between them (:func:`order.attach`).
     """
     reader = _Reader(modules, calls, table_classes(fragment.entities))
     rows = {row.owner: row for row in fragment.reach_graph}
-    counts = [0, 0, 0, 0]
     functions: dict[str, ast.AST] = {}
+    files: dict[str, str] = {}
     resets: dict[str, list[order.Reset]] = {}
     for file, func, owner in reader.names.functions:
         row = rows.get(owner)
         if row is None:
             continue
         functions[owner] = func
+        files[owner] = file
         row.assigns, row.bindings, row.call_bindings, resets[owner] = reader.read(
             file, func, row
         )
         row.writes = reader.writes(func)
-        counts[0] += len(row.assigns)
-        counts[1] += len(row.bindings)
-        counts[2] += len(row.call_bindings)
-        counts[3] += len(row.writes)
+    _run_deferred(reader, rows, functions, files, resets)
     order.attach(functions, rows, resets)
-    return counts[0], counts[1], counts[2], counts[3]
+    read = [rows[owner] for owner in functions]
+    return (
+        sum(len(row.assigns) for row in read),
+        sum(len(row.bindings) for row in read),
+        sum(len(row.call_bindings) for row in read),
+        sum(len(row.writes) for row in read),
+    )
+
+
+#: The assumption a runner call running what its function's callees defer is settled by (:data:`reach.ASSUMPTIONS`).
+RUNS_DEFERRED = "runner_runs_callees_sql"
+
+
+class _Deferred(NamedTuple):
+    """A statement a function puts into a container it was handed in place of running it (:func:`_deferred_runs`):
+    the put's line, the line of the function's own run of the same text, and where in the container the text is
+    put -- ``extracted_sqls['job']['sql']``."""
+
+    put: int
+    run: int
+    text_at: str
+
+
+def _deferred_runs(func: ast.AST) -> list[_Deferred]:
+    """The statements *func* defers: a dict literal put into a container one of its parameters names and it never
+    binds again -- ``P[k] = {...}``, ``P.setdefault(k, {...})`` -- holding, at a literal key, the statement a runner
+    call on the other side of an ``if`` holding the put runs (``ast.dump`` equal)."""
+    runners = sql.runners()
+    handed = frozenset(
+        name
+        for name in _local_names(func)
+        if is_parameter(func, name) and not C._rebinds(func, name)
+    )
+    found: set[_Deferred] = set()
+    for node in C.own_nodes(func):
+        if not isinstance(node, ast.If):
+            continue
+        for side, other in ((node.body, node.orelse), (node.orelse, node.body)):
+            runs = [
+                one
+                for one in _side_nodes(other)
+                if isinstance(one, ast.Call)
+                and isinstance(one.func, ast.Attribute)
+                and one.func.attr in runners
+                and one.args
+            ]
+            for one in _side_nodes(side) if runs else ():
+                for text_at, text in _put_texts(one, handed):
+                    found.update(
+                        _Deferred(one.lineno, run.lineno, text_at)  # type: ignore[attr-defined]
+                        for run in runs
+                        if ast.dump(run.args[0]) == ast.dump(text)
+                    )
+    return sorted(found)
+
+
+def _side_nodes(statements: list[ast.stmt]):
+    """Every node of one side of an ``if``; a nested function or class runs elsewhere."""
+    for statement in statements:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield statement
+        yield from C.own_nodes(statement)
+
+
+def _put_texts(node: ast.AST, handed: frozenset[str]) -> list[tuple[str, ast.expr]]:
+    """Each value of a dict literal *node* puts into a container one of *handed* names, with where it is put:
+    ``("P['k']['sql']", <sql1 + comment>)`` of ``P["k"] = {"sql": sql1 + comment}`` or ``P.setdefault("k",
+    {"sql": ...})``; none for any other node."""
+    base: Optional[str] = None
+    literal: Optional[ast.expr] = None
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Subscript)
+    ):
+        base, literal = _path(node.targets[0], handed, store=True), node.value
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "setdefault"
+        and len(node.args) == 2
+    ):
+        held = _path(node.func.value, handed)
+        if held is not None:
+            base = held + _subscript(node.args[0], store=True)
+        literal = node.args[1]
+    if base is None or not isinstance(literal, ast.Dict):
+        return []
+    return [
+        (base + _key(key), value)
+        for key, value in zip(literal.keys, literal.values, strict=True)
+        if key is not None
+    ]
+
+
+def _run_deferred(
+    reader: "_Reader",
+    rows: dict,
+    functions: dict[str, ast.AST],
+    files: dict[str, str],
+    resets: dict[str, list[order.Reset]],
+) -> int:
+    """Make each runner call that runs what its function's callees defer the database, and read its function
+    again; how many calls.
+
+    A call plugin's leaves left a hole because its statement is not read
+    (:data:`reach.HOLE_STATEMENT_NOT_READ`), and whose statement is an
+    element of a container, no text the function builds (:func:`_drawn`),
+    runs what its callees defer (:func:`_deferred_runs`) where follow
+    carries its statement -- both
+    ways, as it carries any object -- to where one of them puts a deferred
+    statement's text: ``bulk_insert_new_jobs``'s ``executemany(sql, ...)``
+    runs ``sql`` of ``extracted_sqls[target_key]["sqls"]``, appended from the
+    ``tmp_extracted_sqls[target_key]["sql"]`` it hands each ``insertNewJob``
+    (``**kwargs``), which puts ``extracted_sqls["job"] = {"sql": sql1 +
+    comment, ...}`` where it does not run ``sql1 + comment`` itself.  Those
+    statements' writes are read at the puts (:meth:`_Reader.writes`), so the
+    call is the database (:data:`RUNS_DEFERRED`), and what it is handed is
+    not followed into it: its function is read again so (:meth:`_Values._call`).
+    """
+    deferred: dict[str, list[str]] = {}
+    for owner, func in functions.items():
+        held = sorted({one.text_at for one in _deferred_runs(func)})
+        if held:
+            deferred[owner] = held
+    if not deferred:
+        return 0
+    runners = sql.runners()
+    closed = 0
+    for owner, func in functions.items():
+        row = rows[owner]
+        lines = {
+            hole.line
+            for hole in row.holes
+            if hole.why.startswith(reach.HOLE_STATEMENT_NOT_READ)
+        }
+        if not lines:
+            continue
+        versions = _Versions(func, _local_names(func))
+        running = [
+            call
+            for call in C.own_nodes(func)
+            if isinstance(call, ast.Call)
+            and call.lineno in lines
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in runners
+            and call.args
+            and _drawn(func, call.args[0])
+            and any(
+                _puts_reached(follow(rows, owner, start), deferred)
+                for start in versions.paths(call.args[0])
+            )
+        ]
+        if not running:
+            continue
+        shut = {call.lineno for call in running}
+        row.holes = [
+            hole
+            for hole in row.holes
+            if not (
+                hole.line in shut and hole.why.startswith(reach.HOLE_STATEMENT_NOT_READ)
+            )
+        ]
+        row.database = sorted({*row.database, *shut})
+        row.settled[RUNS_DEFERRED] = row.settled.get(RUNS_DEFERRED, 0) + len(running)
+        row.assigns, row.bindings, row.call_bindings, resets[owner] = reader.read(
+            files[owner], func, row
+        )
+        closed += len(running)
+    return closed
+
+
+def _drawn(func: ast.AST, statement: ast.expr) -> bool:
+    """Whether *statement*, what a runner call runs, is an element of a container and no text *func* builds: a
+    subscript, or a name *func* binds, not a parameter, each binding of which is a loop's element or a subscript's
+    (``for sql in extracted_sqls[target_key]["sqls"]``, ``sql = got[key]["sql"]``)."""
+    if isinstance(statement, ast.Subscript):
+        return True
+    if not isinstance(statement, ast.Name) or is_parameter(func, statement.id):
+        return False
+    name = statement.id
+    stores = 0
+    drawn = 0
+    for node in C.own_nodes(func):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Store)
+        ):
+            stores += 1
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            drawn += _stores_of(node.target, name)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript):
+            drawn += sum(_stores_of(target, name) for target in node.targets)
+    return stores > 0 and stores == drawn
+
+
+def _stores_of(target: ast.expr, name: str) -> int:
+    """How many times *target* stores into *name*."""
+    return sum(
+        1
+        for one in ast.walk(target)
+        if isinstance(one, ast.Name)
+        and one.id == name
+        and isinstance(one.ctx, ast.Store)
+    )
+
+
+def _puts_reached(reached: ObjectReach, deferred: dict[str, list[str]]) -> bool:
+    """Whether *reached* holds the object, in a function of *deferred*, where that function puts a deferred
+    statement's text -- ``extracted_sqls[]['sql']`` at ``extracted_sqls['job']['sql']``."""
+    return any(
+        _under(text_at, held) == ""
+        for at, paths in reached.held.items()
+        for text_at in deferred.get(at, ())
+        for held in paths
+    )
 
 
 class _Reader:
@@ -240,6 +473,10 @@ class _Reader:
         ``restartTasksForContentsUpdate_JEDI`` runs one ``UPDATE`` in a loop
         over one query's tasks and again in a loop over another's, and the
         write named both loops' tasks as the row of each.
+
+        A statement the function defers (:func:`_deferred_runs`) is its own
+        run of the same text made at the put as well: that run's writes take
+        the put's line.
         """
         names = _local_names(func)
         versions = _Versions(func, names)
@@ -264,6 +501,11 @@ class _Reader:
         unique: dict[str, DbWrite] = {}
         for one in found:
             unique.setdefault(one.model_dump_json(), one)
+        deferred = _deferred_runs(func) if unique else []
+        for one in unique.values():
+            puts = {put.put for put in deferred if put.run in one.lines}
+            if puts:
+                one.lines = sorted({*one.lines, *puts})
         return list(unique.values())
 
     def _run_writes(

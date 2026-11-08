@@ -1182,6 +1182,122 @@ def test_a_list_literal_keeps_its_positions_until_a_method_moves_them(tmp_path):
     assert not found.holes
 
 
+DEFERRED = """\
+from pkg.spec import JobSpec
+
+
+class Proxy:
+    def insert_job(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "INSERT INTO ATLAS_PANDA.jobsDefined4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+        if no_late_bulk_exec:
+            varMap = job.valuesMap()
+            self.cur.execute(sql, varMap)  # RUN
+        elif extracted_sqls is not None:
+            extracted_sqls["job"] = {"sql": sql, "vars": [job.valuesMap()]}  # PUT
+        self.record(job, no_late_bulk_exec=no_late_bulk_exec, extracted_sqls=extracted_sqls)
+
+    def record(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,jobStatus) VALUES (:PandaID,:jobStatus)"
+        varMap = {":PandaID": job.PandaID, ":jobStatus": job.jobStatus}
+        if no_late_bulk_exec:
+            self.cur.execute(sql, varMap)  # LOG
+        elif extracted_sqls is not None:
+            extracted_sqls.setdefault("state", {"sql": sql, "vars": []})  # SETDEFAULT
+            extracted_sqls["state"]["vars"].append(varMap)
+
+    def bulk_insert(self, arg_list):
+        extracted = {}
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.insert_job(*args, **kwargs)
+            for key in ["job", "state"]:
+                if key in got:
+                    extracted.setdefault(key, {"sqls": [], "vars": {}})
+                    if got[key]["sql"] not in extracted[key]["sqls"]:
+                        extracted[key]["sqls"].append(got[key]["sql"])
+                        extracted[key]["vars"][got[key]["sql"]] = []
+                    extracted[key]["vars"][got[key]["sql"]] += got[key]["vars"]
+        for key in ["job", "state"]:
+            if key not in extracted:
+                continue
+            for sql in extracted[key]["sqls"]:
+                self.cur.executemany(sql, extracted[key]["vars"][sql])  # BULK
+
+    def bulk_mixed(self, arg_list, flag):
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.insert_job(*args, **kwargs)
+            sql = got["job"]["sql"] if flag else self.make_text()
+            self.cur.executemany(sql, got["job"]["vars"])  # MIXED
+
+    def stash(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "DELETE FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID"
+        if extracted_sqls is not None:
+            extracted_sqls["job"] = {"sql": sql, "vars": [{":PandaID": job.PandaID}]}
+
+    def bulk_other(self, arg_list):
+        extracted = {}
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.stash(*args, **kwargs)
+            for key in ["job", "state"]:
+                if key in got:
+                    extracted.setdefault(key, {"sqls": [], "vars": {}})
+                    if got[key]["sql"] not in extracted[key]["sqls"]:
+                        extracted[key]["sqls"].append(got[key]["sql"])
+                        extracted[key]["vars"][got[key]["sql"]] = []
+                    extracted[key]["vars"][got[key]["sql"]] += got[key]["vars"]
+        for key in ["job", "state"]:
+            if key not in extracted:
+                continue
+            for sql in extracted[key]["sqls"]:
+                self.cur.executemany(sql, extracted[key]["vars"][sql])  # OTHER
+"""
+_DEFERRED = "pkg/deferred.py::Proxy"
+
+
+def test_a_statement_put_where_its_caller_runs_it_is_its_own_run_made_at_the_put(
+    tmp_path,
+):
+    """``bulk_insert_new_jobs``'s shape: a statement put into a container handed in, on the other side of an ``if``
+    from the function's own run of the same text, is that run's write made at the put; the caller's runner call
+    drawing its statement from there is the database, not a hole.  One drawing it from a callee that never runs it
+    itself stays a hole, and so does one whose statement may be a text the function builds as well."""
+    fragment = _build(tmp_path, spec=SPEC, deferred=DEFERRED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def at(marker: str) -> int:
+        return _line(DEFERRED, marker)
+
+    (job,) = rows[f"{_DEFERRED}.insert_job"].writes
+    assert (job.table, job.lines) == ("jobsDefined4", [at("# RUN"), at("# PUT")])
+    (log,) = rows[f"{_DEFERRED}.record"].writes
+    assert (log.table, log.lines) == (
+        "jobs_StatusLog",
+        [at("# LOG"), at("# SETDEFAULT")],
+    )
+    bulk = rows[f"{_DEFERRED}.bulk_insert"]
+    assert at("# BULK") in bulk.database
+    assert [hole for hole in bulk.holes if hole.line == at("# BULK")] == []
+    assert bulk.settled.get(panda_objects.RUNS_DEFERRED) == 1
+    assert panda_objects.RUNS_DEFERRED in reach.ASSUMPTIONS
+    assert [one for one in bulk.call_bindings if one.line == at("# BULK")] == []
+    for owner, marker in (("bulk_other", "# OTHER"), ("bulk_mixed", "# MIXED")):
+        row = rows[f"{_DEFERRED}.{owner}"]
+        assert [hole.why for hole in row.holes if hole.line == at(marker)] == [
+            f"{reach.HOLE_STATEMENT_NOT_READ}: {sql.SKIP_UNREAD_NAME}"
+        ], owner
+        assert panda_objects.RUNS_DEFERRED not in row.settled, owner
+    result = object_records_resolve(fragment)
+    assert result.passed, result.failures
+
+
 def test_a_tuple_targets_columns_are_assigned(tmp_path):
     _fragment, rows = _forms(tmp_path)
     assigns = {(a.path, *a.attrs) for a in rows[f"{_FORMS}.columns"].assigns}
