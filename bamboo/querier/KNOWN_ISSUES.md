@@ -561,7 +561,7 @@ nothing are placed, at 24 calls; at 10 of them two rows can show the call ran, a
 A writer no pair places is asked in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
 has a log -- each prints nothing, no pair places it and its reading names none -- H2 stops on that before it asks
 (`_writer_logs`); before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  Only
-where the map places the prints (`ROWS_FROM=graph`, `ROWS_OWN_FILES`): else the readings' logs stand.
+where the map places the prints (`ROWS_FROM=graph`): else the readings' logs stand.
 
 *Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
 verdict `prints-nothing`.  H2: the caller's line among the candidates, "rows a and b printed in a row, which only a
@@ -1638,8 +1638,7 @@ What is still read as a loop that may go round:
 - any loop in a run of several calls.  S3 reads no row's path condition in such a run either.
 
 *Shows:* "row N printed and its arms [...] leave L out (the loop at M went round once: its way back prints row(s)
-[R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".  `WHICH_RUN_ONCE_LOOPS=0` and
-`RERUN_S3_ROWS=0` read as before.
+[R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".
 *Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
 
 ### K64. An arm's guard reads as the row only the names the map's records bind to what the arm writes

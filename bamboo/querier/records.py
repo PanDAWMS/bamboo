@@ -218,8 +218,6 @@ EXTRACT = re.compile(r"^# extract by (?P<key>\S+):")
 
 LEVEL_RANK = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
-#: rule 8 in its earlier, stricter form: a row's absence counts only if the file holds a line at its level from some run
-FILE_LEVEL = os.environ.get("RULE8_FILE_LEVEL") == "1"
 #: a filter added in code, the class, or a fileConfig whose file this cannot read; and a "filters" key, counted only in
 #: a file that calls dictConfig (an API's query "filters" is not a logging one)
 _FILTER = re.compile(r"\baddFilter\s*\(|\blogging\.Filter\b|\bfileConfig\s*\(")
@@ -604,9 +602,9 @@ class Run:
         handler passes every level at or above its own threshold too, so the
         handler that wrote the run's DEBUG line writes its ERROR line to the
         same file.  Only a filter could send one level elsewhere; where the
-        corpus or panda-common has one (``level_filters``), or with
-        ``RULE8_FILE_LEVEL=1``, the file must still hold a line at *level* from
-        some run.  That condition made a verdict hang on other jobs: an
+        corpus or panda-common has one (``level_filters``), the file must still
+        hold a line at *level* from some run.  Asked everywhere, as rule 8 did
+        before, that condition made a verdict hang on other jobs: an
         extract of one job's lines held no ERROR line, a one-minute
         window held five of other jobs.
 
@@ -635,7 +633,7 @@ class Run:
             return False
         if not any(LEVEL_RANK.get(r.level, 99) <= rank for r in self.records):
             return False
-        if FILE_LEVEL or level_filters():
+        if level_filters():
             return any(r.level == level for r in self.log.records)
         return True
 

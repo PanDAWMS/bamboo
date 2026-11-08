@@ -473,7 +473,7 @@ TEMPLATES: dict[str, str] = {
     "line-hole": "{line}: {hole}",
     "prints-not-known-named": "no line before the arm(s) at {lines} is known to name the written row's {columns}: the map did not read their names whole (KNOWN_ISSUES.md K19)",
     "prints-name-the-key": "a line before every arm at {lines} names the written row's {columns}",
-    "logs-the-maps-reading": "the logs are the map's reading's, not where it places the prints (ROWS_OWN_FILES, ROWS_FROM)",
+    "logs-the-maps-reading": "the logs are the map's reading's, not where it places the prints (ROWS_FROM)",
     "logs-no-prints-of-its-own": "the map has no prints of its own for it",
     "logs-placed-by": "the map places some of its prints by {bases}, not by their logger: where they land is not known whole",
     "logs-in-no-file": "the map places its prints in no file",

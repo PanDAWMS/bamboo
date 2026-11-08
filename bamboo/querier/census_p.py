@@ -200,7 +200,6 @@ def main() -> None:
         + ("" if P.HANDLER_RULE else " -- E6 off")
         + ("" if P.REUSE_WALKS else " -- reuse off")
         + ("" if P.CALLS_RAISE else " -- no call raises (P_CALLS_RAISE=0, upper bound)")
-        + ("" if H.FOLLOW_OUT else " -- OUT not followed (P_FOLLOW_OUT=0)")
         + ("" if P.LEVEL_BY == "share" else f" -- S* chosen by {P.LEVEL_BY} (P_LEVEL_BY)")
         + ("" if P.WRITTEN_BACK else " -- an execute rewrites its whole map (P_WRITTEN_BACK=0)"),
         f"# {len(arms)} arm statement(s)",

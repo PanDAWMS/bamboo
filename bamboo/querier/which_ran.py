@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import ast
 import datetime
-import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -66,20 +65,6 @@ from bamboo.querier import windows as W  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
 
-#: ``WHICH_RUN_BY_ROWS=0``: a candidate with no run of its own takes the key's first run in the window, whatever
-#: function it is.  With several runs there -- a DB proxy log, whose token is the method --
-#: that is another function's run, and its rows read as missing
-RUN_BY_ROWS = os.environ.get("WHICH_RUN_BY_ROWS", "1") != "0"
-#: ``WHICH_RUN_JOIN_CALLS=0``: runs of the key in several logs stay several runs, and none is the question's
-#: (2026-10-14), even where one ran inside a call the other made (the adder's updateJobs and DBProxy's archiveJob)
-JOIN_CALLS = os.environ.get("WHICH_RUN_JOIN_CALLS", "1") != "0"
-#: ``WHICH_RUN_ROWS_AROUND=0``: a line is proven only by a row on a path through it (implying rows, P), not by two
-#: rows printed in a row that only a path through it prints (:func:`rows_around`)
-ROWS_AROUND = os.environ.get("WHICH_RUN_ROWS_AROUND", "1") != "0"
-#: ``WHICH_RUN_ONCE_LOOPS=0``: every loop a row and a site share may have gone round between them, the DB proxy's
-#: retry too (``rows.once_loops``): activateJob's else row 111 then leaves arm 71 standing
-ONCE_LOOPS = os.environ.get("WHICH_RUN_ONCE_LOOPS", "1") != "0"
-
 
 def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
     """``rows.once_loops`` of *fn* in one call's run *run*: a row is not printed where rule 4 would read it as
@@ -88,13 +73,13 @@ def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
         row = fn.row_at(stmt)
         return (row is not None and not sn.present(row) and R.absence_trusted(row, run.log, mode)[0]
                 and run.would_print(row.level, row.func))
-    return R.once_loops(fn.node, absent) if ONCE_LOOPS and sn.single_call() else {}
+    return R.once_loops(fn.node, absent) if sn.single_call() else {}
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
     """Of the key's runs in the window, the one where most of the candidate's rows are proven; None when there
     are several and none holds one.  A single run is taken as it is, as before."""
-    if len(found) == 1 or not RUN_BY_ROWS:
+    if len(found) == 1:
         return found[0]
     fn = R.function(c.rel, c.func, c.lines)
     counts = [sum(1 for row in fn.rows if sn.proven(row)) for sn in (R.seen(fn, r, mode) for r in found)]
@@ -906,10 +891,6 @@ def empty_loops(fn: R.Function, stmt: ast.stmt, callee: dict[str, tuple[str, str
     return ""
 
 
-#: a loop's rows read per element; P_LOOP_ELEMENT=0 reads them per function
-LOOP_ELEMENT = os.environ.get("P_LOOP_ELEMENT", "1") != "0"
-
-
 def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.Seen, env: E.Env | None) -> str:
     """Why *row*, which the run printed, did not print for the question's row in a pass through the arm at *line*;
     '' if it may have (KNOWN_ISSUES.md K64).
@@ -1087,7 +1068,7 @@ def judge(
     # a run inside a call another run made is a part of that run: (outer run, record before, record after, calls)
     joined: dict[int, tuple[Run, int, int, str]] = {}
     join_notes: list[str] = []
-    if question_run is None and called_at is not None and JOIN_CALLS and subject and observed:
+    if question_run is None and called_at is not None and subject and observed:
         runs = list({id(r): r for r in runs_of.values() if r is not None}.values())
         for inner in runs:
             for outer in runs:
@@ -1148,7 +1129,7 @@ def judge(
                 if row is None:
                     continue
                 if sn.present(row):
-                    elsewhere = (other_elements(fn, stmt, row, sn, env) if LOOP_ELEMENT else "") or for_others.get(row.line, "")
+                    elsewhere = other_elements(fn, stmt, row, sn, env) or for_others.get(row.line, "")
                     if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func):
                         absent.append(row.line)
                         per_element.append(elsewhere)
@@ -1247,7 +1228,7 @@ def judge(
                 elif proof.kind == "positive":
                     v.kind = "positive"
                     v.reasons.append(proof.reason)
-                elif ROWS_AROUND and (around := rows_around(fn, psn, stmt)) is not None:
+                elif (around := rows_around(fn, psn, stmt)) is not None:
                     v.kind = "positive"
                     v.reasons.append(f"rows {around[0]} and {around[1]} printed in a row, which only a path through it prints")
                 else:

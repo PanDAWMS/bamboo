@@ -34,8 +34,8 @@ def _corpus(tmp_path: Path) -> Path:
 
 
 def _run(tmp_path: Path, code: str, **env: str | None) -> subprocess.CompletedProcess[str]:
-    """Run *code* in a child interpreter that imports bamboo from this repository; rule 8's switch is the test's to set."""
-    child = {k: v for k, v in os.environ.items() if k not in ("BAMBOO_TREE", "PANDA_PIN", "PYTHONPATH", "RULE8_FILE_LEVEL")}
+    """Run *code* in a child interpreter that imports bamboo from this repository."""
+    child = {k: v for k, v in os.environ.items() if k not in ("BAMBOO_TREE", "PANDA_PIN", "PYTHONPATH")}
     child |= {"PYTHONPATH": str(REPO), "PYTHONDONTWRITEBYTECODE": "1", "PANDA_PIN": str(_corpus(tmp_path))}
     for k, v in env.items():
         if v is None:
@@ -7522,8 +7522,6 @@ def test_a_row_shorter_than_min_proof_proves_only_as_its_whole_message_no_other_
                 "a row with no prefix": proves("activateJob", "", "start", mark, "start"),
                 "a row of MIN_PROOF": proves("activateJob", "", "a long row", mark, "in a long row too"),
             }
-            rows.PREFIX = False
-            got["prefixes not read"] = start()
             print(json.dumps(got))
             """,
         )
@@ -7535,7 +7533,7 @@ def test_a_row_shorter_than_min_proof_proves_only_as_its_whole_message_no_other_
                    "a logger with marks on its paths, in the log": no, "a logger with marks on its paths, in another log": yes,
                    "lines the map does not place": no, "a row of holes alone": yes,
                    "another text with no prefix, in the log": yes, "a row with no prefix": no,
-                   "a row of MIN_PROOF": yes, "prefixes not read": no}
+                   "a row of MIN_PROOF": yes}
 
 
 def test_s2_takes_the_one_positive_arm_as_a_passs_way_and_the_positive_exits_as_where_it_left_after(tmp_path):

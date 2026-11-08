@@ -166,9 +166,6 @@ BAMBOO = Path(R.BAMBOO_TREE)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
-#: ``RERUN_S3_ROWS=0``: S3 settles a pass's guards by the exit it left by alone, not also by the rows it printed on
-#: the way (``Rerun._ways_printed``, KNOWN_ISSUES.md K46)
-S3_ROWS = os.environ.get("RERUN_S3_ROWS", "1") != "0"
 
 
 def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> dict[str, ast.expr]:
@@ -440,7 +437,7 @@ def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
     its prints in by the logger they are made on (``PrintStatement.log_files``; a DB proxy method's are the server's and
     JEDI's both, as the process that called it chooses).  ``{"held": True | False | None, "why": ...}``, None where the
     files are the map's reading's, not where it places the prints (``rows.own_log_files``)."""
-    if not R.OWN_FILES or R.ROWS_FROM != "graph":
+    if R.ROWS_FROM != "graph":
         return {"held": None, "why": T.Said("logs-the-maps-reading")}
     found = R._prints_of(owner, lines)
     if found is None or not found.statements:
@@ -2428,18 +2425,8 @@ class Rerun:
         self.say(f"END {what}")
 
     def files_of(self, owner: str, today: list[str], lines) -> list[str]:
-        """Where *owner*'s own rows are looked for (``R.own_log_files``); ``FILES_LOG`` gets both answers."""
-        own = R.own_log_files(owner, list(today), lines)
-        if os.environ.get("FILES_LOG"):
-            saved = R.OWN_FILES
-            R.OWN_FILES = True
-            would = R.own_log_files(owner, list(today), lines)
-            R.OWN_FILES = saved
-            found = R._prints_of(owner, lines)
-            basis = sorted({st.log_files_basis for st in found.statements}) if found is not None else None
-            with open(os.environ["FILES_LOG"], "a") as out:
-                out.write(json.dumps({"hop": self.hop, "owner": owner, "today": sorted(today), "own": would, "basis": basis}) + "\n")
-        return own
+        """Where *owner*'s own rows are looked for (``R.own_log_files``)."""
+        return R.own_log_files(owner, list(today), lines)
 
     def warn_split(self, owner: str, lines) -> None:
         if split := R.split_files(owner, lines):
@@ -3237,7 +3224,7 @@ class Rerun:
         whose arm a history pair places (``attr_time.arms``), the pair's caller at the call on the way to it, read on
         the caller's run (:class:`StandIn`, kept in ``_stand_ins`` by the caller's owner and line).  Only where the map
         places the prints (``rows.own_log_files``): else the readings' logs stand, as before."""
-        silent = [r for r in readings if prints_nothing(r.owner, r.lines)] if R.OWN_FILES and R.ROWS_FROM == "graph" else []
+        silent = [r for r in readings if prints_nothing(r.owner, r.lines)] if R.ROWS_FROM == "graph" else []
         arms = {(a.owner, a.line): a for a in AT.arms(mapdump.fragment(), subject, silent)} if silent else {}
         found: dict[str, Candidate] = {}
 
@@ -5130,7 +5117,7 @@ class Rerun:
         held when it printed -- activateJob's 111, in the else of 70, says ``not (len(res) == 0 or allOK)``, though
         the exit the pass left by (153, ``return True``) is reached either way (KNOWN_ISSUES.md K46).  None of a run of
         several calls, nor where no run is handed."""
-        if not S3_ROWS or run is None or not getattr(fn, "rows", None):
+        if run is None or not getattr(fn, "rows", None):
             return []
         sn = R.claim([R.seen(fn, run, self.mode)])[0]
         if not sn.single_call():
