@@ -2017,9 +2017,15 @@ def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_recor
             run = N(records=[N(stamp=f"2026-01-01 00:00:{s},000") for s in ["00", "01", "02", "03"]])
             placed = {3: [0], 5: [1], 9: [3]}
             hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
-            caller = N(fn=fn, run=run, unambiguous=placed, hits=hits)
+            every = lambda row: True
+            caller = N(fn=fn, run=run, unambiguous=placed, hits=hits, would_show=every)
             # "on hold" matched the third record too, though not alone: the function may have printed there
-            read_between = N(fn=fn, run=run, unambiguous=placed, hits={**hits, 8: [(2, 9, "")]})
+            read_between = N(fn=fn, run=run, unambiguous=placed, hits={**hits, 8: [(2, 9, "")]}, would_show=every)
+            # "set A" not read in the run: "start" and "end" are the two records around the call
+            around = {3: [0], 9: [3]}
+            unread = {k: [(x, 9, "") for x in v] for k, v in around.items()}
+            shown = N(fn=fn, run=run, unambiguous=around, hits=unread, would_show=every)
+            unshown = N(fn=fn, run=run, unambiguous=around, hits=unread, would_show=lambda row: row.line != 5)
             inner = lambda a, b: N(first=f"2026-01-01 00:00:{a}", last=f"2026-01-01 00:00:{b}")
             print(json.dumps([
                 [len(x) for x in R.must_rows(node, stmt)],
@@ -2027,11 +2033,13 @@ def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_recor
                 inside_call(caller, inner("00,200", "00,800"), "pandaserver/a.py:6"),
                 inside_call(caller, inner("03,200", "03,800"), "pandaserver/a.py:6"),
                 inside_call(read_between, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+                inside_call(shown, inner("01,200", "01,800"), "pandaserver/a.py:6"),
+                inside_call(unshown, inner("01,200", "01,800"), "pandaserver/a.py:6"),
             ]))
             """,
         )
     )
-    shape, inside, before_its_arm, after_the_end, printed_between = json.loads(out.splitlines()[-1])
+    shape, inside, before_its_arm, after_the_end, printed_between, set_a_shown, set_a_unshown = json.loads(out.splitlines()[-1])
     # the call ends an arm and the next statement calls: no print every path runs after it
     assert shape == [2, 0]
     # "set A" and "end", two of the function's records in a row, hold the run, and the call is between their prints
@@ -2041,6 +2049,10 @@ def test_a_call_with_no_print_after_it_on_every_path_is_placed_between_the_recor
     assert after_the_end is None
     # a row of the function read between the two: they are not one pass's
     assert printed_between is None
+    # every path from "start" to "end" through the call prints "set A": where the run would show it, its absence
+    # between the two says no such path ran; where it would not, it may have printed unseen (KNOWN_ISSUES.md K67)
+    assert set_a_shown is None
+    assert set_a_unshown == [0, 3]
 
 
 def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_their_prints_runs_it(tmp_path):
@@ -2058,6 +2070,14 @@ def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_thei
                 if task.x:
                     self.tb.update(task)
                 self.logger.info("checking length")
+
+            def skipping(self, task):
+                self.logger.info("a")
+                if task.y:
+                    self.logger.debug("skip")
+                else:
+                    self.impl.extract(task)
+                self.logger.info("b")
             """
         )
     )
@@ -2075,18 +2095,28 @@ def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_thei
             at = lambda line: R.statement_at(node, line)
             prints = [s for s in R.own_nodes(node) if R.is_print(s)]
             through = lambda a, b, s: flow.passes_through(at(a), at(b), at(s), prints)
-            fn = N(node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            row_at = lambda s: N(line=s.lineno) if R.is_print(s) else None
+            fn = N(node=node, row_at=row_at)
+            every = lambda row: True
             # record 1 is another function's (the callee's, say)
             placed = {3: [0], 11: [2]}
             hits = {k: [(x, 9, "") for x in v] for k, v in placed.items()}
+            seen = lambda unambiguous, hits, shows=every: N(unambiguous=unambiguous, hits=hits, would_show=shows)
+            # "a" and "b" in a row: "skip" closes the way round the call where the run would show it
+            node2 = R.functions("pandajedi/r.py", "skipping")[0]
+            fn2 = N(node=node2, row_at=row_at)
+            ab = {14: [0], 19: [1]}
+            ab_hits = {k: [(x, 9, "") for x in v] for k, v in ab.items()}
             print(json.dumps({
                 "the call": through(3, 11, 5),
                 "an arm": through(3, 11, 10),
                 "raised to the handler": through(3, 7, 5),
-                "around the call": rows_around(fn, N(unambiguous=placed, hits=hits), at(5)),
-                "around the arm": rows_around(fn, N(unambiguous=placed, hits=hits), at(10)),
-                "a row read between": rows_around(fn, N(unambiguous=placed, hits={**hits, 7: [(1, 9, "")]}), at(5)),
-                "only the first": rows_around(fn, N(unambiguous={3: [0]}, hits={3: [(0, 9, "")]}), at(5)),
+                "around the call": rows_around(fn, seen(placed, hits), at(5)),
+                "around the arm": rows_around(fn, seen(placed, hits), at(10)),
+                "a row read between": rows_around(fn, seen(placed, {**hits, 7: [(1, 9, "")]}), at(5)),
+                "only the first": rows_around(fn, seen({3: [0]}, {3: [(0, 9, "")]}), at(5)),
+                "skip shown": rows_around(fn2, seen(ab, ab_hits), R.statement_at(node2, 18)),
+                "skip unshown": rows_around(fn2, seen(ab, ab_hits, lambda row: row.line != 16), R.statement_at(node2, 18)),
             }))
             """,
         )
@@ -2101,6 +2131,10 @@ def test_two_records_in_a_row_show_a_line_ran_only_where_every_path_between_thei
     # no two rows in a row: nothing shown; "failed" matched the record between, though not alone: not a pass's two
     assert got["only the first"] is None
     assert got["a row read between"] is None
+    # "skip" is the only other way from "a" to "b": shown, its absence says the call ran; unshown, it may have printed
+    # unseen, and "a" then "b" no longer show the call ran (KNOWN_ISSUES.md K67)
+    assert got["skip shown"] == [14, 19]
+    assert got["skip unshown"] is None
 
 
 def test_rule_3_places_a_printed_row_before_or_after_the_site_only_where_the_flow_lets_it_go_one_way(tmp_path):
@@ -6776,7 +6810,7 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
                 r._unborn = lambda readings, subject, state: (readings, "")
                 r._ask = lambda key, names, asking, owners, whole: ({}, [], holes)
                 r.base_env = lambda at: env
-                got = r._row_at("JobSpec.nucleus", "nucleus", "MPPMU", "7", ["every writer"], row, N(window=("10:05", "10:05")), named)
+                got = r._row_at("JobSpec.nucleus", "nucleus", "MPPMU", "7", ["every writer"], row, N(window=("10:05", "10:05"), machine=None), named)
                 return [said(got), r.lines]
 
             # a log not searched whole goes to the judge, which here reads no verdict
@@ -6818,6 +6852,286 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
     # writers not shown naming the key are added
     assert got["generator not searched whole"][0] == []
     assert got["refiner not searched whole"][0] == [["g.py::doGenerate:1251", False, [why("panda-JobGenerator.log")]]]
+
+
+def test_h2_reads_an_arm_whose_logs_never_name_the_key_on_the_run_that_recorded_the_row(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import render as T
+            from bamboo.querier import rerun
+
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.hop, r.unanswered, r.mode = [], "H2", [], "outside"
+            r.data = {"classes": {"about": "x", "job": "JobSpec"}, "rows": {"job": {"jediTaskID": {"value": 5, "source": "now"}}}}
+            r.window = lambda asking: asking.window
+            files = {"pandaserver/j.py::insertNewJob": ["panda-DBProxy.log", "panda-JediDBProxy.log"],
+                     "pandajedi/g.py::runImpl": ["panda-JobGenerator.log"]}
+            r.files_of = lambda owner, today, lines: files[owner]
+            r._called_at = lambda fn, callee: ["pandajedi/g.py:845"]
+            r._key_columns = lambda subject, key: {"JobSpec.PandaID"}
+            first = [True]
+            rerun.prints_key_before = lambda owner, lines, columns: first[0] and columns == {"JobSpec.PandaID"} and owner == "pandaserver/j.py::insertNewJob"
+            rec = rerun.Recorder("pandajedi/g.py::G.runImpl", 845, (("pandaserver/j.py::J.insertNewJob", (3631,)),), (1280, 840))
+            # another call of the same function recording the row by the same method: one reason, said once
+            rec2 = rerun.Recorder("pandajedi/g.py::G.runImpl", 850, (("pandaserver/j.py::J.insertNewJob", (3631,)),), (840,))
+            recs = {"pandajedi/g.py::doGenerate": [rec], "pandajedi/j.py::setSplitRule": [rec, rec2]}
+            rerun.recorders = lambda subject, owner, line: recs.get(owner, [])
+            rerun.owners_of = lambda ids: {}
+            rerun.runs_for = lambda log, key: log.runs
+            rerun.R.function = lambda rel, name, arms=(): N(rel=rel, name=name, owner=f"{rel}::{name}")
+            # the method's mark holds the task (``mark_columns``); the pass's mark is asked for it (``_pass_marks``)
+            rerun.mark_columns = lambda owner, lines, run: {"JobSpec.jediTaskID": run.token.split("=")[1].split()[0]}
+            rerun._pass_marks = lambda owner, line, values: [(v, (f"<t={v} ",)) for c, v in values.items() if c == "JobSpec.jediTaskID"]
+            asked = []
+            rerun.recorded_in_pass = lambda fn, found, window, inner, sites, mode: (
+                asked.append([fn.owner, [f.token for f in found], [i.token for i in inner], sites]),
+                (found[0], sites[0]) if found else None)[1]
+
+            def run(token, first, last=None, machine="m85"):
+                return N(token=token, first=first, last=last or first, machine=machine,
+                         said=lambda: T.Said("log-at-machine", {"log": token, "machine": machine}))
+
+            def read(held, host="m85"):
+                # held: log name -> None (no answer), "absent" (no such log), [runs], ("holes", [runs]), or
+                # {"unlisted": [runs]} (the host not listed: asked of every machine)
+                r.lines, r.unanswered, asked[:] = [], [], []
+
+                def log(name, key, window, machine=None, owners=None, strings=(), whole=False):
+                    got = held.get((name, strings))
+                    if got is None:
+                        raise rerun.Unrecorded([(N(key=(name, strings, window)), "")])
+                    if got == "absent":
+                        return N(without=frozenset({machine}), unlisted=frozenset(), holes=[], runs=[])
+                    if isinstance(got, dict):
+                        return N(without=frozenset(), unlisted=frozenset({machine}), holes=[], runs=got["unlisted"])
+                    holes, runs = got if isinstance(got, tuple) else ([], got)
+                    return N(without=frozenset(), unlisted=frozenset(), holes=holes, runs=runs)
+
+                r.logs = N(names=lambda wanted: wanted, log=log)
+                why = rerun.Premise(T.Said("no-line-holds-the-key", {"logs": ["panda-JobGenerator.log"], "key": "7"}), rerun.NOT_READ)
+
+                def possible(arm, rel, func, line, via=None):
+                    return rerun.Possible(arm, {"status": "defined"}, False, [why],
+                                          branch=N(chosen=N(candidate=N(rel=rel, func=func), line=line), via=via))
+
+                def caller(rel, func, line):
+                    return N(candidate=N(rel=rel, func=func, owner=f"{rel}::{func}"), line=line)
+
+                left = [possible("g.py::doGenerate:1284", "pandajedi/g.py", "doGenerate", 1284),
+                        possible("s.py::other:9", "pandajedi/s.py", "other", 9),
+                        # a writer that prints nothing, read at the recording function's call on the way to it, and
+                        # at another caller's
+                        possible("j.py::setSplitRule:925", "pandajedi/j.py", "setSplitRule", 925, caller("pandajedi/g.py", "runImpl", 840)),
+                        possible("j.py::setSplitRule:925", "pandajedi/j.py", "setSplitRule", 925, caller("pandajedi/w.py", "doForTaskBoost", 723))]
+                state = {"status": "defined", "time": "2026-10-29 01:26:11"}
+                asking = rerun.W.Asking(("2026-10-29 01:26:11", "2026-10-29 01:26:11"), host, "the row")
+                got = r._recorded("JobSpec.diskIO", "7", state, asking, left)
+                asks = []
+                for _, a, _ in r.unanswered:
+                    asks += [list(a.key)] if list(a.key) not in asks else []
+                return {"left": [[p.arm + (f"@{p.branch.via.line}" if p.branch.via else ""), [x.kind for x in p.premises],
+                                  [str(x) for x in p.premises]] for p in got],
+                        "asks": asks, "lines": r.lines, "pass": list(asked)}
+
+            M = lambda name: (name, ())
+            G = ("panda-JobGenerator.log", ("<t=5 ",))
+            mine = run("insertNewJob < <JediTaskID=5 idPool=1 >", "2026-10-29 01:26:09")
+            far = run("insertNewJob < <JediTaskID=5 idPool=1 >", "2026-10-29 00:30:00")
+            other = run("resetDefinedJob < PandaID=7 >", "2026-10-29 01:26:11")
+            gen = run("<t=5 d=1>", "2026-10-29 01:20:00", "2026-10-29 01:27:00")
+            # the method's run of the key near the row on another machine
+            elsewhere = run("insertNewJob < <JediTaskID=5 idPool=1 >", "2026-10-29 01:26:09", machine="m84")
+            def not_first(held):
+                first[0] = False
+                try:
+                    return read(held)
+                finally:
+                    first[0] = True
+
+            print(json.dumps({
+                "unrecorded": read({}),
+                "none": read({M("panda-DBProxy.log"): [other], M("panda-JediDBProxy.log"): "absent"}),
+                "key not first": not_first({M("panda-DBProxy.log"): [other], M("panda-JediDBProxy.log"): "absent"}),
+                "far": read({M("panda-DBProxy.log"): [far], M("panda-JediDBProxy.log"): "absent"}),
+                "both absent": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): "absent"}),
+                "not whole": read({M("panda-DBProxy.log"): (["01:20..01:26"], []), M("panda-JediDBProxy.log"): "absent"}),
+                "unlisted": read({M("panda-DBProxy.log"): [other], M("panda-JediDBProxy.log"): {"unlisted": [elsewhere]}, G: [gen]}),
+                "pass": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine], G: [gen]}),
+                "pass unrecorded": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine]}),
+                "no pass": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine], G: []}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    key = "no line of panda-JobGenerator.log in the records holds 7: its runs are not shown to name it"
+    as_was = [[arm, ["not read"], [key]] for arm in ("g.py::doGenerate:1284", "s.py::other:9", "j.py::setSplitRule:925@840",
+                                                     "j.py::setSplitRule:925@723")]
+    # no record of the method's logs: as it was, and the method's logs and the pass's, for the value the rows file holds
+    # now, asked in one round with no stop -- the methods' over the row less and plus EDGE, the pass's at the row
+    near = ["2026-10-29 01:16:11", "2026-10-29 01:36:11"]
+    row = ["2026-10-29 01:26:11", "2026-10-29 01:26:11"]
+    assert got["unrecorded"]["left"] == as_was
+    assert got["unrecorded"]["asks"] == [["panda-DBProxy.log", [], near], ["panda-JediDBProxy.log", [], near],
+                                         ["panda-JobGenerator.log", ["<t=5 "], row]]
+    # the method's logs on the row's machine, one there and read whole, hold no run of its of the key near the row (a
+    # run of another method's, or one far from it, is none): the arm's pass did not write the row; an arm with no
+    # recording call stays; a writer read at a caller's call is read on that caller's recording calls only, and is said
+    # read there, its two calls' one reason once; read at a caller with no recording call, it stays
+    none = "insertNewJob ran no run of 7 near the row on m85 (panda-DBProxy.log, read whole there): no pass through its call that records the row wrote it"
+    assert got["none"]["left"] == [as_was[1], as_was[3]]
+    assert got["none"]["lines"] == ["  not its row: g.py::doGenerate:1284 -- " + none,
+                                    "  not its row: j.py::setSplitRule:925, read at g.py::runImpl:840 -- " + none]
+    assert got["far"]["left"] == [as_was[1], as_was[3]]
+    # a method the map does not say prints the key before it records the row: no run of it is not its absence
+    assert got["key not first"]["left"] == as_was
+    # none of its logs on the machine, or one not read whole there: as it was
+    assert got["both absent"]["left"] == as_was
+    assert got["not whole"]["left"] == as_was
+    # a log the host is not listed for, asked of every machine: not read whole on the host, and another machine's run
+    # of the key is not the host's -- as it was, and no pass is asked for it
+    assert got["unlisted"]["left"] == as_was
+    assert got["unlisted"]["pass"] == []
+    # its run of the key near the row inside the call of a pass of the recording call's function, that pass asked for
+    # the mark the method's run holds: said in place of the key not being named, still not read
+    assert got["pass"]["pass"] == [["pandajedi/g.py::runImpl", ["<t=5 d=1>"], ["insertNewJob < <JediTaskID=5 idPool=1 >"],
+                                    ["pandajedi/g.py:845"]]] * 3
+    shown = ["its pass at the row is <t=5 d=1>@m85: insertNewJob's run of 7 ran inside its call at pandajedi/g.py:845; "
+             "whether the line ran in it is not read"]
+    assert got["pass"]["left"][0] == ["g.py::doGenerate:1284", ["not read"], shown]
+    assert got["pass"]["left"][2] == ["j.py::setSplitRule:925@840", ["not read"], shown]
+    # another caller's pass is not the pass of a writer read at doForTaskBoost's call
+    assert got["pass"]["left"][1::2] == [as_was[1], as_was[3]]
+    # the pass's log not recorded: as it was, asked; no pass holding the run: as it was
+    assert got["pass unrecorded"]["left"] == as_was
+    assert got["pass unrecorded"]["asks"] == [["panda-JobGenerator.log", ["<t=5 "], row]]
+    assert got["no pass"]["left"] == as_was
+
+
+def test_a_recorder_prints_the_key_first_by_a_hole_or_by_a_mark_every_run_holds(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+
+            def hole(*cols):
+                return N(columns=list(cols))
+
+            # line 10 writes the history; must prints before it are the statements at the lines given
+            def method(before, statements, runs):
+                rerun.R._prints_of = lambda owner, lines: N(statements=statements, runs=runs)
+                rerun.R.function = lambda rel, name, arms=(): N(node="node")
+                rerun.R.statement_at = lambda node, line: N(lineno=line)
+                rerun.R.must_rows = lambda node, stmt: ([N(lineno=x) for x in before], [])
+                return rerun.prints_key_before("p/j.py::insertNewJob", [10], {"JobSpec.PandaID"})
+
+            st = lambda line, *holes, prefix=(): N(line=line, rows=[N(holes=list(holes), prefix_holes=list(prefix))])
+            task_mark = [N(key=[N(columns=["JobSpec.jediTaskID"])])]
+            key_mark = [N(key=[N(columns=["JobSpec.PandaID"])])]
+            print(json.dumps({
+                "hole before": method([3], [st(3, hole("JobSpec.PandaID"))], task_mark),
+                "in its prefix": method([3], [st(3, prefix=[hole("JobSpec.PandaID")])], []),
+                "only after": method([], [st(12, hole("JobSpec.PandaID"))], task_mark),
+                "another column": method([3], [st(3, hole("JobSpec.jediTaskID"))], task_mark),
+                "every mark holds it": method([3], [st(3)], key_mark),
+                "a mark without it": method([3], [st(3)], key_mark + task_mark),
+                "a mark, no print before": method([], [st(12)], key_mark),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"hole before": True, "in its prefix": True, "only after": False, "another column": False,
+                   "every mark holds it": True, "a mark without it": False, "a mark, no print before": False}
+
+
+def test_recorders_are_the_calls_after_the_arm_with_the_calls_on_the_way_to_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+
+            def pair(caller, point, call, writes, order="after"):
+                return N(caller=caller, point=point, call=call, writes=writes, order=order)
+
+            placed = [pair("w.py::W.boost", 723, 724, ["j.py::J.updateTask:1570"]),
+                      # the same recording call reached by another call on the way to the arm: one recorder, both calls
+                      pair("w.py::W.boost", 730, 724, ["j.py::J.updateTask:1570"]),
+                      pair("w.py::W.boost", 723, 724, ["j.py::J.updateTask:1570"]),
+                      pair("p.py::P.reassign", 312, 313, ["j.py::J.updateTask:1570", "j.py::J.updateTask:1580"]),
+                      # before the arm, or writing no history line: not a recorder
+                      pair("q.py::Q.before", 5, 4, ["j.py::J.updateTask:1570"], order="before"),
+                      pair("q.py::Q.none", 5, 6, [])]
+            rerun.mapdump.fragment = lambda: None
+            rerun.AT.arms = lambda fragment, subject, at: [N(placed=placed)]
+            print(json.dumps([[r.caller, r.call, [[m, list(ls)] for m, ls in r.methods], list(r.points)]
+                              for r in rerun.recorders("JediTaskSpec.splitRule", "j.py::setSplitRule", 925)]))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == [
+        ["w.py::W.boost", 724, [["j.py::J.updateTask", [1570]]], [723, 730]],
+        ["p.py::P.reassign", 313, [["j.py::J.updateTask", [1570, 1580]]], [312]],
+    ]
+
+
+def test_recorded_in_pass_reads_a_pass_at_the_row_holding_every_run_of_the_recorder_inside_its_call(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import which_ran as W
+
+            fn = N(owner="pandajedi/g.py::runImpl")
+            W.R.entries = lambda fn, run, mode: run.entries
+            W.R.seen = lambda fn, part, mode: part
+            W.at_window = lambda part, window: part.first <= window[0] <= part.last
+            # inside the call where the pass's span holds the inner run, on its machine
+            W.inside_call = lambda seen, inner, site: (0, 1) if site.endswith(":845") and seen.first <= inner.first and inner.last <= seen.last else None
+
+            def run(token, first, last, machine="m85", entries=()):
+                return N(token=token, first=first, last=last, machine=machine, entries=list(entries), records=[0, 1],
+                         part=lambda a, b: run(token, first, last, machine))
+
+            gen = run("<t=5 d=1>", "01:20", "01:27")
+            ins = run("insertNewJob < <JediTaskID=5 >", "01:26", "01:26")
+            other_machine = run("insertNewJob < <JediTaskID=5 >", "01:26", "01:26", machine="m86")
+            late = run("insertNewJob < <JediTaskID=5 >", "01:28", "01:28")
+            say = lambda got: None if got is None else [got[0].token, got[1]]
+            print(json.dumps({
+                "inside": say(W.recorded_in_pass(fn, [gen], ("01:26", "01:26"), [ins], ["pandajedi/g.py:845"], "outside")),
+                "no inner": say(W.recorded_in_pass(fn, [gen], ("01:26", "01:26"), [], ["pandajedi/g.py:845"], "outside")),
+                "another site": say(W.recorded_in_pass(fn, [gen], ("01:26", "01:26"), [ins], ["pandajedi/g.py:900"], "outside")),
+                "another machine": say(W.recorded_in_pass(fn, [gen], ("01:26", "01:26"), [ins, other_machine], ["pandajedi/g.py:845"], "outside")),
+                "one outside": say(W.recorded_in_pass(fn, [gen], ("01:26", "01:26"), [ins, late], ["pandajedi/g.py:845"], "outside")),
+                "not at the row": say(W.recorded_in_pass(fn, [gen], ("01:30", "01:30"), [ins], ["pandajedi/g.py:845"], "outside")),
+                "another method's mark": say(W.recorded_in_pass(fn, [run("getJobs < x >", "01:20", "01:27")], ("01:26", "01:26"), [ins],
+                                                                ["pandajedi/g.py:845"], "outside")),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["inside"] == ["<t=5 d=1>", "pandajedi/g.py:845"]
+    # every run of the recorder near the row must be inside one call of the pass, on its machine
+    assert got["no inner"] is None
+    assert got["another site"] is None
+    assert got["another machine"] is None
+    assert got["one outside"] is None
+    assert got["not at the row"] is None
+    assert got["another method's mark"] is None
 
 
 def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(tmp_path):

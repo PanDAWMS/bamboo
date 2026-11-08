@@ -589,9 +589,11 @@ class RecordedLogs:
         # the key, or what the asker names in its place: marks holding it (F3), whose lines are all a run's
         asked = tuple(strings) or (key,)
         (first,) = self._get([(Ask(name, asked, window, machine), "")], notes)
+        unlisted: frozenset[str] = frozenset()
         if machine is not None and any(r.get("machines", {}).get(machine, {}).get("status") == "not listed" for r in first):
             (first,) = self._get([(Ask(name, asked, window), f"{machine} is not in list_logs: every machine asked")], notes)
             notes.append(f"{machine} is not in list_logs, so every machine was asked")
+            unlisted = frozenset({machine})
         got = _Gathered()
         # the records of the asks over the window itself, apart: a widening is decided from the ends they searched
         # alone, so neither a widened ask's record nor a wider ask's widens again (once: the module's doc)
@@ -687,6 +689,8 @@ class RecordedLogs:
         log.edges = _edges_in(got, strings_of)
         log.partial = partial
         log.narrowed = narrowed
+        log.without = frozenset(got.without)
+        log.unlisted = unlisted
         if partial:
             kinds = sorted(set(partial.values()))
             notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")

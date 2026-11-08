@@ -163,6 +163,30 @@ def holds_key(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
     return bool(part.found_by) or bool(_key_through_call(fn, part, logs, mode, called_at))
 
 
+def recorded_in_pass(fn: R.Function, found: list[Run], window: tuple[str, str], inner: list[Run], sites: list[str],
+                     mode: str) -> tuple[Run, str] | None:
+    """``(the pass, the call)``: a pass of *fn* at *window* inside whose call at one of *sites* (``file:line``) every run
+    of *inner* ran, on the machine both name; None where none is (KNOWN_ISSUES.md K67).  *found* are runs of *fn*'s
+    log under its own marks, *inner* the runs of the method that records the row, of the key near it.  A run is cut into
+    passes and a pass is at the window as :func:`passes_at` reads them; a run inside a call as :func:`inside_call` reads
+    it -- which says only that the inner run ran while the pass was inside that call."""
+    if not inner:
+        return None
+    for run in found:
+        if not of_mover(run, fn.owner):
+            continue
+        cuts = sorted({0, *R.entries(fn, run, mode), len(run.records)})
+        parts = [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+        for part in parts:
+            if not at_window(part, window):
+                continue
+            seen = R.seen(fn, part, mode)
+            for site in sites:
+                if all(m.machine == part.machine and inside_call(seen, m, site) is not None for m in inner):
+                    return part, site
+    return None
+
+
 def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
               called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> tuple[list[Run], list[str]]:
     """``(passes, why the rest went)``: of the key's runs whose span holds *window*, the passes of *c*'s function the
@@ -373,7 +397,8 @@ def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, i
 
     ``updateTaskStatusByContFeeder_JEDI`` ends an arm of feed_contents_to_tasks and the next print is in another arm,
     so no print every path runs follows it; the run's "set task_status=..." before it and its next record after hold
-    the JediDBProxy run between them."""
+    the JediDBProxy run between them.  Only a print the run would show closes a path between the two
+    (:func:`_shown_by`)."""
     node, records = caller.fn.node, caller.run.records
     placed = sorted((x, line) for line, xs in caller.unambiguous.items() for x in xs)
     before = [p for p in placed if records[p[0]].stamp <= inner.first]
@@ -388,12 +413,22 @@ def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, i
     first, last = R.statement_at(node, first_line), R.statement_at(node, last_line)
     if first is None or last is None or not {id(first), id(last)} <= {id(s) for s in prints}:
         return None
-    return (i, j) if flow.runs_between(first, last, stmt, prints) else None
+    return (i, j) if flow.runs_between(first, last, stmt, _shown_by(caller.fn, caller.would_show, prints, first, last)) else None
 
 
 def _row_prints(fn: R.Function) -> list[ast.stmt]:
     """*fn*'s prints that are rows: what a run's records can show."""
     return [s for s in R.own_nodes(fn.node) if isinstance(s, ast.stmt) and R.is_print(s) and fn.row_at(s) is not None]
+
+
+def _shown_by(fn: R.Function, shows: Callable[[R.Row], bool], prints: list[ast.stmt], *read: ast.stmt) -> list[ast.stmt]:
+    """Of *prints*, the two records in a row *read* and the prints the run would show had they printed between them
+    (*shows*, ``Seen.would_show``).  A print the run cannot show may have printed between the two unseen, so it closes
+    no path between them: runImpl's ``tmpLog.debug(main_stop_watch.get_elapsed_time(...))`` at 838 is on every path
+    from its print at 837 to 883, around the storeJobs call at 845, and its record between them is read as no row
+    (KNOWN_ISSUES.md K67).  For :func:`_between_records` (a path through the call) this can only add a pass; for
+    :func:`rows_around` (every path through the line) only take a proof away."""
+    return [s for s in prints if any(s is r for r in read) or ((row := fn.row_at(s)) is not None and shows(row))]
 
 
 def _order(printed: ast.stmt, site: ast.stmt, once: list[ast.AST]) -> str | None:
@@ -412,7 +447,8 @@ def rows_around(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> tuple[int, int] |
     path through *stmt* prints so (the map's ``flow.passes_through``), or None.  A line no row is on every path through (a call
     of a function that prints nothing) is shown run by the rows around it: ``TaskRefinerThread.runImpl``'s 205 and 563
     around 211, ``extractCommon``.  A row read but not placed (``Seen.hits`` beyond ``unambiguous``) between the two
-    breaks the pair, as in :func:`_between_records`."""
+    breaks the pair, as in :func:`_between_records`, and only a print the run would show closes a path between them
+    (:func:`_shown_by`)."""
     node = fn.node
     placed = sorted((x, line) for line, xs in sn.unambiguous.items() for x in xs)
     read = sorted(x for found in getattr(sn, "hits", {}).values() for x, *_ in found)
@@ -424,7 +460,7 @@ def rows_around(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> tuple[int, int] |
         first, last = R.statement_at(node, a), R.statement_at(node, b)
         if first is None or last is None or id(first) not in ids or id(last) not in ids:
             continue
-        if flow.passes_through(first, last, stmt, prints):
+        if flow.passes_through(first, last, stmt, _shown_by(fn, sn.would_show, prints, first, last)):
             return a, b
     return None
 

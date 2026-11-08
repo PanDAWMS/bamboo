@@ -389,6 +389,12 @@ class Log:
     #: (``recorded._read``): a row of another function below WARNING is not searched in a run of one
     narrowed: dict[tuple[str, str], str] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    #: the machines a recorded listing says hold no file of the log (``no such log``): none of its runs is there (empty
+    #: in a file handed in)
+    without: frozenset[str] = frozenset()
+    #: the machine an ask named that no recorded list has (``not listed``): the log was asked of every machine in its
+    #: place (K13), so nothing is known of a file of it there
+    unlisted: frozenset[str] = frozenset()
 
     @property
     def name(self) -> str:

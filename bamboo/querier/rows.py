@@ -1128,6 +1128,11 @@ class Seen:
     def present(self, row: Row) -> bool:
         return bool(self.hits.get(row.line))
 
+    def would_show(self, row: Row) -> bool:
+        """Whether the run would show *row* had it printed: rule 4's test of a row missing from a run
+        (:func:`absence_trusted`, ``Run.would_print``).  A print it would not show may have printed unseen."""
+        return absence_trusted(row, self.run.log, self.mode)[0] and self.run.would_print(row.level, row.func)
+
     def proven(self, row: Row) -> bool:
         """Whether a record of the run is this row's, read by no other row of the function (a text two rows print
         alike is either one's: activateJob's filesTable4 UPDATE, 92 in the arm that activates and 124 in the one that

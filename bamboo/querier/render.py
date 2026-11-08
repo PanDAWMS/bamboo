@@ -285,6 +285,14 @@ TEMPLATES: dict[str, str] = {
     "a-birth-no-run": "a birth: it wrote as the row was made, at {time}; no run is read",
     "logs-not-searched-whole-over": "its logs were not searched whole over {why}: it may have written in what was not",
     "no-line-holds-the-key": "no line of {logs:join=, } in the records holds {key}: its runs are not shown to name it",
+    # the run that recorded the row (rerun._recorder_read, KNOWN_ISSUES.md K67)
+    "its-pass-recorded-the-row": "its pass at the row is {run}: {methods:join=, }'s run of {key} ran inside its call at "
+                                 "{site}; whether the line ran in it is not read",
+    "no-recorder-run-at-the-row": "{methods:join=, } ran no run of {key} near the row on {machine} ({logs:join=, }, read "
+                                  "whole there): no pass through its call that records the row wrote it",
+    "for-the-recorders-pass": "the pass of {func} around its call at {call}, for {marks:rjoin=, }",
+    "for-the-rows-recorder": "the run of {methods:join=, } that records the statuslog's {status!r} at {time}, on {machine}, "
+                             "the row's host",
     # L1's stay (rerun._stay_of, _stays_said)
     "a-statuslog-row-for": "a statuslog row for {observed!r}",
     "a-stay-beginning-at": "a stay of {observed!r} beginning at {since} (--since)",
