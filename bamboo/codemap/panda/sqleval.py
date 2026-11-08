@@ -8,6 +8,12 @@ abstract interpreter over one function at a time:
   ``!=``, ``is`` / ``is not``) the opposite way.  A test that reads attributes (``self.backend ==
   'oracle'``) is one too, until something assigns the attribute or the object, or a call is handed the object (as its
   receiver or an argument): a call handed something else -- ``self.cur.execute(...)`` -- is taken not to change it.
+- A call it does not model may change what it is handed -- an argument, a keyword, ``*x``, ``**x`` -- and what that
+  holds, by the function's own bindings (:func:`holding`): an element or value put into it, an alias.
+  ``bulk_insert_new_jobs`` hands ``insertNewJob`` ``**kwargs``, which ``kwargs.update(new_kwargs)`` filled with the
+  ``tmp_extracted_sqls`` dict ``insertNewJob`` fills; read as staying empty, the run never reached the
+  ``executemany`` that runs what was filled.  Not what holds a part handed (``x = d[k]; f(x)`` leaves ``d``), nor
+  the other things a container holds beside one handed: a dict holding the number handed is not changed.
 - A loop over a sequence it knows is unrolled; over anything else, its body runs once or twice (:data:`UNKNOWN_EMPTY`).
   What such a loop appends to a name its body reads nowhere else is one part, however many passes run: a hole that
   keeps what one pass appends (:data:`REPEATED`, :attr:`HoleAt.repeats`), then what every pass ends with.
@@ -68,8 +74,9 @@ Limits, each said rather than hidden:
   well be none: a statement only an empty loop leads to (a flag the loop sets, tested after it) is not read.
 
 Approximations: values a loop carries between passes are forgotten (numbers always); tests that decide a guard are not
-tracked; a dict is tracked by literal keys only where it is read by them; lists are values (no aliasing); nested
-functions are not run unless called through the resolver.
+tracked; a dict is tracked by literal keys only where it is read by them; lists are values -- an object shared by
+two names is lost by both only where a call is handed it (:func:`holding`); nested functions are not run unless called
+through the resolver.
 """
 
 from __future__ import annotations
@@ -937,6 +944,41 @@ _BUILTINS = frozenset(
         "reversed",
     }
 )
+#: What a call handed a container may change besides it (:func:`holding`), read off callfacts: the container
+#: methods putting what they are handed into their receiver (``append``, ``update``, ``setdefault`` ...), those
+#: handing back a part of it (``get``, ``pop``, ``values`` ...) or a copy holding what it holds (``copy``); the
+#: builtin functions whose value holds the elements of what they are handed (``list``, ``sorted``, ``zip``, ``dict``
+#: ...) or is one of them (``next``, ``max``).
+_PUTTING = frozenset(
+    name for (_type, name), fact in callfacts.BUILTIN_METHODS.items() if fact.puts
+)
+_PART_OF = frozenset(
+    name
+    for (_type, name), fact in callfacts.BUILTIN_METHODS.items()
+    if fact.gives is not None and fact.gives.part != callfacts.SELF
+)
+_COPYING = frozenset(
+    name
+    for (_type, name), fact in callfacts.BUILTIN_METHODS.items()
+    if fact.gives is not None and fact.gives.part == callfacts.SELF
+)
+_HOLDING_FUNCTIONS = frozenset(
+    name
+    for name, fact in callfacts.BUILTIN_FUNCTIONS.items()
+    if fact.gives
+    in (
+        callfacts.COPY,
+        callfacts.NUMBERED,
+        callfacts.ZIPPED,
+        callfacts.DICT,
+        callfacts.KEPT,
+    )
+)
+_ONE_OF_FUNCTIONS = frozenset(
+    name
+    for name, fact in callfacts.BUILTIN_FUNCTIONS.items()
+    if fact.gives == callfacts.ONE
+)
 
 
 def _names(node: ast.AST) -> set[str]:
@@ -963,6 +1005,177 @@ def _own_nodes(func: ast.AST):
         ):
             continue
         stack.extend(ast.iter_child_nodes(node))
+
+
+class Holding(NamedTuple):
+    """What each name of a function may hold, by its own bindings read without their order: *holds* -- the names
+    whose objects its object may hold, an element or a value put into it -- and *aliases* -- the names bound to the
+    same object."""
+
+    holds: dict[str, set[str]]
+    aliases: dict[str, set[str]]
+
+
+_HOLDING: dict[int, tuple[ast.AST, Holding]] = {}  # id(func) -> (func, its Holding)
+
+
+def holding(func: ast.AST) -> Holding:
+    """*func*'s :class:`Holding`, read once.  ``Y = N`` makes aliases; ``Y = {"k": N}``, ``Y = [N]``, ``Y[k] = N``,
+    ``Y.append(N)`` (:data:`_PUTTING`), ``Y += [N]``, ``Y = N.copy()``, ``Y = list(N)`` make Y hold N (and what N
+    holds, read as N); ``Y = N[k]``, ``Y = N.get(k)``, ``Y = next(N)``, ``for Y in N`` and ``Y, Z = N`` make N hold
+    Y.  An attribute is not followed: ``self.x = N`` and ``self.x[k] = N`` make nothing hold N."""
+    cached = _HOLDING.get(id(func))
+    if cached is not None and cached[0] is func:
+        return cached[1]
+    holds: dict[str, set[str]] = {}
+    aliases: dict[str, set[str]] = {}
+
+    def hold(owner: str, names: set[str]) -> None:
+        if names - {owner}:
+            holds.setdefault(owner, set()).update(names - {owner})
+
+    def parts_of(owners: set[str], target: ast.expr) -> None:
+        for name in _stored(target):
+            for owner in owners:
+                hold(owner, {name})
+
+    def bind(target: ast.expr, value: ast.expr) -> None:
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(
+                target.elts
+            ):
+                for one, given in zip(target.elts, value.elts, strict=True):
+                    bind(one, given)
+            else:
+                same, _held, part_of = _value_parts(value)
+                parts_of(same | part_of, target)
+            return
+        same, held, part_of = _value_parts(value)
+        if isinstance(target, ast.Name):
+            for name in same - {target.id}:
+                aliases.setdefault(target.id, set()).add(name)
+                aliases.setdefault(name, set()).add(target.id)
+            hold(target.id, held)
+            for owner in part_of:
+                hold(owner, {target.id})
+            return
+        root = _subscripted(target)
+        if root is not None:
+            hold(root, same | held)
+
+    for node in _own_nodes(func):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                bind(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            bind(node.target, node.value)
+        elif isinstance(node, ast.AugAssign):
+            root = _subscripted(node.target)
+            if root is not None:
+                same, held, _part_of = _value_parts(node.value)
+                hold(root, same | held)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            same, _held, part_of = _value_parts(node.iter)
+            parts_of(same | part_of, node.target)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _PUTTING
+        ):
+            root = _subscripted(node.func.value)
+            if root is not None:
+                for given in [*node.args, *(k.value for k in node.keywords)]:
+                    same, held, _part_of = _value_parts(given)
+                    hold(root, same | held)
+    found = Holding(holds, aliases)
+    _HOLDING[id(func)] = (func, found)
+    return found
+
+
+def _held_from(func: ast.AST, names: set[str]) -> set[str]:
+    """*names*, their aliases, and what their objects may hold, all the way down (:func:`holding`)."""
+    found = holding(func)
+    seen, todo = set(names), list(names)
+    while todo:
+        name = todo.pop()
+        for one in found.aliases.get(name, set()) | found.holds.get(name, set()):
+            if one not in seen:
+                seen.add(one)
+                todo.append(one)
+    return seen
+
+
+def _value_parts(value: ast.expr) -> tuple[set[str], set[str], set[str]]:
+    """The names *value* is, the names it holds, and the names it is a part of (:func:`holding`)."""
+    if isinstance(value, ast.Name):
+        return {value.id}, set(), set()
+    if isinstance(value, ast.NamedExpr):
+        same, held, part_of = _value_parts(value.value)
+        return same | {value.target.id}, held, part_of
+    if isinstance(value, ast.Await):
+        return _value_parts(value.value)
+    if isinstance(value, (ast.IfExp, ast.BoolOp)):
+        same, held, part_of = set(), set(), set()
+        for one in (
+            [value.body, value.orelse] if isinstance(value, ast.IfExp) else value.values
+        ):
+            more = _value_parts(one)
+            same, held, part_of = same | more[0], held | more[1], part_of | more[2]
+        return same, held, part_of
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+        held = set()
+        for one in value.values if isinstance(value, ast.Dict) else value.elts:
+            more = _value_parts(one.value if isinstance(one, ast.Starred) else one)
+            held |= more[0] | more[1]
+        return set(), held, set()
+    if isinstance(value, ast.Subscript):
+        more = _value_parts(value.value)
+        return set(), set(), more[0] | more[2]
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        held = set()
+        for generator in value.generators:
+            more = _value_parts(generator.iter)
+            held |= more[0] | more[1]
+        return set(), held, set()
+    if isinstance(value, ast.Call):
+        func = value.func
+        if isinstance(func, ast.Attribute) and func.attr in _COPYING:
+            more = _value_parts(func.value)
+            return set(), more[0] | more[1], set()
+        if isinstance(func, ast.Attribute) and func.attr in _PART_OF:
+            more = _value_parts(func.value)
+            return set(), set(), more[0] | more[2]
+        if (
+            isinstance(func, ast.Name)
+            and func.id in _HOLDING_FUNCTIONS | _ONE_OF_FUNCTIONS
+        ):
+            given: set[str] = set()
+            for one in value.args:
+                more = _value_parts(one.value if isinstance(one, ast.Starred) else one)
+                given |= more[0] | more[1]
+            if func.id in _ONE_OF_FUNCTIONS:
+                return set(), set(), given
+            return set(), given, set()
+    return set(), set(), set()
+
+
+def _stored(target: ast.expr) -> set[str]:
+    """The names a target stores into: a name, each name of a tuple target, the root of a subscript chain."""
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return set().union(*(_stored(one) for one in target.elts))
+    if isinstance(target, ast.Starred):
+        return _stored(target.value)
+    root = _subscripted(target)
+    return {root} if root is not None else set()
+
+
+def _subscripted(target: ast.expr) -> Optional[str]:
+    """The name a subscript chain is rooted at -- ``d`` of ``d[k][j]`` and of ``d`` --; none past an attribute."""
+    while isinstance(target, ast.Subscript):
+        target = target.value
+    return target.id if isinstance(target, ast.Name) else None
 
 
 _SQL_COMMENT = re.compile(r"/\*.*?\*/|--[^\n]*", re.S)
@@ -3544,6 +3757,9 @@ class Ref:
         return out, broken, continued
 
     def escaped(self, node: Optional[ast.AST]) -> set[str]:
+        """The tracked names a call in *node* it does not model may change: what it is handed -- an argument, a
+        keyword, ``*x``, ``**x``, an element of a literal handed (``f([x])``), the root of an attribute it is called
+        on --, tracked or not, and what that holds (:func:`holding`)."""
         found: set[str] = set()
         if node is None:
             return found
@@ -3569,27 +3785,23 @@ class Ref:
                 )
             )
             if not modelled:
-                found |= {
-                    arg.id
-                    for arg in call.args
-                    if isinstance(arg, ast.Name) and arg.id in self.relevant
-                }
-                found |= {
-                    k.value.id
-                    for k in call.keywords
-                    if isinstance(k.value, ast.Name) and k.value.id in self.relevant
-                }
+                for arg in [*call.args, *(k.value for k in call.keywords)]:
+                    same, held, _part_of = _value_parts(
+                        arg.value if isinstance(arg, ast.Starred) else arg
+                    )
+                    found |= same | held
             if isinstance(func, ast.Attribute) and not direct:
                 root = func.value
                 while isinstance(root, (ast.Attribute, ast.Call, ast.Subscript)):
                     root = root.func if isinstance(root, ast.Call) else root.value
                 if (
                     isinstance(root, ast.Name)
-                    and root.id in self.relevant
                     and func.attr not in _STR_METHODS | _CONTAINER_METHODS
                 ):
                     found.add(root.id)
-        return found
+        if not found:
+            return found
+        return {name for name in _held_from(self.func, found) if name in self.relevant}
 
     def lose(self, envs: list[Env], names: set[str]) -> list[Env]:
         for name in names:

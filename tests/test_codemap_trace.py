@@ -5333,3 +5333,21 @@ def test_a_function_of_the_time_reads_the_clock_only_where_it_is_not_handed_a_ti
     assert classified("time.gmtime()", spell=spell) == (models.STOP_CLOCK, "time.gmtime")
     assert classified("time.gmtime(seconds)", spell=spell) == ("", "")
     assert classified("naive_utcnow()") == ("", "")
+
+
+def test_a_hole_renders_as_str_only_plain_or_s_and_with_no_format_spec() -> None:
+    """``{code}``, ``{code!s}`` and ``{str(code)}`` write the text a reader takes back; ``!r``, a spec, a hole
+    spelled both ways, a message not written in the call, and a hole not there are not said to."""
+
+    def said(source: str, expression: str) -> bool:
+        return trace_mod.renders_as_str(ast.parse(source).body[0], expression)
+
+    assert said('log.debug(f"code={code}")', "code")
+    assert said('log.debug(f"code={code!s}")', "code")
+    assert said('log.debug(f"code={str(code)}")', "str(code)")
+    assert said('log.debug(f"code={str(code)}")', "code")
+    assert not said('log.debug(f"code={code!r}")', "code")
+    assert not said('log.debug(f"n={code:5d}")', "code")
+    assert not said('log.debug(f"a={code} b={code!r}")', "code")
+    assert not said('log.debug("code=%s" % code)', "code")
+    assert not said('log.debug(f"x={other}")', "code")

@@ -258,6 +258,93 @@ def test_a_test_of_an_attribute_is_taken_the_same_way_until_the_object_is_handed
         ]
 
 
+HANDED_IN_A_DICT = """
+def bulk(self, arg_list):
+    extracted = {}
+    for args, kwargs in arg_list:
+        got = {}
+        new_kwargs = {"extracted_sqls": got}
+        kwargs.update(new_kwargs)
+        self.insert_job(*args, **kwargs)
+        for key in ["job"]:
+            if key in got:
+                extracted.setdefault(key, [])
+                extracted[key].append(got[key])
+    for key in ["job"]:
+        if key not in extracted:
+            continue
+        for sql in extracted[key]:
+            self.cur.execute(sql, {})
+"""
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        pytest.param("self.insert_job(*args, **kwargs)", id="in a dict a keyword spread hands"),
+        pytest.param("self.insert_job(*args, extracted_sqls=got)", id="as a keyword"),
+        pytest.param("self.insert_job(*[got])", id="in a list a star spreads"),
+    ],
+)
+def test_a_call_may_change_what_the_object_it_is_handed_holds(call):
+    """``bulk_insert_new_jobs``: ``insertNewJob`` fills the ``got`` dict it is handed inside ``kwargs``; read as
+    staying empty, ``if key not in extracted: continue`` skipped the run of what it filled every time."""
+    reading = _reading(HANDED_IN_A_DICT.replace("self.insert_job(*args, **kwargs)", call))
+    (line,) = [n for n, text in enumerate(HANDED_IN_A_DICT.splitlines(), 1) if "execute" in text]
+    assert line in reading.reached
+
+
+SIBLING = """
+def scout(self, task_id):
+    data = {"walltime": 1, "ramCount": 2}
+    var_map = {}
+    var_map[":id"] = task_id
+    self.log(task_id)
+    sql = "UPDATE T SET "
+    for key, value in data.items():
+        var_map[f":{key}"] = value
+        sql += f"{key}=:{key},"
+    sql = sql[:-1] + " WHERE id=:id"
+    self.cur.execute(sql, var_map)
+"""
+
+
+def test_a_call_handed_one_thing_a_container_holds_does_not_change_the_others():
+    """``setScoutJobData_JEDI``: ``var_map`` holds the task's ID and each value of ``data``; a call handed the ID
+    changes neither ``data`` nor what the loop over it writes."""
+    texts, _reading_ = _texts(SIBLING)
+    assert texts[max(texts)] == ["UPDATE T SET walltime=:walltime,ramCount=:ramCount WHERE id=:id"]
+
+
+def test_what_a_name_holds_is_read_off_the_functions_bindings():
+    """Aliases both ways; an element or value put in, a copy's; a part taken out, a loop's element, a tuple's."""
+    found = sqleval.holding(
+        _function(
+            """
+            def f(self, n, rows, t):
+                y = n
+                d = {"k": n, **self.more}
+                d2 = d.copy()
+                e = d2.get("k")
+                bag = []
+                bag.append(rows)
+                bag += [t]
+                for row in rows:
+                    pass
+                a, b = t
+                self.x[0] = n
+            """
+        )
+    )
+    assert found.aliases == {"y": {"n"}, "n": {"y"}}
+    assert found.holds == {
+        "d": {"n"},
+        "d2": {"d", "e"},
+        "bag": {"rows", "t"},
+        "rows": {"row"},
+        "t": {"a", "b"},
+    }
+
 def test_a_test_of_a_loop_variables_attribute_is_taken_again_on_each_pass():
     """The same within a pass; the next pass's ``fileSpec`` is another object."""
     src = """

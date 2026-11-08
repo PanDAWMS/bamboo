@@ -745,6 +745,15 @@ class RewriteSite(BaseModel):
             "pass may still take."
         ),
     )
+    of_prior: str = Field(
+        default="",
+        description=(
+            "For a store whose value reads the value it replaces -- the same holder's column, in the value or in the "
+            "value of the one binding reaching the local it is --: that value as an expression of the replaced one, "
+            "spelled ``PRIOR`` (:data:`bamboo.codemap.panda.rewrites.PRIOR`): ``re.sub('\\\\$ORIGINPANDAID', "
+            "str(originPandaID), PRIOR)``.  ``\"\"`` else, and for a row."
+        ),
+    )
 
 
 class Rewrite(BaseModel):
@@ -5711,6 +5720,7 @@ KEY_STOPS: dict[str, str] = {
     "unbound": "{name} is read at {at} before a binding of it",
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
+    "generator": "the call at {at} makes a generator of {name}, not what {name} returns",
     "raises": "{name} goes no further than {at}: {what} on it",
     "no_meeting": "{name} and the read run in no one function's call: no function is on both ways",
     "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",

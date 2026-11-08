@@ -267,8 +267,9 @@ def test_the_records_are_paths_of_the_function(tmp_path):
         for c in process.call_bindings
         if c.to == "pkg/proxy.py::TaskBuffer.updateJobs"
     ]
+    # updateJobs([self.job]): a list literal keeps its positions, so the job is jobs[0]
     assert {(c.parameter, c.path, c.at) for c in updated} == {
-        ("jobs", "self.job", "[]"),
+        ("jobs", "self.job", "[0]"),
         ("self", "self.tb", ""),
     }
     assert not any(c.path.startswith("threading") for c in process.call_bindings)
@@ -778,9 +779,11 @@ class Fixer:
 def test_the_record_keeps_every_path_and_follow_says_where_its_cap_stops_it(
     tmp_path,
 ):
-    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: the
-    parts cap is what stops the cycle, and follow says where it did; may_change names ``follow_capped``.  The
-    record keeps a path however long -- how far one is read is follow's."""
+    """A file's owner is the job (JobSpec.addFile), so ``job.Files[]._owner`` names the job again, and again: past
+    the parts cap a turn of that loop is read once (objects._folded), so setOwner's
+    ``self._owner.Files[]._owner.Files[]._owner`` is no stop; a path longer than the cap with no loop of fields in
+    it is still stopped, follow says where, and may_change names ``follow_capped``.  The record keeps a path however
+    long -- how far one is read is follow's."""
     owned = """\
 class FileSpec:
     def setOwner(self, owner):
@@ -822,14 +825,18 @@ class Runner:
         (site.owner, site.line, site.how[len(spent) :]) for site in found.capped
     } == {
         (run, _line(owned, "deep = "), deep),
+        # deep + ".Files[]._owner.Files[]._owner" is read as this one, past the cap still.
         (run, _line(owned, "deep = "), deep + ".Files[]._owner"),
-        (run, _line(owned, "deep = "), deep + ".Files[]._owner.Files[]._owner"),
-        (
-            "pkg/owned.py::FileSpec.setOwner",
-            _line(owned, "self._owner = owner"),
-            "self._owner.Files[]._owner.Files[]._owner",
-        ),
     }
+    assert (
+        objects._folded("self._owner.Files[]._owner.Files[]._owner")
+        == "self._owner.Files[]._owner"
+    )
+    # Within the cap, and a block of elements alone (the object, or a list holding it), are not folded.
+    assert objects._folded("job.Files[]._owner.Files[]._owner") == (
+        "job.Files[]._owner.Files[]._owner"
+    )
+    assert objects._folded("self.vos[][][][][][][]") == "self.vos[][][][][][][]"
     assert all(
         objects._parts(path) <= objects.MAX_PARTS
         for paths in found.held.values()
@@ -935,6 +942,54 @@ class Forms:
 
     def columns(self, job: JobSpec):
         job.jobStatus, job.PandaID = "x", 1
+
+    def take(self, first: JobSpec, second, mode=None):
+        first.jobStatus = "taken"
+        second.ddmErrorCode = 5
+
+    def spread(self, job: JobSpec, other):
+        args = (job, other)
+        self.take(*args)
+
+    def spread_named(self, job: JobSpec, other):
+        kw = {"second": job}
+        self.take(other, **kw)
+
+    def spread_rows(self, rows):
+        for args, kwargs in rows:
+            self.take(*args, **kwargs)
+
+    def spread_bulk(self, job: JobSpec, other):
+        rows = []
+        rows.append(((job, other), {"mode": 1}))
+        self.spread_rows(rows)
+
+    def spread_list(self, job: JobSpec, other):
+        rows = []
+        rows.append([[job, other], {"mode": 1}])
+        self.spread_rows(rows)
+
+    def listed(self, job: JobSpec, other):
+        pair = [job, other]
+        first = pair[0]
+        second = pair[1]
+        first.jobStatus = "first"
+        second.ddmErrorCode = 6
+
+    def sorted_pair(self, job: JobSpec, other):
+        pair = [job, other]
+        pair.sort()
+        second = pair[1]
+        second.ddmErrorCode = 7
+
+    def sort_it(self, pair):
+        pair.sort()
+
+    def handed_sorted(self, job: JobSpec, other):
+        pair = [job, other]
+        self.sort_it(pair)
+        second = pair[1]
+        second.ddmErrorCode = 8
 """
 
 _FORMS = "pkg/forms.py::Forms"
@@ -1075,6 +1130,172 @@ def test_a_list_made_of_a_tuple_is_read_at_any_position(tmp_path):
     _fragment, rows = _forms(tmp_path)
     owner = f"{_FORMS}.reordered"
     assert "second" in objects.follow(rows, owner, "job").held[owner]
+
+
+def test_a_spread_hands_each_parameter_what_is_at_its_position_or_key(tmp_path):
+    """``self.take(*args)`` with ``args = (job, other)``: first is the job, second is not.  ``**kw`` with
+    ``kw = {"second": job}``: second is.  Rows of ``(args, kwargs)`` handed to a loop that spreads them: the same."""
+    _fragment, rows = _forms(tmp_path)
+    take = f"{_FORMS}.take"
+    bound = {
+        (one.parameter, one.path, one.at)
+        for one in rows[f"{_FORMS}.spread"].call_bindings
+        if one.to == take
+    }
+    assert {("first", "args[0]", ""), ("second", "args[1]", "")} <= bound
+    assert not any(not parameter for parameter, _path, _at in bound)
+    by_key = {
+        (one.parameter, one.path)
+        for one in rows[f"{_FORMS}.spread_named"].call_bindings
+        if one.to == take
+    }
+    assert {
+        ("first", "other"),
+        ("second", "kw['second']"),
+        ("mode", "kw['mode']"),
+    } <= by_key
+    assert ("first", "kw['first']") not in by_key  # first is filled by position
+    for owner, attr, other in (
+        ("spread", "jobStatus", "ddmErrorCode"),
+        ("spread_named", "ddmErrorCode", "jobStatus"),
+        ("spread_bulk", "jobStatus", "ddmErrorCode"),
+    ):
+        found = objects.follow(rows, f"{_FORMS}.{owner}", "job")
+        assert _assigned(found).get(attr) == {"Forms.take"}, owner
+        assert other not in _assigned(found), owner
+        assert not found.holes, owner
+
+
+def test_a_list_literal_keeps_its_positions_until_a_method_moves_them(tmp_path):
+    """``pair = [job, other]``: ``pair[0]`` is the job, ``pair[1]`` is not -- until ``pair.sort()``, here or in a
+    function it is handed to, after which any position can be.  Rows of ``[args, kwargs]`` lists spread as tuples."""
+    _fragment, rows = _forms(tmp_path)
+    listed = _assigned(objects.follow(rows, f"{_FORMS}.listed", "job"))
+    assert listed.get("jobStatus") == {"Forms.listed"}
+    assert "ddmErrorCode" not in listed
+    for owner in ("sorted_pair", "handed_sorted"):
+        moved = _assigned(objects.follow(rows, f"{_FORMS}.{owner}", "job"))
+        assert moved.get("ddmErrorCode") == {f"Forms.{owner}"}, owner
+    found = objects.follow(rows, f"{_FORMS}.spread_list", "job")
+    assert _assigned(found).get("jobStatus") == {"Forms.take"}
+    assert "ddmErrorCode" not in _assigned(found)
+    assert not found.holes
+
+
+DEFERRED = """\
+from pkg.spec import JobSpec
+
+
+class Proxy:
+    def insert_job(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "INSERT INTO ATLAS_PANDA.jobsDefined4 (PandaID,jobMetrics) VALUES (:PandaID,:jobMetrics)"
+        if no_late_bulk_exec:
+            varMap = job.valuesMap()
+            self.cur.execute(sql, varMap)  # RUN
+        elif extracted_sqls is not None:
+            extracted_sqls["job"] = {"sql": sql, "vars": [job.valuesMap()]}  # PUT
+        self.record(job, no_late_bulk_exec=no_late_bulk_exec, extracted_sqls=extracted_sqls)
+
+    def record(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "INSERT INTO ATLAS_PANDA.jobs_StatusLog (PandaID,jobStatus) VALUES (:PandaID,:jobStatus)"
+        varMap = {":PandaID": job.PandaID, ":jobStatus": job.jobStatus}
+        if no_late_bulk_exec:
+            self.cur.execute(sql, varMap)  # LOG
+        elif extracted_sqls is not None:
+            extracted_sqls.setdefault("state", {"sql": sql, "vars": []})  # SETDEFAULT
+            extracted_sqls["state"]["vars"].append(varMap)
+
+    def bulk_insert(self, arg_list):
+        extracted = {}
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.insert_job(*args, **kwargs)
+            for key in ["job", "state"]:
+                if key in got:
+                    extracted.setdefault(key, {"sqls": [], "vars": {}})
+                    if got[key]["sql"] not in extracted[key]["sqls"]:
+                        extracted[key]["sqls"].append(got[key]["sql"])
+                        extracted[key]["vars"][got[key]["sql"]] = []
+                    extracted[key]["vars"][got[key]["sql"]] += got[key]["vars"]
+        for key in ["job", "state"]:
+            if key not in extracted:
+                continue
+            for sql in extracted[key]["sqls"]:
+                self.cur.executemany(sql, extracted[key]["vars"][sql])  # BULK
+
+    def bulk_mixed(self, arg_list, flag):
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.insert_job(*args, **kwargs)
+            sql = got["job"]["sql"] if flag else self.make_text()
+            self.cur.executemany(sql, got["job"]["vars"])  # MIXED
+
+    def stash(self, job: JobSpec, no_late_bulk_exec=True, extracted_sqls=None):
+        sql = "DELETE FROM ATLAS_PANDA.jobsDefined4 WHERE PandaID=:PandaID"
+        if extracted_sqls is not None:
+            extracted_sqls["job"] = {"sql": sql, "vars": [{":PandaID": job.PandaID}]}
+
+    def bulk_other(self, arg_list):
+        extracted = {}
+        for args, kwargs in arg_list:
+            got = {}
+            new_kwargs = {"no_late_bulk_exec": False, "extracted_sqls": got}
+            kwargs.update(new_kwargs)
+            self.stash(*args, **kwargs)
+            for key in ["job", "state"]:
+                if key in got:
+                    extracted.setdefault(key, {"sqls": [], "vars": {}})
+                    if got[key]["sql"] not in extracted[key]["sqls"]:
+                        extracted[key]["sqls"].append(got[key]["sql"])
+                        extracted[key]["vars"][got[key]["sql"]] = []
+                    extracted[key]["vars"][got[key]["sql"]] += got[key]["vars"]
+        for key in ["job", "state"]:
+            if key not in extracted:
+                continue
+            for sql in extracted[key]["sqls"]:
+                self.cur.executemany(sql, extracted[key]["vars"][sql])  # OTHER
+"""
+_DEFERRED = "pkg/deferred.py::Proxy"
+
+
+def test_a_statement_put_where_its_caller_runs_it_is_its_own_run_made_at_the_put(
+    tmp_path,
+):
+    """``bulk_insert_new_jobs``'s shape: a statement put into a container handed in, on the other side of an ``if``
+    from the function's own run of the same text, is that run's write made at the put; the caller's runner call
+    drawing its statement from there is the database, not a hole.  One drawing it from a callee that never runs it
+    itself stays a hole, and so does one whose statement may be a text the function builds as well."""
+    fragment = _build(tmp_path, spec=SPEC, deferred=DEFERRED)
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def at(marker: str) -> int:
+        return _line(DEFERRED, marker)
+
+    (job,) = rows[f"{_DEFERRED}.insert_job"].writes
+    assert (job.table, job.lines) == ("jobsDefined4", [at("# RUN"), at("# PUT")])
+    (log,) = rows[f"{_DEFERRED}.record"].writes
+    assert (log.table, log.lines) == (
+        "jobs_StatusLog",
+        [at("# LOG"), at("# SETDEFAULT")],
+    )
+    bulk = rows[f"{_DEFERRED}.bulk_insert"]
+    assert at("# BULK") in bulk.database
+    assert [hole for hole in bulk.holes if hole.line == at("# BULK")] == []
+    assert bulk.settled.get(panda_objects.RUNS_DEFERRED) == 1
+    assert panda_objects.RUNS_DEFERRED in reach.ASSUMPTIONS
+    assert [one for one in bulk.call_bindings if one.line == at("# BULK")] == []
+    for owner, marker in (("bulk_other", "# OTHER"), ("bulk_mixed", "# MIXED")):
+        row = rows[f"{_DEFERRED}.{owner}"]
+        assert [hole.why for hole in row.holes if hole.line == at(marker)] == [
+            f"{reach.HOLE_STATEMENT_NOT_READ}: {sql.SKIP_UNREAD_NAME}"
+        ], owner
+        assert panda_objects.RUNS_DEFERRED not in row.settled, owner
+    result = object_records_resolve(fragment)
+    assert result.passed, result.failures
 
 
 def test_a_tuple_targets_columns_are_assigned(tmp_path):

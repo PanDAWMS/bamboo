@@ -257,3 +257,238 @@ def test_a_tree_without_parent_links_is_refused_rather_than_read_as_reached_from
     at = next(node for node in ast.walk(func) if isinstance(node, ast.If))
     with pytest.raises(ValueError, match="parent links"):
         pathcond.held_at(func, "isOK", at)  # type: ignore[arg-type]
+
+
+SINCE = """\
+def holds(n):
+    log.debug(f"n={n}")  # P
+    x = 1
+    if n == 2:  # S
+        pass
+
+
+def rebound(n, flag):
+    log.debug(f"n={n}")  # P
+    if flag:
+        n = 3
+    if n == 2:  # S
+        pass
+
+
+def elsewhere(n, flag):
+    log.debug(f"n={n}")  # P
+    if flag:
+        n = 3
+        return
+    if n == 2:  # S
+        pass
+
+
+def looped(n, items):
+    log.debug(f"n={n}")  # P
+    for one in items:
+        if n == 2:  # S
+            pass
+        n = one
+
+
+def once(n):
+    tries = 1
+    log.debug(f"n={n}")  # P
+    for attempt in range(tries):
+        if n == 2:  # S
+            pass
+        n = 3
+
+
+def deleted(n, flag):
+    log.debug(f"n={n}")  # P
+    if flag:
+        del n
+    if n == 2:  # S
+        pass
+
+
+def maybe(n, flag):
+    if flag:
+        log.debug(f"n={n}")  # P
+    if n == 2:  # S
+        pass
+
+
+def walrus(n, items):
+    log.debug(f"n={n}")  # P
+    if (n := len(items)) > 0:
+        pass
+    if n == 2:  # S
+        pass
+
+
+def nested(n):
+    log.debug(f"n={n}")  # P
+
+    def inner():
+        n = 5
+        return n
+
+    if n == 2:  # S
+        pass
+
+
+def converted(code):
+    log.debug(f"code={code}")  # P
+    if isinstance(code, int):
+        code = str(code)
+    if code in ["2", "4"]:  # S
+        pass
+
+
+def flagged(code, flag):
+    log.debug(f"code={code}")  # P
+    if flag:
+        code = str(code)
+    if code == "2":  # S
+        pass
+
+
+def second(code, flag):
+    log.debug(f"code={code}")  # P
+    if flag:
+        flag = False
+        code = str(code)
+    if code == "2":  # S
+        pass
+
+
+def otherwise(code, flag):
+    log.debug(f"code={code}")  # P
+    if flag:
+        pass
+    else:
+        code = str(code)
+    if code == "2":  # S
+        pass
+
+
+def always(code):
+    log.debug(f"code={code}")  # P
+    code = str(code)
+    if code == "2":  # S
+        pass
+
+
+def prefixed(code, prefix):
+    log.debug(f"code={code}")  # P
+    code = prefix + code
+    if code == "x2":  # S
+        pass
+
+
+def twice(code):
+    log.debug(f"code={code}")  # P
+    code = str(code)
+    code = code.strip()
+    if code == "2":  # S
+        pass
+"""
+
+
+def _since(function: str, name: str) -> pathcond.HeldSince:
+    tree = ast.parse(SINCE)
+    pathcond.attach_parents(tree)
+    (func,) = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == function
+    ]
+    lines = SINCE.splitlines()
+
+    def statement(marker: str) -> ast.stmt:
+        (line,) = [
+            n
+            for n in range(func.lineno, func.end_lineno + 1)  # type: ignore[operator]
+            if lines[n - 1].endswith(f"# {marker}")
+        ]
+        (found,) = [
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.stmt) and node.lineno == line
+        ]
+        return found
+
+    return pathcond.held_since(func, name, statement("S"), statement("P"))
+
+
+def _lines(sites: tuple[ast.AST, ...]) -> list[object]:
+    return [
+        "entry" if isinstance(site, ast.arguments) else site.lineno  # type: ignore[attr-defined]
+        for site in sites
+    ]
+
+
+def test_a_shown_value_holds_where_no_other_write_reaches_the_read_past_the_print() -> (
+    None
+):
+    """A binding on a way that leaves before the read, a nested scope's own name, and a loop's later binding on a
+    ``range`` of a name bound once to 1 (one pass, as :func:`reaching` reads it) reach nothing past the print."""
+    for function in ("holds", "elsewhere", "once", "nested"):
+        assert _since(function, "n") == pathcond.HeldSince((), True, ()), function
+
+
+def test_a_write_reaching_the_read_past_the_print_is_another_value() -> None:
+    """A binding on a way, one a loop brings back round, a ``del``, a walrus, and the entry where the print is not
+    on every way."""
+    assert _lines(_since("rebound", "n").others) == [11]
+    assert _lines(_since("looped", "n").others) == [30]
+    assert _lines(_since("deleted", "n").others) == [45]
+    assert _lines(_since("walrus", "n").others) == [59]
+    held = _since("maybe", "n")
+    assert (_lines(held.others), held.raw) == (["entry"], True)
+
+
+def test_a_rebinding_turning_the_shown_value_is_a_conversion_with_the_tests_it_runs_under() -> (
+    None
+):
+    """killJob's ``if isinstance(code, int): code = str(code)``: the int way is text, any other as it was."""
+    held = _since("converted", "code")
+    assert (held.others, held.raw) == ((), True)
+    ((conversion),) = held.conversions
+    assert ast.unparse(conversion.value) == "str(code)"
+    assert [ast.unparse(test) for test in conversion.tests] == ["isinstance(code, int)"]
+    assert conversion.decided is True
+    flagged = _since("flagged", "code").conversions[0]
+    assert ([ast.unparse(test) for test in flagged.tests], flagged.decided) == (
+        ["flag"],
+        True,
+    )
+    always = _since("always", "code")
+    assert (always.raw, always.conversions[0].tests, always.conversions[0].decided) == (
+        False,
+        (),
+        True,
+    )
+
+
+def test_a_conversion_not_opening_its_if_or_in_an_else_is_not_decided() -> None:
+    assert _since("second", "code").conversions[0].decided is False
+    assert _since("otherwise", "code").conversions[0].decided is False
+
+
+def test_a_rebinding_reading_another_name_or_another_conversion_is_another_value() -> (
+    None
+):
+    prefixed = _since("prefixed", "code")
+    assert (_lines(prefixed.others), prefixed.raw, prefixed.conversions) == (
+        [120],
+        False,
+        (),
+    )
+    twice = _since("twice", "code")
+    assert (_lines(twice.others), twice.raw, twice.conversions) == ([128], False, ())
+
+
+def test_held_since_refuses_a_tree_without_parent_links() -> None:
+    func = ast.parse(SINCE).body[0]
+    statements = [node for node in ast.walk(func) if isinstance(node, ast.stmt)]
+    with pytest.raises(ValueError, match="parent links"):
+        pathcond.held_since(func, "n", statements[-1], statements[1])  # type: ignore[arg-type]

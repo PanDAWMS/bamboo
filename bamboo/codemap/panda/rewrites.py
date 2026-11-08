@@ -41,7 +41,16 @@ a list it is put in -- ``upJobs.append(job)`` before ``updateJobs(upJobs)``
 - a call handed the object: what its run can write
   (:func:`bamboo.codemap.objects.may_change`) -- its assignments of the
   column on the object, each said written or not by a write of the run, and
-  its statements writing the column on the object's row by its key;
+  its statements writing the column on the object's row by its key -- read
+  as that call runs the function it lands in: the constants the call hands
+  (:meth:`Calls.route_constant`: a literal, or a default it leaves) to
+  parameters the function's ``if`` tests read and it never binds again rule
+  out what those tests keep from running (:func:`pathcond.ruled_out_by`),
+  and what is on those lines -- calls, bindings, writes, holes,
+  assignments -- is not read.  JobGenerator's ``storeJobs(...,
+  toPending=True, bulk_job_insert=True)`` does not run the direct
+  ``insertNewJob`` nor the Setupper.  One level: the function's own callees
+  are read for any call.
 - a row: a statement there writing the column on a row its key names by a
   path holding the object.
 
@@ -65,6 +74,7 @@ import re
 from functools import partial
 from typing import TYPE_CHECKING, Optional
 
+from bamboo.codemap import calls as C
 from bamboo.codemap import objects
 from bamboo.codemap.models import (
     REWRITE_CALL,
@@ -110,6 +120,9 @@ LATER = frozenset(
     }
 )
 
+#: The name :attr:`RewriteSite.of_prior` gives the value a store replaces.
+PRIOR = "PRIOR"
+
 #: The column a class's row is named by, for :func:`objects.may_change`'s key: a history table's, and a file's.
 ROW_KEYS: dict[str, str] = {**runs.HISTORY_KEYS, "FileSpec": "row_ID"}
 
@@ -146,6 +159,37 @@ def attach(reader: "runs._Reader", modules: list[SourceModule]) -> int:
     return found
 
 
+def _tested(func: ast.AST) -> list[str]:
+    """The names *func*'s own ``if`` tests read."""
+    return sorted(
+        {
+            name.id
+            for node in C.own_nodes(func)
+            if isinstance(node, ast.If)
+            for name in ast.walk(node.test)
+            if isinstance(name, ast.Name)
+        }
+    )
+
+
+def _statements_by_line(func: ast.AST) -> dict[int, ast.stmt]:
+    """Each line of *func*'s own body, with the innermost of its statements holding it."""
+    found: dict[int, ast.stmt] = {}
+    for node in C.own_nodes(func):
+        if not isinstance(node, ast.stmt):
+            continue
+        end = node.end_lineno or node.lineno
+        for line in range(node.lineno, end + 1):
+            there = found.get(line)
+            if (
+                there is None
+                or (there.end_lineno or there.lineno) - there.lineno
+                >= end - node.lineno
+            ):
+                found[line] = node
+    return found
+
+
 def open_kind(how: str) -> str:
     """The ``REWRITE_*`` reason of what :func:`objects.may_change` leaves open (:attr:`objects.Change.open`)."""
     for pattern, kind in _OPEN_PATTERNS:
@@ -164,7 +208,11 @@ class _Later:
         self.recorded: frozenset[str] = frozenset().union(
             *(declared.get(name, set()) for name in panda_objects.COLUMN_CLASSES)
         )
-        self._changes: dict[tuple[str, str, str, str], "Change"] = {}
+        self._changes: dict[tuple, "Change"] = {}
+        #: The constants a call hands its callee's tested parameters, by (caller, line, callee).
+        self._constants: dict[tuple[str, int, str], tuple[tuple[str, object], ...]] = {}
+        #: The record and may_change's memo with a callee's row read as a call hands it (:meth:`_as_called`).
+        self._called: dict[tuple, tuple[dict[str, ReachNode], dict]] = {}
         self._replaced: dict = {}
         self._helds: dict[tuple[str, frozenset[str]], tuple[set[str], bool]] = {}
         self._names = objects._function_names(self.rows)
@@ -382,7 +430,12 @@ class _Later:
             got, frames = self._written_value(one.site, func, column)
             line = one.site.lineno
             site = RewriteSite(
-                owner=owner, line=line, how=REWRITE_STORE, values=got, frames=frames
+                owner=owner,
+                line=line,
+                how=REWRITE_STORE,
+                values=got,
+                frames=frames,
+                of_prior=_of_prior(one.site, func, column),
             )
             _found(
                 found,
@@ -452,6 +505,7 @@ class _Later:
                         how=REWRITE_STORE,
                         values=got,
                         frames=frames,
+                        of_prior=_of_prior(statement, func, column),
                     )
                     _found(
                         found,
@@ -554,7 +608,7 @@ class _Later:
                 continue
             sites: dict[tuple[str, int, str], RewriteSite] = {}
             for path in sorted(paths):
-                change = self._change(to, path, column, cls)
+                change = self._change(to, path, column, cls, step.owner, line)
                 for one in change.because:
                     site = self._site(one, column, True)
                     if site is not None:
@@ -611,20 +665,106 @@ class _Later:
             self._helds[key] = (found | set(held), spent)
         return self._helds[key]
 
-    def _change(self, owner: str, path: str, column: str, cls: str) -> "Change":
-        key = (owner, path, column, cls)
+    def _change(
+        self,
+        owner: str,
+        path: str,
+        column: str,
+        cls: str,
+        caller: str = "",
+        line: int = 0,
+    ) -> "Change":
+        """:func:`objects.may_change` of *owner*'s run, as the call at *caller*:*line* runs it (:meth:`_as_called`)."""
+        handed = self._handed_constants(caller, line, owner) if caller else ()
+        key = (owner, path, column, cls, handed)
         if key not in self._changes:
+            rows, memo = self._as_called(owner, handed)
             self._changes[key] = objects.may_change(
-                self.rows,
+                rows,
                 owner,
                 path,
                 column,
                 key_column=ROW_KEYS.get(cls, "PandaID"),
                 spec_class=cls,
                 table_classes=self.tables,
-                memo=self._record,
+                memo=memo,
             )
         return self._changes[key]
+
+    def _handed_constants(
+        self, caller: str, line: int, owner: str
+    ) -> tuple[tuple[str, object], ...]:
+        """The constants the one call at *caller*:*line* into *owner* hands the parameters *owner*'s ``if`` tests
+        read and it never binds again: a literal, or the default the call leaves (:meth:`Calls.route_constant`).
+        Empty where the line holds no call into it or more than one."""
+        key = (caller, line, owner)
+        if key not in self._constants:
+            found: dict[str, object] = {}
+            held = self.reader.funcs.get(owner)
+            sites = (
+                self.reader._sites_into(owner, caller, line)
+                if held is not None and caller in self.reader.funcs
+                else []
+            )
+            if len(sites) == 1:
+                func = held[1]  # type: ignore[index]
+                target = self.reader._target(owner)
+                for name in _tested(func):
+                    if not panda_objects.is_parameter(func, name) or C._rebinds(
+                        func, name
+                    ):
+                        continue
+                    value = self.reader.calls.route_constant(name, target, (sites[0],))
+                    if isinstance(value, (str, int, float, bool, type(None))):
+                        found[name] = value
+            self._constants[key] = tuple(sorted(found.items(), key=lambda one: one[0]))
+        return self._constants[key]
+
+    def _as_called(
+        self, owner: str, handed: tuple[tuple[str, object], ...]
+    ) -> tuple[dict[str, ReachNode], dict]:
+        """The record, and a memo for :func:`objects.may_change`, with *owner*'s row read as a call handing *handed*
+        runs it: what is on a line the constants rule out (:func:`pathcond.ruled_out_by`) is not read -- a call all of
+        whose lines are, a call binding, a write all of whose lines are, a hole, a binding, an assignment.  The
+        record itself where none is ruled out."""
+        key = (owner, handed)
+        if key not in self._called:
+            self._called[key] = (self.rows, self._record)
+            held = self.reader.funcs.get(owner)
+            row = self.rows.get(owner)
+            if handed and held is not None and row is not None:
+                func, values = held[1], dict(handed)
+                dead = {
+                    line
+                    for line, statement in _statements_by_line(func).items()
+                    if pathcond.ruled_out_by(statement, func, values)
+                }
+                if dead:
+                    rows = dict(self.rows)
+                    rows[owner] = row.model_copy(
+                        update={
+                            "calls": [
+                                one
+                                for one in row.calls
+                                if not set(one.lines or [one.line]) <= dead
+                            ],
+                            "call_bindings": [
+                                one for one in row.call_bindings if one.line not in dead
+                            ],
+                            "writes": [
+                                one for one in row.writes if not set(one.lines) <= dead
+                            ],
+                            "holes": [one for one in row.holes if one.line not in dead],
+                            "bindings": [
+                                one for one in row.bindings if one.line not in dead
+                            ],
+                            "assigns": [
+                                one for one in row.assigns if one.line not in dead
+                            ],
+                        }
+                    )
+                    self._called[key] = (rows, {})
+        return self._called[key]
 
     def _site(
         self, one: objects.Site, column: str, written: bool
@@ -668,6 +808,7 @@ class _Later:
             values=got,
             frames=frames,
             written=written,
+            of_prior=_of_prior(statement, held[1], column),  # type: ignore[index]
         )
 
     def _row_values(
@@ -749,6 +890,75 @@ class _Later:
             return sorted(set(settled)), []
         reading = values.value_reading(expression, func)  # type: ignore[arg-type]
         return [progress._runtime(expression)], list(reading.frames)
+
+
+def _of_prior(statement: ast.stmt, func: Optional[ast.AST], column: str) -> str:
+    """What *statement*, a store of *column*, writes as an expression of the value it replaces, that value spelled
+    :data:`PRIOR`, where it reads it -- the same holder's *column* -- in its value (``x.col = f(x.col)``, ``x.col +=
+    v``) or in the value of the one binding reaching the local its value is (``newJobName = re.sub(..., job.jobName)``
+    before ``job.jobName = newJobName``); else ``""``."""
+    if isinstance(statement, ast.AugAssign):
+        augmented = statement.target
+        if not (isinstance(augmented, ast.Attribute) and augmented.attr == column):
+            return ""
+        prior = ast.Name(id=PRIOR, ctx=ast.Load())
+        return ast.unparse(
+            ast.BinOp(left=prior, op=statement.op, right=statement.value)
+        )
+    if (
+        not isinstance(statement, (ast.Assign, ast.AnnAssign))
+        or statement.value is None
+    ):
+        return ""
+    targets = (
+        statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+    )
+    target = next(
+        (
+            one
+            for one in targets
+            if isinstance(one, ast.Attribute) and one.attr == column
+        ),
+        None,
+    )
+    if target is None:
+        return ""
+    holder = ast.unparse(target.value)
+    value = statement.value
+    spelled = _with_prior(value, holder, column)
+    if spelled or not isinstance(value, ast.Name):
+        return spelled
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return ""
+    sites = pathcond.held_at(func, value.id, statement).sites
+    if len(sites) != 1:
+        return ""
+    (site,) = sites
+    if (
+        isinstance(site, ast.Assign)
+        and len(site.targets) == 1
+        and isinstance(site.targets[0], ast.Name)
+    ) or (isinstance(site, ast.AnnAssign) and isinstance(site.target, ast.Name)):
+        return _with_prior(site.value, holder, column) if site.value is not None else ""
+    return ""
+
+
+def _with_prior(value: ast.expr, holder: str, column: str) -> str:
+    """*value* with :data:`PRIOR` for each read of *holder*'s *column* (``holder.column``, by its text); ``""`` where
+    it reads none."""
+    fresh = ast.parse(ast.unparse(value), mode="eval").body
+    found = False
+
+    class _Prior(ast.NodeTransformer):
+        def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+            nonlocal found
+            if node.attr == column and ast.unparse(node.value) == holder:
+                found = True
+                return ast.Name(id=PRIOR, ctx=ast.Load())
+            return self.generic_visit(node)
+
+    spelled = _Prior().visit(fresh)
+    return ast.unparse(spelled) if found else ""
 
 
 def _spelled(text: str) -> str:

@@ -639,6 +639,36 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     return ""
 
 
+def renders_as_str(statement: ast.stmt, expression: str) -> bool:
+    """Whether the print *statement* writes the value of *expression* -- a hole as a row spells it, ``code`` or
+    ``str(code)`` -- as ``str()`` of it would, every time its message holds it: an f-string's ``{code}``,
+    ``{code!s}`` or ``{str(code)}``, with no format spec.
+
+    A reader taking a hole's text back as the value needs it: ``{code!r}`` writes ``'2'`` for the text ``2``, and
+    ``{n:5d}`` pads.  Only a message written in the call, its first argument, is read; any other is not said to.
+    """
+    call = getattr(statement, "value", None)
+    if not isinstance(call, ast.Call) or not call.args or not isinstance(call.args[0], ast.JoinedStr):
+        return False
+    plain = []
+    for part in call.args[0].values:
+        if not isinstance(part, ast.FormattedValue):
+            continue
+        value = part.value
+        inner = (
+            value.args[0]
+            if isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "str"
+            and len(value.args) == 1
+            and not value.keywords
+            else None
+        )
+        if ast.unparse(value) == expression or (inner is not None and ast.unparse(inner) == expression):
+            plain.append(part.format_spec is None and part.conversion in (-1, ord("s")))
+    return bool(plain) and all(plain)
+
+
 def _bound(message: ast.JoinedStr, hole: int) -> str:
     """A pattern for an unfilled hole, closed against the literal after it.
 
