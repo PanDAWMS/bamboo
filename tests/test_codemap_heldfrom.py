@@ -762,7 +762,9 @@ def returned(tmp_path_factory: pytest.TempPathFactory) -> dict[str, set[tuple]]:
         reader = heldfrom._Reader(calls, record, sites, set(), trees)
         found: dict[str, set[tuple]] = {}
         for stmt in caller.body:
-            target = stmt.targets[0] if isinstance(stmt, ast.Assign) else None
+            if not isinstance(stmt, ast.Assign):
+                continue
+            target = stmt.targets[0]
             if isinstance(target, ast.Name) and target.id != "tmpStat":
                 found[target.id] = {
                     (
