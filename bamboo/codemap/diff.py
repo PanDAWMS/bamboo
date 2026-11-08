@@ -331,6 +331,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "calls_considered": _REPORT,
     "swallowing_managers": "a check of the flow's premise over the corpus -- see SwallowingManager",
     "managers_read": _REPORT,
+    "handler_marks": (
+        "records beside the nodes, not nodes: what each except handler prints when it is entered -- see "
+        "HandlerMark; a dump's section compare reads them"
+    ),
     "row_key_sources": _REPORT,
     "key_froms": (
         "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "

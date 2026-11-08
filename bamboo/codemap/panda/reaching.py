@@ -493,14 +493,16 @@ def catching_try(node: ast.AST, raised: Collection[ast.ExceptHandler]) -> Option
         if isinstance(current, (ast.Try, ast.TryStar)) and any(child is one for one in current.body):
             if any(id(handler) in entered for handler in current.handlers):
                 return current  # type: ignore[return-value]
-            if any(_catches_all(handler) for handler in current.handlers):
+            if any(catches_all(handler) for handler in current.handlers):
                 return None
         child = current
         current = getattr(current, "parent", None)
     return None
 
 
-def _catches_all(handler: ast.ExceptHandler) -> bool:
+def catches_all(handler: ast.ExceptHandler) -> bool:
+    """Whether *handler* catches every exception: a bare ``except``, or one naming ``Exception`` or
+    ``BaseException`` (alone or in a tuple)."""
     kind = handler.type
     if kind is None:
         return True
@@ -742,7 +744,7 @@ class _Flow:
             self._catchers.append(guard)
         caught = (
             _Handlers(
-                any(_catches_all(h) for h in node.handlers),
+                any(catches_all(h) for h in node.handlers),
                 self.raised is None or any(id(h) in self.raised for h in node.handlers),
             )
             if node.handlers
