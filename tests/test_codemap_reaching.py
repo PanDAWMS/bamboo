@@ -662,3 +662,25 @@ def test_the_writes_live_at_a_normal_exit_are_those_a_return_or_the_end_sees():
 
     assert reaching_exit(func, sites) == [second, last]
     assert reaching_exit(func, [func.args, first], [second, last]) == []
+
+
+def test_a_walrus_handed_in_as_itself_writes_where_its_statement_does():
+    """``pathcond.bindings`` names a ``:=`` by its expression.  It writes at the ``if``'s test, so the ``n = 1``
+    above it reaches no read below, and the answer names the expression handed in -- ``held_at`` no longer
+    says the read holds the constant 1."""
+    source = (
+        "def f(items):\n"
+        "    n = 1\n"
+        "    if (n := len(items)) > 0:\n"
+        "        pass\n"
+        "    use(n)\n"
+    )
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    one, test, target = func.body
+    walrus = test.test.left
+
+    assert reaching(target, [one, walrus]) == [walrus]
+    held = pathcond.held_at(func, "n", target)
+    assert (held.kind, held.sites) == (pathcond.HELD_COMPUTED, (walrus,))
