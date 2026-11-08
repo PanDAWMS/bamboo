@@ -99,15 +99,21 @@ class Give(NamedTuple):
 
 class Method(NamedTuple):
     """What a method of a class the corpus does not hold does: what it puts into its receiver, whether it changes
-    the receiver at all, and what it hands back of it."""
+    the receiver at all, what it hands back of it, and whether it moves what the receiver holds to other positions
+    (``insert``, ``pop``, ``remove``, ``sort``, ``reverse``: what was at ``[0]`` may be anywhere after)."""
 
     puts: tuple[Put, ...] = ()
     changes: bool = False
     gives: Optional[Give] = None
+    moves: bool = False
 
 
 def _changing(gives: Optional[Give] = None) -> Method:
     return Method((), True, gives)
+
+
+def _moving(gives: Optional[Give] = None) -> Method:
+    return Method((), True, gives, True)
 
 
 def _giving(gives: Give) -> Method:
@@ -119,13 +125,13 @@ def _giving(gives: Give) -> Method:
 #: (its values are).
 BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("list", "append"): Method((Put(0, ELEMENT),), True),
-    ("list", "insert"): Method((Put(1, ELEMENT),), True),
+    ("list", "insert"): Method((Put(1, ELEMENT),), True, None, True),
     ("list", "extend"): Method((Put(0, ELEMENTS),), True),
-    ("list", "pop"): _changing(Give(AT, 0)),
-    ("list", "remove"): _changing(),
+    ("list", "pop"): _moving(Give(AT, 0)),
+    ("list", "remove"): _moving(),
     ("list", "clear"): _changing(),
-    ("list", "sort"): _changing(),
-    ("list", "reverse"): _changing(),
+    ("list", "sort"): _moving(),
+    ("list", "reverse"): _moving(),
     ("list", "copy"): _giving(Give(SELF)),
     ("list", "__getitem__"): _giving(Give(AT, 0)),
     ("set", "add"): Method((Put(0, ELEMENT),), True),
@@ -152,16 +158,16 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("dict", "items"): _giving(Give(ITEMS)),
     ("dict", "copy"): _giving(Give(SELF)),
     ("deque", "append"): Method((Put(0, ELEMENT),), True),
-    ("deque", "appendleft"): Method((Put(0, ELEMENT),), True),
-    ("deque", "insert"): Method((Put(1, ELEMENT),), True),
+    ("deque", "appendleft"): Method((Put(0, ELEMENT),), True, None, True),
+    ("deque", "insert"): Method((Put(1, ELEMENT),), True, None, True),
     ("deque", "extend"): Method((Put(0, ELEMENTS),), True),
-    ("deque", "extendleft"): Method((Put(0, ELEMENTS),), True),
-    ("deque", "pop"): _changing(Give(AT)),
-    ("deque", "popleft"): _changing(Give(AT)),
-    ("deque", "remove"): _changing(),
+    ("deque", "extendleft"): Method((Put(0, ELEMENTS),), True, None, True),
+    ("deque", "pop"): _moving(Give(AT)),
+    ("deque", "popleft"): _moving(Give(AT)),
+    ("deque", "remove"): _moving(),
     ("deque", "clear"): _changing(),
-    ("deque", "rotate"): _changing(),
-    ("deque", "reverse"): _changing(),
+    ("deque", "rotate"): _moving(),
+    ("deque", "reverse"): _moving(),
     ("deque", "copy"): _giving(Give(SELF)),
 }
 
@@ -815,8 +821,9 @@ def _of_types(names: frozenset[str], name: str) -> Optional[Method]:
 
 
 def _together(found: list[Method]) -> Optional[Method]:
-    """Several types' facts of one name as one: every put, a change where one changes, and what they hand back where
-    every one hands back the same part -- ``pop`` is one of what it holds for each, at the key a dict's is handed."""
+    """Several types' facts of one name as one: every put, a change or a move where one changes or moves, and what
+    they hand back where every one hands back the same part -- ``pop`` is one of what it holds for each, at the key a
+    dict's is handed."""
     if not found:
         return None
     parts = {
@@ -843,6 +850,7 @@ def _together(found: list[Method]) -> Optional[Method]:
         tuple(dict.fromkeys(put for method in found for put in method.puts)),
         any(m.changes for m in found),
         gives,
+        any(m.moves for m in found),
     )
 
 

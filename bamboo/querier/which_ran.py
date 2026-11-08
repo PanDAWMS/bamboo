@@ -55,6 +55,7 @@ from bamboo.codemap.panda import flow, pathcond  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
+from bamboo.querier import row_names  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
@@ -529,6 +530,40 @@ def empty_loops(fn: R.Function, stmt: ast.stmt, callee: dict[str, tuple[str, str
 LOOP_ELEMENT = os.environ.get("P_LOOP_ELEMENT", "1") != "0"
 
 
+def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.Seen, env: E.Env | None) -> str:
+    """Why *row*, which the run printed, did not print for the question's row in a pass through the arm at *line*;
+    '' if it may have (KNOWN_ISSUES.md K64).
+
+    The names the map's records bind to the object the arm writes hold the row in a pass that wrote it
+    (:mod:`row_names`).  A row printing such a name's key (``Env.keys``), under the binding that reaches the arm and
+    in the arm's pass (every loop holding the arm holds the row), shows which object the pass wrote.  Where every
+    record of it holds another key than the row's, the run printed it for other objects only: updateUnmergedJobs'
+    ``update unmerged PandaID={umJob.PandaID}`` at 1252 printed the unmerged jobs' keys under the merge job's mark,
+    so 1236, which writes umJob, did not write the merge job.  Only the key, which no pass changes; not where the
+    map records nothing the arm writes, nor for a name whose value a record does not show.
+    """
+    m = re.fullmatch(r"<(\w+)>\.\w+", env.subject) if env is not None else None
+    if env is None or m is None or not env.keys or not env.written:
+        return ""
+    entity = m[1]
+    bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
+    if not bound or not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node):
+        return ""
+    captures = [row.capture(sn.run.records[i]) for i, _, _ in sn.hits.get(row.line, ())]
+    for expr in sorted({e for c in captures for e in c}):
+        name, _, column = expr.rpartition(".")
+        held = env.table.get(entity, {}).get(column)
+        if column not in env.keys or bound.get(name) != entity or held is None:
+            continue
+        values = [c.get(expr) for c in captures]
+        if any(v is None for v in values) or not row_names.same_binding(fn.node, name, [row.line], line):
+            continue
+        wanted = str(held.value)
+        if wanted not in [str(v).strip() for v in values]:
+            return f"row {row.line} printed only for other values of {expr} ({len(values)} time(s)), not {wanted!r}"
+    return ""
+
+
 def other_elements(fn: R.Function, stmt: ast.stmt, row: R.Row, sn: R.Seen, env: E.Env | None) -> str:
     """Why *row*, which the run printed, did not print for the loop element *stmt* is asked about; '' if it may have.
 
@@ -590,6 +625,10 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
             continue
         for atom, truth in solved.settled.items():
             m = re.fullmatch(rf"([\w.]+\.{re.escape(attr)}) (==|!=) ['\"]{re.escape(observed)}['\"]", atom)
+            # only the row's own column: a name the arm's env does not read as the row (a caller's job handing on
+            # another object, KNOWN_ISSUES.md K64) is another object's status
+            if m and env.subject and hidden.canonical(m[1]) != env.subject:
+                continue
             if m and ((m[2] == "==" and truth) or (m[2] == "!=" and not truth)):
                 used = {k: v for k, v in {**env.used, **hidden.used}.items() if k in guard and k not in asked}
                 return f"rule 6: reached only when {m[1]} is already {observed!r} (guard {guard!r} at {where}; {used})"
@@ -696,6 +735,8 @@ def judge(
         in_run = [sn for sn in seens.values() if sn.run is question_run]
         bracket = bracket_of(subject_values(in_run, subject), observed)
 
+    # each arm's run as its proofs read it: less the rows printed for other objects than the one it writes
+    arm_seen: dict[tuple[str, int], R.Seen] = {}
     for c in candidates:
         run = runs_of[c.owner]
         if run is None:
@@ -717,13 +758,17 @@ def judge(
                 continue
             before, after = R.must_rows(fn.node, stmt, raised if named else set())
             must = before + after
+            # rows the run printed for other objects only (other_objects): not in the run for the row, for rule 4 and
+            # for every proof of the arm
+            for_others = {r.line: why for r in fn.rows if sn.present(r) and (why := other_objects(fn, stmt, line, r, sn, env))}
+            arm_seen[(c.owner, line)] = psn = sn.without(for_others)
             absent, neutral, shown, proof, wrong_value, per_element = [], [], [], False, [], []
             for s in must:
                 row = fn.row_at(s)
                 if row is None:
                     continue
                 if sn.present(row):
-                    elsewhere = other_elements(fn, stmt, row, sn, env) if LOOP_ELEMENT else ""
+                    elsewhere = (other_elements(fn, stmt, row, sn, env) if LOOP_ELEMENT else "") or for_others.get(row.line, "")
                     if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func):
                         absent.append(row.line)
                         per_element.append(elsewhere)
@@ -779,7 +824,7 @@ def judge(
                     v.kind = "excluded"
                     v.reasons.append(f"rule 3: runs inside the call at {site}, before {outer.records[hi].span}, when {subject} still showed another value")
             if subject and observed and env is not None:
-                own = env.reading(fn.owner, stmt.lineno)
+                own = env.reading(fn.owner, stmt.lineno, arm=(fn.owner, line))
                 stable_holes([x for x in seens.values() if x.run is run], own, class_of(fn))
                 why = rewriter(fn, stmt, subject, observed, own)
                 if why:
@@ -792,7 +837,7 @@ def judge(
                 # the tests reaching it runs under, the early exits above it too; one whose names are as they are at
                 # another line (``[at N]``) is not read in the pass's values (KNOWN_ISSUES.md K61); a hole another
                 # function printed is read only where the map hands its object here (KNOWN_ISSUES.md K63)
-                genv = env.reading(fn.owner, stmt.lineno)
+                genv = env.reading(fn.owner, stmt.lineno, arm=(fn.owner, line))
                 for guard in pathcond.arm_condition(stmt):
                     if E.read_elsewhere(guard):
                         continue
@@ -808,17 +853,17 @@ def judge(
             if loops_empty := empty_loops(fn, stmt, callee):
                 v.kind = "excluded"
                 v.reasons.append(loops_empty)
-            proof = PR.prove(fn, sn, stmt)
+            proof = PR.prove(fn, psn, stmt)
             if v.kind == "kept":
                 implying = [fn.row_at(s) for s in R.implying_rows(fn.node, stmt)]
-                proven = [r.line for r in implying if r is not None and sn.proven(r)]
+                proven = [r.line for r in implying if r is not None and psn.proven(r)]
                 if proven:
                     v.kind = "positive"
                     v.reasons.append(f"row(s) {proven} print only on a path through it")
                 elif proof.kind == "positive":
                     v.kind = "positive"
                     v.reasons.append(proof.reason)
-                elif ROWS_AROUND and (around := rows_around(fn, sn, stmt)) is not None:
+                elif ROWS_AROUND and (around := rows_around(fn, psn, stmt)) is not None:
                     v.kind = "positive"
                     v.reasons.append(f"rows {around[0]} and {around[1]} printed in a row, which only a path through it prints")
                 else:
@@ -847,7 +892,7 @@ def judge(
             c = v.candidate
             if v.kind != "kept" or c.owner not in seens or (stmt := R.statement_at(seens[c.owner].fn.node, v.line)) is None:
                 continue
-            sn = seens[c.owner]
+            sn = arm_seen.get((c.owner, v.line), seens[c.owner])
             lines = {
                 int(line) for other in standing if other.owner != c.owner
                 for site in called_at(sn.fn, other) for file, _, line in [site.rpartition(":")] if file == c.rel

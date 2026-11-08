@@ -45,9 +45,17 @@ container's elements: a slice moves positions), a subscript or an attribute
 of any of them, an await, a walrus, a call's result; the targets of an
 assignment (a tuple target at any depth, ``*rest``), an augmented
 assignment, a loop, a return and a yield, a call's arguments and receiver.
-Only a tuple makes ``[i]`` -- it cannot be reordered, and whatever else puts
-into a container puts at ``[]``, which every position matches -- and a
-literal int written to (``x[0] = v``) is ``[]``.
+A tuple or list literal makes ``[i]``, until a ``*`` in it; a method that
+moves what its list holds -- ``insert``, ``pop``, ``remove``, ``sort``,
+``reverse`` (callfacts' ``Method.moves``) -- binds ``x[] <- x[]``: every
+element may be at any position after, before it too, as bindings are read
+without order; a call handing the list to a parameter its callee moves
+itself (``rses.sort()``, one hop) binds the same at the call.  Not
+read as a move: ``del x[i]``, a slice assignment, ``random.shuffle`` (no
+case of the corpus reaches a list literal by them, and ``del d[k]`` would
+lose a dict's keys).  Whatever else puts into a container puts at ``[]``,
+which every position matches, and a literal int written to (``x[0] = v``)
+is ``[]``.
 
 A call that lands in a function of the corpus is that call: its result is
 bound with the functions it lands in (``PathBinding.to``), not with the
@@ -75,6 +83,23 @@ statement, the calls with the same values and keys one write.  A spec's
 reset of its changed attributes (``resetChangedAttr``, ``resetChangedList``)
 is read with them, not as an assignment, and :func:`order.attach` reads the
 order of each function's lines and what its resets clear.
+
+A statement a function defers -- puts into a container it was handed,
+``extracted_sqls["job"] = {"sql": sql1 + comment, "vars": [...]}`` or
+``extracted_sqls.setdefault(key, {"sql": ..., "vars": []})``, on one side
+of an ``if`` whose other side runs the same text itself (``ast.dump``
+equal) -- is that run made at the put as well: the run's writes take the
+put's line (:func:`_deferred_runs`).  Its values are the run's; the put's
+own are not compared (the corpus's ten hand the same).  A runner call
+whose statement is not read and is an element of a container, no text the
+function builds (:func:`_drawn`), is the database where
+:func:`bamboo.codemap.objects.follow` carries its statement to where a
+callee defers one: ``bulk_insert_new_jobs`` runs, after all its jobs, what
+each ``insertNewJob`` put (:data:`RUNS_DEFERRED`).  The
+statement runs there, later than the put: after the writes the function
+makes after the put.  Read once every function's records are -- follow
+needs them --, so the readers before :func:`attach` (the crossings, the key
+sources, the ways in) read that call as the hole it was.
 """
 
 from __future__ import annotations
@@ -100,7 +125,7 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
-from bamboo.codemap.objects import RETURN, table_classes
+from bamboo.codemap.objects import RETURN, ObjectReach, _under, follow, table_classes
 from bamboo.codemap.panda import mapentries, order, pathcond, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
@@ -138,29 +163,245 @@ def attach(
     """Read every function's object records into its :class:`ReachNode`; how many assigns, bindings, call bindings and writes.
 
     Inside the build's reading context (:func:`sql.across_calls`), so the
-    statements are the ones every slice read.  Then the order of their lines
-    and the resets between them (:func:`order.attach`).
+    statements are the ones every slice read.  Then the runner calls that run
+    what their callees defer (:func:`_run_deferred`), and the order of the
+    records' lines and the resets between them (:func:`order.attach`).
     """
     reader = _Reader(modules, calls, table_classes(fragment.entities))
     rows = {row.owner: row for row in fragment.reach_graph}
-    counts = [0, 0, 0, 0]
     functions: dict[str, ast.AST] = {}
+    files: dict[str, str] = {}
     resets: dict[str, list[order.Reset]] = {}
     for file, func, owner in reader.names.functions:
         row = rows.get(owner)
         if row is None:
             continue
         functions[owner] = func
+        files[owner] = file
         row.assigns, row.bindings, row.call_bindings, resets[owner] = reader.read(
             file, func, row
         )
         row.writes = reader.writes(func)
-        counts[0] += len(row.assigns)
-        counts[1] += len(row.bindings)
-        counts[2] += len(row.call_bindings)
-        counts[3] += len(row.writes)
+    _run_deferred(reader, rows, functions, files, resets)
     order.attach(functions, rows, resets)
-    return counts[0], counts[1], counts[2], counts[3]
+    read = [rows[owner] for owner in functions]
+    return (
+        sum(len(row.assigns) for row in read),
+        sum(len(row.bindings) for row in read),
+        sum(len(row.call_bindings) for row in read),
+        sum(len(row.writes) for row in read),
+    )
+
+
+#: The assumption a runner call running what its function's callees defer is settled by (:data:`reach.ASSUMPTIONS`).
+RUNS_DEFERRED = "runner_runs_callees_sql"
+
+
+class _Deferred(NamedTuple):
+    """A statement a function puts into a container it was handed in place of running it (:func:`_deferred_runs`):
+    the put's line, the line of the function's own run of the same text, and where in the container the text is
+    put -- ``extracted_sqls['job']['sql']``."""
+
+    put: int
+    run: int
+    text_at: str
+
+
+def _deferred_runs(func: ast.AST) -> list[_Deferred]:
+    """The statements *func* defers: a dict literal put into a container one of its parameters names and it never
+    binds again -- ``P[k] = {...}``, ``P.setdefault(k, {...})`` -- holding, at a literal key, the statement a runner
+    call on the other side of an ``if`` holding the put runs (``ast.dump`` equal)."""
+    runners = sql.runners()
+    handed = frozenset(
+        name
+        for name in _local_names(func)
+        if is_parameter(func, name) and not C._rebinds(func, name)
+    )
+    found: set[_Deferred] = set()
+    for node in C.own_nodes(func):
+        if not isinstance(node, ast.If):
+            continue
+        for side, other in ((node.body, node.orelse), (node.orelse, node.body)):
+            runs = [
+                one
+                for one in _side_nodes(other)
+                if isinstance(one, ast.Call)
+                and isinstance(one.func, ast.Attribute)
+                and one.func.attr in runners
+                and one.args
+            ]
+            for one in _side_nodes(side) if runs else ():
+                for text_at, text in _put_texts(one, handed):
+                    found.update(
+                        _Deferred(one.lineno, run.lineno, text_at)  # type: ignore[attr-defined]
+                        for run in runs
+                        if ast.dump(run.args[0]) == ast.dump(text)
+                    )
+    return sorted(found)
+
+
+def _side_nodes(statements: list[ast.stmt]):
+    """Every node of one side of an ``if``; a nested function or class runs elsewhere."""
+    for statement in statements:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield statement
+        yield from C.own_nodes(statement)
+
+
+def _put_texts(node: ast.AST, handed: frozenset[str]) -> list[tuple[str, ast.expr]]:
+    """Each value of a dict literal *node* puts into a container one of *handed* names, with where it is put:
+    ``("P['k']['sql']", <sql1 + comment>)`` of ``P["k"] = {"sql": sql1 + comment}`` or ``P.setdefault("k",
+    {"sql": ...})``; none for any other node."""
+    base: Optional[str] = None
+    literal: Optional[ast.expr] = None
+    if (
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Subscript)
+    ):
+        base, literal = _path(node.targets[0], handed, store=True), node.value
+    elif (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "setdefault"
+        and len(node.args) == 2
+    ):
+        held = _path(node.func.value, handed)
+        if held is not None:
+            base = held + _subscript(node.args[0], store=True)
+        literal = node.args[1]
+    if base is None or not isinstance(literal, ast.Dict):
+        return []
+    return [
+        (base + _key(key), value)
+        for key, value in zip(literal.keys, literal.values, strict=True)
+        if key is not None
+    ]
+
+
+def _run_deferred(
+    reader: "_Reader",
+    rows: dict,
+    functions: dict[str, ast.AST],
+    files: dict[str, str],
+    resets: dict[str, list[order.Reset]],
+) -> int:
+    """Make each runner call that runs what its function's callees defer the database, and read its function
+    again; how many calls.
+
+    A call plugin's leaves left a hole because its statement is not read
+    (:data:`reach.HOLE_STATEMENT_NOT_READ`), and whose statement is an
+    element of a container, no text the function builds (:func:`_drawn`),
+    runs what its callees defer (:func:`_deferred_runs`) where follow
+    carries its statement -- both
+    ways, as it carries any object -- to where one of them puts a deferred
+    statement's text: ``bulk_insert_new_jobs``'s ``executemany(sql, ...)``
+    runs ``sql`` of ``extracted_sqls[target_key]["sqls"]``, appended from the
+    ``tmp_extracted_sqls[target_key]["sql"]`` it hands each ``insertNewJob``
+    (``**kwargs``), which puts ``extracted_sqls["job"] = {"sql": sql1 +
+    comment, ...}`` where it does not run ``sql1 + comment`` itself.  Those
+    statements' writes are read at the puts (:meth:`_Reader.writes`), so the
+    call is the database (:data:`RUNS_DEFERRED`), and what it is handed is
+    not followed into it: its function is read again so (:meth:`_Values._call`).
+    """
+    deferred: dict[str, list[str]] = {}
+    for owner, func in functions.items():
+        held = sorted({one.text_at for one in _deferred_runs(func)})
+        if held:
+            deferred[owner] = held
+    if not deferred:
+        return 0
+    runners = sql.runners()
+    closed = 0
+    for owner, func in functions.items():
+        row = rows[owner]
+        lines = {
+            hole.line
+            for hole in row.holes
+            if hole.why.startswith(reach.HOLE_STATEMENT_NOT_READ)
+        }
+        if not lines:
+            continue
+        versions = _Versions(func, _local_names(func))
+        running = [
+            call
+            for call in C.own_nodes(func)
+            if isinstance(call, ast.Call)
+            and call.lineno in lines
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in runners
+            and call.args
+            and _drawn(func, call.args[0])
+            and any(
+                _puts_reached(follow(rows, owner, start), deferred)
+                for start in versions.paths(call.args[0])
+            )
+        ]
+        if not running:
+            continue
+        shut = {call.lineno for call in running}
+        row.holes = [
+            hole
+            for hole in row.holes
+            if not (
+                hole.line in shut and hole.why.startswith(reach.HOLE_STATEMENT_NOT_READ)
+            )
+        ]
+        row.database = sorted({*row.database, *shut})
+        row.settled[RUNS_DEFERRED] = row.settled.get(RUNS_DEFERRED, 0) + len(running)
+        row.assigns, row.bindings, row.call_bindings, resets[owner] = reader.read(
+            files[owner], func, row
+        )
+        closed += len(running)
+    return closed
+
+
+def _drawn(func: ast.AST, statement: ast.expr) -> bool:
+    """Whether *statement*, what a runner call runs, is an element of a container and no text *func* builds: a
+    subscript, or a name *func* binds, not a parameter, each binding of which is a loop's element or a subscript's
+    (``for sql in extracted_sqls[target_key]["sqls"]``, ``sql = got[key]["sql"]``)."""
+    if isinstance(statement, ast.Subscript):
+        return True
+    if not isinstance(statement, ast.Name) or is_parameter(func, statement.id):
+        return False
+    name = statement.id
+    stores = 0
+    drawn = 0
+    for node in C.own_nodes(func):
+        if (
+            isinstance(node, ast.Name)
+            and node.id == name
+            and isinstance(node.ctx, ast.Store)
+        ):
+            stores += 1
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            drawn += _stores_of(node.target, name)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript):
+            drawn += sum(_stores_of(target, name) for target in node.targets)
+    return stores > 0 and stores == drawn
+
+
+def _stores_of(target: ast.expr, name: str) -> int:
+    """How many times *target* stores into *name*."""
+    return sum(
+        1
+        for one in ast.walk(target)
+        if isinstance(one, ast.Name)
+        and one.id == name
+        and isinstance(one.ctx, ast.Store)
+    )
+
+
+def _puts_reached(reached: ObjectReach, deferred: dict[str, list[str]]) -> bool:
+    """Whether *reached* holds the object, in a function of *deferred*, where that function puts a deferred
+    statement's text -- ``extracted_sqls[]['sql']`` at ``extracted_sqls['job']['sql']``."""
+    return any(
+        _under(text_at, held) == ""
+        for at, paths in reached.held.items()
+        for text_at in deferred.get(at, ())
+        for held in paths
+    )
 
 
 class _Reader:
@@ -232,6 +473,10 @@ class _Reader:
         ``restartTasksForContentsUpdate_JEDI`` runs one ``UPDATE`` in a loop
         over one query's tasks and again in a loop over another's, and the
         write named both loops' tasks as the row of each.
+
+        A statement the function defers (:func:`_deferred_runs`) is its own
+        run of the same text made at the put as well: that run's writes take
+        the put's line.
         """
         names = _local_names(func)
         versions = _Versions(func, names)
@@ -256,6 +501,11 @@ class _Reader:
         unique: dict[str, DbWrite] = {}
         for one in found:
             unique.setdefault(one.model_dump_json(), one)
+        deferred = _deferred_runs(func) if unique else []
+        for one in unique.values():
+            puts = {put.put for put in deferred if put.run in one.lines}
+            if puts:
+                one.lines = sorted({*one.lines, *puts})
         return list(unique.values())
 
     def _run_writes(
@@ -576,7 +826,7 @@ class _Values:
         held = self.versions.paths(expr)
         if held:
             return [_Carry("", one) for one in held]
-        if isinstance(expr, ast.Tuple):
+        if isinstance(expr, (ast.Tuple, ast.List)):
             found: list[_Carry] = []
             known = True  # a position after a starred element is not known
             for index, one in enumerate(expr.elts):
@@ -586,7 +836,7 @@ class _Values:
                 else:
                     found += _shift(self.carried(one), f"[{index}]" if known else "[]")
             return found
-        if isinstance(expr, (ast.List, ast.Set)):
+        if isinstance(expr, ast.Set):
             return [carry for one in expr.elts for carry in self._element(one)]
         if isinstance(expr, ast.Dict):
             found = []
@@ -632,7 +882,7 @@ class _Values:
         return []
 
     def _element(self, one: ast.expr) -> list[_Carry]:
-        """What an element of a list or set literal puts at a position not known: ``[a, *b]``."""
+        """What an element of a set literal puts at a position not known: ``{a, *b}``."""
         if isinstance(one, ast.Starred):
             return _shift(_index(self.carried(one.value), "[]"), "[]")
         return _shift(self.carried(one), "[]")
@@ -1072,6 +1322,10 @@ class _Values:
         )
         if meant.method is None or meant.kind not in _FILLING:
             return
+        if meant.method.moves:
+            # sort, insert, pop ...: what the receiver held at a position may now be at any
+            for base in self.target_paths(called.value):  # type: ignore[attr-defined]
+                self._bind(line, base + "[]", base + "[]", BIND_FILL)
         items = []
         for value, put, key, keyword in callfacts.put_arguments(meant.method, call):
             if put.into == callfacts.ELEMENT:
@@ -1187,16 +1441,27 @@ class _Values:
                 continue
             given = C.bind(call, target, placed.on_class)
             for argument, held, at in passed:
-                taken = [name for name, value in given.items() if value is argument]
-                if not taken and isinstance(argument, ast.Starred):
-                    taken = [""]
+                taken = [
+                    (name, held, at)
+                    for name, value in given.items()
+                    if value is argument
+                ]
                 if not taken:
-                    taken = [_rest_parameter(target.func, argument in call.args)]
-                for name in taken:
+                    taken = _spread(call, target, placed.on_class, argument, held, at)
+                if not taken:
+                    taken = [
+                        (_rest_parameter(target.func, argument in call.args), held, at)
+                    ]
+                for name, path, inside in taken:
                     _add(
                         self.handed,
-                        CallBinding(line=line, to=to, parameter=name, path=held, at=at),
+                        CallBinding(
+                            line=line, to=to, parameter=name, path=path, at=inside
+                        ),
                     )
+                    if not inside and name and _moves_parameter(target.func, name):
+                        # rses.sort() in the callee: what the caller handed may be at any position after
+                        self._bind(line, path + "[]", path + "[]", BIND_FILL)
             # The receiver is ``self`` only where the method called is the one named: ``self.plugin_class(job)``
             # builds a new object, which is the call's result, not ``self``.
             if (
@@ -1247,8 +1512,8 @@ def _attribute(items: list[_Carry], name: str) -> list[_Carry]:
 def _subscript(key: ast.expr, store: bool = False) -> str:
     """The part a subscript reads: ``['k']`` for a literal str key, ``[i]`` for a literal int read, else ``[]``.
 
-    An int written to (``x[0] = v``) is ``[]``: a list it is written in can
-    be reordered later, and only a tuple, which cannot, keeps its positions.
+    An int written to (``x[0] = v``) is ``[]``: no reader needs the position
+    a value is written at.
     """
     if isinstance(key, ast.Constant):
         if isinstance(key.value, str):
@@ -1400,6 +1665,97 @@ def _scalar(expr: Optional[ast.expr]) -> bool:
 def _cut(node: ast.AST) -> str:
     text = ast.unparse(node)
     return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _spread(
+    call: ast.Call,
+    target: C.Target,
+    on_class: bool,
+    argument: ast.expr,
+    held: str,
+    at: str,
+) -> list[tuple[str, str, str]]:
+    """The parameters a ``*x`` or ``**y`` argument fills: each with the path it takes and where in its value.
+
+    ``f(a, *x)``: the parameter at the second position takes ``x[0]``, the next ``x[1]``, and so on; what *held*
+    puts at a position of x goes to that position's parameter, and at a position not known -- or after another
+    ``*`` -- to each of them.  ``f(**y)``: a parameter the call fills neither by position nor by name takes
+    ``y['name']``; what is under a key goes to the parameter of that name.  A ``*args`` / ``**kwargs`` of the callee
+    takes what no named parameter can.  Empty where *argument* is no spread; ``("", held, at)`` -- the call does not
+    say which parameter -- where no parameter can take it.
+    """
+    func = target.func
+    params = func.args  # type: ignore[attr-defined]
+    positional = [one.arg for one in C._positional(target, on_class)]
+    named = {keyword.arg for keyword in call.keywords if keyword.arg}
+    stars = [
+        index for index, one in enumerate(call.args) if isinstance(one, ast.Starred)
+    ]
+    plain = stars[0] if stars else len(call.args)
+    first, _, below = at.partition("]")
+    first, below = (first + "]", below) if at.startswith("[") else ("", at)
+    found: list[tuple[str, str, str]] = []
+    if isinstance(argument, ast.Starred) and argument in call.args:
+        index = call.args.index(argument)
+        known = index == plain
+        slots = [
+            (position - index, name)
+            for position, name in enumerate(positional)
+            if position >= (index if known else plain) and name not in named
+        ]
+        position = int(first[1:-1]) if known and first[1:-1].isdigit() else None
+        for offset, name in slots:
+            if not at:
+                found.append((name, f"{held}[{offset}]" if known else f"{held}[]", ""))
+            elif position is None or position == offset:
+                found.append((name, held, below if first else at))
+        rest = params.vararg
+        if rest is not None and (
+            position is None or position not in {offset for offset, _ in slots}
+        ):
+            found.append((f"*{rest.arg}", held, at))
+    elif any(
+        keyword.arg is None and keyword.value is argument for keyword in call.keywords
+    ):
+        keyable = [
+            name
+            for position, name in enumerate(positional)
+            if position >= plain and name not in {one.arg for one in params.posonlyargs}
+        ] + [one.arg for one in params.kwonlyargs]
+        free = [name for name in keyable if name not in named]
+        key = first[2:-2] if first.startswith(("['", '["')) else None
+        for name in free:
+            if not at:
+                found.append((name, f"{held}['{name}']", ""))
+            elif key is None or key == name:
+                found.append((name, held, below if first else at))
+        rest = params.kwarg
+        if rest is not None and (key is None or key not in free):
+            found.append((f"*{rest.arg}", held, at))
+    else:
+        return []
+    return found or [("", held, at)]
+
+
+#: The builtin containers' methods that move what they hold to other positions (callfacts' ``Method.moves``).
+_MOVING = frozenset(
+    called
+    for (_type, called), method in callfacts.BUILTIN_METHODS.items()
+    if method.moves
+)
+
+
+def _moves_parameter(func: ast.AST, name: str) -> bool:
+    """Whether *func* calls a moving method (:data:`_MOVING`) on its parameter *name* itself: one hop, read by the
+    method's name, as a receiver whose class is not said is read (``rses.sort()``)."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in _MOVING
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == name
+        for node in C.own_nodes(func)
+    )
 
 
 def _rest_parameter(func: ast.AST, positional: bool) -> str:

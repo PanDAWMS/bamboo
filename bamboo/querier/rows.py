@@ -31,7 +31,7 @@ import functools
 import hashlib
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -1153,6 +1153,15 @@ class Seen:
 
     def single_call(self) -> bool:
         return all(len(v) <= 1 for v in self.unambiguous.values())
+
+    def without(self, lines: Iterable[int]) -> Seen:
+        """This run less the records of the rows at *lines*: the run an arm's proofs read where those rows printed
+        for other objects than the one the arm writes (``which_ran.other_objects``)."""
+        drop = set(lines)
+        if not drop:
+            return self
+        return replace(self, hits={k: v for k, v in self.hits.items() if k not in drop},
+                       unambiguous={k: v for k, v in self.unambiguous.items() if k not in drop})
 
 
 def seen(fn: Function, run: Run, mode: str) -> Seen:

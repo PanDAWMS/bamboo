@@ -1642,6 +1642,175 @@ What is still read as a loop that may go round:
 `RERUN_S3_ROWS=0` read as before.
 *Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
 
+### K64. An arm's guard reads as the row only the names the map's records bind to what the arm writes
+
+The rows file names the spellings of a row (`job`, `self.job`), and every such name in any arm's guard read the row's
+values.  The spelling is not the object.  `killEventServiceConsumers` 818 writes `dJob`, a consumer it packs from a
+SELECT (787-788), while its guards `pandaID == job.PandaID` and `dJob.jobsetID != job.jobsetID` read `job`, the job it
+was handed: another job.  And the object an arm writes was no row where no rows file spells it: `doGenerate`'s
+`jobSpec`, a setter's `self`, `killEventServiceConsumers`' `dJob`.
+
+Now the guards of an arm are read in an env for that arm (`Env.for_arm`, from `Env.reading(..., arm=...)` where H2 reads
+a candidate at its statement and H3 reads the chosen arm).  Its row names are the ones the map's records bind to the
+object the arm writes (`row_names`), under the premise every such reading makes: this arm wrote the question's row.
+- The arm's written expression (its `WriteFrom` of role `object`).  A guard name that is the same expression holds the
+  row where the bindings that reach the guard's test are the ones that reach the arm (`pathcond.held_at`).  A field of
+  `self` is one place in the method.  setupper's `for job in self.jobs + [None]` binds `job` once, so in the iteration
+  whose arm ran, its sentinel test reads the row.
+- A name with one way, through no call outside the corpus, ending where the written object's way ends, with equal
+  steps.  An element step (`[*]`, `[1]`) alone binds nothing: two elements of one list may be two objects.
+- A name whose way is the written object's plus a collection the rows file holds (`Files`) and an element: one of
+  the collection's rows (`file`).
+- An SQL arm, which writes through a statement and has no written object: a name holding the whole row the statement's
+  one key source is read off (the same select, no column, no steps).  Only the sources in the statement's own
+  function count: a parameter of it, or a select it runs.  The selects its callers filled that parameter from are the
+  same object followed up (archiveJob 1851: its `job`, and two callers' selects).  A key with several sources in its
+  own function binds no name.
+A name the rows file spells and the records do not bind is not read as the row.  The rows file's other rows keep their
+spellings.  An arm the map records nothing written for (no `WriteFrom` of role `object`, no `KeyFrom`: the adder
+plugin's `self.result.set_fatal()`) has no record to narrow by, and its guards read the spellings.
+
+Rule 6 (`which_ran.rewriter`) solves a guard for the question's column only on an atom the arm's env reads as the row.
+It had taken any `x.jobStatus`: at archiveJob 1783, a caller of updateUnmergedJobs, whose arm 1236 writes `umJob`, it
+solved `job.jobStatus == 'finished'`, the merge job's.
+
+The same names read the run's prints (`which_ran.other_objects`).  A row printing the key (`PandaID`, `Env.keys`) of a
+name bound to the object the arm writes, under the binding that reaches the arm and in the arm's pass (every loop
+holding the arm holds the row), shows which object that pass wrote.  Where every record of it in the run holds another
+key than the row's, the row printed for other objects only.  It is not in the run for the row (rule 4, where it is a
+must row), and every proof of the arm reads the run without it (`Seen.without`): the rows printed only on a path
+through the arm, two rows printed in a row around it, and `printed.py`'s P.  updateUnmergedJobs 1236 writes `umJob`,
+an unmerged job.  Under the merge job's mark (MJE-7398264739), its 1252 `update unmerged PandaID={umJob.PandaID}`
+printed the eleven unmerged jobs' keys and never the merge job's.  Rule 6 had excluded 1236 only by reading the merge
+job's `job.jobStatus` as the row's.  Once rule 6 read only the row's names, 1252 made 1236 positive.  1252 is no must
+row of 1236 (the calls between may leave), so 1236 is now kept, not excluded.  Read in one proof only, 1252 still
+proved it in another: 1179 and 1252 printed in a row around it.  Only the key is compared: another column's value at
+the print need not be the rows file's.
+
+Measured on the map's codemap-xxviii b386318 dump against master's querier on it (qb1), as r0b4, on the 144 cases, the
+65, attr and MT: 5 of the 144 move, and no END is gained or lost.
+- Four cases (MJE-7395049236, 7396077018, 7396725720, 7398394561) lose a reason of archiveJob 1379's exclusion, which
+  stays by rule 4.  1379 writes `dJob`, a downstream job packed from a select, and its step 5 had read the parameter
+  `job`'s values (the upstream job) as the row's.
+- MJE-7398264739: updateUnmergedJobs 1236 goes from excluded, by rule 6's reading of the merge job's status, to kept.
+  It stops at H2 as before, with no "may have changed it last" pair: that pair rested on the exclusion.
+- The 65, attr and MT: no file moves.
+
+Not changed: a reading for no arm (`printed.py`, the S and U steps, `learn`'s row facts) reads the spellings as before;
+a printed hole is keyed by the printing function's spelling, as its run is the key's run.
+
+*Shows:* a guard of a name the records do not bind is not read in the row's values ("not read"); "row N printed only
+for other values of X.PandaID".
+*Revisit:*
+- a pass that left between the arm and a print of other objects (1236's calls before 1252) wrote the object only in
+  memory: archiveJob(umJob), which stores it, follows the print.  Reading the store stage would exclude 1236 there;
+- the task row a job's arm links to by the value it hands on (`taskSpec.jediTaskID`, `WriteFrom` of role `value`):
+  bound once the rows file holds the job's task row (R1);
+- a name bound only by a builtin's loop (`for i, job in enumerate(jobs)`) whose function binds it more than once:
+  its ways stop at the builtin call.
+
+### K65. A status's arm whose value a method it calls returns is read by the map's ways to that value
+
+PostProcessorBase.doBasicPostProcess:77 is `taskSpec.status = self.getFinalTaskStatus(taskSpec, update_error_dialog=True)`.
+No `if` encloses it, so H3 stopped there: "has no guard of its own" (the 8 MTE of m-gaps).  The value is decided in the
+method.  The map holds a branch at 77 for each of the method's returns, 13 in all, each with the method's tests marked
+`  [in getFinalTaskStatus()]`.
+
+H3 now reads these ways (`Rerun._read_ways`, `callee_ways`).  This holds for a status's arm with no guard of its own,
+where the map's branches at its line to the observed value hold such a term:
+- Each branch to the value is a way.
+- Each term is read in the caller's names at the call (`_in_caller`).  A parameter the call hands a path (the map's
+  `call_bindings`) reads that path.  Any other name reads nothing: the method's own local, a parameter left to its
+  default, a module it imports.
+- The row's own column, the question's (`Env.subject`), is read as the statuslog row before the question's held it
+  (`_status_before`).  This rests on two things: no write between left no row, and no write of the column in the pass
+  came before the call.
+- A way where a term reads false is not the one taken.
+- One way left, and the run shows the arm ran (H2's positive on its own run): each term the values leave unread held,
+  since no other way gives the value.  This is not a premise: were the term false, the value would differ.  It rests
+  on the map's branches being every way there is.
+- H3 stops as K54's status does (a status does not end at H3).  The stop holds that way's terms; or the ways left and
+  what they leave unread; or no way left, though the run shows the arm ran.  The last is a contradiction: a value read,
+  or the map's ways, are wrong.
+
+Not read here:
+- a spec's method (`taskSpec.is_hpo_workflow()`, `failGoalUnreached()`), which needs the map's runnables read;
+- a class constant (`self.failOnZeroOkFile`, which a plugin sets);
+- a column the rows file holds as read at another time (K22): `parent_tid` is read only where its value is the key;
+- the method's own locals (`nFiles`, `parent_status`).
+
+Measured as inf1 (this on the tree of codemap-xxviii b386318 with K64, dump x13xxviiiQm) against the same without it
+(r0b4).  No run crashed; 8 of the 144 cases move, the 8 MTE; the 65, the attribute 60 and MT: no file moves.  Outcome
+kind, step, code and the asks do not move: each stays a stop at H3, now on the ways.
+- One way left in 3: 53374152 broken and 53417999 aborted (one way each to the value), and 53425234 done.  For done,
+  the way through the parent reads false, since parent_tid is the task's own ID; both are read as fetched, the value
+  being the key (K22).
+- Ways left in 5: failed 3 of 4 twice, finished 2 of 4 and 4 of 4, done 2 of 2.  They need what no value here reads:
+  the counts, the parent's status, the plugin, the spec's methods.
+
+*Shows:*
+- "STOP H3: <fn>:<line>'s value '<v>' comes from <f>(): the one of its n way(s) to it the values read leave, its run
+  showing it ran ('<term>' held on <name> (<source>); '<term>' held, the only way to the value)";
+- "... k of its n way(s) to it the values read leave (<terms> | ...)";
+- "... each of its n way(s) to it reads a term false (...), though its run shows it ran".
+
+*Revisit:*
+- An arm with guards of its own and `[in f()]` terms besides: S3 meets them at TaskRefiner.runImpl, in no case of
+  ours.  Read its own guards as H3 does and the terms as here.
+- A spec's method on the row as fetched, where the column's changes are not recorded (splitRule's marks): an answer
+  per value -- the way under the value as fetched, the other way under the other -- is an answer while they are not.
+- Where a status ends: with a term's value read from the rows file (the statuslog row before), that row and its time
+  are where the value came from.  The next question is who wrote that row.
+
+### K66. An attribute's one writer left, none dropped by a guard, is the only way to the value: its guards held
+
+Where H2 leaves arms that may have written (K38), each walks on from H3.  Before, an arm whose guards the values did
+not read stopped there, open, even when it was the one arm left.  The answer was then "written last by the one arm
+left, which the data does not decide", code one-of, not counted as an answer.  JobSpec.diskIO=652 was one: the map
+has one writer of the column, doGenerate:1284, and JobGenerator's log names no job, so its guards (readStat, the task
+name at 1013, `not usePrePro()` at 1150) were read nowhere.
+
+Now (`Rerun.arms_left`, `WroteBy.only_way`) an attribute's one arm left is the only way to the value when:
+- no other writer of the value was dropped by a guard in H2 (`Rerun._dropped_by_guard`): the judge's step 5 or rule 6,
+  or a guard read false on a writer that prints nothing (K25).  For a stand-in, the dropped arms are those its caller
+  stands in for (`_guard_dropped`).  The arm itself dropped at a newer row is no other way.  Writers dropped by what
+  their runs printed or did not print (rule 4, rule 3, no pass of the key at the window) are evidence, not guards;
+- the value is no default (`_a_default`): not NULL, not 0.  A row holds NULL with no write, and 0 where a spec stores
+  an unset zero attribute (`JobSpec._zeroAttrs`).  The map does not say which columns default to 0, so every 0 is
+  taken as one.
+
+Its guards the values leave unread then held: no other way gives the value.  A guard read through a method held too.
+A guard read false still decides: the arm did not write at that row, and its next row is read.  Nothing the arm
+rested on is open of who wrote it (its run not shown, a condition not read, the functions between a call and it):
+the END has no premise and no code.  The older rows it may have written at are said, as before.  This is not
+circular (inf-design.md 8): no guard of another writer is read as held to drop it, and the value is observed.
+
+It rests on the map's arms being every way the value reaches the row.  One known way has no arm: the server's API
+(`job_api.submit_jobs`) restores a client's JobSpec whole (`JobSpec.load_from_json_serializable` -> `__setstate__`).
+Operationally, a job with a jediTaskID is never made that way, only by JEDI's JobGenerator.
+
+Measured as r5a (this on inf1's tree, K65, dump x13xxviiiQm) against inf1.  No run crashed; 14 of the 144 cases and
+the 9 attribute cases below move; the 65, MT and the asks: no file moves.
+- 17 outputs (13 questions) move from one-of to END with no premise and no code: attribute diskIO, inputFileProject,
+  nOutputDataFiles, inputFileType, coreCount, outDiskUnit, transPath, mergeCoreCount and ticketID; in the cases
+  diskIO, inputFileProject, nOutputDataFiles, jobMetrics, inputFileType, prodUserID and resource_type twice.
+- 6 MR-T cases gain the H2 line only: they end with their guards read (K49), so nothing is held by this.
+- transExitCode 0, twice, does not move: 0 is read as a possible default.
+
+*Shows:* "END <subject>='<v>' written last by <fn>:<line> (the one writer of the value left, none dropped by a guard:
+no run shows the line ran; its guards held, the only way to the value ('<guard>', ...)[; the others in the rows'
+values]), in the pass of ..."; a line "<arm> is the one writer of <subject>=<v> left, none dropped by a guard: the
+only way to the value".
+*Revisit:*
+- A column's default other than NULL and 0, and which columns default to 0: then a 0 the column cannot default to
+  (transExitCode) is no default.
+- A job without a jediTaskID: the API's restore as an arm of each column it carries.
+- A status: it does not end at H3 (K54), so the only way does not answer it there.
+- The row the END names first is the newest the arm may have written at (K38), and H2 keeps a row whose host holds
+  none of the writer's logs.  diskIO 7390316278's END names 'defined' (aipanda098, a server machine with no
+  panda-JobGenerator.log) before 'pending' (aipanda085, JEDI's insert); the statuslog's host is the machine of the
+  process that wrote the row, so the row is 'pending'.  Before, the walk stopped at H3 and named no row.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one
