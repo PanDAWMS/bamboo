@@ -69,6 +69,8 @@ PREFIX = re.compile(
 _BARE_BUILDERS = frozenset({"LogWrapper", "MsgWrapper"})
 #: the dump :func:`_marks_of` read its marks from, and those marks by log
 _MARKS: list = []
+#: the dump :func:`_heads_of` read its rows from, and those rows by log
+_HEADS: list = []
 
 
 def log_name(path: str) -> str:
@@ -160,6 +162,51 @@ def cut_mark(log: str, token: str, message: str) -> tuple[str, str]:
     if end == len(token):
         return token, message
     return text[:end], text[end + 1:] if text[end:end + 1] == " " else text[end:]
+
+
+def head_word(pattern: str) -> str:
+    """The literal first word of a map row's pattern, up to its first blank: ``failed`` of ``failed\\ to\\ get\\
+    taskSpec\\ for\\ jediTaskID=``; "" where a hole or another construct comes before the blank, or none comes.  A
+    line its logger writes with no mark starts with that word, which :data:`PREFIX` takes for the mark (K70)."""
+    head, blank, _ = pattern.partition("\\ ")
+    if not blank or not head or re.search(r"[][(){}?*+|^$.]", re.sub(r"\\.", "", head)):
+        return ""
+    return re.sub(r"\\(.)", r"\1", head)
+
+
+def _heads_of(log: str) -> dict[str, list[re.Pattern[str]]]:
+    """The map's rows printing into *log* with no prefix -- a logger that writes no mark -- by their pattern's first
+    word (:func:`head_word`); empty for a log no such row prints into, or with no map installed."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return {}
+    if not _HEADS or _HEADS[0] is not fragment:
+        found: dict[str, dict[str, list[re.Pattern[str]]]] = {}
+        for node in fragment.function_prints:
+            for st in node.statements:
+                if st.log_files_basis != "logger":
+                    continue
+                for row in st.rows:
+                    if row.prefix or not row.pattern or not (word := head_word(row.pattern)):
+                        continue
+                    for name in st.log_files:
+                        found.setdefault(name, {}).setdefault(word, []).append(re.compile(row.pattern, re.S))
+        _HEADS[:] = [fragment, found]
+    heads: dict[str, dict[str, list[re.Pattern[str]]]] = _HEADS[1]
+    return heads.get(log, {})
+
+
+def unmarked(log: str, token: str, text: str) -> bool:
+    """Whether *token*, as :data:`PREFIX` cut a line of the file *log*, is no mark but the first word of a line its
+    logger writes with none: a row of the map printing into *log* with no prefix reads the line as written from that
+    word on.  ContentsFeederThread's ``self.logger`` is the module's logger, not wrapped yet where a task's spec was
+    not got: ``failed to get taskSpec for jediTaskID=...`` (ContentsFeeder.py:157) is cut as the mark ``failed``, and
+    every such line of a machine's log, of every task over days, would be one run of it (KNOWN_ISSUES.md K70)."""
+    heads = _heads_of(log).get(token)
+    if not heads:
+        return False
+    line = f"{token} {text}"
+    return any(p.match(line) for p in heads)
 
 
 TRACEBACK = "Traceback (most recent call last):"
@@ -513,6 +560,9 @@ class Run:
     token: str
     records: list[Record]
     found_by: list[Record]  # the records the key was on
+    #: a line its logger writes with no mark (:func:`unmarked`), a run of its own: nothing says which other lines are
+    #: of its pass (KNOWN_ISSUES.md K70)
+    alone: bool = False
 
     @property
     def first(self) -> str:
@@ -564,8 +614,10 @@ class Run:
         getJobs call's ``Start`` read as absent, and the call that sent the
         job was excluded).  A run whose mark holds the key is whole in it.  Nor in a run of a mark whose other records
         were not asked (``Log.partial``), nor for a row of *func* a run asked for another's rows does not hold
-        (:meth:`holds`).
+        (:meth:`holds`).  Nor in a line read alone (:attr:`alone`): its pass's other lines are not under it.
         """
+        if self.alone:
+            return False
         if self.log.extract_key and not keyed(self.log.extract_key).search(self.token):
             return False
         if (self.machine, self.token) in self.log.partial:
@@ -589,7 +641,7 @@ class Run:
     def part(self, start: int, end: int) -> "Run":
         """The records ``[start:end]`` as a run of their own: one pass, where a mark holds several."""
         kept = self.records[start:end]
-        return Run(self.log, self.token, kept, [r for r in self.found_by if r in kept])
+        return Run(self.log, self.token, kept, [r for r in self.found_by if r in kept], self.alone)
 
     def said(self) -> T.Said:
         """The run's line as a record: where, its mark, its records' count and stamps; and, for a run a recorded search
@@ -598,9 +650,12 @@ class Run:
         cut = self.log.edges(self.machine, self.token, self.first, self.last) if self.log.edges is not None and self.machine else ""
         cut = self.log.partial.get((self.machine, self.token), cut)
         method = self.log.narrowed.get((self.machine, self.token))
+        said_cut: T.Said | str = T.Said("read-as-cut", {"cut": cut}) if cut else ""
+        if self.alone:
+            said_cut = T.Said("read-alone", {"then": said_cut})
         return T.Said("run-line", {
             "where": where, "token": self.token, "n": len(self.records), "first": self.first, "last": self.last,
-            "found": len(self.found_by), "cut": T.Said("read-as-cut", {"cut": cut}) if cut else "",
+            "found": len(self.found_by), "cut": said_cut,
             "asked": T.Said("asked-for-its-rows", {"method": method}) if method else "",
         })
 
@@ -611,8 +666,15 @@ class Run:
 
 def runs_for(log: Log, key: str) -> list[Run]:
     """Every run of *log* the key appears in, keyed by the machine and the instance token: one mark on two machines
-    is two runs (a file handed in is one machine's)."""
+    is two runs (a file handed in is one machine's).  A line its logger writes with no mark is a run of its own
+    (:func:`unmarked`, ``Run.alone``): the word :data:`PREFIX` takes for its mark is its text's first, which joins the
+    lines of every pass and object (KNOWN_ISSUES.md K70)."""
     pattern = keyed(key)
+    heads = _heads_of(log.name)
+
+    def alone(r: Record) -> bool:
+        return r.token in heads and unmarked(log.name, r.token, r.text)
+
     # the pattern finds the key only where its text is, so a record without the text is passed over without it (most
     # of a day-long mark's records: MT-ready-stuck's S1, 62% of its time in this line)
     hits = [r for r in log.records if (key in r.message and pattern.search(r.message)) or (key in r.token and pattern.search(r.token))]
@@ -620,8 +682,10 @@ def runs_for(log: Log, key: str) -> list[Run]:
     # each (MT-running-stuck's day-long marks: 879 of its 928 s under cProfile)
     by_mark: dict[tuple[str, str], list[Record]] = {}
     for r in log.records:
-        by_mark.setdefault((r.machine, r.token), []).append(r)
-    found: dict[tuple[str, str], list[Record]] = {}
+        if not alone(r):
+            by_mark.setdefault((r.machine, r.token), []).append(r)
+    found: dict[tuple[str, str, int], list[Record]] = {}
     for r in hits:
-        found.setdefault((r.machine, r.token), []).append(r)
-    return [Run(log, mark[1], by_mark[mark], held) for mark, held in found.items() if mark[1]]
+        found.setdefault((r.machine, r.token, id(r) if alone(r) else 0), []).append(r)
+    return [Run(log, mark[1], held if mark[2] else by_mark[mark[:2]], held, bool(mark[2]))
+            for mark, held in found.items() if mark[1]]

@@ -152,6 +152,7 @@ from bamboo.querier.which_ran import (
     judge,
     of_mover,
     once_loops_of,
+    passes_of,
     recorded_in_pass,
     spans,
     stable_holes,
@@ -4761,7 +4762,7 @@ class Rerun:
             for run in runs.get(name, []):
                 if not of_mover(run, q.owner):
                     continue
-                parts, how = R.passes(fn, run, self.mode)
+                parts, how = passes_of(fn, run, self.mode)
                 self.say(f"{run.describe()}: {how}")
                 found += parts
         # the runs come machine by machine; the passes are read, and the first and the last taken, in time
@@ -4895,7 +4896,7 @@ class Rerun:
         for name in to_hand:
             for run in runs.get(name, []):
                 if of_mover(run, c.owner):
-                    parts, said = R.passes(fn, run, self.mode)
+                    parts, said = passes_of(fn, run, self.mode)
                     self.say(f"{run.describe()}: {said}")
                     found += parts
         found = sorted((p for p in found if p.last[:19] >= start and p.first[:19] <= end), key=lambda p: p.first)

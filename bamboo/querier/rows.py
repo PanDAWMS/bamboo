@@ -43,7 +43,7 @@ from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 from . import TREE, mapdump
-from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run
+from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run, head_word
 
 #: the bamboo tree the map's code is imported from (the package's own; see :mod:`bamboo.querier`)
 BAMBOO_TREE = str(TREE)
@@ -632,6 +632,8 @@ class Row:
     #: :meth:`patterns` per mode, made on the first ask: a row is built once per function (``_function``) and its
     #: patterns and shapes are not changed after, while ``matches`` asks for them once per record
     compiled: dict[str, list[tuple[re.Pattern[str], int, str]]] = field(default_factory=dict, repr=False, compare=False)
+    #: the first words of the map's patterns (``records.head_word``), made on the first ask (:meth:`texts`)
+    heads: frozenset[str] | None = field(default=None, repr=False, compare=False)
 
     def lands_in(self, name: str) -> bool:
         """Whether a line of this row can be in the log file *name*: yes where the map does not place it."""
@@ -695,8 +697,12 @@ class Row:
         line as the logger wrote it.  A logger with no mark of its own writes that hole's value first, and the log's
         parser takes it for the token (``records.PREFIX``): ``f"{job.PandaID} Finisher : Kill"`` is the token
         ``7392812614`` and the message ``Finisher : Kill``, while the map's pattern begins at the space after the hole
-        (KNOWN_ISSUES.md K53)."""
-        if record.token and LEADING_HOLE.match(self.text):
+        (KNOWN_ISSUES.md K53).  So for a print with no prefix that begins with a word: the parser takes the word,
+        ``failed`` of ``self.logger.debug(f"failed to get taskSpec for jediTaskID={jediTaskID}")``
+        (ContentsFeeder.py:157), for the token, and the message alone holds no pattern of the row (K70)."""
+        if self.heads is None:
+            self.heads = frozenset() if self.map_prefixes else frozenset(w for p in self.map_patterns if (w := head_word(p)))
+        if record.token and (LEADING_HOLE.match(self.text) or record.token in self.heads):
             return [record.text, f"{record.token} {record.text}"]
         return [record.text]
 
@@ -901,23 +907,32 @@ def _writers() -> list | None:
         return None
     if not _WRITERS or _WRITERS[0] is not fragment:
         rows = []
+        # the rows with no prefix by their pattern's first word: a line its logger writes with no mark is cut there (K70)
+        heads: dict[str, list] = {}
         for f in fragment.function_prints:
             for st in f.statements:
                 logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
                 for r in st.rows:
                     if r.pattern and _map_usable(r.pattern):
-                        rows.append((re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs, r))
-        _WRITERS[:] = [fragment, rows, {}, {}, {}]
+                        row = (re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs, r)
+                        rows.append(row)
+                        if not r.prefix and (word := head_word(r.pattern)):
+                            heads.setdefault(word, []).append(row)
+        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads]
     return _WRITERS
 
 
 def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]]:
-    """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by."""
+    """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by; a row with no prefix whose pattern's
+    first word is the record's token reads the line as written, that word on (K70)."""
     by_text = writers[2]
     if record.text not in by_text:
         by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
     line = f"{record.token} {record.text}"
-    return [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    found = [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    found += [(o, r) for regex, o, _, logs, r in writers[5].get(record.token, ())
+              if (logs is None or log in logs) and regex.match(line) and (o, r) not in found]
+    return found
 
 
 def line_writers(record: Record, log: str) -> frozenset[str]:

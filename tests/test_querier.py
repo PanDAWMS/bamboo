@@ -951,7 +951,7 @@ def test_a_bare_mark_holding_a_blank_is_cut_by_the_maps_marks_of_its_log(tmp_pat
             def run(line, builder, mark, logs=("panda-x.log",)):
                 return N(owner=f"p/x.py::f{{line}}",
                          runs=[N(line=line, at=f"p/x.py::f{{line}}", builder=builder, mark=mark, key=[])],
-                         statements=[N(log_files_basis="logger", runs=[line], handed_runs=[], log_files=list(logs))])
+                         statements=[N(log_files_basis="logger", runs=[line], handed_runs=[], log_files=list(logs), rows=[])])
 
             mapdump._FRAGMENT[:] = [N(function_prints=[
                 run(513, "LogWrapper", "update_job PandaID={{}} PID={{}}"),
@@ -1006,7 +1006,7 @@ def test_a_mark_the_calls_share_is_asked_only_near_the_keys_records_joined_per_m
 
             def run(at, builder, mark, columns):
                 return N(owner=at, runs=[N(line=1, at=at, builder=builder, mark=mark, key=[N(columns=c) for c in columns])],
-                         statements=[N(log_files_basis="logger", runs=[1], handed_runs=[], log_files=["panda-x.log"])])
+                         statements=[N(log_files_basis="logger", runs=[1], handed_runs=[], log_files=["panda-x.log"], rows=[])])
 
             mapdump._FRAGMENT[:] = [N(tables=[N(identity_attrs=["JobSpec.PandaID"])], function_prints=[
                 run("p/x.py::C.getTasks_JEDI", "create_tagged_logger", "vo={} label={}", [["JediTaskSpec.vo"], []]),
@@ -5318,7 +5318,7 @@ def test_a_writer_that_writes_its_loop_s_objects_after_it_is_read_on_its_latest_
             return N(owner=f"pandaserver/w.py::{func}", unread=unread, object="job", table="", statement=statement,
                      writes={"JobSpec.jobStatus": [line]}, handed_to=["pandaserver/t.py::TaskBuffer.updateJobs"])
 
-        mapdump._FRAGMENT[:] = [N(key_froms=[kf("run", CALL, ARM), kf("each", CALL2, ARM2)])]
+        mapdump._FRAGMENT[:] = [N(key_froms=[kf("run", CALL, ARM), kf("each", CALL2, ARM2)], function_prints=[])]
         found = rerun.batched("pandaserver/w.py", "run", [ARM], "JobSpec.jobStatus")
         got = {"batched": [found[0], found[2]] if found else None,
                "inside": rerun.batched("pandaserver/w.py", "each", [ARM2], "JobSpec.jobStatus"),
@@ -9180,6 +9180,151 @@ def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read
     # a list is changed in place by the append after the print (the map's changes.object_changes): "[]" is not read
     # (read, ``items != []`` would exclude the arm)
     assert not step5(got["list"][listed]), got["list"][listed]
+
+
+_PASSES_OF = """
+class Setupper:
+    def __init__(self):
+        self.logger = logger
+
+    def run(self):
+        self.logger.debug("running jumbo")
+        self.setup_jumbo()
+        self.logger.debug("end")
+
+    def setup_jumbo(self):
+        if len(self.jumbo) == 0:
+            return
+        self.logger.debug("start jumbo")
+        self.status = "failed"
+
+
+class Broker:
+    def __init__(self):
+        self.logger = logger
+
+    def broke(self):
+        self.logger.debug("brokerage done")
+"""
+
+
+def test_a_run_holding_none_of_a_functions_rows_is_its_pass_only_where_a_callers_row_after_its_call_shows_it_ran(tmp_path):
+    # setupper's run prints "end" at 206 only after calling setup_jumbo_jobs at 202, which returned at 1967 printing
+    # nothing: the run is its pass (MJ-assigned-stuck).  TaskBrokerThread's runImpl prints under the time token
+    # TaskCheckerThread's does, and 085's post-processing stopped before calling doBasicPostProcess: no record says
+    # the function ran, so the run is not its pass (MT-assigning-late, MT-prepared-late; KNOWN_ISSUES.md K69)
+    (_corpus(tmp_path) / "pandaserver" / "p.py").write_text(_PASSES_OF)
+    lines = _PASSES_OF.splitlines()
+    call, end = lines.index("        self.setup_jumbo()") + 1, lines.index('        self.logger.debug("end")') + 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    for name, texts in {"called": ["running jumbo", "end"], "before": ["running jumbo"], "other": ["brokerage done"],
+                        "own": ["running jumbo", "start jumbo", "end"], "shared": ["brokerage done", "start jumbo"]}.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import passes_of
+
+            R.ROWS_FROM = "walk"
+            # in shared.log the map reads "start jumbo" as Broker's too (TaskBroker's two runImpl both print "getting Impl")
+            both = frozenset({"pandaserver/p.py::Setupper.setup_jumbo", "pandaserver/p.py::Broker.broke"})
+            R.line_writers = lambda record, log: both if log.startswith("shared") and "start jumbo" in record.text else frozenset()
+            fn = R.function("pandaserver/p.py", "setup_jumbo")
+            got = {}
+            for name in ("called", "before", "other", "own", "shared"):
+                run, = runs_for(read_log(f"{name}.log"), "1")
+                parts, how = passes_of(fn, run, "outside")
+                got[name] = [len(parts), how]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the caller's "end" comes after its call on every way: the run is the callee's one pass, and says why
+    assert got["called"][0] == 1 and f"its call shown by run:{end} after its call(s) at [{call}]" in got["called"][1], got
+    # "running jumbo" is printed before the call: it does not say the call ran
+    assert got["before"][0] == 0 and "not shown to be a pass of it" in got["before"][1], got
+    # another class's rows under the same mark say nothing of the function
+    assert got["other"][0] == 0 and "not shown to be a pass of it" in got["other"][1], got
+    # a record of the function's own row: the run is read as before
+    assert got["own"][0] == 1 and "no record" not in got["own"][1], got
+    # a record another function's print can have written too says nothing of which ran
+    assert got["shared"][0] == 0 and "not shown to be a pass of it" in got["shared"][1], got
+
+
+def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_is_a_run_of_its_own(tmp_path):
+    # ContentsFeederThread's self.logger is the module's logger, not wrapped yet where the task's spec was not got:
+    # "failed to get taskSpec for jediTaskID=..." (ContentsFeeder.py:157) is cut as the mark "failed" and the message
+    # "to get taskSpec ...", which the row's pattern does not find; and the "failed ..." lines of every task and pass
+    # of a machine's log were one run (Tr; KNOWN_ISSUES.md K70)
+    (tmp_path / "panda-x.log").write_text(
+        "2026-01-01 00:00:00,000 panda.log.X: DEBUG    failed to get taskSpec for jediTaskID=5\n"
+        "2026-01-01 00:00:01,000 panda.log.X: DEBUG    <jediTaskID=5 gshare=G> start loop\n"
+        "2026-01-01 00:00:02,000 panda.log.X: DEBUG    failed to get taskSpec for jediTaskID=6\n"
+        "2026-01-01 00:00:03,000 panda.log.X: DEBUG    <jediTaskID=5 gshare=G> done\n"
+        "2026-01-01 01:00:00,000 panda.log.X: DEBUG    failed to get taskSpec for jediTaskID=5\n"
+        "2026-01-01 01:00:01,000 panda.log.X: DEBUG    failed with nothing for jediTaskID=5\n"
+    )
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json, re
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import head_word, read_log, runs_for
+
+            bare = re.escape("failed to get taskSpec for jediTaskID=") + ".*?"
+            marked = re.escape("start loop")
+            owner = "p/f.py::Feeder.feed"
+            mapdump._FRAGMENT[:] = [N(function_prints=[N(owner=owner, runs=[], statements=[
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
+                  rows=[N(pattern=bare, prefix=None)]),
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
+                  rows=[N(pattern=marked, prefix="<jediTaskID={} gshare={}>")]),
+            ])])]
+            runs = runs_for(read_log("panda-x.log"), "5")
+            cut = runs[0].records[0]
+            stmt = ast.parse("pass").body[0]
+            row = R.Row("p/f.py", "feed", stmt, "DEBUG", 'f"failed to get taskSpec for jediTaskID={jediTaskID}"',
+                        map_patterns=[bare])
+            prefixed = R.Row("p/f.py", "feed", stmt, "DEBUG", 'f"failed to get taskSpec for jediTaskID={jediTaskID}"',
+                             map_patterns=[bare], map_prefixes=["<jediTaskID={} gshare={}>"])
+            print(json.dumps({
+                "runs": [[r.token, [x.stamp[11:19] for x in r.records], r.alone, r.would_print("DEBUG")] for r in runs],
+                "said": runs[0].describe(),
+                "cut": [cut.token, cut.message],
+                "writers": sorted(R.line_writers(cut, "panda-x.log")),
+                "matches": row.matches(cut, "outside")[0] > 0,
+                "prefixed": prefixed.texts(cut),
+                "heads": [head_word(p) for p in (bare, marked, ".*?" + re.escape(" x"), re.escape("a-b c"), "start")],
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # each line of the row is a run of its own, whose missing rows say nothing; the marked lines are one run as
+    # before; another task's line is not the key's; a line whose first word is the row's but whose text is not stays
+    # under that word
+    assert got["runs"] == [
+        ["failed", ["00:00:00"], True, False],
+        ["<jediTaskID=5 gshare=G>", ["00:00:01", "00:00:03"], False, True],
+        ["failed", ["01:00:00"], True, False],
+        ["failed", ["01:00:01"], False, True],
+    ], got
+    assert "read alone: its logger writes no mark, so the token is the line's first word" in got["said"], got
+    # the cut is the parser's still; the row and the map's writers read the line as written
+    assert got["cut"] == ["failed", "to get taskSpec for jediTaskID=5"], got
+    assert got["writers"] == ["p/f.py::Feeder.feed"], got
+    assert got["matches"] is True, got
+    # a row the map gives a prefix reads the message only
+    assert got["prefixed"] == ["to get taskSpec for jediTaskID=5"], got
+    assert got["heads"] == ["failed", "start", "", "a-b", ""], got
 
 
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):

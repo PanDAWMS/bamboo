@@ -1957,6 +1957,106 @@ str(code) at 853'})".
   a conversion that reads another name (`if flag:`), which the shown values could decide.
 - An attribute chain (`self.job.jobStatus`) is PVH's v2, for (iii), J and P1.
 
+### K69. A run holding no record only a function prints is its pass only where a caller's row after its call shows it ran
+
+S2 (a mover's passes) and U2 (a caller's) cut each run of the key at the function's entry row (`rows.passes`).  A run
+with no entry row read whole in it was kept whole as one pass, and judge read it: the function's rows absent, its
+exits behind them were excluded and the one left was chosen by elimination.  Where the function did not run in it
+that reading is wrong.
+- MT-assigning-late (U2, the caller runImpl at 204): TaskCheckerThread.runImpl and TaskBrokerThread.runImpl each make
+  a `MsgWrapper` per pass, marked by its time; the run <2026-10-29/08:55:23.273195> is TaskBrokerThread's ("start
+  TaskBrokerThread 5/5", "brokerage with AtlasProdTaskBroker", "done": 253, 282, 292), read as a pass of
+  TaskCheckerThread's that left by 165, so "one exit every pass took" failed.
+- MT-prepared-late (S2, doBasicPostProcess): 085's post-processing pass stopped after 104 ("checked duplication with
+  0"); 129's call prints 83 in doBasicPostProcess or 131 on a raise, and neither is there.  It was read as going
+  through 77, and S3 stopped at "what arm 77 wrote, yet the value stayed".
+- MJ-merging-stuck, MJ-transferring-stuck (S2, handle_failed_job): the adder's run prints "status after plugin call
+  :job.jobStatus=finished", so finalize_job_status (279) did not call it; it was read as going through 374.
+- datasetManager's FinisherThr.run (MJ-assigned-stuck): its runs under the PandaID token are another thread's
+  "skip since ... is missing with rule" (963).
+- Right, and kept: setup_jumbo_jobs returned at 1967 printing nothing; setupper's run prints 205 "took" and 206
+  "end" only after calling it at 202.
+
+Now (`which_ran.passes_of`, for S2 and U2) such a run is the function's pass only where it shows the function ran:
+- a record only the function's rows can have printed (`rows.line_writers` names no other writer; "getting Impl" is
+  both runImpl's), or
+- a record of a caller's row that every way from the caller's entry reaches only through one of its calls of the
+  function (`which_ran.called_in`: the map's `Calls.callers`, every call of the caller handed at once to
+  `flow.passes_before`, on the tree the calls index walked).
+Otherwise it is not shown to be a pass of it, and is set aside: U2 drops the run, and S2 reads the window without it
+(its callers' passes where none is left, K55).  A mark naming the function keeps its run, and a run the entry row cuts
+is read as before.  Set aside is not shown not to be: a run of the function's that shows neither is lost, and a U2 or
+S2 "every pass" is then read over the rest.  The function's own row unread does that too: ContentsFeeder's
+"failed to get taskSpec ..." lines, set aside, left Tr's S2 saying "every pass (8) left by 646" while two passes in its
+window took 158 -- K70 reads them.
+
+Measured as u69n against u69o (querier-v cac0bf1: bc48751 with the map's b7b2f40; xxix's dump 5c1172d, pin m), every
+set: no run crashed; 10 of 144 outputs differ, the 65 and attr do not, MT in one (the same as m-cut2's).
+- The four wrong readings go: MT-assigning-late's branch 3 stops at K55 ("setCloudToTasks_JEDI's pass on the row
+  inside runImpl's call at 204"); MT-prepared-late, MJ-merging-stuck and MJ-transferring-stuck lose S3's "what arm
+  77 / 374 wrote, yet the value stayed", and U2 stops at K55 on the caller's call (post_process_tasks 156,
+  process_job_report 446).
+- Set aside rightly: datasetManager's 5 runs (MJ-assigned-stuck), the adder's one-line runs of
+  `AdderGen.dump_file_report` (the pilot API's, before the window).
+- Kept by a caller's row, the wording only: setup_jumbo_jobs x2, setup_source, subscribe_dispatch_data_block,
+  check_output_file_metadata x3.  None of their calls is under and/or, if-else, a comprehension or a lambda.
+- Wrong: Tr (above, K70); doPreProRefine (MT-scouting-stuck, before the window, no verdict moves; *Revisit*).
+With K70 (u70n), the same but Tr.
+
+*Shows:* "...: the run is not split; no record only <fn> prints, nor a caller's row after its call: not shown to be a
+pass of it", or "..., its call shown by run:205 after its call(s) at [202]".
+*Revisit:*
+- A caller's row another class's method prints alike: MT-scouting-stuck's TaskRefiner run (08:41:58, before the
+  window) ran doPreProRefine, called by AtlasAnalTaskRefiner.doRefine at 208 before its "done" at 280; AtlasProd's
+  doRefine prints "done" too (174) and does not call it, so the run is set aside.  The run names the class, "refining
+  with AtlasAnalTaskRefiner" (TaskRefiner 282, the impl `FactoryBase.instantiateImpl` chose by `taskrefine.modConfig`
+  for vo, prodSourceLabel and taskType), right before 284 calls `impl.doRefine`: the impl's class rules out a method of
+  a sibling class (the map's parts: the receiver held from the print to the call, and the class a method is of).
+- A callee's row as the evidence (the function handing its logger down), and a caller two hops up.
+- A call the statement may skip (under and/or, if-else, a comprehension, a lambda) counts as passed once the statement
+  is entered (the map's finding); a handler after a logger call follows reaching's raise rule (a).
+- S2/U2's candidates have no way for a function that runs to its end: check_output_file_metadata (MJ-merging-stuck)
+  is read as leaving by 181 while the job was "finished" and it ran through its loop (not K69).
+
+### K70. A line its logger writes with no mark is read from its first word, and is a run of its own
+
+`records.PREFIX` takes a line's first word for its mark where no bracket ends one.  A logger that writes no mark
+starts the line with its text, so the text's first word became the mark.  ContentsFeederThread's `self.logger` is the
+module's logger (ContentsFeeder.py:36, handed to `WorkerThread`); `feed_contents_to_tasks` wraps it in
+`MsgWrapper(self.logger, "<jediTaskID=... gshare=...>")` at 172, only once the task's spec is got.  Where it is not,
+157 prints `failed to get taskSpec for jediTaskID=...` with the bare logger and 158 goes on to the next task.  Two
+things went wrong with that line:
+- the row did not read it: the record is the mark `failed` and the message `to get taskSpec ...`, and the row's
+  pattern starts at `failed` (`Row.texts` joined the mark back only for a print starting with a hole, K53);
+- every such line of a machine's log -- every task's, over days -- was one run of the mark `failed`: Tr's run on
+  aipanda088 held 11292 records, 3 of the key's.
+Before K69 that run was a pass of 2 days with nothing read, and S2 stopped on it ("which way pass 1 went").  K69 set it
+aside (no record of the function's rows), and Tr's S2 said "every pass (8) left by 646": the key's lines at 07:25:50
+(aipanda088) and 07:26:06 (aipanda086), in the window, are passes that took 158.
+
+Now (`records.unmarked`, from the map's rows: a row with no prefix, printing into the log, whose pattern starts with
+a literal word -- `records.head_word` -- and reads the line as written from that word on):
+- `records.runs_for` makes each such line a run of its own (`Run.alone`); its missing rows say nothing
+  (`Run.would_print` is false): nothing in the line says which other lines are of its pass;
+- `Row.texts` and `rows.line_writers` read it as written, the mark joined back, for a row with no prefix whose
+  pattern's first word is the mark.
+A line that starts with the word but does not match the row's pattern stays under that word, as before.  The door still
+asks for the "mark" `failed` over the window (`recorded`: the key's records under a mark not holding it), which a new
+record round would change; it is not changed here.
+
+Measured with K69 as u70n against u69o and u69n (querier-v cac0bf1 with K69 alone; xxix's dump 5c1172d, pin m), every
+set: no run crashed; against u69n, past K69's new wording, only the three outputs holding ContentsFeeder's lines move,
+and xi's copy of one.  Tr: the 6 run lines are 11 runs of one line; 07:25:50 and 07:26:06 are passes 9 and 10, 158
+chosen by positive evidence (157 prints only on a path through it); branch 2 stops at "S2: one exit every pass took"
+(8 passes by 646, 2 by 158).  MT-ready-stuck: 5 runs of one line, all before the window (08:25:50): the passes and stops
+do not move.  MT-defined-stuck: 27 runs of one line, none in the window; "pass(es) after the window" goes from 2 to 24.
+
+*Shows:* "token=failed 1 record(s) ... (key on 1; read alone: its logger writes no mark, so the token is the line's
+first word...)"; in Tr's S2, "-- pass 9: 2026-10-29 07:25:50,756 .. ..., 1 record(s); printed {'jediTaskID': 53343550}"
+chosen 158 by positive evidence.
+*Revisit:* the dump holds 630 such rows (60 logs, 334 log-and-word pairs); a line of one word, with no blank, is not
+read (it holds no key, so it makes no run of the key).
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

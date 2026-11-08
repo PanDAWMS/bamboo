@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from bamboo.codemap import trace  # noqa: E402
+from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import evaluate as SE  # noqa: E402
 from bamboo.codemap.panda import flow, pathcond  # noqa: E402
@@ -108,6 +109,84 @@ def of_mover(run: Run, owner: str) -> bool:
     the tag's, which the method writes in its own comment: a comment copied from another method hides its runs."""
     m = re.match(r"([A-Za-z_]\w*) <", run.token)
     return m is None or m[1] == owner.split("::")[-1]
+
+
+def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
+    """*run* cut into *fn*'s passes (``rows.passes``), with a word on how.  A run kept whole that holds no record only
+    *fn*'s rows can have printed (:func:`_rows_shown`), under a mark that does not name *fn*, is *fn*'s pass only where
+    it shows *fn* was called (:func:`called_in`); otherwise it is not shown to be one, and is set aside.  Another
+    function shares the mark -- TaskBrokerThread's runImpl prints under the same time token as TaskCheckerThread's --
+    or the function's caller ran without calling it: 085's post-processing pass stopped after 104 and never reached
+    doBasicPostProcess.  Kept whole, judge read the absent rows as the way the pass went and chose an exit by
+    elimination (KNOWN_ISSUES.md K69).  Set aside is not shown not to be: a caller's row after the call that another
+    class's method prints alike does not show it (AtlasAnal.doRefine's "done", AtlasProd.doRefine's too)."""
+    parts, how = R.passes(fn, run, mode)
+    if parts != [run]:
+        return parts, how
+    m = re.match(r"([A-Za-z_]\w*) <", run.token)
+    if m is not None and m[1] == fn.name:
+        return parts, how
+    if _rows_shown(fn, run, mode):
+        return parts, how
+    shown = called_in(fn, run, mode)
+    if shown:
+        return parts, f"{how}; no record only {fn.name} prints, its call shown by {shown}"
+    return [], f"{how}; no record only {fn.name} prints, nor a caller's row after its call: not shown to be a pass of it"
+
+
+def called_in(fn: R.Function, run: Run, mode: str) -> str:
+    """A record in *run* that says *fn* was called, as ``caller:line after its call(s) at [lines]``; '' for none: a
+    row of a caller of *fn* (the map's ``Calls.callers``) the run printed, which every way from the caller's entry
+    reaches only through one of its calls of *fn* (``flow.passes_before``, every call of *fn* in that caller handed at
+    once).  setupper's run prints ``end`` at 206 only after calling setup_jumbo_jobs at 202.  The caller's rows and
+    statements are read on the tree the map's calls index walked, as the flow asks."""
+    try:
+        types = asked._types()
+        tree = types.tree(fn.rel)
+        if tree is None:
+            return ""
+        func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
+        owned = types.method_class(fn.rel, func)
+        sites = PR._calls_index(types).callers(Target(fn.rel, func, owned[1] if owned else None))
+    except (StopIteration, LookupError, ValueError):
+        return ""
+    callers: dict[tuple[str, int], tuple[str, Any, list[ast.stmt]]] = {}
+    for site in sites:
+        if site.in_module:
+            continue
+        stmt = pathcond.site_of(site.call)
+        if isinstance(stmt, ast.stmt):
+            callers.setdefault((site.file, id(site.func)), (site.file, site.func, []))[2].append(stmt)
+    for rel, g, calls in callers.values():
+        try:
+            gfn = R.function(rel, g.name, within=[g.lineno])
+        except LookupError:
+            continue
+        for row in _rows_shown(gfn, run, mode):
+            printed = R.statement_at(g, row.line)
+            if printed is None:
+                continue
+            try:
+                if flow.passes_before(printed, calls):
+                    return f"{g.name}:{row.line} after its call(s) at {sorted({c.lineno for c in calls})}"
+            except ValueError:
+                continue
+    return ""
+
+
+def _rows_shown(fn: R.Function, run: Run, mode: str) -> list[R.Row]:
+    """*fn*'s rows with a record in *run* that no other function's print can have written (``rows.line_writers``;
+    one the map names no writer of counts too).  TaskCheckerThread.runImpl and TaskBrokerThread.runImpl both print
+    "getting Impl" through loggers with the same time-token mark: such a record does not say which ran."""
+    owner = f"{fn.rel}::{pathcond.qualified_name(fn.node)}"
+    sn = R.seen(fn, run, mode)
+    shown = []
+    for row in fn.rows:
+        for i, _, _ in sn.hits.get(row.line, ()):
+            if R.line_writers(run.records[i], run.log.name) <= {owner}:
+                shown.append(row)
+                break
+    return shown
 
 
 def spans(run: Run, window: tuple[str, str]) -> bool:

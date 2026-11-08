@@ -306,6 +306,7 @@ TEMPLATES: dict[str, str] = {
     "run-line": "{where} token={token} {n} record(s) {first} .. {last} (key on {found}{cut}{asked})",
     "log-at-machine": "{log}@{machine}",
     "read-as-cut": "; read as cut: {cut}",
+    "read-alone": "; read alone: its logger writes no mark, so the token is the line's first word{then}",
     "asked-for-its-rows": "; asked for {method}'s rows and WARNING and above",
     "mover-label": "mover {owner}",
     "others-excluded": "; the other {n_excluded} arm(s) left excluded ({excluded:join=, })",
