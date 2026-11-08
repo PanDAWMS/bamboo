@@ -50,12 +50,16 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+from bamboo.codemap import trace  # noqa: E402
+from bamboo.codemap.panda import changes as MC  # noqa: E402
+from bamboo.codemap.panda import evaluate as SE  # noqa: E402
 from bamboo.codemap.panda import flow, pathcond  # noqa: E402
+from bamboo.querier import asked, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
-from bamboo.querier import row_names  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
 from bamboo.querier.records import Run  # noqa: E402
@@ -352,16 +356,21 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
 def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env) -> dict[str, str]:
     """Put in *env* each bare local (``{N}`` or ``{str(N)}``) that a row of *fn* printed before *stmt* on every path to
     it (*before*, :func:`rows.must_rows`) -- a record of the row placed in the run (``Seen.unambiguous``) -- with one
-    value in every record of the run the row reads, and that nothing
-    between the print and *stmt* binds again (``printed.valid_before``): the value the pass's guards on the way to
-    *stmt* read.  Not a name *env* already knows, nor a row's spelling.
+    value in every record of the run the row reads, where the value shown is the one *stmt* reads: the value the
+    pass's guards on the way to *stmt* read.  Not a name *env* already knows, nor a row's spelling.
+
+    What reaches *stmt* from the print is the map's reading (``pathcond.held_since``): no other write of N may reach
+    it, and a value that is not an immutable scalar must not be changed in place on the way
+    (``changes.object_changes``).  Where only the shown value reaches, it is put as ``put_printed`` reads every hole.
+    Where a rebinding turns it on its way (a conversion), the type decides which way it took, so the text is read as
+    each value it can be -- its literal and itself, each printing as the text -- and put only when every way gives one
+    value (:func:`_through_conversions`).
 
     Rule 17 (:func:`stable_holes`) puts a local bound once in the whole function, wherever it is read; this reads one
-    print and one statement.  killJob's ``code`` is a parameter and is bound again at 853 (``code = str(code)``), so
-    rule 17 never puts it; printed at 840 as ``code=2``, it is ``"2"`` at every arm of the chain below, and ``code in
-    ['2', '4']`` holds at 1028 and ``code == '51'`` is false at 1047.  A rebinding ``N = str(N)`` is the one let
-    through: the print rendered ``{N}`` as ``str(N)``, so the text is put as a string, not as the literal it reads as
-    (``code=2`` is ``"2"``, not ``2``).  KNOWN_ISSUES.md K68."""
+    print and one statement.  killJob's ``code`` is a parameter and is bound again at 853 (``code = str(code)`` under
+    ``if isinstance(code, int):``), so rule 17 never puts it.  Printed at 840 as ``code=2``, an int 2 takes 853's way
+    and the text "2" the other, both ``"2"``: ``code in ['2', '4']`` holds at 1028 and ``code == '51'`` is false at
+    1047.  KNOWN_ISSUES.md K68."""
     values: dict[str, set[str]] = {}
     last: dict[str, tuple[ast.stmt, str, str]] = {}
     for s in before:
@@ -387,60 +396,90 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
             continue
         text = next(iter(seen_values))
         s, expr, source = last[name]
-        binders = _binders(fn.node, s, stmt, name)
-        if not binders and PR.valid_before(fn.node, s, stmt, PR.Hole.make(expr, text, source)):
+        held = pathcond.held_since(fn.node, name, stmt, s)
+        if held.others or not (held.raw or held.conversions):
+            continue
+        if not _immutable_scalar(text) and _changed_in_place(fn, name, s, stmt):
+            continue
+        if not held.conversions:
             env.put_printed(expr, text, source)
             put[expr] = text
-        elif binders and all(_str_of(b, name) for b in binders) and _rendered_plain(s, name):
-            env.put(name, text, f"{source}, as str: {name} = str({name}) at {sorted(b.lineno for b in binders)}")
+            continue
+        # the conversion's way is str() of the shown value: only where the print wrote it so
+        value = _through_conversions(held, name, text) if trace.renders_as_str(s, expr) else E.UNKNOWN
+        if value is not E.UNKNOWN:
+            turned = "; ".join(f"{ast.unparse(c.site)} at {c.site.lineno}" for c in held.conversions)
+            env.put(name, value, f"{source}, through {turned}")
             put[name] = text
     return put
 
 
-def _binders(func: ast.AST, row_stmt: ast.stmt, s_star: ast.stmt, name: str) -> list[ast.stmt | ast.expr | ast.excepthandler]:
-    """The nodes of *func* that bind the bare *name* -- or a chain under it -- after *row_stmt*'s line and before
-    *s_star*'s, or in a loop around *s_star* not around *row_stmt* (``printed.valid_before``'s region); an assignment
-    expression and a nested ``def``/``class`` too, which ``printed.valid_before`` does not read."""
-    around_row = list(pathcond.ancestors(row_stmt))
-    loops = [lp for lp in PR.loops_around(s_star, func) if lp not in around_row]
-    nodes = list(R.own_nodes(func))
-    nodes += [d for n in nodes for d in ast.iter_child_nodes(n) if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
-    out: list[ast.stmt | ast.expr | ast.excepthandler] = []
-    for n in nodes:
-        if not isinstance(n, (ast.stmt, ast.ExceptHandler, ast.NamedExpr)) or n is func:
-            continue
-        between = row_stmt.lineno < n.lineno < s_star.lineno
-        looped = any(lp is n or lp in pathcond.ancestors(n) for lp in loops)
-        if (between or looped) and any(PR.affects(t, frozenset({name})) for t, _ in PR.binds(n)):
-            out.append(n)
-    return out
+#: what a conversion's tests and value may call: builtins with no effect, and the builtin types a test names
+_PURE_BUILTINS: dict[str, Callable[..., Any]] = {f.__name__: f for f in (isinstance, str, int, float, bool, len, repr, abs, type)}
+_BUILTIN_TYPES = {t.__name__: t for t in (int, str, float, bool, bytes, list, dict, tuple, set, frozenset)}
+#: a value no call can change in place (agreed with the map for PVH): anything else is read with the calls on the way
+_SCALARS = (str, int, float, bool, bytes, type(None))
 
 
-def _str_of(node: ast.AST, name: str) -> bool:
-    """Whether *node* is ``name = str(name)``."""
-    return (
-        isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-        and node.targets[0].id == name and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
-        and node.value.func.id == "str" and len(node.value.args) == 1 and not node.value.keywords
-        and isinstance(node.value.args[0], ast.Name) and node.value.args[0].id == name
-    )
-
-
-def _rendered_plain(stmt: ast.stmt, name: str) -> bool:
-    """Whether the print *stmt* renders *name* as ``str(name)`` does: an f-string's ``{name}``, ``{name!s}`` or
-    ``{str(name)}``, no format spec."""
-    message = PR.message_of(stmt)
-    if not isinstance(message, ast.JoinedStr):
+def _immutable_scalar(text: str) -> bool:
+    """Whether the printed *text* reads back as an immutable scalar; a text it cannot read (an object's str) is not."""
+    try:
+        return isinstance(ast.literal_eval(text), _SCALARS)
+    except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
         return False
-    for v in message.values:
-        if not isinstance(v, ast.FormattedValue) or v.format_spec is not None or v.conversion not in (-1, ord("s")):
-            continue
-        held = v.value
-        if isinstance(held, ast.Call) and isinstance(held.func, ast.Name) and held.func.id == "str" and len(held.args) == 1:
-            held = held.args[0]
-        if isinstance(held, ast.Name) and held.id == name:
+
+
+def _changed_in_place(fn: R.Function, name: str, since: ast.stmt, at: ast.stmt) -> bool:
+    """Whether the object *name* holds may be changed in place between the print *since* and *at*
+    (``changes.object_changes``, on the corpus reading the map's calls index walked; True where it cannot be asked)."""
+    try:
+        types = asked._types()
+        tree = types.tree(fn.rel)
+        if tree is None:
             return True
-    return False
+        func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
+        first, last = R.statement_at(func, since.lineno), R.statement_at(func, at.lineno)
+        if first is None or last is None:
+            return True
+        return bool(MC.object_changes(PR._calls_index(types), fn.rel, func, name, first, last))
+    except (StopIteration, LookupError, ValueError):
+        return True
+
+
+def _through_conversions(held: pathcond.HeldSince, name: str, text: str) -> Any:
+    """The value a conversion-turned local holds where it is read, or ``UNKNOWN``: each value the printed *text* can be
+    (itself, and its literal where that prints as the text) takes a way -- a decided conversion's where its tests hold,
+    the shown value's where none does, both where that is not known -- and only one value on every way is put.
+    killJob's ``code=2``: an int 2 takes ``code = str(code)`` under ``isinstance(code, int)``, the text "2" the other
+    way, and both are ``"2"``."""
+    candidates: list[Any] = [text]
+    try:
+        literal = ast.literal_eval(text)
+    except (ValueError, SyntaxError, MemoryError, RecursionError, TypeError):
+        pass
+    else:
+        if str(literal) == text and not isinstance(literal, str):
+            candidates.append(literal)
+    got: dict[tuple[str, str], Any] = {}
+    for candidate in candidates:
+        env = SE.Env(call=_PURE_BUILTINS.get)
+        for type_name, kind in _BUILTIN_TYPES.items():
+            env.put(type_name, kind, "a builtin")
+        env.put(name, candidate, "the value shown")
+        ways: list[Any] = []
+        raw = held.raw
+        for conversion in held.conversions:
+            results = [SE.evaluate(test, env) for test in conversion.tests]
+            if any(r is not SE.UNKNOWN and not r for r in results):
+                continue
+            ways.append(conversion.value)
+            if conversion.decided and all(r is not SE.UNKNOWN for r in results):
+                raw = False
+        values = [SE.evaluate(way, env) for way in ways] + ([candidate] if raw else [])
+        if any(v is SE.UNKNOWN for v in values):
+            return E.UNKNOWN
+        got.update({(type(v).__name__, repr(v)): v for v in values})
+    return next(iter(got.values())) if len(got) == 1 else E.UNKNOWN
 
 
 def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, int] | None:

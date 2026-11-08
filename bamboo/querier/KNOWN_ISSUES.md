@@ -1899,7 +1899,7 @@ kind, step, code or branch count:
   pair crosses it, so the server's 'defined' is read as no row of the arm's pass, not as a row its pass caused.
 - A status's question, where the row's writer is the answer ("which run wrote the row"): the same reading.
 
-### K68. A local printed before an arm on every path is read by the arm's guards, through `N = str(N)` too
+### K68. A local printed before an arm on every path is read by the arm's guards, through a conversion too
 
 H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column
 of the row and an attribute of self for its class (`stable_holes`), and, in U2's passes, a local bound once in the
@@ -1915,11 +1915,16 @@ Now (`which_ran.printed_before`) step 5 also reads a bare local N, printed as `{
   129 instead (`start for {commandStr}`);
 - every record the row reads in the run shows one value.  With two calls printing two values, which one ran the arm
   is not known;
-- nothing binds N, or a chain under it, after the print's line and before the arm's, nor in a loop around the arm
-  that does not hold the print (`printed.valid_before`, and an assignment expression or a nested def or class).  One
-  rebinding is let through: `N = str(N)` and no other, where the print renders N as str(N) does (`{N}`, `{N!s}` or
-  `{str(N)}`, no format spec).  The text is then put as a string: `code=2` is `"2"`, and `code in ['2', '4']` holds.
-  Otherwise the text is read as the literal it spells (`put_printed`): `ignore_hard_exhausted=True` is True.
+- the value shown is the one the arm reads, by the map's reading (`pathcond.held_since`, PVH): no other write of N --
+  a binding, a `del`, the function's entry -- reaches the arm past the print, and a value that is not an immutable
+  scalar (an object's str, a container) is not changed in place on the way (`changes.object_changes`).  Where only the
+  shown value reaches, the text is read as the literal it spells (`put_printed`): `ignore_hard_exhausted=True` is
+  True, as every hole is read.  Where a rebinding turns it on its way (a conversion: `code = str(code)` under `if
+  isinstance(code, int):`), the type decides which way it took: the text is read as each value it can be (itself, and
+  its literal where that prints as the text), each takes the way its tests give, and it is put only when every way
+  gives one value -- `code=2` is `"2"` on both, and `code in ['2', '4']` holds.  Under `if flag:` an int 2 may reach
+  the arm as 2, so nothing is put.  The conversion's way needs the print to write the value as str() does
+  (`trace.renders_as_str`).
 A name the reading already holds, or a spelling of a row, is left as it was.
 
 Rule 17 reads a local wherever the function reads it, so only one bound once.  This reads one print and one statement.
@@ -1937,15 +1942,20 @@ them, and no choice, END or STOP kind:
 - 8 outputs only add a step-5 reason to an arm already excluded (updateJobStatus 355, setup_destination 924,
   TaskCommando 181, retryTask_JEDI 5330), and MT-exhausted-late to retryTask_JEDI 5058 too.
 p2a read 133's ambiguous record in 3 of them; no verdict moved by it, and p2b reads 129 there.
+The move to PVH was measured as p2n against p2o (querier-v 3eb560c, which reads by line span as p2b; dump 5c1172d).
+No run crashed, no verdict moves, and attr and MT do not move:
+- the 9 killJob cases change the wording of their 36 step-5 reasons only ("as str: code = str(code) at [853]" ->
+  "through code = str(code) at 853");
+- A-rec and N-rec add a step-5 reason to updateJobStatus 229, already excluded by rule 4.  51 prints
+  `status=running`, and the binding at 229 reaches 227 only by a second pass of `for iTry in range(nTry)` after `nTry
+  = 1`, which the map's flow reads as one pass; the line span took 229 as a binding on the way.
 
-*Shows:* "step 5: guard \"not (code in ['2', '4'])\" is false ({'code': 'hole of killJob:840 at <span>, as str: code =
-str(code) at [853]'})".
+*Shows:* "step 5: guard \"not (code in ['2', '4'])\" is false ({'code': 'hole of killJob:840 at <span>, through code =
+str(code) at 853'})".
 *Revisit:*
-- The static half -- what binds N between the print and the arm, `N = str(N)`, how the print renders N -- is a
-  reading of the code, which the map's shared parts give (11-01): asked of the map as one part (PVH), by flow.  This
-  one reads the lines between, so a binding on no path from the print to the arm keeps N unread.
-- A print on some paths to the arm only, a conversion other than str (`int(code)`), a `!r` or a format spec: not
-  read.
+- A print on some paths to the arm only; a conversion of a conversion (the map reads it as another write); a test of
+  a conversion that reads another name (`if flag:`), which the shown values could decide.
+- An attribute chain (`self.job.jobStatus`) is PVH's v2, for (iii), J and P1.
 
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 

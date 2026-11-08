@@ -9085,12 +9085,27 @@ class Proxy:
         else:
             self.logger.info(f"executing {cmd}")
             job.jobStatus = "toretry"
+
+    def flagged(self, job, code, flag):
+        self.logger.debug(f"code={code} flag={flag}")
+        if flag:
+            code = str(code)
+        if code == 2:
+            job.jobStatus = "closed"
+
+    def listed(self, job, items):
+        self.logger.debug(f"items={items}")
+        items.append(1)
+        if items != []:
+            job.jobStatus = "closed"
 """
 
 
 def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read_by_the_arms_guards(tmp_path):
-    # killJob prints ``code={code}`` at 840 and binds ``code = str(code)`` at 853: printed "2", code is "2" at every arm
-    # of the chain below, so ``code in ['2', '4']`` holds at 1028 and the arms after it are excluded (MJE-7383377087)
+    # killJob prints ``code={code}`` at 840 and binds ``code = str(code)`` at 853 under ``isinstance(code, int)``:
+    # printed "2", an int takes 853's way and a text the other, so code is "2" at every arm of the chain below, ``code
+    # in ['2', '4']`` holds at 1028 and the arms after it are excluded (MJE-7383377087).  What reaches the arm from the
+    # print is the map's reading (pathcond.held_since)
     (_corpus(tmp_path) / "pandaserver" / "p.py").write_text(_PRINTED_BEFORE)
     lines = _PRINTED_BEFORE.splitlines()
     at = {name: lines.index(text) + 1 for name, text in {
@@ -9099,11 +9114,12 @@ def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read
     at["jedi"] = at["expire"] + 2
     at["pilot"] = lines.index('        if user == "pilot":') + 2
     kill = lines.index('                job.jobStatus = "aborting"') + 1
+    flagged, listed = len(lines) - 6, len(lines)
     stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
     for name, texts in {"one": ["code=2 user=pilot hard=False", "done late=False"],
                         "two": ["code=2 user=pilot hard=False", "code=51 user=pilot hard=False", "done late=False",
                                 "done late=False"],
-                        "dup": ["executing retry"]}.items():
+                        "dup": ["executing retry"], "flag": ["code=2 flag=True"], "list": ["items=[]"]}.items():
         (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
     out = _ok(
         _run(
@@ -9125,8 +9141,15 @@ def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read
             run, = runs_for(read_log("dup.log"), "1")
             c = Candidate("pandaserver/p.py", "command", [KILL], [run.log.name], run=run)
             got["dup"] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, question_run=run, env=E.Env()).verdicts}
+            run, = runs_for(read_log("flag.log"), "1")
+            c = Candidate("pandaserver/p.py", "flagged", [FLAGGED], [run.log.name], run=run)
+            got["flag"] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, question_run=run, env=E.Env()).verdicts}
+            run, = runs_for(read_log("list.log"), "1")
+            c = Candidate("pandaserver/p.py", "listed", [LISTED], [run.log.name], run=run)
+            got["list"] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, question_run=run, env=E.Env()).verdicts}
             print(json.dumps(got))
-            """.replace("ARMS", str(sorted(v for k, v in at.items() if k != "str"))).replace("KILL", str(kill)),
+            """.replace("ARMS", str(sorted(v for k, v in at.items() if k != "str"))).replace("KILL", str(kill))
+            .replace("FLAGGED", str(flagged)).replace("LISTED", str(listed)),
         )
     )
     got = {name: {int(k): v for k, v in arms.items()} for name, arms in json.loads(out.splitlines()[-1]).items()}
@@ -9135,12 +9158,12 @@ def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read
     def step5(verdict: list) -> list[str]:
         return [r for r in verdict[1] if r.startswith("step 5")]
 
-    # code is put as the text printed, a string: the print rendered str(code), and str(code) is all that binds it after
+    # code is put as the text printed, a string: whichever type it had, the way it took makes it "2"
     assert not step5(one[at["expire"]]), one[at["expire"]]
     jedi = step5(one[at["jedi"]])
     assert one[at["jedi"]][0] == "excluded" and len(jedi) == 1, one[at["jedi"]]
     assert jedi[0].startswith("step 5: guard \"not (code in ['2', '4'])\" is false"), jedi
-    assert f"as str: code = str(code) at [{at['str']}]" in jedi[0], jedi
+    assert f"through code = str(code) at {at['str']}" in jedi[0], jedi
     # a local bound nowhere after the print is put as the literal it reads as: "False" is False, not a string
     assert one[at["hard"]][0] == "excluded" and step5(one[at["hard"]])[0].startswith("step 5: guard 'hard' is false"), one[at["hard"]]
     # user is bound again after the print, and late is printed only after its arm: neither is read
@@ -9151,6 +9174,12 @@ def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read
     # "executing retry" is read alike by the print before the kill arm and by the one in the other arm: no record of
     # the first, so its cmd is not read (TaskCommando's runImpl 133 and 235)
     assert not step5(got["dup"][kill]), got["dup"][kill]
+    # ``if flag: code = str(code)``: flag is not known where the way is chosen, so an int 2 may reach the arm as 2 and the
+    # text as "2" -- not one value, so code is not read (read as "2", ``code == 2`` would exclude the arm)
+    assert not step5(got["flag"][flagged]), got["flag"][flagged]
+    # a list is changed in place by the append after the print (the map's changes.object_changes): "[]" is not read
+    # (read, ``items != []`` would exclude the arm)
+    assert not step5(got["list"][listed]), got["list"][listed]
 
 
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
