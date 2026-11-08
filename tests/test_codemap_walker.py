@@ -94,6 +94,15 @@ def asked(job, task: Task, items, m, flag: bool, held):
     put(m)  # C7
     held.append(job)  # C8
     fill(flag)  # C9
+
+
+def guarded(job, log):
+    try:
+        if job:  # S6
+            x = 1  # T1
+            job.close()  # T2
+    except Exception:
+        log.error("failed")  # T3
 """
 
 
@@ -526,3 +535,46 @@ def test_a_statement_can_raise_as_the_map_reads_exceptions():
     loop = ast.parse("for i in xs:\n    y = i\n").body[0]
     pathcond.attach_parents(loop)
     assert not walker.may_divert(loop)
+
+
+def test_a_run_s_marks_say_where_a_path_can_leave_by_an_exception(module, calls):
+    """Handed the handlers a run entered, any statement of their try leaves -- the test, ``x = 1`` --, whatever
+    it holds; handed none, none does; the map's own reading leaves at the call alone."""
+    handler = _at(module, "T3").parent  # type: ignore[attr-defined]
+    lines = {mark: _at(module, mark).lineno for mark in ("S6", "T1", "T2")}
+
+    def left(**kw) -> list[str]:
+        w = _walker(module, calls, "guarded", "T1", require_all=False, **kw)
+        return sorted(p.left for p in w.run(walker.region_of(_at(module, "S6"))))
+
+    assert left() == ["", "", f"call at {lines['T2']}"]
+    assert left(raised=[]) == ["", ""]
+    # the copy leaving at ``x = 1`` is alike to the one leaving at the test, and merges into it
+    assert left(raised=[handler]) == [
+        "",
+        "",
+        f"call at {lines['S6']}",
+        f"call at {lines['T2']}",
+    ]
+    literal = _at(module, "T1")
+    readers = [
+        _walker(module, calls, "guarded", "T1", raised=raised)
+        for raised in (None, [], [handler])
+    ]
+    assert [w.raises(literal) for w in readers] == [False, False, True]
+
+
+def test_a_statement_passed_whole_diverts_by_a_raise_only_to_a_handler_around_it():
+    """A loop inside a try whose handler the run entered can be left by a raise; the try passed whole keeps its
+    own handler's raise inside; with no handler entered nothing raises."""
+    tree = ast.parse(
+        "try:\n    for i in xs:\n        y = f(i)\nexcept Exception:\n    pass\n"
+    )
+    pathcond.attach_parents(tree)
+    guarded = tree.body[0]
+    assert isinstance(guarded, ast.Try)
+    loop, handler = guarded.body[0], guarded.handlers[0]
+    assert walker.may_divert(loop)
+    assert walker.may_divert(loop, [handler])
+    assert not walker.may_divert(loop, [])
+    assert not walker.may_divert(guarded, [handler])

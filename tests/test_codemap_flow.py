@@ -9,7 +9,7 @@ import pytest
 
 from bamboo.codemap.gates import with_exits_are_read
 from bamboo.codemap.models import MapFragment
-from bamboo.codemap.panda import flow, pathcond
+from bamboo.codemap.panda import flow, pathcond, reaching
 
 FLOW = """\
 def handled(proxy, log):
@@ -94,6 +94,29 @@ def setup(log, items, flag):
     except Exception:
         log.error("failed")  # P9
     log.debug(f"done {prepare(3)}")  # P10
+
+
+def guarded(log):
+    log.debug("start")  # B1
+    try:
+        x = 1  # B2
+        prepare(1)  # B3
+        prepare(2)  # B4
+    except Exception:
+        log.error("failed")  # B5
+    log.debug("end")  # B6
+
+
+def nested(log):
+    try:
+        x = 1  # C0
+        try:
+            x = 2  # C1
+            x = 3  # C2
+        except Exception:
+            pass  # C3
+    except Exception:
+        log.error(f"outer {x}")  # C4
 """
 
 
@@ -179,6 +202,50 @@ def test_a_handler_print_says_a_call_ran_only_if_nothing_before_it_can_raise() -
     say the call ran; the logger call itself, entered before it can raise, is passed."""
     assert not flow.passes_before(S["P9"], [S["P8"]])
     assert flow.passes_before(S["P9"], [S["P7"]])
+
+
+def _handler(marker: str) -> ast.ExceptHandler:
+    handler = S[marker].parent  # type: ignore[attr-defined]
+    assert isinstance(handler, ast.ExceptHandler)
+    return handler
+
+
+def test_a_run_with_no_mark_ran_every_try_to_its_end() -> None:
+    """Handed no handler, no statement raises: the handler is not entered, and the try's last call ran before
+    ``end`` -- where the map's own reading has ``prepare(1)`` raise past it."""
+    assert not flow.runs_after(S["B1"], S["B5"], raised=[])
+    assert flow.passes_before(S["B6"], [S["B4"]], raised=[])
+    assert not flow.passes_before(S["B6"], [S["B4"]])
+
+
+def test_a_handler_whose_mark_the_run_shows_is_entered_from_any_statement_of_its_try() -> (
+    None
+):
+    """Which statement raised is not said: the try may have been left before ``x = 1`` as well, a literal the
+    map's own reading never has raise."""
+    raised = [_handler("B5")]
+    assert flow.runs_after(S["B1"], S["B5"], raised=raised)
+    assert not flow.passes_before(S["B5"], [S["B3"]], raised=raised)
+    assert flow.passes_before(S["B5"], [S["B3"]])
+    assert flow.runs_after(S["B1"], S["B6"], raised=raised)
+
+
+def test_a_catch_all_the_run_did_not_enter_stops_a_raise_inside_it() -> None:
+    """The silent inner handler would have caught a raise of ``x = 2`` or ``x = 3``: only the outer try's own
+    statements raise into the outer handler, which then reads ``x = 1`` alone."""
+    outer = _handler("C4")
+    read = next(
+        node
+        for node in ast.walk(S["C4"])
+        if isinstance(node, ast.Name) and node.id == "x"
+    )
+    writes = [S["C0"], S["C1"], S["C2"]]
+    assert reaching.reaching(read, writes, raised=[outer]) == [S["C0"]]
+    assert reaching.reaching(read, writes) == []
+    assert not flow.runs_after(S["C0"], S["C3"], raised=[outer])
+    assert reaching.catching_try(S["C1"], [outer]) is None
+    assert reaching.catching_try(S["C0"], [outer]) is outer.parent  # type: ignore[attr-defined]
+    assert reaching.catching_try(S["B6"], [_handler("B5")]) is None
 
 
 def test_a_loop_the_run_went_round_once_has_no_way_back() -> None:

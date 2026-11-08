@@ -16,7 +16,10 @@ question is :func:`runs_after`, and the others are made of it.
   its ``break`` only; a statement that can raise, to each handler around it and on out -- any attribute,
   subscript, call or format, a print's own logger call included; ``finally`` on every way out.
 * **What a run adds.**  *once*: loops the run went round exactly once (a reader's ``once_loops``) have no way
-  back and run their body, as a ``for`` over ``range(1)`` does.
+  back and run their body, as a ``for`` over ``range(1)`` does.  *raised*: the handlers whose marks the run
+  shows; handed them, a raise is read by where it is, not by what raises -- any statement of a ``try`` holding
+  one, before a catch-all not among them -- and only they are entered (:func:`reaching.catching_try`).  A run
+  with no mark hands none: every ``try`` ran to its end.
 * **Not read.**  A ``with`` whose manager swallows what its body raised, and a call that never returns.  The
   first is watched: :func:`swallowing_managers` lists each such manager of the corpus into the dump, and the
   ``with-exits-are-read`` gate fails on one (none in PanDA).
@@ -69,13 +72,21 @@ def runs_after(
     *,
     once: Sequence[ast.AST] = (),
     printed: bool = False,
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> bool:
     """Whether one call can run *then* after *first* has started -- or, *printed*, after the print *first* printed
     -- with none of *stops* (prints, passed once they printed) run between."""
     _one_function(first, then)
     killers = [stop for stop in stops if stop is not first]
     return bool(
-        reaching(then, [first], killers, entered=[] if printed else [first], once=once)
+        reaching(
+            then,
+            [first],
+            killers,
+            entered=[] if printed else [first],
+            once=once,
+            raised=raised,
+        )
     )
 
 
@@ -86,6 +97,7 @@ def runs_between(
     prints: Sequence[ast.stmt],
     *,
     once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> bool:
     """Whether *site* can run after the print *first* and before the print *last*, with none of *prints* between.
 
@@ -94,9 +106,9 @@ def runs_between(
     end of an arm, and its next print is in another."""
     if any(site is one for one in prints):
         return False
-    return runs_after(first, site, prints, once=once, printed=True) and runs_after(
-        site, last, prints, once=once
-    )
+    return runs_after(
+        first, site, prints, once=once, printed=True, raised=raised
+    ) and runs_after(site, last, prints, once=once, raised=raised)
 
 
 def passes_through(
@@ -106,18 +118,25 @@ def passes_through(
     prints: Sequence[ast.stmt],
     *,
     once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> bool:
     """Whether every way from the print *first* to the print *last* with none of *prints* between passes *site*,
     so two records in a row say the call ran it: ``TaskRefinerThread.runImpl`` prints at 205 and 563 around its
     call of ``extractCommon`` at 211, which prints nothing."""
-    if not runs_between(first, last, site, prints, once=once):
+    if not runs_between(first, last, site, prints, once=once, raised=raised):
         return False
     stops = [stop for stop in prints if stop is not first]
-    return not reaching(last, [first], [*stops, site], entered=[site], once=once)
+    return not reaching(
+        last, [first], [*stops, site], entered=[site], once=once, raised=raised
+    )
 
 
 def passes_before(
-    printed: ast.stmt, sites: Sequence[ast.stmt], *, once: Sequence[ast.AST] = ()
+    printed: ast.stmt,
+    sites: Sequence[ast.stmt],
+    *,
+    once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> bool:
     """Whether every way from the entry of the function holding the print *printed* to its end passes one of
     *sites*, so its record says the call ran one of them: ``setupper_atlas_plugin.run`` prints ``end`` at 206
@@ -132,20 +151,26 @@ def passes_before(
     func = _scope(printed)
     if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
         raise ValueError("the flow answers from a function's entry")
-    return not reaching(printed, [func.args], sites, entered=sites, once=once)
+    return not reaching(
+        printed, [func.args], sites, entered=sites, once=once, raised=raised
+    )
 
 
 def together(
-    printed: ast.stmt, site: ast.stmt, *, once: Sequence[ast.AST] = ()
+    printed: ast.stmt,
+    site: ast.stmt,
+    *,
+    once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> bool:
     """Whether one call can print *printed* and run *site*, in either order.
 
     Where it cannot, a call that printed it did not run *site*: below the ``return`` every way from the print
     ends at, in the other arm of an ``if`` no loop holds with it, in another arm of a pass of a loop *once* says
     went round once."""
-    return runs_after(printed, site, once=once, printed=True) or runs_after(
-        site, printed, once=once
-    )
+    return runs_after(
+        printed, site, once=once, printed=True, raised=raised
+    ) or runs_after(site, printed, once=once, raised=raised)
 
 
 # -- the premise: no with goes on past a raise in its body ------------------------------------------------------ #

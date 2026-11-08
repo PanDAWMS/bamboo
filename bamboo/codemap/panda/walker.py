@@ -10,7 +10,9 @@ and how it left.
 * **Leaving.**  A ``return``, ``raise``, ``break`` or ``continue`` ends the path (``left``), and a statement that
   can raise, as the map reads exceptions (:func:`reaching.may_raise`: any expression but a literal, a name or a
   display of them, an unpacking, an ``assert``, ``del`` or ``import`` -- a logger's call too), forks a copy that
-  leaves there, ``left`` saying ``call at <line>`` (:meth:`Walker.raises`).
+  leaves there, ``left`` saying ``call at <line>`` (:meth:`Walker.raises`).  Handed *raised*, the handlers whose
+  marks a run shows, a statement leaves so only where its raise reaches one of them, whatever it holds
+  (:func:`reaching.catching_try`): a run that shows none ran every ``try`` to its end.
 * **Passed whole.**  A loop, a ``try`` or a ``match`` is one step: what it binds becomes unknown, the rows in it
   are passed in their order, and a copy leaves where it can divert.  A ``with`` is entered.
 * **Calls.**  A call changes what it is handed, as the map reads the call (:func:`changes.call_changes`): a value
@@ -44,7 +46,7 @@ import functools
 import weakref
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.callfacts import LOG_LEVELS
@@ -165,12 +167,23 @@ def is_log_call(node: ast.AST) -> bool:
     )
 
 
-def may_divert(stmt: ast.stmt) -> bool:
+def may_divert(
+    stmt: ast.stmt, raised: Optional[Collection[ast.ExceptHandler]] = None
+) -> bool:
     """Whether control can leave *stmt* other than by falling through it: a jump in it, or a statement in it that
-    can raise (:func:`can_raise`)."""
+    can raise (:func:`can_raise`) -- handed *raised*, the handlers a run entered, one whose raise reaches one of
+    them in a ``try`` around *stmt* (:func:`reaching.catching_try`)."""
     if isinstance(stmt, JUMPS) or contains(stmt, JUMPS):
         return True
-    return any(isinstance(n, ast.stmt) and can_raise(n) for n in own_nodes(stmt))
+    if raised is None:
+        return any(isinstance(n, ast.stmt) and can_raise(n) for n in own_nodes(stmt))
+    around = {id(node) for node in pathcond.ancestors(stmt)}
+    for node in own_nodes(stmt):
+        if isinstance(node, ast.stmt):
+            caught = reaching.catching_try(node, raised)
+            if caught is not None and id(caught) in around:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------- reading expressions
@@ -843,8 +856,11 @@ class Walker:
         bound: tuple = (),
         track: bool = False,
         require_all: bool = True,
+        raised: Optional[Collection[ast.ExceptHandler]] = None,
     ) -> None:
         self.func = func
+        #: the handlers whose marks the run shows (:func:`reaching.catching_try`); None reads (a)
+        self.raised = raised
         self.corpus = corpus
         self.file = file
         self.bound_classes = bound
@@ -878,8 +894,11 @@ class Walker:
         """Put in *env* what the reader knows on *p* beyond what the path bound."""
 
     def raises(self, node: ast.AST) -> bool:
-        """Whether a path may leave at *node* by an exception (:func:`can_raise`)."""
-        return can_raise(node)
+        """Whether a path may leave at *node* by an exception (:func:`can_raise`); handed *raised*, whether a raise
+        at *node* reaches one of them (:func:`reaching.catching_try`)."""
+        if self.raised is None:
+            return can_raise(node)
+        return reaching.catching_try(node, self.raised) is not None
 
     def roots(self, node: ast.AST) -> set[str]:
         """The names the calls in *node* are handed or called on (:func:`mutating_roots`)."""
@@ -1058,7 +1077,7 @@ class Walker:
 
     def opaque(self, s: ast.stmt, p: Path) -> list[Path]:
         out = []
-        if may_divert(s):
+        if may_divert(s, self.raised):
             jumps = contains(s, (ast.Return, ast.Raise))
             out.append(
                 self.leave(
