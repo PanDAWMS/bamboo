@@ -539,6 +539,42 @@ def test_a_call_drops_what_it_may_change_of_a_chain_it_is_handed_as_the_map_read
     }
 
 
+def _marks(module, calls, mark):
+    """The marks a path takes across the call at *mark* in ``asked``, and those a row passed before takes."""
+    w = walker.Walker(
+        _func(module, "asked"),
+        _at(module, mark),
+        target="",
+        relevant={"job", "task", "items", "m", "flag", "held"},
+        order={},
+        decide=_both,
+        check_row=_passes,
+        corpus=calls,
+        file=FILE,
+    )
+    q = walker.Path(since={0: frozenset()})
+    w.calls(q, _at(module, mark))
+    return q.marks, q.since[0]
+
+
+def test_a_call_marks_what_it_may_change_as_the_map_reads_the_call(module, calls):
+    """As a binding marks the text it binds, a call marks what it may change of what it is handed, by the reading
+    that drops what the path holds (walker.change_mark): a store of ``.status`` marks ``job.status``; an append to
+    ``job.files`` what ``job.files`` holds; an item stored, by its key; an object a method is called on, or put
+    where it is not followed, anything of it.  A callee that only reads marks nothing."""
+    expected = {
+        "C2": set(),
+        "C3": {"job.status"},
+        "C4": {"job.files()"},
+        "C5": {"task.splitRule"},
+        "C6": {"items()"},
+        "C7": {"m['j']"},
+        "C8": {"held()", "job()"},
+    }
+    for mark, marks in expected.items():
+        assert _marks(module, calls, mark) == (marks, marks), mark
+
+
 def test_a_test_reads_a_chain_by_its_identity_or_by_what_it_holds():
     """``is``, a literal compared, a type and a key read a chain's identity; anything else what it holds; a method
     called reads its receiver's content, and a function called by its name nothing of its own."""

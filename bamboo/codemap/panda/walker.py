@@ -20,7 +20,10 @@ and how it left.
   where the call may change that name's object at the chain's first step -- at any key for a bare name, and for the
   receiver of a method a test calls (``task.useScout()``).  It stays where the object cannot change (its stated
   type, a value or a fact the path holds) and where the test reads only the chain's identity (:func:`readings`): a
-  change inside the chain's own value leaves that, and no call binds its caller's name anew.
+  change inside the chain's own value leaves that, and no call binds its caller's name anew.  What a call may
+  change marks the path as a binding does (:func:`change_mark`), by the same reading: ``r.a`` where it stores
+  ``r.a``, ``r.a()`` where it may change what ``r.a`` holds, ``r()`` where it may change any of ``r``; a call that
+  changes nothing of a name marks nothing.
 * **Rows.**  The reader's *order* -- the rows it asks of, by line, each with its rank -- is passed in that order: a
   path passing a row out of it, or missing one where *require_all*, is dropped, and the reader's *check_row* may
   drop it at each.
@@ -53,7 +56,12 @@ from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.callfacts import LOG_LEVELS
-from bamboo.codemap.models import CHANGE_INNER, CHANGE_UNREAD
+from bamboo.codemap.models import (
+    CHANGE_DELETE,
+    CHANGE_INNER,
+    CHANGE_STORE,
+    CHANGE_UNREAD,
+)
 from bamboo.codemap.panda import changes, evaluate, pathcond, reaching
 from bamboo.codemap.panda.recognizers.selection import log_level
 
@@ -248,6 +256,18 @@ def affects(bound: str, read: frozenset[str] | set[str]) -> bool:
         or bound.startswith((c + ".", c + "["))
         for c in read
     )
+
+
+def change_mark(name: str, change: changes.ObjectChange) -> str:
+    """The mark a call's *change* of the object *name* holds puts on a path, beside the texts a binding marks:
+    ``name.a`` (``name['k']``) where the call stores or deletes that key, ``name.a()`` where it may change what the
+    key holds, ``name()`` where it may change the object at any key."""
+    if change.key == changes.EVERY:
+        return f"{name}()"
+    step = change.key if change.key.startswith(".") else f"[{change.key}]"
+    if change.kind in (CHANGE_STORE, CHANGE_DELETE):
+        return name + step
+    return f"{name}{step}()"
 
 
 def _flat(target: ast.expr) -> list[ast.expr]:
@@ -1211,16 +1231,22 @@ class Walker:
 
     def call(self, q: Path, roots: set[str], node: ast.AST) -> None:
         """Drop what the calls in *node* may change of what the path holds of a chain rooted at one of *roots*: the
-        values it bound there, save the target's (read through ``target_called``), and the facts reading them."""
+        values it bound there, save the target's (read through ``target_called``), and the facts reading them; and
+        mark what they may change (:func:`change_mark`)."""
         roots = roots & self.rel_roots
         if not roots:
             return
-        marks = frozenset(f"{r}()" for r in roots)
-        q.marks |= marks
-        q.since = {line: m | marks for line, m in q.since.items()}
         made = [
             n for n in own_nodes(node) if isinstance(n, ast.Call) and not is_log_call(n)
         ]
+        marks = frozenset(
+            change_mark(r, change)
+            for r in roots
+            for call in made
+            for change in self.call_changes(call, r)
+        )
+        q.marks |= marks
+        q.since = {line: m | marks for line, m in q.since.items()}
         facts, state = dict(q.facts), dict(q.state)
 
         def changed(read: Iterable[tuple[ast.expr, str]]) -> bool:
