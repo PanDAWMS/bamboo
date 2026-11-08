@@ -7849,6 +7849,9 @@ def test_a_status_arm_whose_value_a_called_method_returns_reads_the_maps_ways_to
 
             rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            # a guard's call (spec.is_hpo()) is read through the pure functions, which E fills from pandaserver at the first
+            # call; the dev install (CI) has no pandaserver, and the call is no pure function either way
+            E.PURE.setdefault("<no pure function is read here>", None)
             rerun.pathcond = N(arm_condition=lambda site: [], path_condition=lambda site: [],
                                exits_above_at=lambda site: [], ancestors=lambda node: iter(()))
             rerun.mark_handed = lambda owner, line, run: []
@@ -8955,6 +8958,9 @@ def test_an_attributes_one_writer_left_none_dropped_by_a_guard_is_the_only_way_t
 
             rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
+            # a guard's call (task.useScout()) is read through the pure functions, which E fills from pandaserver at the first
+            # call; the dev install (CI) has no pandaserver, and the call is no pure function either way
+            E.PURE.setdefault("<no pure function is read here>", None)
             guards = {("gen", 9): ["task.x", "task.y", "not (task.useScout())"], ("put", 7): ["task.z"]}
             rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
                                exits_above_at=lambda site: [])
