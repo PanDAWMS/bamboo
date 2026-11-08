@@ -103,6 +103,25 @@ def guarded(job, log):
             job.close()  # T2
     except Exception:
         log.error("failed")  # T3
+
+
+def forgot(job, flag, kind, log):
+    if flag:  # G1
+        log.debug("on")
+    if kind == "a":  # G2
+        log.debug("a")
+    if job.ready and not flag:  # G3
+        job.status = "b"  # G4
+
+
+def witness(kind, log):
+    if kind == "a":  # W1
+        log.debug("a")
+    if kind.upper() == "A":  # W2
+        log.debug("upper")
+    fill(kind)  # W3
+    if kind.upper() == "A":  # W4
+        log.debug("again")  # W5
 """
 
 
@@ -309,15 +328,87 @@ def test_a_branch_taken_settles_its_atoms(module, calls):
         relevant={"toSkip"},
         decide=_decide,
         require_all=False,
+        track=True,
     )
     paths = w.run(walker.region_of(_at(module, "S4")))
     # the second if is decided by what taking the first one settled: two ways, not four (beside the copies left
-    # where a statement can raise)
+    # where a statement can raise); after the last statement nothing reads a fact, so none is held
     through = [p for p in paths if not p.left]
-    assert len(through) == 2
-    assert sorted((p.facts.get("toSkip"), p.arm) for p in through) == [
-        (False, False),
-        (True, True),
+    s4, s5 = _at(module, "S4").lineno, _at(module, "S5").lineno
+    assert sorted((p.tests, p.arm) for p in through) == [
+        (((s4, False), (s5, True)), True),
+        (((s4, True), (s5, False)), False),
+    ]
+    assert [p.facts for p in through] == [{}, {}]
+
+
+def _asked(module, calls, func, arm, mark, relevant):
+    """The walk of *func* from its first ``if``, with what each path at the ``if`` at *mark* held and the ways it went
+    there."""
+    asked = []
+
+    def decide(w: walker.Walker, s: ast.If, p: walker.Path) -> list[bool]:
+        ways = _decide(w, s, p)
+        if s is _at(module, mark):
+            asked.append((dict(p.facts), ways))
+        return ways
+
+    w = _walker(
+        module,
+        calls,
+        func,
+        arm,
+        relevant=relevant,
+        decide=decide,
+        require_all=False,
+    )
+    paths = w.run(walker.region_of(_func(module, func).body[0]))
+    return paths, asked
+
+
+def test_a_path_keeps_only_the_facts_a_later_test_reads(module, calls):
+    """No later test reads ``kind == 'a'``: the two ways through G2 are one at G3, for each way through G1.  G3 reads
+    ``flag`` as the operand of a ``not`` in an ``and``: kept, it decides G3 where ``flag`` held.  After G3 nothing
+    reads a fact, and the ways that missed G4 are one."""
+    paths, asked = _asked(
+        module, calls, "forgot", "G4", "G3", {"flag", "kind", "job.ready", "job.status"}
+    )
+    assert sorted(asked, key=repr) == [
+        ({"flag": False}, [True, False]),
+        ({"flag": True}, [False]),
+    ]
+    through = [p for p in paths if not p.left]
+    assert sorted(p.arm for p in through) == [False, True]
+    assert walker.lookups(ast.parse("a and not (b or c)", mode="eval").body) == {
+        "a and (not (b or c))",
+        "a",
+        "not (b or c)",
+        "b or c",
+        "b",
+        "c",
+    }
+
+
+def test_a_witness_stays_while_a_later_call_is_handed_its_name(module, calls):
+    """``kind == 'a'`` says ``kind`` holds a ``str``, which no call changes.  No test reads it again, but W3 hands
+    ``kind`` to a call: kept, it keeps ``kind.upper() == 'A'`` across that call, and W4 goes the way W2 went.  Where
+    ``kind == 'a'`` did not hold, the call drops what W2 settled, and W4 goes both ways."""
+    assert walker.witnessed("kind == 'a'", True) == {"kind"}
+    assert walker.witnessed("kind == 'a'", False) == set()
+    assert walker.witnessed("kind != 'a'", False) == {"kind"}
+    assert walker.witnessed("kind.upper() == 'A'", True) == set()
+    _, asked = _asked(module, calls, "witness", "W5", "W4", {"kind"})
+    held = sorted(
+        (
+            (facts.get("kind == 'a'"), facts.get("kind.upper() == 'A'"), ways)
+            for facts, ways in asked
+        ),
+        key=repr,
+    )
+    assert held == [
+        (None, None, [True, False]),
+        (True, False, [False]),
+        (True, True, [True]),
     ]
 
 
