@@ -1899,6 +1899,54 @@ kind, step, code or branch count:
   pair crosses it, so the server's 'defined' is read as no row of the arm's pass, not as a row its pass caused.
 - A status's question, where the row's writer is the answer ("which run wrote the row"): the same reading.
 
+### K68. A local printed before an arm on every path is read by the arm's guards, through `N = str(N)` too
+
+H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column
+of the row and an attribute of self for its class (`stable_holes`), and, in U2's passes, a local bound once in the
+whole function (rule 17).  A local bound more than once was read nowhere, even where nothing binds it between its
+print and the arm.  killJob's chain (1026-1063) tests `code`, a parameter bound again at 853 (`if isinstance(code,
+int): code = str(code)`).  840 prints `code=2` (or 4, 10, 51, 60), and all five arms of the chain were kept in the 9
+job cases whose run holds killJob.
+
+Now (`which_ran.printed_before`) step 5 also reads a bare local N, printed as `{N}` or `{str(N)}`, where:
+- a row of the arm's function prints it before the arm on every path through the arm (`rows.must_rows`), and the run
+  places a record of that row (`Seen.unambiguous`).  TaskCommando's runImpl prints `executing {commandStr}` at 133
+  and at 235, in two arms, so 235's "executing incexec" is no record of 133; the guard of 181 reads `commandStr` from
+  129 instead (`start for {commandStr}`);
+- every record the row reads in the run shows one value.  With two calls printing two values, which one ran the arm
+  is not known;
+- nothing binds N, or a chain under it, after the print's line and before the arm's, nor in a loop around the arm
+  that does not hold the print (`printed.valid_before`, and an assignment expression or a nested def or class).  One
+  rebinding is let through: `N = str(N)` and no other, where the print renders N as str(N) does (`{N}`, `{N!s}` or
+  `{str(N)}`, no format spec).  The text is then put as a string: `code=2` is `"2"`, and `code in ['2', '4']` holds.
+  Otherwise the text is read as the literal it spells (`put_printed`): `ignore_hard_exhausted=True` is True.
+A name the reading already holds, or a spelling of a row, is left as it was.
+
+Rule 17 reads a local wherever the function reads it, so only one bound once.  This reads one print and one statement.
+
+Measured as p2a (this without the placed-record rule, on k67a5's tree with 7b5c368's querier, dump x13xxviiiQm)
+against k67a5, then as p2b (with it) on what p2a moved.  No run crashed; attr and MT do not move, nor the 65 but Fr2.
+19 of the 144 cases and Fr2 (dump and readat rows) move: 21 outputs, 41 arm verdicts from kept to excluded in 13 of
+them, and no choice, END or STOP kind:
+- the 9 killJob cases: 4 of the 5 chain arms go each, by `code` as text; H2's STOP lists one killJob arm left (MJE
+  7383377087: 20 left -> 16, killJob:1028);
+- MR-J-7390861912-jobsetID: insertNewJob 3146 and 3151 go (`origEsJob=False` at 3115, the call's one record before
+  "inserted 7390861912"), and its one-of names 6 arms, not 8;
+- 3 MT passes of getTasksToExecCommand_JEDI lose the avalanche arm 4436 (`commandStr` printed at 4382 in the key's
+  iteration, "got 1 tasks"); the pass still goes by 4442;
+- 8 outputs only add a step-5 reason to an arm already excluded (updateJobStatus 355, setup_destination 924,
+  TaskCommando 181, retryTask_JEDI 5330), and MT-exhausted-late to retryTask_JEDI 5058 too.
+p2a read 133's ambiguous record in 3 of them; no verdict moved by it, and p2b reads 129 there.
+
+*Shows:* "step 5: guard \"not (code in ['2', '4'])\" is false ({'code': 'hole of killJob:840 at <span>, as str: code =
+str(code) at [853]'})".
+*Revisit:*
+- The static half -- what binds N between the print and the arm, `N = str(N)`, how the print renders N -- is a
+  reading of the code, which the map's shared parts give (11-01): asked of the map as one part (PVH), by flow.  This
+  one reads the lines between, so a binding on no path from the print to the arm keeps N unread.
+- A print on some paths to the arm only, a conversion other than str (`int(code)`), a `!r` or a format spec: not
+  read.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

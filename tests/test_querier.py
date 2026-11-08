@@ -9054,6 +9054,105 @@ def test_a_row_printing_the_key_of_what_the_arm_writes_shows_another_key_in_ever
     assert got["between"][0] == "kept", got["between"]
 
 
+_PRINTED_BEFORE = """
+class Proxy:
+    def __init__(self):
+        self.logger = logger
+
+    def kill(self, job, code, user, hard, late):
+        self.logger.debug(f"code={code} user={user} hard={hard}")
+        if isinstance(code, int):
+            code = str(code)
+        user = self.owner_of(job)
+        for table in ("a", "b"):
+            if code in ["2", "4"]:
+                job.jobStatus = "closed"
+            elif code == "51":
+                job.jobStatus = "closed"
+        if hard:
+            job.jobStatus = "failed"
+        if user == "pilot":
+            job.jobStatus = "closed"
+        if late:
+            job.jobStatus = "cancelled"
+        self.logger.debug(f"done late={late}")
+
+    def command(self, job, cmd):
+        if cmd in ["kill", "finish"]:
+            self.logger.info(f"executing {cmd}")
+            if cmd == "kill":
+                job.jobStatus = "aborting"
+        else:
+            self.logger.info(f"executing {cmd}")
+            job.jobStatus = "toretry"
+"""
+
+
+def test_a_local_printed_before_an_arm_on_every_path_and_not_bound_again_is_read_by_the_arms_guards(tmp_path):
+    # killJob prints ``code={code}`` at 840 and binds ``code = str(code)`` at 853: printed "2", code is "2" at every arm
+    # of the chain below, so ``code in ['2', '4']`` holds at 1028 and the arms after it are excluded (MJE-7383377087)
+    (_corpus(tmp_path) / "pandaserver" / "p.py").write_text(_PRINTED_BEFORE)
+    lines = _PRINTED_BEFORE.splitlines()
+    at = {name: lines.index(text) + 1 for name, text in {
+        "expire": '                job.jobStatus = "closed"', "hard": '            job.jobStatus = "failed"',
+        "late": '            job.jobStatus = "cancelled"', "str": "            code = str(code)"}.items()}
+    at["jedi"] = at["expire"] + 2
+    at["pilot"] = lines.index('        if user == "pilot":') + 2
+    kill = lines.index('                job.jobStatus = "aborting"') + 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    for name, texts in {"one": ["code=2 user=pilot hard=False", "done late=False"],
+                        "two": ["code=2 user=pilot hard=False", "code=51 user=pilot hard=False", "done late=False",
+                                "done late=False"],
+                        "dup": ["executing retry"]}.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            got = {}
+            for name in ("one", "two"):
+                run, = runs_for(read_log(f"{name}.log"), "1")
+                c = Candidate("pandaserver/p.py", "kill", ARMS, [run.log.name], run=run)
+                verdicts = judge([c], {run.log.name: [run]}, question_run=run, env=E.Env()).verdicts
+                got[name] = {v.line: [v.kind, v.reasons] for v in verdicts}
+            run, = runs_for(read_log("dup.log"), "1")
+            c = Candidate("pandaserver/p.py", "command", [KILL], [run.log.name], run=run)
+            got["dup"] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, question_run=run, env=E.Env()).verdicts}
+            print(json.dumps(got))
+            """.replace("ARMS", str(sorted(v for k, v in at.items() if k != "str"))).replace("KILL", str(kill)),
+        )
+    )
+    got = {name: {int(k): v for k, v in arms.items()} for name, arms in json.loads(out.splitlines()[-1]).items()}
+    one, two = got["one"], got["two"]
+
+    def step5(verdict: list) -> list[str]:
+        return [r for r in verdict[1] if r.startswith("step 5")]
+
+    # code is put as the text printed, a string: the print rendered str(code), and str(code) is all that binds it after
+    assert not step5(one[at["expire"]]), one[at["expire"]]
+    jedi = step5(one[at["jedi"]])
+    assert one[at["jedi"]][0] == "excluded" and len(jedi) == 1, one[at["jedi"]]
+    assert jedi[0].startswith("step 5: guard \"not (code in ['2', '4'])\" is false"), jedi
+    assert f"as str: code = str(code) at [{at['str']}]" in jedi[0], jedi
+    # a local bound nowhere after the print is put as the literal it reads as: "False" is False, not a string
+    assert one[at["hard"]][0] == "excluded" and step5(one[at["hard"]])[0].startswith("step 5: guard 'hard' is false"), one[at["hard"]]
+    # user is bound again after the print, and late is printed only after its arm: neither is read
+    assert not step5(one[at["pilot"]]) and not step5(one[at["late"]]), (one[at["pilot"]], one[at["late"]])
+    # two records of the print with two values of code: which one ran the arm is not known, so code is not read
+    assert not step5(two[at["jedi"]]) and not step5(two[at["expire"]]), (two[at["jedi"]], two[at["expire"]])
+    assert step5(two[at["hard"]]), two[at["hard"]]
+    # "executing retry" is read alike by the print before the kill arm and by the one in the other arm: no record of
+    # the first, so its cmd is not read (TaskCommando's runImpl 133 and 235)
+    assert not step5(got["dup"][kill]), got["dup"][kill]
+
+
 def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_are_the_answer(tmp_path):
     out = _ok(
         _run(

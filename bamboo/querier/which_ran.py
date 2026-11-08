@@ -349,6 +349,100 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
     return put
 
 
+def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env) -> dict[str, str]:
+    """Put in *env* each bare local (``{N}`` or ``{str(N)}``) that a row of *fn* printed before *stmt* on every path to
+    it (*before*, :func:`rows.must_rows`) -- a record of the row placed in the run (``Seen.unambiguous``) -- with one
+    value in every record of the run the row reads, and that nothing
+    between the print and *stmt* binds again (``printed.valid_before``): the value the pass's guards on the way to
+    *stmt* read.  Not a name *env* already knows, nor a row's spelling.
+
+    Rule 17 (:func:`stable_holes`) puts a local bound once in the whole function, wherever it is read; this reads one
+    print and one statement.  killJob's ``code`` is a parameter and is bound again at 853 (``code = str(code)``), so
+    rule 17 never puts it; printed at 840 as ``code=2``, it is ``"2"`` at every arm of the chain below, and ``code in
+    ['2', '4']`` holds at 1028 and ``code == '51'`` is false at 1047.  A rebinding ``N = str(N)`` is the one let
+    through: the print rendered ``{N}`` as ``str(N)``, so the text is put as a string, not as the literal it reads as
+    (``code=2`` is ``"2"``, not ``2``).  KNOWN_ISSUES.md K68."""
+    values: dict[str, set[str]] = {}
+    last: dict[str, tuple[ast.stmt, str, str]] = {}
+    for s in before:
+        row = fn.row_at(s)
+        # a row is read only where the run places a record of it: a text two rows (or two functions) print alike is
+        # either one's -- TaskCommando's runImpl prints ``executing {commandStr}`` at 133 under ``commandStr in ['kill',
+        # 'finish', 'reassign']`` and at 235 in the other arm, and 235's "executing incexec" is no record of 133
+        if row is None or not (placed := sn.unambiguous.get(row.line)):
+            continue
+        for i, _, _ in sn.hits.get(row.line, ()):
+            for expr, value in row.capture(sn.run.records[i]).items():
+                inner = re.fullmatch(r"str\((\w+)\)", expr)
+                name = inner[1] if inner else expr
+                if not name.isidentifier() or env.canonical(name) != name or env.knows(name) or env.knows(expr):
+                    continue
+                # every record the row reads counts against one value, the placed ones name the source
+                values.setdefault(name, set()).add(value.strip())
+                if i in placed and (name not in last or last[name][0].lineno < s.lineno):
+                    last[name] = (s, expr, f"hole of {fn.name}:{row.line} at {sn.run.records[i].span}")
+    put: dict[str, str] = {}
+    for name, seen_values in values.items():
+        if len(seen_values) != 1 or name not in last:
+            continue
+        text = next(iter(seen_values))
+        s, expr, source = last[name]
+        binders = _binders(fn.node, s, stmt, name)
+        if not binders and PR.valid_before(fn.node, s, stmt, PR.Hole.make(expr, text, source)):
+            env.put_printed(expr, text, source)
+            put[expr] = text
+        elif binders and all(_str_of(b, name) for b in binders) and _rendered_plain(s, name):
+            env.put(name, text, f"{source}, as str: {name} = str({name}) at {sorted(b.lineno for b in binders)}")
+            put[name] = text
+    return put
+
+
+def _binders(func: ast.AST, row_stmt: ast.stmt, s_star: ast.stmt, name: str) -> list[ast.stmt | ast.expr | ast.excepthandler]:
+    """The nodes of *func* that bind the bare *name* -- or a chain under it -- after *row_stmt*'s line and before
+    *s_star*'s, or in a loop around *s_star* not around *row_stmt* (``printed.valid_before``'s region); an assignment
+    expression and a nested ``def``/``class`` too, which ``printed.valid_before`` does not read."""
+    around_row = list(pathcond.ancestors(row_stmt))
+    loops = [lp for lp in PR.loops_around(s_star, func) if lp not in around_row]
+    nodes = list(R.own_nodes(func))
+    nodes += [d for n in nodes for d in ast.iter_child_nodes(n) if isinstance(d, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    out: list[ast.stmt | ast.expr | ast.excepthandler] = []
+    for n in nodes:
+        if not isinstance(n, (ast.stmt, ast.ExceptHandler, ast.NamedExpr)) or n is func:
+            continue
+        between = row_stmt.lineno < n.lineno < s_star.lineno
+        looped = any(lp is n or lp in pathcond.ancestors(n) for lp in loops)
+        if (between or looped) and any(PR.affects(t, frozenset({name})) for t, _ in PR.binds(n)):
+            out.append(n)
+    return out
+
+
+def _str_of(node: ast.AST, name: str) -> bool:
+    """Whether *node* is ``name = str(name)``."""
+    return (
+        isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == name and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "str" and len(node.value.args) == 1 and not node.value.keywords
+        and isinstance(node.value.args[0], ast.Name) and node.value.args[0].id == name
+    )
+
+
+def _rendered_plain(stmt: ast.stmt, name: str) -> bool:
+    """Whether the print *stmt* renders *name* as ``str(name)`` does: an f-string's ``{name}``, ``{name!s}`` or
+    ``{str(name)}``, no format spec."""
+    message = PR.message_of(stmt)
+    if not isinstance(message, ast.JoinedStr):
+        return False
+    for v in message.values:
+        if not isinstance(v, ast.FormattedValue) or v.format_spec is not None or v.conversion not in (-1, ord("s")):
+            continue
+        held = v.value
+        if isinstance(held, ast.Call) and isinstance(held.func, ast.Name) and held.func.id == "str" and len(held.args) == 1:
+            held = held.args[0]
+        if isinstance(held, ast.Name) and held.id == name:
+            return True
+    return False
+
+
 def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, int] | None:
     """The last record still showing another value, and the first after it showing *observed*."""
     for (i, v, _), (j, w, _) in zip(values, values[1:], strict=False):
@@ -874,6 +968,8 @@ def judge(
                 # another line (``[at N]``) is not read in the pass's values (KNOWN_ISSUES.md K61); a hole another
                 # function printed is read only where the map hands its object here (KNOWN_ISSUES.md K63)
                 genv = env.reading(fn.owner, stmt.lineno, arm=(fn.owner, line))
+                # the bare locals a print before it on every path showed, not bound again on the way (KNOWN_ISSUES.md K68)
+                printed_before(fn, psn, stmt, before, genv)
                 for guard in pathcond.arm_condition(stmt):
                     if E.read_elsewhere(guard):
                         continue
