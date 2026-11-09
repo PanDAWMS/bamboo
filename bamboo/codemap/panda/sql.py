@@ -2262,15 +2262,24 @@ def regions(
     Where two statements share one ``var_map = {}`` the later one's binds
     start filling *above* the earlier one's call, so the next run's window
     is no edge at all: it would end a region before the statement it
-    belongs to ran, taking that statement's own ``fetchall`` with it.  A
-    statement's territory cannot close at or before it ran, so where the
-    windows overlap the next *call* is the edge.
+    belongs to ran, taking that statement's own ``fetchall`` with it, and
+    starting the later one there would hand it the earlier one's rows.
+    Where the windows overlap, the edge is the later statement's first
+    store into its own ``var_map`` after the earlier one's call -- what is
+    stored then can only be for the later one -- or, with none, its call:
+    two stretches never hold one line.  ``peekJob`` fills one ``varMap``
+    for the job's select, its files' and its metadata's; the ``fetchall``
+    after the job's select is that select's rows, not the files' or the
+    metadata's, which store nothing more and run after it.
+    ``updateJobStatus`` 's update at 243 fills ``:jobStatus`` at 242, after
+    the select at 224: that line is the update's.
 
     Keyed by the call line because a branchy statement is several runs at one
     ``execute``: without the key the region ends at the statement's own second
     variant, which is itself.
     """
     starts: dict[int, int] = {}
+    names: dict[int, set[str]] = {}
     for run in executions:
         line = run.call.lineno
         window = run.window
@@ -2278,16 +2287,48 @@ def regions(
             window = binding_window(func, run.varmap, line)
         begins = window[0] if window else line
         starts[line] = min(starts.get(line, begins), begins)
+        if run.varmap:
+            names.setdefault(line, set()).add(run.varmap)
     last = func.end_lineno or func.lineno
     ordered = sorted(starts.items())
-    found: dict[int, tuple[int, int]] = {}
+    stores = _bind_stores(func)
+    opens = []
     for index, (line, begins) in enumerate(ordered):
-        if index + 1 < len(ordered):
-            next_line, next_begins = ordered[index + 1]
-            following = next_begins if next_begins > line else next_line
-        else:
-            following = last + 1
-        found[line] = (begins, max(line, following - 1))
+        if index and begins <= ordered[index - 1][0]:
+            previous = ordered[index - 1][0]
+            own = [
+                at
+                for at, name in stores
+                if previous < at < line and name in names.get(line, ())
+            ]
+            begins = min(own) if own else line
+        opens.append(begins)
+    found: dict[int, tuple[int, int]] = {}
+    for index, (line, _) in enumerate(ordered):
+        following = opens[index + 1] if index + 1 < len(ordered) else last + 1
+        found[line] = (opens[index], max(line, following - 1))
+    return found
+
+
+def _bind_stores(func: ast.AST) -> list[tuple[int, str]]:
+    """``(line, name)`` for each store into an item of a name in *func* 's own body, ``var_map[":x"] = ...``."""
+    found = []
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target]
+            if isinstance(node, (ast.AugAssign, ast.AnnAssign))
+            else []
+        )
+        for target in targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                found.append((target.lineno, target.value.id))
     return found
 
 

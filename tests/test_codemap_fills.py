@@ -9,7 +9,7 @@ import pytest
 
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import fills, pathcond
+from bamboo.codemap.panda import fills, pathcond, sql
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"
@@ -103,6 +103,34 @@ class Proxy:
         other.pack(rows[0])
         if other.jobStatus is None:  # A3
             return
+
+    def peekJob(self, pandaID, fromActive):
+        sql1_0 = "SELECT %s FROM %s "
+        sql1_1 = "WHERE PandaID=:PandaID"
+        tables = []
+        if fromActive:
+            tables.append("ATLAS_PANDA.jobsActive4")
+        tables.append("ATLAS_PANDA.jobsArchived4")
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        for table in tables:
+            sql = sql1_0 % (JobSpec.columnNames(), table) + sql1_1
+            self.cur.execute(sql, varMap)
+            res = self.cur.fetchall()
+            if len(res) != 0:
+                job = JobSpec()
+                job.pack(res[0])
+                sqlFile = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.filesTable4 "
+                sqlFile += "WHERE PandaID=:PandaID"
+                self.cur.execute(sqlFile, varMap)
+                resFs = self.cur.fetchall()
+                sqlMeta = "SELECT metaData FROM ATLAS_PANDA.metaTable WHERE PandaID=:PandaID"
+                self.cur.execute(sqlMeta, varMap)
+                for (clobMeta,) in self.cur:
+                    pass
+                if job.jobStatus == "finished":  # P1
+                    return job
+        return None
 """
 
 
@@ -247,6 +275,30 @@ def test_a_row_a_loop_takes_of_the_fetched_rows_is_each_row(tmp_path) -> None:
     assert _keys(fill) == {
         ("ATLAS_PANDA.filesTable4", "PandaID=:PandaID", ":PandaID", ("pandaID",))
     }
+
+
+def test_a_fill_takes_the_rows_of_its_own_run_where_later_runs_share_its_binds(
+    tmp_path,
+) -> None:
+    """``peekJob`` fills one ``varMap`` for the job's select, its files' and its metadata's: the ``fetchall`` after
+    the job's select is that select's rows, so the fill names its run on each table and not the files' or the
+    metadata's, whose stretches start where the job select's ends (:func:`sql.regions`)."""
+    held = _ask(tmp_path, "peekJob", "P1", "job.jobStatus")
+    assert held.others == ()
+    (fill,) = held.fills
+    assert _source(fill.site) == "job.pack(res[0])"
+    assert {key[0] for key in _keys(fill)} == {
+        "ATLAS_PANDA.jobsActive4",
+        "ATLAS_PANDA.jobsArchived4",
+    }
+    func = pathcond.enclosing_function(fill.site)
+    assert func is not None
+    stretches = sorted(sql.regions(func, sql.executions(func)).values())  # type: ignore[arg-type]
+    assert len(stretches) == 3
+    assert all(
+        earlier[1] < later[0]
+        for earlier, later in zip(stretches, stretches[1:], strict=False)
+    )
 
 
 def test_a_value_from_elsewhere_is_another_write(tmp_path) -> None:
