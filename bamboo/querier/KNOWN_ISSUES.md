@@ -561,7 +561,7 @@ nothing are placed, at 24 calls; at 10 of them two rows can show the call ran, a
 A writer no pair places is asked in the logs its reading names (`rows.own_log_files`).  Where no writer of the subject
 has a log -- each prints nothing, no pair places it and its reading names none -- H2 stops on that before it asks
 (`_writer_logs`); before, it asked no log and stopped on "a run of <key> at <t>", as if the logs had held none.  Only
-where the map places the prints (`ROWS_FROM=graph`, `ROWS_OWN_FILES`): else the readings' logs stand.
+where the map places the prints (`ROWS_FROM=graph`): else the readings' logs stand.
 
 *Shows:* said ("the map has no prints of its own for it, so no run in a log is its own: not followed"); result.json's
 verdict `prints-nothing`.  H2: the caller's line among the candidates, "rows a and b printed in a row, which only a
@@ -1638,8 +1638,7 @@ What is still read as a loop that may go round:
 - any loop in a run of several calls.  S3 reads no row's path condition in such a run either.
 
 *Shows:* "row N printed and its arms [...] leave L out (the loop at M went round once: its way back prints row(s)
-[R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".  `WHICH_RUN_ONCE_LOOPS=0` and
-`RERUN_S3_ROWS=0` read as before.
+[R], not in the run)"; "settled by the rows the pass printed on the way [N]: {...}".
 *Revisit:* a way back that runs off the body's end and still must print (a handler that prints "retry" and ends).
 
 ### K64. An arm's guard reads as the row only the names the map's records bind to what the arm writes
@@ -1809,7 +1808,292 @@ only way to the value".
 - The row the END names first is the newest the arm may have written at (K38), and H2 keeps a row whose host holds
   none of the writer's logs.  diskIO 7390316278's END names 'defined' (aipanda098, a server machine with no
   panda-JobGenerator.log) before 'pending' (aipanda085, JEDI's insert); the statuslog's host is the machine of the
-  process that wrote the row, so the row is 'pending'.  Before, the walk stopped at H3 and named no row.
+  process that wrote the row, so the row is 'pending'.  Before, the walk stopped at H3 and named no row.  K67 reads
+  such a row on the run that recorded it.
+
+### K67. An arm whose logs never name the key is read at a row on the run that recorded the row
+
+H2 scans the statuslog rows an arm's pass can write (K38).  Where no line of the arm's logs holds the key, no run of
+it at a row is not its absence (`Rerun._unshown`), so the arm may have written at every such row.
+JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and prints no PandaID: on m-cut2 and the
+attribute cases, 145 arm x rows of 58 arms were left so.  diskIO 7390316278's one arm, doGenerate:1284, was left at
+'defined' (aipanda098, 01:26:11) and 'pending' (aipanda085, 01:26:10).  Its pass records the row later, in
+another function: runImpl calls storeJobs at 845, and insertNewJob records the job's status.  The server's
+reassignJobs -> resetDefinedJob wrote 'defined', called by JobGenerator's PandaClient.reassign_jobs over HTTP.
+
+Now (`Rerun._recorded`, `_recorder_read`) such an arm is read on the run that recorded the row.  The map's history
+pairs on the arm's object, whose call runs after the arm, name the call (`Recorder`: the function, its line) and the
+methods that record the row (`HistoryPair.writes`).  Those methods' logs (`files_of`: a DB proxy method's are
+panda-DBProxy.log and panda-JediDBProxy.log) are asked on the row's machine for the key over the row less and plus
+EDGE, each whole.  Then:
+- no run of those methods holds the key there, in their logs read whole there, one of them there at least
+  (`Log.without`: a listing says the machine holds no file of the log), each method printing the key before it
+  records the row: the arm's pass did not write the row, and the arm goes from it.  Only the host's runs count.  A
+  log no recorded list has the host for (`not listed`) comes asked of every machine (K13, `Log.unlisted`).  It is
+  not read whole there.  jediTaskID 7391196833's ask of JediDBProxy.log on aipanda092 ('defined', 12:29:43) was
+  widened so.  Its 'pending' row is at 12:29:42 on aipanda084, so an answer of every machine may hold
+  insertNewJob's run there, which is not 092's.  A method prints the key first
+  where, before each of its history writes, a print every path runs (`prints_key_before`, `rows.must_rows`) has a
+  hole naming a column the key fills, or every run mark of the function holds one: insertNewJob's "inserted
+  {PandaID}" (3199, before its INSERTs, which the bulk path defers to bulk_insert_new_jobs 3713), updateTask_JEDI's
+  mark `jediTaskID={}`, prepareTasksToBeFinished_JEDI's and setScoutJobDataToTasks_JEDI's task lines.  A row whose
+  recording calls are not all so stays.
+- such runs, every one inside the call of a pass of the call's function at the row, on its machine
+  (`which_ran.recorded_in_pass`, by `inside_call` and the map's reach, `_called_at`): the arm's pass at the row is
+  that one.  It is said in place of the key not being named; whether the arm's line ran in it is not read.  The
+  pass is asked by its marks (`_pass_marks`): a hole of the map's mark whose columns name a column the methods' runs'
+  marks hold (`mark_columns`: insertNewJob's `<JediTaskID={} ...>` holds `JobSpec.jediTaskID`, runImpl's
+  `<jediTaskID={} datasetID={}>` names it).  The first round asks for the value the rows file holds, not read as
+  the value at the row (K22); the reading takes it from the methods' runs, which ran at the row.
+- else, it stays as it was.  An ask no record answers is kept for the asks file with no stop, the pass's in the same
+  round as the methods'.
+
+A writer that prints nothing is read at its caller's call on the way to it (K25, `StandIn`, `Wrote.via`): the
+pair's caller and point.  Such an arm is read on that caller's recording calls only (`Recorder.points`).  Another
+caller's pass is not its pass: setSplitRule:925, read at AtlasAnalWatchDog's doForTaskBoost:723, is not read on
+AtlasProdWatchDog's doActionForReassign pass, which records the same task row by the same method.  Read on every
+pair, the arm read at one caller took another caller's pass as its own.  Its row went only where every caller's
+calls ran none.
+
+A run read inside a call says only that it ran while the pass was in that call: a log line names no process.  Two
+passes of one function on one machine are both its passes, so that does not move the reading; another caller of the
+method there, for the same key in the same seconds, would.  insertNewJob is called from storeJobs alone (at 455, and
+through bulk_insert_new_jobs at 510), and storeJobs
+from JobGenerator, the server's API (no JEDI job) and TaskBuffer 678.  No birth is read (the map reads insertNewJob's
+INSERT key as handed in, new_row None): the pass is read by its call, not by the key being new.
+
+A call with no print every path runs after it is placed by the caller's two records in a row around the inner run
+(`_between_records`), where a path from the one's print to the other's runs the call and no other print.  Only a
+print the run would show closes such a path (`Seen.would_show`: rule 4's test of a missing row, `absence_trusted` and
+`would_print`; `which_ran._shown_by`).  runImpl's storeJobs call at 845 sits in a while loop that calls on after it.
+Its records around insertNewJob's run are 837 ("submit njobs=16") and 883 ("successfully submitted").  Every path
+between them runs 838, `tmpLog.debug(main_stop_watch.get_elapsed_time(...))`, a row whose text the reader cannot
+read: its record between the two was read as no row, and the print closed the only path.  So jobsetID 7390861912's
+'pending' row on aipanda088 had its pass and insertNewJob's run, and was not read as that pass's.  `rows_around`
+(a line shown run by the rows around it, `flow.passes_through`) reads the same two records and takes the same prints.
+For a path through the call this can only add a pass; for every path through a line, only take a proof away.
+
+Measured as k67b (this less the two-records reading, on the r5a tree, dump x13xxviiiQm) on the 14 m-cut2 cases'
+records of K67's own round, against r5a's tree on the same records; then as k67a5 (with it) against k67b.  No run
+crashed.  The 65, MT, m-failed and m-gaps do not move.  The attribute cases read a snapshot of older records, so
+K67's asks stay unanswered there and only their window lines and asks move.  15 m-cut2 cases move, and no outcome
+kind, step, code or branch count:
+- 8 ENDs name 'pending' in place of 'defined' (nucleus, lockedby, prodSeriesLabel, diskIO, jobsetID, jediTaskID,
+  processingType, workQueue_ID): the server's 'defined' rows go in all 14 job cases.  diskIO's is K66's END,
+  whose first row is now the right one.
+- 6 one-ofs drop the 'defined' rows from their branches (hs06, maxCpuCount, maxCpuUnit, maxWalltime, job_label,
+  minRamCount), 2-16 "not its row" lines each.
+- splitRule 53351604: the task's 'defined' row (its birth, on aipanda089) leaves the TaskCommando and WatchDog arms,
+  the stand-ins read at their own callers' calls.  Its one-of stays; the arms name 'running' and 'ready' only.
+- The positive is said once, for jobsetID's 3 JobGenerator arms at 'pending', and only with the two-records reading
+  (k67a5: 1 of 144 cases moves, its premise kind).  The other 13 job cases ask their insertNewJob mark's records on
+  JEDI's host (K13), one ask each.
+- K67's 45 first asks are answered and gone.
+
+*Shows:* "  not its row: <arm>[, read at <caller's call>] -- <methods> ran no run of <key> near the row on <machine>
+(<logs>, read whole there): no pass through its call that records the row wrote it"; a premise "its pass at the row is <run>: <methods>'s run of
+<key> ran inside its call at <site>; whether the line ran in it is not read".
+*Revisit:*
+- A recording call across processes (JobGenerator's reassign_jobs over HTTP to the server's reassignJobs): no history
+  pair crosses it, so the server's 'defined' is read as no row of the arm's pass, not as a row its pass caused.
+- A status's question, where the row's writer is the answer ("which run wrote the row"): the same reading.
+
+### K68. A local printed before an arm on every path is read by the arm's guards, through a conversion too
+
+H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column
+of the row and an attribute of self for its class (`stable_holes`), and, in U2's passes, a local bound once in the
+whole function (rule 17).  A local bound more than once was read nowhere, even where nothing binds it between its
+print and the arm.  killJob's chain (1026-1063) tests `code`, a parameter bound again at 853 (`if isinstance(code,
+int): code = str(code)`).  840 prints `code=2` (or 4, 10, 51, 60), and all five arms of the chain were kept in the 9
+job cases whose run holds killJob.
+
+Now (`which_ran.printed_before`) step 5 also reads a bare local N, printed as `{N}` or `{str(N)}`, where:
+- a row of the arm's function prints it before the arm on every path through the arm (`rows.must_rows`), and the run
+  places a record of that row (`Seen.unambiguous`).  TaskCommando's runImpl prints `executing {commandStr}` at 133
+  and at 235, in two arms, so 235's "executing incexec" is no record of 133; the guard of 181 reads `commandStr` from
+  129 instead (`start for {commandStr}`);
+- every record the row reads in the run shows one value.  With two calls printing two values, which one ran the arm
+  is not known;
+- the value shown is the one the arm reads, by the map's reading (`pathcond.held_since`, PVH): no other write of N --
+  a binding, a `del`, the function's entry -- reaches the arm past the print, and a value that is not an immutable
+  scalar (an object's str, a container) is not changed in place on the way (`changes.object_changes`).  Where only the
+  shown value reaches, the text is read as the literal it spells (`put_printed`): `ignore_hard_exhausted=True` is
+  True, as every hole is read.  Where a rebinding turns it on its way (a conversion: `code = str(code)` under `if
+  isinstance(code, int):`), the type decides which way it took: the text is read as each value it can be (itself, and
+  its literal where that prints as the text), each takes the way its tests give, and it is put only when every way
+  gives one value -- `code=2` is `"2"` on both, and `code in ['2', '4']` holds.  Under `if flag:` an int 2 may reach
+  the arm as 2, so nothing is put.  The conversion's way needs the print to write the value as str() does
+  (`trace.renders_as_str`).
+A name the reading already holds, or a spelling of a row, is left as it was.
+
+Rule 17 reads a local wherever the function reads it, so only one bound once.  This reads one print and one statement.
+
+Measured as p2a (this without the placed-record rule, on k67a5's tree with 7b5c368's querier, dump x13xxviiiQm)
+against k67a5, then as p2b (with it) on what p2a moved.  No run crashed; attr and MT do not move, nor the 65 but Fr2.
+19 of the 144 cases and Fr2 (dump and readat rows) move: 21 outputs, 41 arm verdicts from kept to excluded in 13 of
+them, and no choice, END or STOP kind:
+- the 9 killJob cases: 4 of the 5 chain arms go each, by `code` as text; H2's STOP lists one killJob arm left (MJE
+  7383377087: 20 left -> 16, killJob:1028);
+- MR-J-7390861912-jobsetID: insertNewJob 3146 and 3151 go (`origEsJob=False` at 3115, the call's one record before
+  "inserted 7390861912"), and its one-of names 6 arms, not 8;
+- 3 MT passes of getTasksToExecCommand_JEDI lose the avalanche arm 4436 (`commandStr` printed at 4382 in the key's
+  iteration, "got 1 tasks"); the pass still goes by 4442;
+- 8 outputs only add a step-5 reason to an arm already excluded (updateJobStatus 355, setup_destination 924,
+  TaskCommando 181, retryTask_JEDI 5330), and MT-exhausted-late to retryTask_JEDI 5058 too.
+p2a read 133's ambiguous record in 3 of them; no verdict moved by it, and p2b reads 129 there.
+The move to PVH was measured as p2n against p2o (querier-v 3eb560c, which reads by line span as p2b; dump 5c1172d).
+No run crashed, no verdict moves, and attr and MT do not move:
+- the 9 killJob cases change the wording of their 36 step-5 reasons only ("as str: code = str(code) at [853]" ->
+  "through code = str(code) at 853");
+- A-rec and N-rec add a step-5 reason to updateJobStatus 229, already excluded by rule 4.  51 prints
+  `status=running`, and the binding at 229 reaches 227 only by a second pass of `for iTry in range(nTry)` after `nTry
+  = 1`, which the map's flow reads as one pass; the line span took 229 as a binding on the way.
+
+*Shows:* "step 5: guard \"not (code in ['2', '4'])\" is false ({'code': 'hole of killJob:840 at <span>, through code =
+str(code) at 853'})".
+*Revisit:*
+- A print on some paths to the arm only; a conversion of a conversion (the map reads it as another write); a test of
+  a conversion that reads another name (`if flag:`), which the shown values could decide.
+- An attribute chain (`self.job.jobStatus`) is PVH's v2, for (iii), J and P1.
+
+### K69. A run holding no record only a function prints is its pass only where a caller's row after its call shows it ran
+
+S2 (a mover's passes) and U2 (a caller's) cut each run of the key at the function's entry row (`rows.passes`).  A run
+with no entry row read whole in it was kept whole as one pass, and judge read it: the function's rows absent, its
+exits behind them were excluded and the one left was chosen by elimination.  Where the function did not run in it
+that reading is wrong.
+- MT-assigning-late (U2, the caller runImpl at 204): TaskCheckerThread.runImpl and TaskBrokerThread.runImpl each make
+  a `MsgWrapper` per pass, marked by its time; the run <2026-10-29/08:55:23.273195> is TaskBrokerThread's ("start
+  TaskBrokerThread 5/5", "brokerage with AtlasProdTaskBroker", "done": 253, 282, 292), read as a pass of
+  TaskCheckerThread's that left by 165, so "one exit every pass took" failed.
+- MT-prepared-late (S2, doBasicPostProcess): 085's post-processing pass stopped after 104 ("checked duplication with
+  0"); 129's call prints 83 in doBasicPostProcess or 131 on a raise, and neither is there.  It was read as going
+  through 77, and S3 stopped at "what arm 77 wrote, yet the value stayed".
+- MJ-merging-stuck, MJ-transferring-stuck (S2, handle_failed_job): the adder's run prints "status after plugin call
+  :job.jobStatus=finished", so finalize_job_status (279) did not call it; it was read as going through 374.
+- datasetManager's FinisherThr.run (MJ-assigned-stuck): its runs under the PandaID token are another thread's
+  "skip since ... is missing with rule" (963).
+- Right, and kept: setup_jumbo_jobs returned at 1967 printing nothing; setupper's run prints 205 "took" and 206
+  "end" only after calling it at 202.
+
+Now (`which_ran.passes_of`, for S2 and U2) such a run is the function's pass only where it shows the function ran:
+- a record only the function's rows can have printed (`rows.line_writers` names no other writer; "getting Impl" is
+  both runImpl's), or
+- a record of a caller's row that every way from the caller's entry reaches only through one of its calls of the
+  function (`which_ran.called_in`: the map's `Calls.callers`, every call of the caller handed at once to
+  `flow.passes_before`, on the tree the calls index walked).
+Otherwise it is not shown to be a pass of it, and is set aside: U2 drops the run, and S2 reads the window without it
+(its callers' passes where none is left, K55).  A mark naming the function keeps its run, and a run the entry row cuts
+is read as before.  Set aside is not shown not to be: a run of the function's that shows neither is lost, and a U2 or
+S2 "every pass" is then read over the rest.  The function's own row unread does that too: ContentsFeeder's
+"failed to get taskSpec ..." lines, set aside, left Tr's S2 saying "every pass (8) left by 646" while two passes in its
+window took 158 -- K70 reads them.
+
+Measured as u69n against u69o (querier-v cac0bf1: bc48751 with the map's b7b2f40; xxix's dump 5c1172d, pin m), every
+set: no run crashed; 10 of 144 outputs differ, the 65 and attr do not, MT in one (the same as m-cut2's).
+- The four wrong readings go: MT-assigning-late's branch 3 stops at K55 ("setCloudToTasks_JEDI's pass on the row
+  inside runImpl's call at 204"); MT-prepared-late, MJ-merging-stuck and MJ-transferring-stuck lose S3's "what arm
+  77 / 374 wrote, yet the value stayed", and U2 stops at K55 on the caller's call (post_process_tasks 156,
+  process_job_report 446).
+- Set aside rightly: datasetManager's 5 runs (MJ-assigned-stuck), the adder's one-line runs of
+  `AdderGen.dump_file_report` (the pilot API's, before the window).
+- Kept by a caller's row, the wording only: setup_jumbo_jobs x2, setup_source, subscribe_dispatch_data_block,
+  check_output_file_metadata x3.  None of their calls is under and/or, if-else, a comprehension or a lambda.
+- Wrong: Tr (above, K70); doPreProRefine (MT-scouting-stuck, before the window, no verdict moves; *Revisit*).
+With K70 (u70n), the same but Tr.
+
+*Shows:* "...: the run is not split; no record only <fn> prints, nor a caller's row after its call: not shown to be a
+pass of it", or "..., its call shown by run:205 after its call(s) at [202]".
+*Revisit:*
+- A caller's row another class's method prints alike: MT-scouting-stuck's TaskRefiner run (08:41:58, before the
+  window) ran doPreProRefine, called by AtlasAnalTaskRefiner.doRefine at 208 before its "done" at 280; AtlasProd's
+  doRefine prints "done" too (174) and does not call it, so the run is set aside.  The run names the class, "refining
+  with AtlasAnalTaskRefiner" (TaskRefiner 282, the impl `FactoryBase.instantiateImpl` chose by `taskrefine.modConfig`
+  for vo, prodSourceLabel and taskType), right before 284 calls `impl.doRefine`: the impl's class rules out a method of
+  a sibling class (the map's parts: the receiver held from the print to the call, and the class a method is of).
+- A callee's row as the evidence (the function handing its logger down), and a caller two hops up.
+- A call the statement may skip (under and/or, if-else, a comprehension, a lambda) counts as passed once the statement
+  is entered (the map's finding); a handler after a logger call follows reaching's raise rule (a).
+- S2/U2's candidates have no way for a function that runs to its end: check_output_file_metadata (MJ-merging-stuck)
+  is read as leaving by 181 while the job was "finished" and it ran through its loop (not K69).
+
+### K70. A line its logger writes with no mark is read from its first word, and is a run of its own
+
+`records.PREFIX` takes a line's first word for its mark where no bracket ends one.  A logger that writes no mark
+starts the line with its text, so the text's first word became the mark.  ContentsFeederThread's `self.logger` is the
+module's logger (ContentsFeeder.py:36, handed to `WorkerThread`); `feed_contents_to_tasks` wraps it in
+`MsgWrapper(self.logger, "<jediTaskID=... gshare=...>")` at 172, only once the task's spec is got.  Where it is not,
+157 prints `failed to get taskSpec for jediTaskID=...` with the bare logger and 158 goes on to the next task.  Two
+things went wrong with that line:
+- the row did not read it: the record is the mark `failed` and the message `to get taskSpec ...`, and the row's
+  pattern starts at `failed` (`Row.texts` joined the mark back only for a print starting with a hole, K53);
+- every such line of a machine's log -- every task's, over days -- was one run of the mark `failed`: Tr's run on
+  aipanda088 held 11292 records, 3 of the key's.
+Before K69 that run was a pass of 2 days with nothing read, and S2 stopped on it ("which way pass 1 went").  K69 set it
+aside (no record of the function's rows), and Tr's S2 said "every pass (8) left by 646": the key's lines at 07:25:50
+(aipanda088) and 07:26:06 (aipanda086), in the window, are passes that took 158.
+
+Now (`records.unmarked`, from the map's rows: a row with no prefix, printing into the log, whose pattern starts with
+a literal word -- `records.head_word` -- and reads the line as written from that word on):
+- `records.runs_for` makes each such line a run of its own (`Run.alone`); its missing rows say nothing
+  (`Run.would_print` is false): nothing in the line says which other lines are of its pass;
+- `Row.texts` and `rows.line_writers` read it as written, the mark joined back, for a row with no prefix whose
+  pattern's first word is the mark.
+A line that starts with the word but does not match the row's pattern stays under that word, as before.  The door still
+asks for the "mark" `failed` over the window (`recorded`: the key's records under a mark not holding it), which a new
+record round would change; it is not changed here.
+
+Measured with K69 as u70n against u69o and u69n (querier-v cac0bf1 with K69 alone; xxix's dump 5c1172d, pin m), every
+set: no run crashed; against u69n, past K69's new wording, only the three outputs holding ContentsFeeder's lines move,
+and xi's copy of one.  Tr: the 6 run lines are 11 runs of one line; 07:25:50 and 07:26:06 are passes 9 and 10, 158
+chosen by positive evidence (157 prints only on a path through it); branch 2 stops at "S2: one exit every pass took"
+(8 passes by 646, 2 by 158).  MT-ready-stuck: 5 runs of one line, all before the window (08:25:50): the passes and stops
+do not move.  MT-defined-stuck: 27 runs of one line, none in the window; "pass(es) after the window" goes from 2 to 24.
+
+*Shows:* "token=failed 1 record(s) ... (key on 1; read alone: its logger writes no mark, so the token is the line's
+first word...)"; in Tr's S2, "-- pass 9: 2026-10-29 07:25:50,756 .. ..., 1 record(s); printed {'jediTaskID': 53343550}"
+chosen 158 by positive evidence.
+*Revisit:* the dump holds 630 such rows (60 logs, 334 log-and-word pairs); a line of one word, with no blank, is not
+read (it holds no key, so it makes no run of the key).
+
+### K71. A guard reading the question's column the pass filled from the row reads the statuslog's state before the pass
+
+Judge's step 5 reads an arm's guards in the pass's values.  The question's own column (`<job>.jobStatus`) was not
+among them where a guard reads it from the row the function fetched: the rows file holds it at another time
+(`Env.unread`, K22), and no print of the pass shows it.  killJob reads `job.jobStatus != "failed"` at 1017 after
+`job.pack(res[0])` at 998, `res` the rows of 992's `SELECT ... WHERE PandaID=:PandaID`; J (H2's step 3) needs it to
+read the chain 1017 .. 1072 down to the arm the pass took.
+
+Now (`which_ran.row_state`, after K68's `printed_before`): a chain a test reaching the arm reads (`pathcond.tests_on`
+on the map's tree), spelling the question's row and column (`Env.subject`), is put with the statuslog row in force
+when the pass began (`which_ran.state_before`), where the map says every write of it reaching the read
+(`fills.row_fills`) fills it from one row -- `fetchone`'s, or the rows' element at a constant index -- of a statement
+testing a key column equal to a bind, as the subject's column, with no call changing it in place on the way.  Any
+other write reaching the read -- a store (killJob's 1028 .. 1063 before 1071), a parameter, a binding not from a row
+-- leaves the chain unput for the arm; a value a print showed is kept.  The state: the last statuslog row before the
+pass's first record; none where a row of another machine falls within the pass's span (the read may come after it).
+A row within the span written by the pass's own machine is its own write, after its read (A-rec's updateJobStatus
+prints "old=starting new=running", the statuslog holding running at 10:14:50.111 from aipanda092 inside the pass
+10:14:50,068 .. ,077, starting at 10:14:39.53 before it).  A pass's stamps are the database's clock within a second on
+the server's machines (`which_ran.CLOCK`: their statuslog rows fell inside their runs to the second, bamboo-e1) and
+within the windows' slack on JEDI's (`Log.jedi`, from the records' services).
+
+Premises: every change of the column leaves a statuslog row (the current PanDA version); a key column tested equal
+reads the question's row.
+Narrowed from the design: a local filled from a select item (updateJobStatus's `oldJobStatus`, unpacked from 119's
+row at 123) is not read -- the map's parts do not say which table the item is of, and another table keyed by the same
+column holds a column of the same name (JEDI's datasets' `status` by `jediTaskID`).
+
+Measured as u71n against u70n (querier-v cc8903d: ac31839 with the map's ede4a1d; xxix's dump 5c1172d, pin m), every
+set: no run crashed, and no output moves, as predicted -- alone it chooses no stop (it is J's premise), and no guard
+it feeds reads false in a pass.  In MJE-7383377087, run in-process with `row_state` wrapped, killJob's arms 1028,
+1047, 1053, 1059 and 1063 are handed `job.jobStatus` = 'merging', the statuslog row before the pass (aipanda095,
+2026-11-02 15:14:55); 1017's `job.jobStatus != "failed"` holds.  The time is the same (+2 %).
+
+*Shows:* "step 5: guard 'job.jobStatus != ...' is false ({'job.jobStatus': "the statuslog row before the pass, '...'
+at ..."})" where the state makes a guard false; nothing where it holds.
+*Revisit:* the select item's table (a part to ask the map), and a value filled in another function (the adder's
+`self.job`, filled in `run()` at 111 and read in `process_job_report` at 415: the map's next part).
 
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 

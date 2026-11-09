@@ -43,7 +43,7 @@ from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 from . import TREE, mapdump
-from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run
+from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run, head_word
 
 #: the bamboo tree the map's code is imported from (the package's own; see :mod:`bamboo.querier`)
 BAMBOO_TREE = str(TREE)
@@ -63,22 +63,7 @@ MIN_PROOF = 8
 #: stops when the map read another
 #: version of a file than the corpus holds (``anchor.blob_sha``)
 ROWS_FROM = os.environ.get("ROWS_FROM", "graph")
-#: where a function's own rows are looked for: ``ROWS_OWN_FILES=1`` (the default) the files
-#: the map places its printed statements in (``PrintStatement.log_files``); ``0`` the files the map's
-#: reading names, a junction's ``observable_log_files`` -- the caller's, which is where a line saying the junction
-#: settled a value lands, not where the function's own lines do
-OWN_FILES = os.environ.get("ROWS_OWN_FILES", "1") != "0"
-#: ``ROWS_PREFIX=1``: a row whose map rows all carry ``PrintRow.prefix`` (what
-#: its logger writes before the message: ``archiveJob\ <\ .*?\ >\ `` for a proxy method's create_tagged_logger) finds
-#: only a record where that prefix stands right before the message -- the message alone (``start``, ``start with
-#: ...``, ``not found``) is shared by many writers.  The prefix narrows which records count; it adds no literal.
-PREFIX = os.environ.get("ROWS_PREFIX", "1") != "0"
 PATTERN_MODES = ("map", "outside")
-#: ``ROWS_KEEP_SHORT_MAP=1`` finds lines with a map pattern of fewer than ``MIN_SHAPE`` non-blank literal characters,
-#: the earlier behaviour.  By default such a pattern is refused, as a shape built
-#: here that is not ``usable`` is: ``to\ `` (ppEventServiceJob 5667, an append's text drawn alone) is in any line
-#: holding "to ", and most readers of a row's hits ask only whether there is one
-KEEP_SHORT_MAP = os.environ.get("ROWS_KEEP_SHORT_MAP", "0") == "1"
 
 
 #: id of every module ``tree`` parsed -> its corpus path, to tell a corpus function from one built from a string
@@ -543,10 +528,6 @@ def usable(shape: list[Part]) -> bool:
     return sum(len(t.replace(" ", "")) for k, t in shape if k == "lit") >= MIN_SHAPE
 
 
-#: ``ROWS_KEEP_LEADING_HOLE=1`` keeps a non-capturing pattern's leading ``.*?``
-KEEP_LEADING_HOLE = os.environ.get("ROWS_KEEP_LEADING_HOLE", "0") == "1"
-
-
 def _regex(shape: list[Part], capture: bool) -> tuple[str, dict[str, str]]:
     out, groups = [], {}
     holes = [i for i, (k, _) in enumerate(shape) if k == "hole"]
@@ -559,7 +540,7 @@ def _regex(shape: list[Part], capture: bool) -> tuple[str, dict[str, str]]:
             out.append(f"(?P<{name}>[^\\n]*)" if i == holes[-1] and i == len(shape) - 1 else f"(?P<{name}>.*?)")
         else:
             out.append(".*?")
-    if not capture and not KEEP_LEADING_HOLE:
+    if not capture:
         # every reader of a non-capturing pattern only asks whether re.search finds it, and a leading .*? can
         # match nothing, so it finds the same; kept, it retries from every position of a long record (adder_gen
         # 957's f"{lfn} is not found in filesTable": 25 of one case's 53 s over an adder log)
@@ -603,8 +584,11 @@ def _map_text(pattern: str) -> str:
 
 
 def _map_usable(pattern: str) -> bool:
-    """A map pattern held to what ``usable`` asks of a shape built here: ``MIN_SHAPE`` non-blank literal characters."""
-    return KEEP_SHORT_MAP or len(_map_text(pattern).replace(" ", "")) >= MIN_SHAPE
+    r"""A map pattern held to what ``usable`` asks of a shape built here: ``MIN_SHAPE`` non-blank literal characters.
+
+    A shorter one is refused: ``to\ `` (ppEventServiceJob 5667, an append's text drawn alone) is in any line
+    holding "to ", and most readers of a row's hits ask only whether there is one."""
+    return len(_map_text(pattern).replace(" ", "")) >= MIN_SHAPE
 
 
 @dataclass
@@ -621,10 +605,12 @@ class Row:
     map_keyed: bool = False
     shapes: list[list[Part]] = field(default_factory=list)
     capture_shapes: list[list[Part]] = field(default_factory=list)
-    #: the map's prefix patterns of this statement's rows, when every row has one (``PREFIX``)
+    #: the map's prefix patterns of this statement's rows, when every row has one: what its logger writes before the
+    #: message (``archiveJob\ <\ .*?\ >\ `` for a proxy method's create_tagged_logger), as the message alone
+    #: (``start``, ``not found``) is shared by many writers; it narrows which records count and adds no literal
     map_prefixes: list[str] = field(default_factory=list)
     #: the files the map places this statement's lines in (``PrintStatement.log_files``, its logger followed); None
-    #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_OWN_FILES=0``)
+    #: where it does not place them (another ``log_files_basis``, no statement, ``ROWS_FROM=walk``)
     log_files: list[str] | None = None
     #: the map's rows of this statement (``PrintRow``, or the walk's ``SkeletonLine``), for what only the map reads:
     #: a record read whole (:meth:`reads_whole`)
@@ -632,13 +618,15 @@ class Row:
     #: :meth:`patterns` per mode, made on the first ask: a row is built once per function (``_function``) and its
     #: patterns and shapes are not changed after, while ``matches`` asks for them once per record
     compiled: dict[str, list[tuple[re.Pattern[str], int, str]]] = field(default_factory=dict, repr=False, compare=False)
+    #: the first words of the map's patterns (``records.head_word``), made on the first ask (:meth:`texts`)
+    heads: frozenset[str] | None = field(default=None, repr=False, compare=False)
 
     def lands_in(self, name: str) -> bool:
         """Whether a line of this row can be in the log file *name*: yes where the map does not place it."""
         return self.log_files is None or name in self.log_files
 
     def written_by(self, record: Record) -> bool:
-        """Whether *record* can be this row's line by its prefix: always when ``PREFIX`` is off or the map gives
+        """Whether *record* can be this row's line by its prefix: always when the map gives
         none; else the prefix stands where the line starts (``archiveJob < ... >`` is the token and the head of
         the message) or right after the token (``LogWrapper(self.logger, "<run>")``: the outer wrapper's mark
         comes first).  Checked apart from the patterns: a map pattern need not start where the message does
@@ -646,7 +634,7 @@ class Row:
         record's cut (``records.PREFIX``) reads the level with the blanks after it, a mark's own among them
         (``MsgWrapper(self.logger, f" < jediTaskID={jediTaskID} >")``), while the map's prefix is what the logger
         writes (tmaeno, 10-30 15:4x)."""
-        if not (PREFIX and self.map_prefixes):
+        if not self.map_prefixes:
             return True
         regex = _prefix_regex(tuple(self.map_prefixes))
         line = f"{record.token} {record.text}"
@@ -695,8 +683,12 @@ class Row:
         line as the logger wrote it.  A logger with no mark of its own writes that hole's value first, and the log's
         parser takes it for the token (``records.PREFIX``): ``f"{job.PandaID} Finisher : Kill"`` is the token
         ``7392812614`` and the message ``Finisher : Kill``, while the map's pattern begins at the space after the hole
-        (KNOWN_ISSUES.md K53)."""
-        if record.token and LEADING_HOLE.match(self.text):
+        (KNOWN_ISSUES.md K53).  So for a print with no prefix that begins with a word: the parser takes the word,
+        ``failed`` of ``self.logger.debug(f"failed to get taskSpec for jediTaskID={jediTaskID}")``
+        (ContentsFeeder.py:157), for the token, and the message alone holds no pattern of the row (K70)."""
+        if self.heads is None:
+            self.heads = frozenset() if self.map_prefixes else frozenset(w for p in self.map_patterns if (w := head_word(p)))
+        if record.token and (LEADING_HOLE.match(self.text) or record.token in self.heads):
             return [record.text, f"{record.token} {record.text}"]
         return [record.text]
 
@@ -801,7 +793,7 @@ def own_log_files(owner: str, today: list[str], lines: Iterable[int] = ()) -> li
     function the map has no prints for keeps *today* too: it has no rows to read.
     An empty answer is one: a standard-library logger lands in no file.
     """
-    if not OWN_FILES or ROWS_FROM != "graph":
+    if ROWS_FROM != "graph":
         return today
     found = _prints_of(owner, lines)
     if found is None or not found.statements or any(s.log_files_basis != "logger" for s in found.statements):
@@ -817,7 +809,7 @@ def split_files(owner: str, lines: Iterable[int] = ()) -> list[list[str]]:
     its lines are not read (KNOWN_ISSUES.md K23).  2 functions of 1093
     (pilot_api's ``acquire_jobs``, ``update_job``), in no baseline.
     """
-    found = _prints_of(owner, lines) if OWN_FILES and ROWS_FROM == "graph" else None
+    found = _prints_of(owner, lines) if ROWS_FROM == "graph" else None
     if found is None:
         return []
     sets = sorted({tuple(sorted(s.log_files)) for s in found.statements if s.log_files_basis == "logger"})
@@ -901,23 +893,32 @@ def _writers() -> list | None:
         return None
     if not _WRITERS or _WRITERS[0] is not fragment:
         rows = []
+        # the rows with no prefix by their pattern's first word: a line its logger writes with no mark is cut there (K70)
+        heads: dict[str, list] = {}
         for f in fragment.function_prints:
             for st in f.statements:
                 logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
                 for r in st.rows:
                     if r.pattern and _map_usable(r.pattern):
-                        rows.append((re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs, r))
-        _WRITERS[:] = [fragment, rows, {}, {}, {}]
+                        row = (re.compile(r.pattern, re.S), f.owner, _prefix_regex((r.prefix,)) if r.prefix else None, logs, r)
+                        rows.append(row)
+                        if not r.prefix and (word := head_word(r.pattern)):
+                            heads.setdefault(word, []).append(row)
+        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads]
     return _WRITERS
 
 
 def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]]:
-    """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by."""
+    """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by; a row with no prefix whose pattern's
+    first word is the record's token reads the line as written, that word on (K70)."""
     by_text = writers[2]
     if record.text not in by_text:
         by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
     line = f"{record.token} {record.text}"
-    return [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    found = [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    found += [(o, r) for regex, o, _, logs, r in writers[5].get(record.token, ())
+              if (logs is None or log in logs) and regex.match(line) and (o, r) not in found]
+    return found
 
 
 def line_writers(record: Record, log: str) -> frozenset[str]:
@@ -1032,7 +1033,7 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
                 _alternatives(call.args[0], node, stmt),
                 _capture_shapes(call.args[0], node, stmt),
                 _prefixes(mapped),
-                files_of.get(stmt.lineno) if OWN_FILES else None,
+                files_of.get(stmt.lineno),
                 mapped,
             )
         )
@@ -1128,6 +1129,11 @@ class Seen:
     def present(self, row: Row) -> bool:
         return bool(self.hits.get(row.line))
 
+    def would_show(self, row: Row) -> bool:
+        """Whether the run would show *row* had it printed: rule 4's test of a row missing from a run
+        (:func:`absence_trusted`, ``Run.would_print``).  A print it would not show may have printed unseen."""
+        return absence_trusted(row, self.run.log, self.mode)[0] and self.run.would_print(row.level, row.func)
+
     def proven(self, row: Row) -> bool:
         """Whether a record of the run is this row's, read by no other row of the function (a text two rows print
         alike is either one's: activateJob's filesTable4 UPDATE, 92 in the arm that activates and 124 in the one that
@@ -1145,7 +1151,7 @@ class Seen:
         if literal >= MIN_PROOF:
             return True
         record = self.run.records[i]
-        if not (PREFIX and row.map_prefixes) or record.cut:
+        if not row.map_prefixes or record.cut:
             return False
         if not any(regex.fullmatch(record.text.strip()) for regex, _, _ in row.patterns(self.mode)):
             return False

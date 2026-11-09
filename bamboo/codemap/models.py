@@ -2872,6 +2872,73 @@ class SwallowingManager(BaseModel):
     )
 
 
+#: :attr:`HandlerMark.kind`: every way from the handler's entry to its exits passes one of its marks.
+HANDLER_MARKED = "marked"
+#: :attr:`HandlerMark.kind`: it has marks, and a way passes none of them.
+HANDLER_CONDITIONAL = "conditional"
+#: :attr:`HandlerMark.kind`: it has no mark, and a call in it may print all the same: one the map cannot place, or
+#: a builtin that writes (``print``).
+HANDLER_UNPLACED = "unplaced"
+#: :attr:`HandlerMark.kind`: it has no mark, and every call in it is placed or lands outside the corpus (a library,
+#: a class whose ``__init__`` is a library's, a builtin that writes nothing).
+HANDLER_SILENT = "silent"
+
+
+class MarkCallee(BaseModel):
+    """A definition a marking call lands in (:class:`MarkCall`), with the lines of its prints."""
+
+    owner: str = Field(description="``file::qualified.name``, as :attr:`FunctionPrintsNode.owner` spells it.")
+    prints: list[int] = Field(
+        description="Its print statements' lines (:attr:`PrintStatement.line`): every way through it passes one."
+    )
+
+
+class MarkCall(BaseModel):
+    """A call in a handler that prints on every way: each definition it is placed at passes one of its own prints
+    on every way from its entry to a ``return``, a ``raise`` or its end -- ``self.dump_error_message(tmp_log)``."""
+
+    line: int = Field(description="The call statement's first line.")
+    callees: list[MarkCallee]
+
+
+class HandlerMark(BaseModel):
+    """What one ``except`` handler prints when it is entered: the marks a run's log shows it was entered by.
+
+    A reader of a run hands the map's flow and walker the handlers the run entered
+    (:func:`bamboo.codemap.panda.reaching.catching_try`), and it knows them by these marks: a statement of
+    the handler that prints (:attr:`prints`, rows of the owner's :class:`FunctionPrintsNode`) or a call that
+    prints on every way (:attr:`calls`).  Any of them in the run says the handler was entered, since they
+    are in its body.  Where every way from the handler's entry to its exits -- a ``return`` or ``raise`` of
+    its own, a ``break`` or ``continue`` of no loop inside it, the end of its body -- passes one of them, no
+    mark says it was not (:data:`HANDLER_MARKED`), and the ``try`` around ran its body to the end.  A raise
+    the map's rule reads inside the handler leads to no exit counted here.
+
+    :attr:`reraises`: a way from the entry reaches a ``raise`` of the handler's own without passing a mark,
+    so a run can pass through it silently to a handler further out (:func:`~bamboo.codemap.panda.handlermarks.
+    entered`): ``except Exception as e: if self.is_no_wait_exception(e): tmpLog.debug(...) else: raise``.
+    Not a node: records beside the nodes, for a reader of a run.
+    """
+
+    owner: str = Field(description="``file::qualified.name`` of the function the handler is in.")
+    line: int = Field(description="The ``except`` line.")
+    catches: str = Field(description="The handler's type as source; empty for a bare ``except``.")
+    catch_all: bool = Field(description="Whether it catches every exception (bare, ``Exception``, ``BaseException``).")
+    try_first: int = Field(description="The first line of the ``try`` body it guards.")
+    try_last: int = Field(description="The last line of the ``try`` body it guards.")
+    kind: str = Field(
+        description=(
+            f"{HANDLER_MARKED!r}, {HANDLER_CONDITIONAL!r}, {HANDLER_UNPLACED!r} or {HANDLER_SILENT!r} "
+            "(the module's ``HANDLER_*``)."
+        )
+    )
+    prints: list[int] = Field(default_factory=list, description="The handler's own print statements' lines.")
+    calls: list[MarkCall] = Field(default_factory=list)
+    reraises: bool = Field(
+        default=False,
+        description="A way from the entry reaches a ``raise`` of its own without passing a mark.",
+    )
+
+
 class ReadingStop(BaseModel):
     """One place the reading of one statement stopped, and what it stopped on.
 
@@ -3898,6 +3965,13 @@ class MapFragment(BaseModel):
         description=(
             "How many context managers :attr:`swallowing_managers` was drawn from: the corpus's ``contextmanager`` "
             "functions and ``__exit__`` / ``__aexit__`` methods, and each ``suppress`` a ``with`` names."
+        ),
+    )
+    handler_marks: list[HandlerMark] = Field(
+        default_factory=list,
+        description=(
+            "Every ``except`` handler of the corpus, with the marks a run's log shows it was entered by "
+            "(:class:`HandlerMark`)."
         ),
     )
     row_key_sources: list[RowKeySource] = Field(default_factory=list)

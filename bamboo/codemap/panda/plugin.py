@@ -47,6 +47,7 @@ from bamboo.codemap.panda import (
     endpoints,
     entered,
     flow,
+    handlermarks,
     heldfrom,
     mustprints,
     objects,
@@ -888,6 +889,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             read = endpoints.attach(fragment, self._modules, self._calls, returned)
             logger.info(
                 "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
+            )
+            # What each except handler prints when it is entered: the marks a reader of a run knows the handlers it
+            # entered by, to hand the flow and the walker.
+            marked = handlermarks.attach(fragment, self._modules, self._calls)
+            logger.info(
+                "PandaCodeMapPlugin: %d except handler(s), %d marked", len(fragment.handler_marks), marked
             )
 
         # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,

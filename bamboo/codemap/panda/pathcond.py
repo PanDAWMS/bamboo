@@ -17,6 +17,7 @@ such a helper between two releases.
 from __future__ import annotations
 
 import ast
+import builtins
 import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
@@ -1613,6 +1614,146 @@ def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST
         if isinstance(literal, _SCALARS):
             return Held(HELD_CONSTANT, literal, reached)
     return Held(HELD_COMPUTED, None, reached)
+
+
+#: The names a function can call without binding them: a conversion's value may read these beside the name.
+_BUILTIN_NAMES = frozenset(dir(builtins))
+
+
+class Conversion(NamedTuple):
+    """A rebinding that turns the value :func:`held_since`'s *since* showed into another on its way to the read:
+    ``code = str(code)`` under ``if isinstance(code, int):`` in ``killJob``.
+
+    Its value reads the name and no other name of the function -- a builtin, a method called on the name -- and
+    what that read holds is *since*'s alone.  *tests* are the ``if`` tests holding it in their bodies and not holding
+    *since*, outermost first.  *decided*: the rebinding runs on a way exactly when *tests* hold -- it and each inner
+    ``if`` open the body of the ``if`` around them, no loop, ``try``, ``with`` or ``else`` stands between, and every
+    way from *since* to the read enters the outermost; with no ``if`` of its own, every such way passes it.  A reader
+    holding the shown value then evaluates *tests* on it to know which way the value took; otherwise either is open.
+    """
+
+    site: ast.stmt
+    value: ast.expr
+    tests: tuple[ast.expr, ...]
+    decided: bool
+
+
+class HeldSince(NamedTuple):
+    """What a local holds where a statement reads it, counted from a statement that showed its value
+    (:func:`held_since`)."""
+
+    #: the writes that reach the read other than *since* and its conversions -- a binding, a ``del``, the function's
+    #: entry --, the entry first, then in source order: with one, the value read on its way is not the one shown
+    others: tuple[ast.AST, ...]
+    #: whether the value *since* showed reaches the read as it was, on some way
+    raw: bool
+    #: the rebindings that reach the read turning the shown value into another (:class:`Conversion`)
+    conversions: tuple[Conversion, ...]
+
+
+def held_since(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST, since: ast.stmt
+) -> HeldSince:
+    """What the local *name* holds where *at* reads it -- an ``if`` or ``while`` at its test --, counted from the
+    statement *since* that showed its value, a print's hole: :func:`held_at`'s reading with *since* one more write,
+    of the value it showed.
+
+    A write reaching the read past *since* -- a binding, a ``del``, the function's entry where *since* is not on
+    every way -- is one of :attr:`HeldSince.others`: on its way the value read is not the one shown.  A rebinding
+    that only turns the shown value into another is said apart (:class:`Conversion`), with the tests it runs under,
+    so that a reader holding the shown value can tell what reaches: ``killJob`` prints ``code`` at 840, and 853's
+    ``code = str(code)`` under ``if isinstance(code, int):`` makes an int text and leaves any other value as it was.
+    A store into the object (``varMap[":x"] = v``) or a call changing it is not a write of the name:
+    :func:`bamboo.codemap.panda.changes.object_changes` reads those.  The ways are :func:`reaching`'s, a print
+    counted once it has run; a ``global`` or ``nonlocal`` write from another scope is not read.
+    """
+    target = at.test if isinstance(at, (ast.If, ast.While)) else at
+    if getattr(target, "parent", None) is None or getattr(since, "parent", None) is None:
+        raise ValueError(f"held_since needs parent links on the tree holding line {getattr(at, 'lineno', '?')}")
+    sites = _unique(
+        [binding.site for binding in bindings(func, name) if not binding.nested] + _deletions(func, name)
+    )
+    candidates = [func.args, since, *sites]
+    others: list[ast.AST] = []
+    conversions: list[Conversion] = []
+    raw = False
+    for site in reaching(target, candidates):
+        if site is since:
+            raw = True
+            continue
+        conversion = _conversion(func, name, site, since, target, candidates)
+        if conversion is None:
+            others.append(site)
+        else:
+            conversions.append(conversion)
+    others.sort(key=lambda site: -1 if isinstance(site, ast.arguments) else site.lineno)  # type: ignore[attr-defined]
+    return HeldSince(tuple(others), raw, tuple(conversions))
+
+
+def _deletions(func: ast.AST, name: str) -> list[ast.AST]:
+    """The ``del name`` statements of *func*'s own scope: a write that leaves the name with no value."""
+    return [
+        node
+        for node in walk(func)
+        if isinstance(node, ast.Delete)
+        and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        and _scope_of(node) is func
+    ]
+
+
+def _scope_of(node: ast.AST) -> Optional[ast.AST]:
+    return next(
+        (
+            ancestor
+            for ancestor in ancestors(node)
+            if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+        ),
+        None,
+    )
+
+
+def _conversion(
+    func: ast.AST,
+    name: str,
+    site: ast.AST,
+    since: ast.stmt,
+    target: ast.AST,
+    candidates: Sequence[ast.AST],
+) -> Optional[Conversion]:
+    """*site* as a :class:`Conversion` of what *since* showed, or None where it is another write."""
+    if not (
+        isinstance(site, ast.Assign)
+        and len(site.targets) == 1
+        and isinstance(site.targets[0], ast.Name)
+        and site.targets[0].id == name
+    ):
+        return None
+    reads = {node.id for node in walk(site.value) if isinstance(node, ast.Name)}
+    if name not in reads or any(
+        other not in _BUILTIN_NAMES or bindings(func, other) for other in reads - {name}
+    ):
+        return None
+    if [id(one) for one in reaching(site.value, candidates)] != [id(since)]:
+        return None
+    tests: list[ast.expr] = []
+    decided = True
+    outermost: Optional[ast.If] = None
+    held_since_by = {id(one) for one in ancestors(since)}
+    child: ast.AST = site
+    for node in ancestors(site):
+        if id(node) in held_since_by:
+            break
+        if isinstance(node, ast.If) and any(child is one for one in node.body):
+            tests.append(node.test)
+            decided = decided and node.body[0] is child
+            outermost = node
+        else:
+            decided = False
+        child = node
+    tests.reverse()
+    entered = outermost if outermost is not None else site
+    decided = decided and not reaching(target, [since], [entered], entered=[entered])
+    return Conversion(site, site.value, tuple(tests), decided)
 
 
 def surviving_writes(

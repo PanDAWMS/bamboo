@@ -77,7 +77,7 @@ swallow (:func:`bamboo.codemap.panda.flow.swallowing_managers`), and the
 from __future__ import annotations
 
 import ast
-from typing import Optional, Sequence
+from typing import Collection, Optional, Sequence
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -117,6 +117,7 @@ def reaching(
     *,
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> list[ast.AST]:
     """Of *sites*, the writes that can be what *target* reads, in the order given.
 
@@ -132,7 +133,9 @@ def reaching(
     other statement once it has run -- and the function's parameter list
     (its ``args``) on entry, where the call hands the parameters their
     values.  So a parameter rebound on some paths only comes back beside
-    the rebinding: ``if days is None: days = 3`` leaves both.
+    the rebinding: ``if days is None: days = 3`` leaves both.  A ``:=``
+    handed in as itself, the expression :func:`pathcond.bindings` names,
+    writes where the statement holding it does, and comes back as itself.
 
     The scope is the one *target* is in.  A write inside a nested function is
     to another variable and reaches nothing here.  If no write is in this
@@ -145,8 +148,16 @@ def reaching(
     before it can raise, and a loop's before its first pass.  *once* are
     loops a run went round exactly once, read as a ``for`` over ``range(1)``
     is.
+
+    *raised* is a third: the handlers a run's marks show it entered.  Handed
+    them, a statement raises by where it is, not by what it holds -- any
+    statement of a ``try`` body holding one of them, unless a catch-all
+    handler not among them is met first (:func:`catching_try`) -- and only
+    those handlers are entered; a raise out of the scope is not read.  None
+    reads every expression but a literal, a name or a display of them as
+    able to raise (:func:`may_raise`).
     """
-    return reaching_each([target], sites, killers, rereads, entered=entered, once=once)[0]
+    return reaching_each([target], sites, killers, rereads, entered=entered, once=once, raised=raised)[0]
 
 
 def reaching_each(
@@ -157,6 +168,7 @@ def reaching_each(
     *,
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> list[list[ast.AST]]:
     """:func:`reaching` for each of *targets*, the writes read once per scope: what a reader asking of many
     statements with the same writes asks."""
@@ -176,7 +188,7 @@ def reaching_each(
             found.append(list(sites))
             continue
         if id(scope) not in read:
-            read[id(scope)] = _writes(scope, sites, killers, rereads, entered, once)
+            read[id(scope)] = _writes(scope, sites, killers, rereads, entered, once, raised)
         held = read[id(scope)]
         if held is None:
             found.append([site for site in sites if _encloses(_scope_of(site), scope)])
@@ -184,9 +196,16 @@ def reaching_each(
         flow, bits = held
         state = flow.entry.get(id(statement))
         found.append(
-            [site for site in sites if state and state & bits.get(id(site), 0)]
+            [site for site in sites if state and state & bits.get(id(_placed(site)), 0)]
         )
     return found
+
+
+def _placed(node: ast.AST) -> ast.AST:
+    """Where a write sits in the flow: a ``:=`` at the statement holding it, any other write as itself."""
+    if isinstance(node, ast.NamedExpr):
+        return _statement_of(node) or node
+    return node
 
 
 def _writes(
@@ -196,17 +215,18 @@ def _writes(
     rereads: Sequence[ast.AST],
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
 ) -> Optional[tuple[_Flow, dict[int, int]]]:
     """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
-    own = [node for node in (*sites, *killers) if _scope_of(node) is scope]
+    own = [_placed(node) for node in (*sites, *killers) if _scope_of(node) is scope]
     if not own:
         return None
-    again = {id(node) for node in rereads if _scope_of(node) is scope}
+    again = {id(_placed(node)) for node in rereads if _scope_of(node) is scope}
     ids = sorted({id(node) for node in own} | again)
     bits = {key: 1 << index for index, key in enumerate(ids)}
     # A ``+=`` handed in as a killer kills, as every killer does: the caller
     # knows the value goes no further as itself.
-    killed = {id(node) for node in killers} - again
+    killed = {id(_placed(node)) for node in killers} - again
     keeps = 0
     for node in own:
         adds = isinstance(node, ast.AugAssign) and id(node) not in killed
@@ -214,8 +234,9 @@ def _writes(
             keeps |= bits[id(node)]
     for key in again:
         keeps |= bits[key]
-    on_entry = frozenset(id(node) for node in entered if id(node) in bits)
-    return _flow(scope, bits, keeps, on_entry, frozenset(id(node) for node in once)), bits
+    on_entry = frozenset(id(_placed(node)) for node in entered if id(_placed(node)) in bits)
+    entered_handlers = None if raised is None else frozenset(id(node) for node in raised)
+    return _flow(scope, bits, keeps, on_entry, frozenset(id(node) for node in once), entered_handlers), bits
 
 
 def reaching_exit(
@@ -238,7 +259,7 @@ def reaching_exit(
     state = flow.exit
     if not state:
         return []
-    return [site for site in sites if state & bits.get(id(site), 0)]
+    return [site for site in sites if state & bits.get(id(_placed(site)), 0)]
 
 
 def _scope_of(node: ast.AST) -> Optional[ast.AST]:
@@ -270,6 +291,7 @@ def _flow(
     keeps: int,
     entered: frozenset[int] = frozenset(),
     once: frozenset[int] = frozenset(),
+    raised: Optional[frozenset[int]] = None,
 ) -> _Flow:
     """The flow for this set of writes, kept on the scope.
 
@@ -277,18 +299,18 @@ def _flow(
     slice about one key from every run, so the same writes come back with a
     new target many times.
     """
-    held: Optional[dict[tuple[tuple[int, ...], int, frozenset[int], frozenset[int]], _Flow]] = getattr(
+    held: Optional[dict[tuple, _Flow]] = getattr(
         scope, "_reaching_flows", None
     )
     if held is None:
         held = {}
         scope._reaching_flows = held  # type: ignore[attr-defined]
-    key = (tuple(bits), keeps, entered, once)
+    key = (tuple(bits), keeps, entered, once, raised)
     flow = held.get(key)
     if flow is None:
         if len(held) >= _KEPT:
             del held[next(iter(held))]
-        flow = held[key] = _Flow(scope, bits, keeps, entered, once)
+        flow = held[key] = _Flow(scope, bits, keeps, entered, once, raised)
     return flow
 
 
@@ -459,7 +481,28 @@ def _binds(
     return False
 
 
-def _catches_all(handler: ast.ExceptHandler) -> bool:
+def catching_try(node: ast.AST, raised: Collection[ast.ExceptHandler]) -> Optional[ast.Try]:
+    """The ``try`` a raise at *node* reaches a handler of *raised* in -- the handlers a run's marks show it entered
+    --: the innermost holding *node* in its body, in *node*'s own scope, with one of them; None where a ``try``
+    with a catch-all handler not among them comes first, or no such ``try`` holds it.  :func:`reaching` with
+    *raised* reads its raises so; a reader of one statement asks this."""
+    entered = {id(handler) for handler in raised}
+    child: ast.AST = node
+    current = getattr(node, "parent", None)
+    while current is not None and not isinstance(current, _SCOPES):
+        if isinstance(current, (ast.Try, ast.TryStar)) and any(child is one for one in current.body):
+            if any(id(handler) in entered for handler in current.handlers):
+                return current  # type: ignore[return-value]
+            if any(catches_all(handler) for handler in current.handlers):
+                return None
+        child = current
+        current = getattr(current, "parent", None)
+    return None
+
+
+def catches_all(handler: ast.ExceptHandler) -> bool:
+    """Whether *handler* catches every exception: a bare ``except``, or one naming ``Exception`` or
+    ``BaseException`` (alone or in a tuple)."""
     kind = handler.type
     if kind is None:
         return True
@@ -477,12 +520,14 @@ def _irrefutable(case: ast.match_case) -> bool:
 
 
 class _Handlers:
-    """A ``try``'s handlers, collecting the state at every point that can raise into them."""
+    """A ``try``'s handlers, collecting the state at every point that can raise into them; *opens*, whether a
+    raise can be caught by one (one of a run's *raised*, or any where none are handed)."""
 
-    __slots__ = ("catches_all", "state")
+    __slots__ = ("catches_all", "opens", "state")
 
-    def __init__(self, catches_all: bool) -> None:
+    def __init__(self, catches_all: bool, opens: bool = True) -> None:
         self.catches_all = catches_all
+        self.opens = opens
         self.state: Optional[int] = None
 
 
@@ -524,6 +569,7 @@ class _Flow:
         keeps: int,
         entered: frozenset[int] = frozenset(),
         once: frozenset[int] = frozenset(),
+        raised: Optional[frozenset[int]] = None,
     ) -> None:
         self.bits = bits
         self.keeps = keeps
@@ -531,6 +577,8 @@ class _Flow:
         self.entered = entered
         #: loops a run went round exactly once
         self.once = once
+        #: the handlers a run entered (:func:`reaching`'s *raised*), by id; None reads (a)
+        self.raised = raised
         self.entry: dict[int, int] = {}
         #: The state where the scope returns normally: each ``return`` that leaves it, and off its end.
         self.exit: Optional[int] = None
@@ -554,15 +602,27 @@ class _Flow:
         self.entry[id(node)] = state if held is None else held | state
 
     def _raise(self, state: Optional[int]) -> None:
-        if state is None:
+        if state is None or (self.raised is not None and not self._opens()):
             return
         for catcher in reversed(self._catchers):
             if isinstance(catcher, _Finally):
                 catcher.raised = _join(catcher.raised, state)
                 return
-            catcher.state = _join(catcher.state, state)
+            if catcher.opens:
+                catcher.state = _join(catcher.state, state)
             if catcher.catches_all:
                 return
+
+    def _opens(self) -> bool:
+        """Whether a raise here can reach a handler a run entered: a ``try`` holding one, inside out, before a
+        catch-all not entered; never out of the scope."""
+        for catcher in reversed(self._catchers):
+            if isinstance(catcher, _Handlers):
+                if catcher.opens:
+                    return True
+                if catcher.catches_all:
+                    return False
+        return False
 
     def _return(self, state: Optional[int]) -> None:
         if state is None:
@@ -598,7 +658,7 @@ class _Flow:
         self._record(node, state)
         if id(node) in self.entered:
             state = self._gen(state, node)
-        if _raises(node):
+        if self.raised is not None or _raises(node):
             self._raise(state)
         method = getattr(self, "_" + type(node).__name__, None)
         if method is None:
@@ -672,7 +732,7 @@ class _Flow:
         # The test is read at the head, every time round; gone round once, again after the pass, and false then.
         tested = _join(head, passed) if once else head
         self._record(node, tested)
-        if _raises(node):
+        if self.raised is not None or _raises(node):
             self._raise(tested)
         if isinstance(node.test, ast.Constant) and node.test.value:
             return breaks
@@ -683,7 +743,10 @@ class _Flow:
         if guard is not None:
             self._catchers.append(guard)
         caught = (
-            _Handlers(any(_catches_all(h) for h in node.handlers))
+            _Handlers(
+                any(catches_all(h) for h in node.handlers),
+                self.raised is None or any(id(h) in self.raised for h in node.handlers),
+            )
             if node.handlers
             else None
         )
@@ -695,6 +758,8 @@ class _Flow:
         normal = self._block(node.orelse, body)
         if caught is not None and caught.state is not None:
             for handler in node.handlers:
+                if self.raised is not None and id(handler) not in self.raised:
+                    continue
                 self._record(handler, caught.state)
                 out = self._block(handler.body, self._gen(caught.state, handler))
                 if out is not None and handler.name and id(handler) in self.bits:
