@@ -15,8 +15,8 @@ and sets them beside each arm,
 so the rule can be scored against the reading.
 
 ``--calls-change-nothing`` takes every call to bind nothing it is handed
-(``printed.mutating_roots`` empty: no hole, fact or target value is lost at a
-call; a call may still raise).  It is the most following a call to the writers it reaches
+(``printed.mutating_roots`` and the walker's ``roots`` empty: no hole, fact or
+target value is lost at a call; a call may still raise).  It is the most following a call to the writers it reaches
 could prove, since that can only remove such losses.
 
 ``--call-values-known`` decides, the way the arm's path took it, a test that
@@ -110,6 +110,7 @@ def _apply_flags(
         P.HANDLER_RULE = False
     if calls_change_nothing:
         P.mutating_roots = lambda node: set()
+        P.Walker.roots = lambda self, node: set()  # type: ignore[method-assign]
     if call_values_known:
         real_available = P.Walker.available
         P.Walker.available = lambda w, p: real_available(w, p) | _call_bound(w.func)

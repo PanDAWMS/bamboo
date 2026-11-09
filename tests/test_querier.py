@@ -4931,12 +4931,15 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
         "c.py": _ADDER,
         # a subclass runs another parse, which binds self.job_status
         "d.py": _ADDER + "\n\nclass Adder2(Adder):\n    def parse(self):\n        self.job_status = 'failed'\n        return 0\n",
-        # a method lets self out: any call may reach it
+        # a method lets self out, though no call here runs a store of job_status: a call is read by what it runs
         "e.py": _ADDER + "\n    def register(self):\n        REGISTRY.append(self)\n",
     }
-    # the status bound from an object below self: handed to the plugin, the object may hold another status after
+    # the status bound from an object below self: handed to the plugin, which writes it, the object may hold another
+    # status after (a plugin of the corpus: one the map cannot read stores nothing on the corpus's objects)
     info = _ADDER.replace("self.job_status", "self.info.status").replace("self.report = report", "self.report, self.info = report, info")
-    files["h.py"] = info.replace("self.plugin_class(self.job)", "self.plugin_class(self.job, self.info)")
+    files["h.py"] = info.replace("self.plugin_class(self.job)", "self.plugin_class(self.job, self.info)") + (
+        "\n\nclass Plugin:\n    def __init__(self, job, info):\n        info.status = 'closed'\n\n    def execute(self):\n        return None\n"
+    )
     files["i.py"] = info
     for name, text in files.items():
         (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
@@ -4991,8 +4994,10 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
     assert why[-1].endswith("read with the other verdicts: a call reaching no writer of 'failed' left standing does not write it")
     # a writer of 'failed' standing behind the call: the job's status may be its
     assert got["c.py live"][0][0] == "kept"
-    # parse resolved to two methods, or self let out: a call may change any of self, self.job_status too
-    assert got["d.py core"][0][0] == "kept" and got["e.py core"][0][0] == "kept"
+    # parse resolved to two methods: the call may run Adder2.parse, which binds self.job_status
+    assert got["d.py core"][0][0] == "kept"
+    # self let out by a method not called here: the calls are read by what they run, and none of it writes job_status
+    assert got["e.py core"][0][0] == "positive"
     # bound from self.info.status: read at the row where no call is handed self.info, not where the plugin is
     assert got["i.py core"][0][0] == "positive" and got["h.py core"][0][0] == "kept"
     # a row printing another value than the observed one: any call handed the job may have written it

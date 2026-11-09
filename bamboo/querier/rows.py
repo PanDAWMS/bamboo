@@ -72,8 +72,15 @@ TREE_REL: dict[int, str] = {}
 
 @functools.cache
 def tree(rel: str) -> ast.Module:
-    parsed = ast.parse((CORPUS / rel).read_text())
-    pathcond.attach_parents(parsed)
+    from bamboo.codemap.calls import parsed as map_parsed
+
+    package, _, relative = rel.partition("/")
+    held = map_parsed(ROOTS[package] / relative) if package in ROOTS and relative else None
+    if held is None:
+        parsed = ast.parse((CORPUS / rel).read_text())
+        pathcond.attach_parents(parsed)
+    else:
+        parsed = held[1]
     TREE_REL[id(parsed)] = rel
     return parsed
 
