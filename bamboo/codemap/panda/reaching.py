@@ -481,6 +481,11 @@ def _binds(
     return False
 
 
+#: ``try`` and ``except*``, which hold the same fields.  Python 3.10, which the project still runs on, has no
+#: ``ast.TryStar``.
+_TRIES: tuple[type[ast.Try], ...] = (ast.Try, getattr(ast, "TryStar", ast.Try))
+
+
 def catching_try(node: ast.AST, raised: Collection[ast.ExceptHandler]) -> Optional[ast.Try]:
     """The ``try`` a raise at *node* reaches a handler of *raised* in -- the handlers a run's marks show it entered
     --: the innermost holding *node* in its body, in *node*'s own scope, with one of them; None where a ``try``
@@ -490,7 +495,7 @@ def catching_try(node: ast.AST, raised: Collection[ast.ExceptHandler]) -> Option
     child: ast.AST = node
     current = getattr(node, "parent", None)
     while current is not None and not isinstance(current, _SCOPES):
-        if isinstance(current, (ast.Try, ast.TryStar)) and any(child is one for one in current.body):
+        if isinstance(current, _TRIES) and any(child is one for one in current.body):
             if any(id(handler) in entered for handler in current.handlers):
                 return current  # type: ignore[return-value]
             if any(catches_all(handler) for handler in current.handlers):

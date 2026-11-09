@@ -248,6 +248,16 @@ def test_a_catch_all_the_run_did_not_enter_stops_a_raise_inside_it() -> None:
     assert reaching.catching_try(S["B6"], [_handler("B5")]) is None
 
 
+def test_a_catching_try_reads_the_same_where_ast_has_no_try_star(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python 3.10, which the project still runs on, has no ``ast.TryStar``."""
+    outer = _handler("C4")
+    monkeypatch.delattr(ast, "TryStar", raising=False)
+    assert reaching.catching_try(S["C0"], [outer]) is outer.parent  # type: ignore[attr-defined]
+    assert reaching.catching_try(S["C1"], [outer]) is None
+
+
 def test_a_loop_the_run_went_round_once_has_no_way_back() -> None:
     loop = S["O1"]
     assert flow.together(S["O2"], S["O3"])
