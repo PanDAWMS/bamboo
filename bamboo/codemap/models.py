@@ -2916,6 +2916,12 @@ class HandlerMark(BaseModel):
     :attr:`reraises`: a way from the entry reaches a ``raise`` of the handler's own without passing a mark,
     so a run can pass through it silently to a handler further out (:func:`~bamboo.codemap.panda.handlermarks.
     entered`): ``except Exception as e: if self.is_no_wait_exception(e): tmpLog.debug(...) else: raise``.
+
+    :attr:`prints_on_every_way`: the same question of its own prints alone, the calls aside.  A reader of one
+    key's run can read only the owner's own prints absent: a call's callee prints through a logger of its own
+    or a line no reader reads, as ``dump_error_message``'s traceback.  ``killJob`` prints its ``time=`` line
+    after calling ``dump_error_message`` on one way, so its own prints cover every way; a retry prints its own
+    ``retry :`` line only on the way that goes round again, and leaves its last try by the call alone.
     Not a node: records beside the nodes, for a reader of a run.
     """
 
@@ -2936,6 +2942,14 @@ class HandlerMark(BaseModel):
     reraises: bool = Field(
         default=False,
         description="A way from the entry reaches a ``raise`` of its own without passing a mark.",
+    )
+    prints_on_every_way: bool = Field(
+        default=False,
+        description=(
+            "Every way from the entry to its exits passes one of :attr:`prints`, :attr:`calls` aside -- so where "
+            "the owner's own prints are read in a run, none of them says the handler was not entered.  Only with "
+            f"{HANDLER_MARKED!r}; a raise inside the handler that leaves it is no exit counted, as for :attr:`kind`."
+        ),
     )
 
 

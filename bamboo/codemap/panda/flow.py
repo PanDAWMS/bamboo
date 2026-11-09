@@ -34,7 +34,7 @@ import ast
 from typing import Iterable, Iterator, Optional, Sequence
 
 from bamboo.codemap.models import SwallowingManager
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda.reaching import reaching, reaching_end
 
 #: The nodes whose body is a scope of its own, as :mod:`~bamboo.codemap.panda.reaching` reads them.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
@@ -171,6 +171,37 @@ def together(
     return runs_after(
         printed, site, once=once, printed=True, raised=raised
     ) or runs_after(site, printed, once=once, raised=raised)
+
+
+def ends_after(
+    first: ast.stmt | ast.arguments,
+    stops: Sequence[ast.stmt] = (),
+    *,
+    passed: Sequence[ast.stmt] = (),
+    once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
+) -> bool:
+    """Whether one call can end its pass after the print *first* -- print *first* again, or run off the end of
+    the function -- with none of *stops* (prints, passed once they printed) or *passed* (statements, passed once
+    entered) on the way.  *first* the function's parameters (its ``args``) asks from the call's entry.
+
+    A reader that cuts a run at each record of a print every pass starts with reads a pass as running to the
+    next one, and chooses the way it went among *passed* -- arms, the function's own ``return`` statements; a
+    way that ends past all of them is one more.  ``check_output_file_metadata`` leaves by a ``return`` or after
+    its loop over the files with none taken, and no print is on every way there.  A ``return`` and a raise out
+    of the function are not its end: the reader asks of them as statements."""
+    _one_function(first, *stops, *passed)
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise ValueError("the flow answers of a function's pass")
+    killers = [*(stop for stop in stops if stop is not first), *passed]
+    if isinstance(first, ast.stmt) and reaching(
+        first, [first], killers, entered=passed, once=once, raised=raised
+    ):
+        return True
+    return bool(
+        reaching_end(func, [first], killers, entered=passed, once=once, raised=raised)
+    )
 
 
 # -- the premise: no with goes on past a raise in its body ------------------------------------------------------ #

@@ -117,6 +117,60 @@ def nested(log):
             pass  # C3
     except Exception:
         log.error(f"outer {x}")  # C4
+
+
+def checked(self):
+    if self.job_status in ["failed", "cancelled", "closed"]:
+        return  # E1
+    for file in self.job.Files:
+        if file.lfn not in self.extra_info["nevents"]:
+            self.logger.error(f"nEvents is missing for {file.lfn}")  # E2
+            self.job.jobStatus = "failed"  # E3
+            return  # E4
+
+
+def post_processed(self, task_list):
+    for task_spec in task_list:
+        tmp_log = MsgWrapper(self.logger, f"<jediTaskID={task_spec.jediTaskID}>")
+        tmp_log.info("start")  # Q1
+        impl = self.implFactory.instantiateImpl(task_spec.vo)
+        if impl is None:
+            tmp_log.error("post-processor is undefined")  # Q2
+            tmp_stat = Interaction.SC_FATAL
+        else:
+            tmp_log.info(f"post-process with {impl.__class__.__name__}")  # Q3
+            try:
+                tmp_stat = impl.doPostProcess(task_spec, tmp_log)  # Q4
+            except Exception:
+                tmp_log.error("post-process failed")  # Q5
+                tmp_stat = Interaction.SC_FATAL
+        if tmp_stat == Interaction.SC_FAILED:
+            tmp_log.info("post-processing temporarily failed")  # Q6
+            continue  # Q7
+        tmp_log.info("done")  # Q8
+
+
+def fetched(proxy):
+    try:
+        return proxy.get()  # Z1
+    except Exception:
+        return None  # Z2
+
+
+def polled(log, c):
+    while True:
+        poll()  # V1
+        log.info("start")  # V2
+        if c:
+            return  # V3
+
+
+def scanned(log, c, items):
+    for item in items:
+        poll()  # U1
+        log.info("start")  # U2
+        if c:
+            return  # U3
 """
 
 
@@ -285,6 +339,65 @@ def test_a_print_from_another_parse_is_refused_not_answered() -> None:
     )
     with pytest.raises(ValueError, match="one function"):
         flow.passes_before(again, [S["P2"], S["P3"]])
+
+
+def _args(marker: str) -> ast.arguments:
+    node: ast.AST = S[marker]
+    while not isinstance(node, ast.FunctionDef):
+        node = node.parent  # type: ignore[attr-defined]
+    return node.args
+
+
+def _rows_of_the_end(
+    first: ast.stmt | ast.arguments, prints: list[ast.stmt], passed: list[ast.stmt]
+) -> list[ast.stmt]:
+    return [p for p in prints if not flow.ends_after(first, [p], passed=passed)]
+
+
+def test_a_pass_ends_past_every_candidate_where_the_function_runs_off_its_end() -> None:
+    """``check_output_file_metadata``: a pass that takes no ``return`` and no arm ends after its loop over the
+    files, and no print is on every such way, so nothing a run printed rules that end out."""
+    passed = [S["E1"], S["E3"], S["E4"]]
+    assert flow.ends_after(_args("E1"), passed=passed)
+    assert _rows_of_the_end(_args("E1"), [S["E2"]], passed) == []
+
+
+def test_a_pass_from_its_first_print_ends_at_that_print_again_or_off_the_end() -> None:
+    """``post_process_tasks``: from ``start`` past the call and the ``continue``, a pass goes round to the next
+    task's ``start`` or off the end once the loop is done, printing ``undefined`` and ``done`` on every way.  The
+    flow reads the ``if`` on ``tmp_stat`` both ways, as it reads every branch."""
+    passed = [S["Q4"], S["Q7"]]
+    prints = _prints("Q2", "Q3", "Q5", "Q6", "Q8")
+    assert flow.ends_after(S["Q1"], passed=passed)
+    assert _rows_of_the_end(S["Q1"], prints, passed) == [S["Q2"], S["Q8"]]
+
+
+def test_a_return_or_a_raise_out_of_the_function_is_not_its_end() -> None:
+    """A function every way of which ends in a ``return`` or a raise -- one inside a ``try`` with a ``finally``
+    too -- has no end past its candidates, whichever are handed; a ``break`` out of a ``while True`` leads on to
+    it."""
+    assert not flow.ends_after(_args("Z1"))
+    assert not flow.ends_after(_args("Z1"), passed=[S["Z1"], S["Z2"]])
+    assert not flow.ends_after(_args("R1"))
+    assert flow.ends_after(S["W1"])
+    assert not flow.ends_after(S["W1"], [S["W3"]])
+
+
+def test_a_pass_runs_to_the_next_first_print_not_to_the_loop_head() -> None:
+    """What runs between the loop's head and ``start`` is the previous pass's: past ``poll()`` and the
+    ``return`` no ``start`` comes again, and a ``while True`` has no end; a ``for`` ends when its items do."""
+    assert not flow.ends_after(S["V2"], passed=[S["V1"], S["V3"]])
+    assert flow.ends_after(S["V2"], passed=[S["V3"]])
+    assert flow.ends_after(S["U2"], passed=[S["U1"], S["U3"]])
+
+
+def test_the_end_is_asked_of_one_function_s_pass() -> None:
+    with pytest.raises(ValueError, match="one function"):
+        flow.ends_after(S["F1"], [S["L1"]])
+    module = ast.parse("x = 1\n")
+    pathcond.attach_parents(module)
+    with pytest.raises(ValueError, match="a function's pass"):
+        flow.ends_after(module.body[0])
 
 
 MANAGERS = """\
