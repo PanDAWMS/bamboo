@@ -492,3 +492,70 @@ def test_held_since_refuses_a_tree_without_parent_links() -> None:
     statements = [node for node in ast.walk(func) if isinstance(node, ast.stmt)]
     with pytest.raises(ValueError, match="parent links"):
         pathcond.held_since(func, "n", statements[-1], statements[1])  # type: ignore[arg-type]
+
+
+GUARDS = """
+def run(job, items, flag):
+    if job is None:  # E1
+        return
+    for item in items:  # L1
+        if not item:  # E2
+            continue
+        if flag:  # G1
+            if item.ok:  # G2
+                pass
+            else:
+                item.mark()  # A1
+"""
+
+
+def _guards_at() -> tuple[ast.AST, dict[str, ast.stmt]]:
+    tree = ast.parse(GUARDS)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    marked = {
+        text.rpartition("# ")[2]: n
+        for n, text in enumerate(GUARDS.splitlines(), 1)
+        if "# " in text
+    }
+    at = {
+        marker: next(
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.stmt) and node.lineno == line
+        )
+        for marker, line in marked.items()
+    }
+    return func, at
+
+
+def test_the_guards_on_a_node_are_its_ifs_and_the_early_exits_above_it_innermost_first() -> (
+    None
+):
+    """Each ``if`` deciding a node with the value it runs on, its ``if`` and its kind: the ``else`` it is in, the
+    ``if`` around that, the ``continue`` above in the loop, the ``return`` above the loop."""
+    func, at = _guards_at()
+    found = pathcond.guards(at["A1"], func)
+    assert [(ast.unparse(g.test), g.runs_on, g.at, g.exit) for g in found] == [
+        ("item.ok", False, at["G2"], False),
+        ("flag", True, at["G1"], False),
+        ("not item", False, at["E2"], True),
+        ("job is None", False, at["E1"], True),
+    ]
+    assert pathcond._tests_on(at["A1"], func) == [(g.test, g.runs_on) for g in found]
+    assert pathcond.loops_holding(at["A1"]) == [at["L1"]]
+
+
+def test_a_head_keeps_the_guards_at_it_or_inside_it_and_must_hold_the_node() -> None:
+    """From an ``if`` the run reached, its own test and the ones below; from the loop, the exit inside it too, not
+    the one above it.  A head that is the node leaves none, and one beside it is refused."""
+    func, at = _guards_at()
+
+    def tests(head: ast.AST) -> list[str]:
+        return [ast.unparse(g.test) for g in pathcond.guards(at["A1"], func, head)]
+
+    assert tests(at["G1"]) == ["item.ok", "flag"]
+    assert tests(at["L1"]) == ["item.ok", "flag", "not item"]
+    assert tests(at["A1"]) == []
+    with pytest.raises(ValueError):
+        pathcond.guards(at["A1"], func, at["E1"])

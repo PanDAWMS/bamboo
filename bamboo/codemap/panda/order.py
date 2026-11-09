@@ -259,8 +259,8 @@ def _kind(one: ast.AST, other: ast.AST, flows: _Flows) -> str:
         if flows.reaches(one, other) and not pathcond.parted(one, other):
             return ONE_PASS
         return APART
-    theirs = {id(loop) for loop in pathcond._loops_holding(other)}
-    common = [loop for loop in pathcond._loops_holding(one) if id(loop) in theirs]
+    theirs = {id(loop) for loop in pathcond.loops_holding(other)}
+    common = [loop for loop in pathcond.loops_holding(one) if id(loop) in theirs]
     within = common[0] if common else None
     if flows.reaches(one, other, within) and not pathcond.parted(one, other):
         return ONE_PASS
