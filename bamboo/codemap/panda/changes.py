@@ -520,7 +520,8 @@ class _Reading:
             ) < len(handed):
                 # An object handed to no parameter this reading names: a ``*args``.
                 return _ESCAPED
-            if receiver is not None:
+            # A call building an object runs its class's __init__ on the new one, not on what holds the class.
+            if receiver is not None and not placed.built:
                 own = _self_parameter(target, placed.on_class)
                 if own is None:
                     return _ESCAPED
@@ -1248,10 +1249,11 @@ class _Reading:
                 if one is not None and _part_of(one, holds)
             ]
             # A static or class method called on it, or a method read off its class, is not handed it as its
-            # first parameter: what it is handed is bound above.
+            # first parameter: what it is handed is bound above.  Nor is a class's __init__ a call builds an object
+            # with: its ``self`` is the new one.
             own = (
                 _self_parameter(target, placed.on_class)
-                if on_object or within
+                if (on_object or within) and not placed.built
                 else None
             )
             if own is not None and on_object:

@@ -637,6 +637,17 @@ def _holder_changes(tmp_path: Path, walked: bool) -> dict[str, list[tuple[str, s
     return found
 
 
+def test_a_call_building_an_object_runs_its_init_on_the_new_one_not_on_what_holds_the_class(
+    tmp_path,
+):
+    """``self.plugin_class`` holds a class: calling it builds a ``Plugin``, whose ``__init__`` stores on the new
+    object, not on ``self``.  The part handed, ``self.job``, is kept on it, where the reading loses it: read by the
+    attribute's name, ``Plugin.run`` changes inside what a ``job`` holds."""
+    found = _holder_changes(tmp_path, walked=True)
+
+    assert found["self.plugin_class(self.job)"] == [("inner", ".job")]
+
+
 def test_a_reader_handed_no_trees_reads_the_corpus_by_names_as_the_build_does(
     tmp_path,
 ):
