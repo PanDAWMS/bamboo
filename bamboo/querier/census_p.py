@@ -25,13 +25,13 @@ of which in the function is a call's result -- as if the callee's rows had
 told it (``parse_job_output_report end`` before ``return 0``).  Also an
 upper bound: it does not ask whether the callee prints such a row.
 
-``--no-handler-rule`` turns off E6 (``printed.HANDLER_RULE``, on by default): an arm path that leaves by an exception whose handler prints a
+E6: an arm path that leaves by an exception whose handler prints a
 traceback at a line after the arm is proven by that frame; one whose handler
 prints any other row of the run, and a soft path whose missing paths all do,
 is ``by handler`` -- the log decides it, and it does not keep census looking
 at outer ifs.
 
-``--no-render-rows`` turns off E5 (``printed.ROW_RENDER``, on by default): a path whose own rendering of a row cannot be the arm path's is
+E5: a path whose own rendering of a row cannot be the arm path's is
 dropped.
 """
 from __future__ import annotations
@@ -98,16 +98,8 @@ def hand_classes(path: str) -> dict[tuple[str, int, str], str]:
     return out
 
 
-def _apply_flags(
-    no_render_rows: bool, calls_change_nothing: bool, call_values_known: bool, no_handler_rule: bool = False, no_reuse: bool = False
-) -> None:
-    """The run's switches, in this process (and in each worker of ``--jobs``)."""
-    if no_reuse:
-        P.REUSE_WALKS = False
-    if no_render_rows:
-        P.ROW_RENDER = False
-    if no_handler_rule:
-        P.HANDLER_RULE = False
+def _apply_flags(calls_change_nothing: bool, call_values_known: bool) -> None:
+    """The run's upper-bound modes, in this process (and in each worker of ``--jobs``)."""
     if calls_change_nothing:
         P.mutating_roots = lambda node: set()
         P.Walker.roots = lambda self, node: set()  # type: ignore[method-assign]
@@ -182,11 +174,8 @@ def main() -> None:
     ap.add_argument("--jobs", type=int, default=1, help="arms walked in this many processes at once")
     ap.add_argument("--calls-change-nothing", action="store_true")
     ap.add_argument("--call-values-known", action="store_true")
-    ap.add_argument("--no-render-rows", action="store_true")
-    ap.add_argument("--no-handler-rule", action="store_true")
-    ap.add_argument("--no-reuse", action="store_true", help="walk every arm path again (printed.REUSE_WALKS off); the output must not move")
     a = ap.parse_args()
-    flags = (a.no_render_rows, a.calls_change_nothing, a.call_values_known, a.no_handler_rule, a.no_reuse)
+    flags = (a.calls_change_nothing, a.call_values_known)
     _apply_flags(*flags)
     arms = json.loads(Path(a.arms).read_text())
     hand = hand_classes(a.hand) if a.hand else {}
@@ -196,13 +185,7 @@ def main() -> None:
     lines = [
         f"# census_p: {a.arms}, corpus {CORPUS}, bamboo {R.BAMBOO_TREE}"
         + (" -- calls change nothing (upper bound)" if a.calls_change_nothing else "")
-        + (" -- call values known (upper bound)" if a.call_values_known else "")
-        + ("" if P.ROW_RENDER else " -- E5 off")
-        + ("" if P.HANDLER_RULE else " -- E6 off")
-        + ("" if P.REUSE_WALKS else " -- reuse off")
-        + ("" if P.CALLS_RAISE else " -- no call raises (P_CALLS_RAISE=0, upper bound)")
-        + ("" if P.LEVEL_BY == "share" else f" -- S* chosen by {P.LEVEL_BY} (P_LEVEL_BY)")
-        + ("" if P.WRITTEN_BACK else " -- an execute rewrites its whole map (P_WRITTEN_BACK=0)"),
+        + (" -- call values known (upper bound)" if a.call_values_known else ""),
         f"# {len(arms)} arm statement(s)",
     ]
     tags = [hand.get((Path(x["rel"]).name, x["line"], x["func"]), "") for x in arms]

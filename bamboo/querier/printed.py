@@ -26,7 +26,7 @@ dropped when
   is another one; or, the path not binding it, a test the path passed says
   it cannot be the printed one (``if taskSpec.status not in ["topreprocess"]:
   taskSpec.status = "defined"``); or it is a local nothing binds before S*;
-* **E5** (with :data:`ROW_RENDER`) -- the row as the path would print it,
+* **E5** -- the row as the path would print it,
   its message rendered with the bare names the path bound itself (a value,
   or the literal parts of the text it built, the rest left open), does not
   match the record: ``tmpLog.info(tmpErrStr)`` printed ``pending ...`` rules
@@ -93,7 +93,6 @@ from __future__ import annotations
 
 import ast
 import functools
-import os
 import re
 import time
 from collections import Counter
@@ -135,42 +134,7 @@ from . import evaluate as E
 from . import handlers as H
 from . import rows as R
 
-#: ``P_WIDEN_BY_CALLED=1`` joins only paths that agree on whether the target was handed to a call since it was bound,
-#: the earlier behaviour.  By default that is joined as "any of them was": with P_WRITTEN_BACK an execute that writes
-#: nothing back no longer hands the bind map, and updateJobStatus 241's paths that did and did not pass the
-#: corrupted-zip INSERT stopped joining -- 138 -> 250 arm paths, 86 -> 146 s
-WIDEN_BY_CALLED = os.environ.get("P_WIDEN_BY_CALLED", "0") == "1"
-#: census walks every arm path a second time (with reuse it costs little).  P_MAX_ARM_PATHS=48
-#: brings back the stride sample of that many, under which one path in or out moved verdicts and minutes
-MAX_ARM_PATHS = int(os.environ["P_MAX_ARM_PATHS"]) if os.environ.get("P_MAX_ARM_PATHS") else None
-#: E5: check a printed row against the path's own rendering of it (on by default; P_ROW_RENDER=0 turns it off)
-ROW_RENDER = os.environ.get("P_ROW_RENDER", "1") != "0"
-#: ``P_CALLS_RAISE=0`` (``census_p.py --calls-never-raise``): no call leaves by an exception -- the upper bound of
-#: knowing which calls cannot raise
-CALLS_RAISE = os.environ.get("P_CALLS_RAISE", "1") != "0"
-#: E6: a path that leaves by an exception is decided by the rows of the handler that catches it (:mod:`bamboo.querier.handlers`):
-#: against a run, no such row drops it; in census, a traceback at a line after the arm proves an arm path, and
-#: a printing handler settles a path for the log to decide (on by default; P_HANDLER_RULE=0 turns it off)
-HANDLER_RULE = os.environ.get("P_HANDLER_RULE", "1") != "0"
-#: census: an arm path whose second walk would read what an earlier one read takes that walk's outcome
-#: (:func:`_census_at`; on by default, P_REUSE_WALKS=0 turns it off -- the output must not move)
-REUSE_WALKS = os.environ.get("P_REUSE_WALKS", "1") != "0"
-#: census: among S* of one kind (positive, by handler), the one where it holds on the larger share of arm paths
-#: (:func:`_share`, the measure ``every`` is 1 of).  P_LEVEL_BY=count brings back the larger
-#: number of proven paths, which favours an outer S* for having more paths
-LEVEL_BY = os.environ.get("P_LEVEL_BY", "share")
-#: a cursor's ``execute(sql, V)`` / ``executemany(sql, V)`` whose statement the map read and found no
-#: ``RETURNING ... INTO`` in (``sql.written_back_at`` answers ``()``) is not taken to change V: PanDA's
-#: WrappedCursor touches no key but those binds.
-#: P_WRITTEN_BACK=0 takes every such call to rewrite V whole, as before
-WRITTEN_BACK = os.environ.get("P_WRITTEN_BACK", "1") != "0"
-
-
 # ---------------------------------------------------------------- reading expressions
-
-
-def can_raise(node: ast.AST) -> bool:
-    return CALLS_RAISE and any(isinstance(n, ast.Call) and not R.is_log_call(n) for n in R.own_nodes(node))
 
 
 def mutating_roots(node: ast.AST) -> set[str]:
@@ -212,9 +176,12 @@ def written_back(call: ast.Call) -> tuple[str, ...] | None:
 
 
 def _read_only_map(call: ast.Call) -> set[int]:
-    """ids of the Name nodes in a cursor execute's map argument, when the map says its statement writes no key back."""
+    """ids of the Name nodes in a cursor execute's map argument, when the map says its statement writes no key back:
+    a cursor's ``execute(sql, V)`` / ``executemany(sql, V)`` whose statement the map read and found no ``RETURNING ...
+    INTO`` in (``sql.written_back_at`` answers ``()``) is not taken to change V -- PanDA's WrappedCursor touches no
+    key but those binds."""
     if not (
-        WRITTEN_BACK and isinstance(call.func, ast.Attribute) and call.func.attr in ("execute", "executemany")
+        isinstance(call.func, ast.Attribute) and call.func.attr in ("execute", "executemany")
         and len(call.args) >= 2
     ):
         return set()
@@ -711,9 +678,6 @@ class Path(W.Path):
     def key_parts(self) -> tuple:
         return super().key_parts() + (self.rendered, self.target_reached)
 
-    def agree(self, target: str) -> tuple:
-        return super().agree(target) + ((self.target_called,) if WIDEN_BY_CALLED else ())
-
     def join(self, q: "Path") -> None:  # type: ignore[override]
         super().join(q)
         self.target_reached = self.target_reached or q.target_reached
@@ -785,7 +749,7 @@ class Walker(W.Walker):
 
     def value_of(self, q: Path, t: str, vnode: ast.expr | None) -> Any:  # type: ignore[override]
         value = super().value_of(q, t, vnode)
-        if ROW_RENDER and value is E.UNKNOWN and vnode is not None and t.isidentifier():
+        if value is E.UNKNOWN and vnode is not None and t.isidentifier():
             value = shape_value(vnode, q.state)
         if (
             self.against_run and value is E.UNKNOWN and t == self.target and isinstance(vnode, (ast.Name, ast.Attribute))
@@ -803,14 +767,14 @@ class Walker(W.Walker):
 
     def appended(self, s: ast.stmt, q: Path) -> Any:  # type: ignore[override]
         if (
-            ROW_RENDER and isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and isinstance(s.target, ast.Name)
+            isinstance(s, ast.AugAssign) and isinstance(s.op, ast.Add) and isinstance(s.target, ast.Name)
             and isinstance(q.state.get(s.target.id), (str, Shape))
         ):
             return shape_value(s.value, q.state, before=q.state[s.target.id])
         return None
 
     def row_rule(self, q: Path, line: int) -> str:  # type: ignore[override]
-        return self.render_check(q, line) if ROW_RENDER else ""
+        return self.render_check(q, line)
 
     # -- the querier's
 
@@ -923,7 +887,7 @@ def _relevant(region: list[ast.stmt], holes: list[Hole]) -> set[str]:
         for n in [s, *R.own_nodes(s)]:
             if isinstance(n, (ast.If, ast.While)):
                 out |= chains(ast.unparse(n.test))
-            elif ROW_RENDER and isinstance(n, ast.stmt) and R.is_print(n):
+            elif isinstance(n, ast.stmt) and R.is_print(n):
                 out |= _rendered_names(message_of(n))
     for h in holes:
         out |= h.chains
@@ -1064,8 +1028,7 @@ def _prove_at(
         paths = w.run(region)
     except TooMany as e:
         return Proof("none", s_star.lineno, f"P: more than {MAX_PATHS} paths through {s_star.lineno} ({e})")
-    if HANDLER_RULE:
-        paths = _handler_rule(w, fn, sn, paths)
+    paths = _handler_rule(w, fn, sn, paths)
     return _verdict(w, paths, s_star, sorted(order), anchor_before)
 
 
@@ -1085,8 +1048,8 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
 
     ``TB``: the handler prints a traceback through the run's logger; no frame of
     the function in the run, or frames only at other statements, and the path's
-    exception did not happen.  A TB with no handler is the callers' (lib/callers,
-    ``P_FOLLOW_OUT``): their traceback holds this function's frames too, and a
+    exception did not happen.  A TB with no handler is the callers' (lib/callers):
+    their traceback holds this function's frames too, and a
     caller tied only by ``same?`` must print in the run first.  ``LOG``: a row at the top of the handler whose
     absence counts (``Row.absence_counts``) is missing from the run, a run of a file it lands in (``Row.lands_in``)
     asked for its lines (``Run.holds``).
@@ -1218,8 +1181,6 @@ def _share(c: Census) -> float:
 
 def _beats(found: Census, best: Census) -> bool:
     """Whether *found*, an outer S* of *best*'s kind, says more of the arm than *best* (the inner one stays on a tie)."""
-    if LEVEL_BY == "count":
-        return found.kind == "positive" and found.proven_paths > best.proven_paths
     return found.kind in ("positive", "by handler") and _share(found) > _share(best)
 
 
@@ -1277,9 +1238,6 @@ def _census_at(func: ast.AST, stmt: ast.stmt, s_star: ast.If, record: list | Non
         if level is not None:
             level["kind"] = "none"
         return Census("none", s_star.lineno, note="no path through S* reaches the arm")
-    if MAX_ARM_PATHS and len(arms) > MAX_ARM_PATHS:
-        step = len(arms) / MAX_ARM_PATHS
-        arms = [arms[int(i * step)] for i in range(MAX_ARM_PATHS)]
     result = Census("none", s_star.lineno, arm_paths=len(arms))
     kinds: Counter[str] = Counter()
     # A second walk reads the arm path's seen, at_row and rendered, and its tests only at an if whose truth it
@@ -1290,7 +1248,7 @@ def _census_at(func: ast.AST, stmt: ast.stmt, s_star: ast.If, record: list | Non
     for a in arms:
         if not a.seen and not anchor:
             kind = "no anchor"
-            if HANDLER_RULE and a.left:
+            if a.left:
                 cls, line = H.leave_class(func, a.left)
                 if cls == "TB" and line and H.after_arm(func, stmt, line):
                     kind = "positive"  # the traceback's frame is the row it prints
@@ -1307,7 +1265,7 @@ def _census_at(func: ast.AST, stmt: ast.stmt, s_star: ast.If, record: list | Non
         earlier = next(
             (d for d in done.get(same, ()) if all(tests.get(line, missing) == d["tests"].get(line, missing) for line in d["consulted"])),
             None,
-        ) if REUSE_WALKS else None
+        )
         if earlier is not None:
             kinds[earlier["kind"]] += 1
             if level is not None:
@@ -1361,7 +1319,7 @@ def _census_at(func: ast.AST, stmt: ast.stmt, s_star: ast.If, record: list | Non
             continue
         v = _verdict(w, survivors, s_star, list(a.seen), None)
         kind = v.kind
-        if HANDLER_RULE and kind == "soft" and all(H.leave_class(func, p.left)[0] in ("TB", "LOG") for p in survivors if not p.arm):
+        if kind == "soft" and all(H.leave_class(func, p.left)[0] in ("TB", "LOG") for p in survivors if not p.arm):
             kind = "by handler"  # only a call raising misses the arm, and the log shows whether one did
         kinds[kind] += 1
         left_by = sorted({p.left or "falls through" for p in survivors if not p.arm})
