@@ -153,6 +153,37 @@ def is_parameter(func: ast.AST, name: str) -> bool:
     return any(one is not None and one.arg == name for one in held)
 
 
+def tested(func: ast.AST) -> list[str]:
+    """The names *func*'s own ``if`` tests read."""
+    return sorted(
+        {
+            name.id
+            for node in C.own_nodes(func)
+            if isinstance(node, ast.If)
+            for name in ast.walk(node.test)
+            if isinstance(name, ast.Name)
+        }
+    )
+
+
+def route_constants(
+    calls: C.Calls, target: C.Target, sites: tuple[C.CallSite, ...]
+) -> dict[str, object]:
+    """The constants the route *sites* -- the call into *target* first, then outward -- hands the parameters
+    *target*'s own ``if`` tests read (:func:`tested`) and it never binds again: a literal, or the default the call
+    leaves (:meth:`Calls.route_constant`).  What the route does not fix, or fixes to other than a str, a number, a
+    bool or None, is left out."""
+    func = target.func
+    found: dict[str, object] = {}
+    for name in tested(func):
+        if not is_parameter(func, name) or C._rebinds(func, name):
+            continue
+        value = calls.route_constant(name, target, sites)
+        if isinstance(value, (str, int, float, bool, type(None))):
+            found[name] = value
+    return found
+
+
 #: Why a hole the reach record does not hold is one.
 HANDED_WITH_A_CALLABLE = "handed to code outside the corpus together with a function of the corpus, which it may call with it"
 

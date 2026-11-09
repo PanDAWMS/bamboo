@@ -134,12 +134,92 @@ class Proxy:
 """
 
 
+BUFFER = """\
+from contextlib import contextmanager
+from typing import Generator
+
+from pkg.proxy import Proxy
+
+
+class Pool:
+    @contextmanager
+    def get(self) -> Generator[Proxy, None, None]:
+        proxy = Proxy()
+        yield proxy
+
+
+class TaskBuffer:
+    proxyPool: Pool
+
+    def peekJobs(self, jobIDs, fromActive=True, use_json=False):
+        with self.proxyPool.get() as proxy:
+            retJobs = []
+            for jobID in jobIDs:
+                res = proxy.peekJob(jobID, fromActive)
+                if res:
+                    if use_json:
+                        retJobs.append(res.to_dict())
+                    else:
+                        retJobs.append(res)
+                else:
+                    retJobs.append(None)
+        return retJobs
+
+
+class Adder:
+    def __init__(self, taskBuffer: TaskBuffer, job_id):
+        self.taskBuffer = taskBuffer
+        self.job_id = job_id
+        self.job = None
+
+    def run(self):
+        self.job = self.taskBuffer.peekJobs([self.job_id], fromActive=False)[0]
+        self.process()
+        self.unchecked()
+        job = self.taskBuffer.peekJobs([self.job_id])[0]
+        if job is not None:
+            self.check(job)
+
+    def process(self):
+        if self.job is None:
+            return
+        if self.job.jobStatus not in ["transferring"]:  # M1
+            self.job.jobStatus = "holding"
+
+    def unchecked(self):
+        if self.job.jobStatus == "running":  # M2
+            return
+
+    def check(self, job):
+        if job.jobStatus == "failed":  # C1
+            return
+
+
+class Relay:
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def watch(source: TaskBuffer | Relay, job_id):
+    job = source.peekJobs([job_id])[0]
+    if job is None:
+        return
+    if job.jobStatus == "running":  # O1
+        return
+"""
+
+SOURCES = {"spec": SPEC, "proxy": PROXY, "buffer": BUFFER}
+
+
 def _setup(tmp_path: Path):
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
     modules = []
-    for name, text in {"spec": SPEC, "proxy": PROXY}.items():
+    for name, text in SOURCES.items():
         (root / f"{name}.py").write_text(text)
         tree = ast.parse(text)
         pathcond.attach_parents(tree)
@@ -154,38 +234,41 @@ def _setup(tmp_path: Path):
         )
     calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
     assert calls is not None
-    proxy = next(
-        module.tree for module in modules if module.rel_path.endswith("proxy.py")
-    )
-    return calls, proxy
+    return calls, {module.rel_path: module.tree for module in modules}
 
 
-LINES = {
-    text.rsplit("# ", 1)[1]: number
-    for number, text in enumerate(PROXY.splitlines(), 1)
-    if "  # " in text
-}
-FILE = f"{PACKAGE}/proxy.py"
+def _file(module: str) -> str:
+    return f"{PACKAGE}/{module}.py"
 
 
-def _ask(tmp_path: Path, function: str, marker: str, read: str) -> fills.RowHeld:
-    calls, proxy = _setup(tmp_path)
+FILE = _file("proxy")
+
+
+def _ask(
+    tmp_path: Path, function: str, marker: str, read: str, module: str = "proxy"
+) -> fills.RowHeld:
+    calls, trees = _setup(tmp_path)
     func = next(
         node
-        for node in ast.walk(proxy)
+        for node in ast.walk(trees[_file(module)])
         if isinstance(node, ast.FunctionDef) and node.name == function
+    )
+    line = next(
+        number
+        for number, text in enumerate(SOURCES[module].splitlines(), 1)
+        if text.endswith(f"  # {marker}")
     )
     statement = next(
         node
         for node in ast.walk(func)
-        if isinstance(node, ast.If) and node.lineno == LINES[marker]
+        if isinstance(node, ast.If) and node.lineno == line
     )
     node = next(
         one
         for one in ast.walk(statement.test)
         if isinstance(one, ast.expr) and ast.unparse(one) == read
     )
-    return fills.row_fills(calls, FILE, func, node)
+    return fills.row_fills(calls, _file(module), func, node)
 
 
 def _keys(fill: fills.Fill) -> set[tuple[str, str, str, tuple[str, ...]]]:
@@ -202,8 +285,19 @@ def _keys(fill: fills.Fill) -> set[tuple[str, str, str, tuple[str, ...]]]:
     }
 
 
-def _source(node: ast.AST) -> str:
-    return PROXY.splitlines()[node.lineno - 1].strip()  # type: ignore[attr-defined]
+def _source(node: ast.AST, module: str = "proxy") -> str:
+    return SOURCES[module].splitlines()[node.lineno - 1].strip()  # type: ignore[attr-defined]
+
+
+def _hops(fill: fills.Fill | fills.Other) -> list[tuple[str, str, str]]:
+    return [
+        (
+            hop.way,
+            hop.site.func.name,  # type: ignore[attr-defined]
+            _source(hop.site.call, hop.site.file.split("/")[-1][: -len(".py")]),
+        )
+        for hop in fill.route
+    ]
 
 
 def test_a_column_a_row_reading_call_filled_is_said_with_the_run_and_its_keys(
@@ -301,6 +395,76 @@ def test_a_fill_takes_the_rows_of_its_own_run_where_later_runs_share_its_binds(
     )
 
 
+def test_a_field_a_caller_stored_from_a_calls_value_is_read_through_the_calls(
+    tmp_path,
+) -> None:
+    """``process`` reads ``self.job.jobStatus``; ``run`` stored ``self.job`` from ``peekJobs(...)[0]`` before calling
+    it, ``peekJobs`` appends what ``proxy.peekJob`` returns, and that is the job it packed from its select.  The
+    ``None`` s on the way do not reach: ``peekJobs`` appends ``res`` only ``if res:``, and ``process`` returns first
+    ``if self.job is None``.  No ``use_json`` is passed, so ``res.to_dict()`` is not appended."""
+    held = _ask(tmp_path, "process", "M1", "self.job.jobStatus", "buffer")
+    assert held.others == ()
+    (fill,) = held.fills
+    assert (fill.file, _source(fill.site)) == (FILE, "job.pack(res[0])")
+    assert _hops(fill) == [
+        (fills.HOP_UP, "run", "self.process()"),
+        (
+            fills.HOP_DOWN,
+            "run",
+            "self.job = self.taskBuffer.peekJobs([self.job_id], fromActive=False)[0]",
+        ),
+        (fills.HOP_DOWN, "peekJobs", "res = proxy.peekJob(jobID, fromActive)"),
+    ]
+    assert _keys(fill) == {
+        (table, "PandaID=:PandaID", ":PandaID", ("pandaID",))
+        for table in ("ATLAS_PANDA.jobsActive4", "ATLAS_PANDA.jobsArchived4")
+    }
+
+
+def test_a_none_no_test_rules_out_reaches_beside_the_fill(tmp_path) -> None:
+    """``unchecked`` reads ``self.job.jobStatus`` with no test of ``self.job`` on the way: the ``None`` that
+    ``peekJobs`` appends for a job not found reaches, beside the job."""
+    held = _ask(tmp_path, "unchecked", "M2", "self.job.jobStatus", "buffer")
+    assert [_source(fill.site) for fill in held.fills] == ["job.pack(res[0])"]
+    assert [
+        (one.kind, one.file, _source(one.site, "buffer")) for one in held.others
+    ] == [(fills.OTHER_BINDING, _file("buffer"), "retJobs.append(None)")]
+
+
+def test_a_parameter_is_read_at_each_call_of_its_function(tmp_path) -> None:
+    """``check`` reads its parameter ``job``; ``run`` hands it a job ``peekJobs`` returned, and calls it only
+    ``if job is not None``."""
+    held = _ask(tmp_path, "check", "C1", "job.jobStatus", "buffer")
+    assert held.others == ()
+    (fill,) = held.fills
+    assert _hops(fill) == [
+        (fills.HOP_UP, "run", "self.check(job)"),
+        (fills.HOP_DOWN, "run", "job = self.taskBuffer.peekJobs([self.job_id])[0]"),
+        (fills.HOP_DOWN, "peekJobs", "res = proxy.peekJob(jobID, fromActive)"),
+    ]
+
+
+def test_a_call_that_may_land_beyond_the_functions_read_is_also_an_other(
+    tmp_path,
+) -> None:
+    """``watch`` 's ``source`` is a ``TaskBuffer`` or a ``Relay``, which hands every name on to what it wraps, so
+    ``source.peekJobs`` may run somewhere this reading cannot name (:meth:`Calls.opened`): ``TaskBuffer.peekJobs``
+    is read, and the call is an other beside its fill."""
+    held = _ask(tmp_path, "watch", "O1", "job.jobStatus", "buffer")
+    assert [_source(fill.site) for fill in held.fills] == ["job.pack(res[0])"]
+    assert [
+        (one.kind, one.file, _source(one.site, "buffer"), one.route)
+        for one in held.others
+    ] == [
+        (
+            fills.OTHER_BINDING,
+            _file("buffer"),
+            "job = source.peekJobs([job_id])[0]",
+            (),
+        )
+    ]
+
+
 def test_a_value_from_elsewhere_is_another_write(tmp_path) -> None:
     """A parameter is the entry; an object no row filled is its binding; a row the function was handed is not
     followed to a fetch."""
@@ -318,10 +482,10 @@ def test_a_value_from_elsewhere_is_another_write(tmp_path) -> None:
 def test_a_read_is_asked_on_a_tree_with_parent_links_and_of_a_chain_on_a_name(
     tmp_path,
 ) -> None:
-    calls, proxy = _setup(tmp_path)
+    calls, trees = _setup(tmp_path)
     func = next(
         node
-        for node in ast.walk(proxy)
+        for node in ast.walk(trees[FILE])
         if isinstance(node, ast.FunctionDef) and node.name == "killJob"
     )
     with pytest.raises(ValueError, match="parent links"):
