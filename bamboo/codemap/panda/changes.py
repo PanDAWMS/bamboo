@@ -520,7 +520,8 @@ class _Reading:
             ) < len(handed):
                 # An object handed to no parameter this reading names: a ``*args``.
                 return _ESCAPED
-            if receiver is not None:
+            # A call building an object runs its class's __init__ on the new one, not on what holds the class.
+            if receiver is not None and not placed.built:
                 own = _self_parameter(target, placed.on_class)
                 if own is None:
                     return _ESCAPED
@@ -859,8 +860,15 @@ class _Reading:
         return self._setters  # type: ignore[return-value]
 
     def _index(self) -> None:
+        """Every module of the corpus (:meth:`Types.corpus_files`), each by the tree the reader holds for it
+        (:meth:`Types.tree`): the corpus, not the trees a build handed the reader -- one made with none, as a
+        reader of a run makes it, reads every method of a name and every definition by an attribute's name the
+        same."""
         self._methods, self._functions, self._setters = {}, {}, {}
-        for file, (_sha, tree) in sorted(self.types.walked.items()):
+        for file in sorted(self.types.corpus_files()):
+            tree = self.types.tree(file)
+            if tree is None:
+                continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     for member in node.body:
@@ -1241,10 +1249,11 @@ class _Reading:
                 if one is not None and _part_of(one, holds)
             ]
             # A static or class method called on it, or a method read off its class, is not handed it as its
-            # first parameter: what it is handed is bound above.
+            # first parameter: what it is handed is bound above.  Nor is a class's __init__ a call builds an object
+            # with: its ``self`` is the new one.
             own = (
                 _self_parameter(target, placed.on_class)
-                if on_object or within
+                if (on_object or within) and not placed.built
                 else None
             )
             if own is not None and on_object:

@@ -322,6 +322,11 @@ class Placed(NamedTuple):
     holds what ``updateJobStatus`` returned once ``timed_method.run(...)``
     has; empty where it keeps nothing, or the classes the object can be keep
     it in different fields.
+
+    *built*: the call builds an object -- ``JobSpec(...)``,
+    ``self.adder_plugin_class(self.job, ...)`` on a field holding a class --
+    and the targets are the ``__init__`` its class runs on the new one: the
+    object a call reads its callee through is not the ``__init__``'s ``self``.
     """
 
     targets: tuple[Target, ...] = ()
@@ -330,6 +335,7 @@ class Placed(NamedTuple):
     thread: bool = False
     forwarded: tuple[ast.expr, ...] = ()
     kept_at: str = ""
+    built: bool = False
 
     @property
     def returns_none(self) -> bool:
@@ -1340,7 +1346,7 @@ class Calls:
                 if len(lineage) > 1:
                     built += [one for one in self.subclasses(*lineage[1]) if one not in built]
         placed = self._method_of_any(built, "__init__", opened)
-        return placed if placed.targets else None
+        return placed._replace(built=True) if placed.targets else None
 
     def _named(self, file: str, func: ast.AST, name: str) -> Placed:
         # A function or a class defined inside this one, or inside one that
@@ -1351,7 +1357,7 @@ class Calls:
             node = binding(bound_defs(scope), name)
             if isinstance(node, ast.ClassDef):
                 init = self._method_of((file, node), "__init__")
-                return init if init.targets else Placed((), UNPLACED_NO_INIT)
+                return init._replace(built=True) if init.targets else Placed((), UNPLACED_NO_INIT)
             if node is not None:
                 return Placed((Target(file, node, None),))
             scope = self.types.enclosing_function(file, scope)
@@ -1364,7 +1370,7 @@ class Calls:
         constructed = self.types.class_named(file, ast.Name(id=name, ctx=ast.Load()))
         if constructed is not None:
             init = self._method_of(constructed, "__init__")
-            return init if init.targets else Placed((), UNPLACED_NO_INIT)
+            return init._replace(built=True) if init.targets else Placed((), UNPLACED_NO_INIT)
         held = self.types.imports(file).get(name)
         if held is not None:
             module, attribute = held
@@ -1381,7 +1387,7 @@ class Calls:
         node = binding(tree.body, name)
         if isinstance(node, ast.ClassDef):
             init = self._method_of((file, node), "__init__")
-            return init if init.targets else Placed((), UNPLACED_NO_INIT)
+            return init._replace(built=True) if init.targets else Placed((), UNPLACED_NO_INIT)
         if node is not None:
             return Placed((Target(file, node, None),))
         held = self.types.imports(file).get(name)
