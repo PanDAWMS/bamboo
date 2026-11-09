@@ -2138,6 +2138,57 @@ needs the map's reach from the calls between Q and R, and rule R's breaks and ke
 not readable as one call, R in no loop (MT-toincexec-late 5334: `retryTask_JEDI`'s rows printed several times): a
 reading splitting a run into calls.
 
+### K73. A kept arm is positive where its call ran the head if, entered no handler around it, and every test down to it holds (J)
+
+H2's step 3.  An arm left kept by P and P1 under a chain of ifs whose tests the run's values decide had nothing to
+show it ran.  killJob's cancelled arm at 1072 under 1017 and 1071 (MJE-7397556704): the call printed 840 "code=50",
+942 and 1145 "com=True kill=True time=0", and no row prints only through 1072.  14 H2 stops of m-gaps and m-cut2
+were so, each with one killJob arm kept beside unexamined candidates (and, in two, beside kept arms of other functions
+none of whose rows the run printed).
+
+Now (`which_ran.ran_down_to`, after P1 on the kept verdicts, where an env is handed), in a run that is one call
+(`Seen.single_call`) with no traceback of the function:
+- *the head* H: of the ifs holding the arm, outermost first, the first the call is shown to have run, with no loop,
+  handler or `match` between it and the arm (`_head_ran`).  A placed row from which, or from an earlier placed record
+  (or the call's entry), every way passes H (`flow.runs_after`, H a stop); or a row printing a local whose shown value,
+  of the bindings run since a record from which every way to the row binds it, only bindings behind H can give (P1's
+  givers, `reaching.reaching`).  killJob: 1145's `flagKilled=True`; of 875 (False) and 1098 (True) only 1098 gives
+  it, and every way from 840 to 1098 passes 1017;
+- *no raise between*: a try whose body holds H has a catch-all handler, and the call entered none of the handlers of
+  the tries holding H or inside it before the arm.  A handler is read as not entered where the map says every way
+  through it passes one of its own prints (`HandlerMark.prints_on_every_way`, HPC) and none of them is in the run,
+  each where the run would show it (rule 4's reading).  A marking call's prints are not read: 1161 calls `_rollback`,
+  which writes to `self._log_stream` with no key, and `dump_error_message`, whose 319 prints a traceback the reader
+  cannot read; its own 1170 (`time=...`) is on every way;
+- *the tests from H down* (`pathcond.guards(arm, f, head=H)`, H's own included, an early exit's on the way it stays)
+  hold, each read at its own if: the values printed before it (`printed_before`), a name its print shows as several
+  values read under each and taken where all give one answer (`_truth`: killJob's `code=None` is None or "None", and
+  `code in ['2', '4']` is false under both), and the question's column the pass filled from the row (K71's state
+  before the pass), also where other writes reach the read: each must be this function's, reached with no call
+  crossed, under a test those values make false (`_filled_at`).  1071's `job.jobStatus != "closed"` is reached by the
+  stores of 'closed' at 1028 .. 1063, under `code in ['2', '4']`, `code == '51'`, '55', '60' and '10', all false with
+  "50": 'merging' holds.
+
+Premises: the map's flow reads every way a raise may take (`raised` not handed); a handler entered leaves by one of
+its exits, not by a raise inside it (the map's every way: a `dump_error_message` that raised would leave 1161
+without 1170); rule 4's reading of a missing row; K68's values of a print; K71's premises.
+
+Measured as j1j against j1m (querier-v df23a01, codemap-xxxii merged, with J and without; the map's dump 0a82bd3, pin m,
+the same live records) on the cases behind the base's 102 outputs holding a kept verdict (m-failed 8, m-cut2 39,
+m-gaps 31, MT 4; the 65 and attr whole): no run crashed.  13 move as predicted: killJob's arm is positive by J and
+chosen by positive evidence -- 1028, 1047, 1059 (code=60, beside 13 kept arms of archiveJob and others), 1063 and 1072
+(three with code=None, read as None and as "None") -- and the walk goes on from H2 to H4 (11: "3 classes define
+_commit") or to L2 (MJ-pending-late, MJ-starting-late: two asks of logs the records lack).  MJE-7396802500 stays at H2.
+Nothing else moves; the 65's and attr/MT's outputs are equal.  The time is not compared.
+
+*Shows:* "J: the call ran H (row R at <span> printed T='v', which of the bindings run since row Q (at <span>) only
+[...] can give, every way to them passing H); it entered none of the handlers [...] around H..A (their own prints not
+in the run); the tests from H down to A hold: '<test>' True ({...}) ...".
+*Revisit:* a run of several calls (MJE-7396802500: killJob's two calls at 05:27:04 and 05:40:46 stay one run, 840
+not cut, K47) -- a reading splitting a run into calls, or the map's capture of 840; the key's turn of a loop (P1's
+turn) as the unit; a handler covered only with its marking calls (the DB proxy retry idiom: `retry : {iTry}` on the
+way that continues).
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

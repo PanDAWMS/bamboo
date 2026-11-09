@@ -9167,7 +9167,7 @@ def test_a_row_printing_the_key_of_what_the_arm_writes_shows_another_key_in_ever
                          sources=[N(kind="object", name="JobSpec", site_owner="", site_line=None, line=line - 1, steps=[],
                                     through=[], column="", route=[])])
             mapdump._FRAGMENT[:] = [N(write_froms=[w("f", 6), w("g", 15), w("k", 33)], guard_froms=[], key_froms=[],
-                                      function_prints=[])]
+                                      function_prints=[], handler_marks=[])]
             got = {}
             for name, func, line in (("others", "f", 6), ("mine", "f", 6), ("after", "g", 15), ("none", "h", 24),
                                      ("between", "k", 33)):
@@ -10116,3 +10116,151 @@ def test_a_kept_arm_binding_a_local_to_the_value_a_row_of_the_keys_turn_printed_
     ), got["bare"]
     # a way binding nothing reaches the row: neither the print before it nor the entry binds it on every way
     assert got["maybe"] == "", got["maybe"]
+
+
+_J_PROXY = """\
+from pandaserver.spec import JobSpec
+
+
+class Proxy:
+    def killJob(self, pandaID, code):
+        self.logger.debug(f"code={code}")
+        if isinstance(code, int):
+            code = str(code)
+        try:
+            flagKilled = False
+            for attempt in range(2):
+                sql2 = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+                varMap = {}
+                varMap[":PandaID"] = pandaID
+                self.cur.execute(sql2, varMap)
+                res = self.cur.fetchall()
+                if len(res) == 0:
+                    continue
+                job = JobSpec()
+                job.pack(res[0])
+                if job.jobStatus != "failed":
+                    if code in ["2", "4"]:
+                        job.jobStatus = "closed"
+                    elif code == "51":
+                        job.jobStatus = "closed"
+                    if job.jobStatus != "closed":
+                        job.jobStatus = "cancelled"
+                flagKilled = True
+                break
+            self.logger.debug(f"kill={flagKilled}")
+            return flagKilled
+        except Exception as e:
+            if self.no_wait(e):
+                self.logger.debug("skipped with NOWAIT")
+            self.logger.debug("rolled back")
+            return False
+"""
+
+
+def test_a_kept_arm_is_positive_where_its_call_ran_the_head_if_entered_no_handler_and_every_test_down_to_it_holds(tmp_path):
+    # killJob's arms under 1017 (MJE-7397556704, code=50): the call printed kill=True, which only the binding after
+    # the if gives, so the call ran the if; the handler's own print on every way is not in the run; the tests from the
+    # if down hold with the state before the pass and the printed code, the stores of 'closed' under code tests false
+    # (J; KNOWN_ISSUES.md K73).  code=None is None or "None": the tests are false under both
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "proxy.py").write_text(_J_PROXY)
+    lines = _J_PROXY.splitlines()
+    at = {t: lines.index(t) + 1 for t in (
+        '                        job.jobStatus = "cancelled"', '                if job.jobStatus != "failed":',
+        "        except Exception as e:", '                self.logger.debug("skipped with NOWAIT")',
+        '            self.logger.debug("rolled back")')}
+    closed = lines.index('                        job.jobStatus = "closed"') + 1
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.X: DEBUG    < PandaID=1 > {}\n"
+    logs = {
+        "fifty": ["code=50", "kill=True"],
+        "none": ["code=None", "kill=True"],
+        # the handler printed: it was entered
+        "entered": ["code=50", "kill=True", "rolled back"],
+        # no row shows the if ran
+        "short": ["code=50"],
+        # two calls in the run
+        "twice": ["code=50", "kill=True", "code=50", "kill=True"],
+        # a store of 'closed' runs
+        "two": ["code=2", "kill=True"],
+    }
+    for name, texts in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(5 + i, t) for i, t in enumerate(texts)))
+    handler = {"owner": "pandaserver/proxy.py::Proxy.killJob", "line": at["        except Exception as e:"],
+               "catches": "Exception", "catch_all": True, "try_first": lines.index("            flagKilled = False") + 1,
+               "try_last": at["        except Exception as e:"] - 1, "kind": "marked",
+               "prints": [at['                self.logger.debug("skipped with NOWAIT")'], at['            self.logger.debug("rolled back")']]}
+    got = {}
+    for covered in (True, False):
+        # one dump a process (mapdump.install): the handler covered by its own prints, then not
+        out = _ok(
+            _run(
+                tmp_path,
+                f"""
+                import json
+                from bamboo.codemap.models import HandlerMark, MapFragment
+                from bamboo.querier import evaluate as E
+                from bamboo.querier import mapdump
+                from bamboo.querier import rows as R
+                from bamboo.querier import which_ran as W
+                from bamboo.querier.records import read_log, runs_for
+
+                R.ROWS_FROM = "walk"
+                before = {{"status": "merging", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.000000",
+                           "host": "m1"}}
+                fragment = MapFragment(map_id="panda", derived_from="source-root:{_corpus(tmp_path)}",
+                                       handler_marks=[HandlerMark(**{handler!r}, prints_on_every_way={covered})])
+                with open("map.json", "w") as f:
+                    f.write(fragment.model_dump_json())
+                mapdump.install("map.json")
+                fn = R.function("pandaserver/proxy.py", "killJob")
+                got = {{}}
+                for name in {sorted(logs) if covered else ["fifty"]!r}:
+                    run, = runs_for(read_log(f"{{name}}.log"), "1")
+                    sn = R.seen(fn, run, "outside")
+                    for line in ({at['                        job.jobStatus = "cancelled"']}, {closed}):
+                        env = E.Env(rows={{"job": "job"}}, subject="<job>.jobStatus", keys=frozenset({{"PandaID"}}),
+                                    statuslog=[before], call=None)
+                        got[f"{{name}} {{line}} {covered}"] = W.ran_down_to(fn, sn, sn, R.statement_at(fn.node, line), env, set())
+                print(json.dumps(got))
+                """,
+            )
+        )
+        got.update(json.loads(out.splitlines()[-1]))
+    cancelled, head = at['                        job.jobStatus = "cancelled"'], at['                if job.jobStatus != "failed":']
+    code_row, kill_row = lines.index('        self.logger.debug(f"code={code}")') + 1, lines.index('            self.logger.debug(f"kill={flagKilled}")') + 1
+    flag, handler_line = lines.index("                flagKilled = True") + 1, at["        except Exception as e:"]
+    second = lines.index('                        job.jobStatus = "closed"', closed) + 1
+    state = "the statuslog row before the pass, 'merging' at 2026-01-01 00:00:00.000000"
+
+    def ran(name: str, arm: int) -> str:
+        return (f"J: the call ran {head} (row {kill_row} at {name}.log:2 printed flagKilled='True', which of the bindings run "
+                f"since row {code_row} (at {name}.log:1) only [{flag}] can give, every way to them passing {head}); it entered "
+                f"none of the handlers [{handler_line}] around {head}..{arm} (their own prints not in the run); the tests from "
+                f"{head} down to {arm} hold: ")
+
+    # the print after the loop shows flagKilled True, which only the binding after the if gives; 1161's own prints are
+    # not in the call; 1071's read: the stores of 'closed' under code tests false with "50", the state before the pass
+    off = f"""{closed} under "code in ['2', '4']" False, {second} under "code == '51'" False"""
+    assert got[f"fifty {cancelled} True"] == ran("fifty", cancelled) + (
+        f""""job.jobStatus != 'closed'" True ({ {'job.jobStatus': f'{state}; the other writes reaching it do not run: {off}'} }); """
+        f""""job.jobStatus != 'failed'" True ({ {'job.jobStatus': state} })"""
+    ), got[f"fifty {cancelled} True"]
+    # code=None is None or "None": the stores' tests are false under both
+    both = "code read as each of ['None', None]"
+    off = f"""{closed} under "code in ['2', '4']" False ({both}), {second} under "code == '51'" False ({both})"""
+    assert got[f"none {cancelled} True"] == ran("none", cancelled) + (
+        f""""job.jobStatus != 'closed'" True ({ {'job.jobStatus': f'{state}; the other writes reaching it do not run: {off}'} }); """
+        f""""job.jobStatus != 'failed'" True ({ {'job.jobStatus': state} })"""
+    ), got[f"none {cancelled} True"]
+    # the store of 'closed' under code in ['2', '4'] does not run with code 50
+    assert got[f"fifty {closed} True"] == "", got
+    # the handler is not covered by its own prints, entered, or no row shows the if ran, or two calls
+    assert got[f"fifty {cancelled} False"] == "", got
+    assert got[f"entered {cancelled} True"] == "" and got[f"short {cancelled} True"] == "", got
+    assert got[f"twice {cancelled} True"] == "", got
+    # with code 2 the store of 'closed' runs: the arm of 'closed' is read, 'cancelled' is not
+    assert got[f"two {closed} True"].startswith(ran("two", closed) + "\"code in ['2', '4']\" True"), got
+    assert got[f"two {cancelled} True"] == "", got

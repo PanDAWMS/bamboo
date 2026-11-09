@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import itertools
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -59,7 +60,7 @@ from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import evaluate as SE  # noqa: E402
 from bamboo.codemap.panda import fills, flow, pathcond, reaching  # noqa: E402
-from bamboo.querier import asked, row_names  # noqa: E402
+from bamboo.querier import asked, mapdump, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
@@ -421,7 +422,8 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
     return put
 
 
-def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env) -> dict[str, str]:
+def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env,
+                   several: dict[str, list[Any]] | None = None) -> dict[str, str]:
     """Put in *env* each bare local (``{N}`` or ``{str(N)}``) that a row of *fn* printed before *stmt* on every path to
     it (*before*, :func:`rows.must_rows`) -- a record of the row placed in the run (``Seen.unambiguous``) -- with one
     value in every record of the run the row reads, where the value shown is the one *stmt* reads: the value the
@@ -432,13 +434,17 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
     (``changes.object_changes``).  Where only the shown value reaches, it is put as ``put_printed`` reads every hole.
     Where a rebinding turns it on its way (a conversion), the type decides which way it took, so the text is read as
     each value it can be -- its literal and itself, each printing as the text -- and put only when every way gives one
-    value (:func:`_through_conversions`).
+    value (:func:`_ways_through`).
 
     Rule 17 (:func:`stable_holes`) puts a local bound once in the whole function, wherever it is read; this reads one
     print and one statement.  killJob's ``code`` is a parameter and is bound again at 853 (``code = str(code)`` under
     ``if isinstance(code, int):``), so rule 17 never puts it.  Printed at 840 as ``code=2``, an int 2 takes 853's way
     and the text "2" the other, both ``"2"``: ``code in ['2', '4']`` holds at 1028 and ``code == '51'`` is false at
-    1047.  KNOWN_ISSUES.md K68."""
+    1047.  KNOWN_ISSUES.md K68.
+
+    *several*, where handed: each name whose ways give more than one value, with those values, put nowhere -- a reader
+    of one test may take its answer where every value gives the same (J, :func:`_truth`).  killJob's ``code=None``
+    is None or the text "None", and ``code in ['2', '4']`` is false under both."""
     values: dict[str, set[str]] = {}
     last: dict[str, tuple[ast.stmt, str, str]] = {}
     for s in before:
@@ -474,11 +480,13 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
             put[expr] = text
             continue
         # the conversion's way is str() of the shown value: only where the print wrote it so
-        value = _through_conversions(held, name, text) if trace.renders_as_str(s, expr) else E.UNKNOWN
-        if value is not E.UNKNOWN:
-            turned = "; ".join(f"{ast.unparse(c.site)} at {c.site.lineno}" for c in held.conversions)
-            env.put(name, value, f"{source}, through {turned}")
+        ways = _ways_through(held, name, text) if trace.renders_as_str(s, expr) else None
+        turned = "; ".join(f"{ast.unparse(c.site)} at {c.site.lineno}" for c in held.conversions)
+        if ways is not None and len(ways) == 1:
+            env.put(name, ways[0], f"{source}, through {turned}")
             put[name] = text
+        elif ways and several is not None:
+            several[name] = ways
     return put
 
 
@@ -589,28 +597,37 @@ def _chains(test: ast.expr) -> list[ast.Attribute]:
     return out
 
 
-#: :func:`_row_filled`'s answers, by the read's place and what it is asked of
-_FILLED: dict[tuple[str, int, int, str, frozenset[str]], bool] = {}
+#: :func:`_row_held`'s answers, by the read's place
+_HELD: dict[tuple[str, int, int], Any] = {}
 
 
-def _row_filled(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tuple, column: str, keys: set[str]) -> bool:
-    """Whether every write of *read* reaching it fills it from one row of a statement testing a key column equal to a
-    bind, as *column*, with no in-place change on the way (``fills.row_fills``)."""
-    key = (rel, read.lineno, read.col_offset, column, frozenset(keys))
-    if key in _FILLED:
-        return _FILLED[key]
-    try:
-        held = fills.row_fills(calls, rel, func, read, bound)  # type: ignore[arg-type]
-    except ValueError:
-        held = None
-    ok = held is not None and bool(held.fills) and not held.others and all(
+def _row_held(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tuple) -> Any:
+    """The writes of *read* reaching it (``fills.row_fills``), or None where the map cannot read them."""
+    key = (rel, read.lineno, read.col_offset)
+    if key not in _HELD:
+        try:
+            _HELD[key] = fills.row_fills(calls, rel, func, read, bound)  # type: ignore[arg-type]
+        except ValueError:
+            _HELD[key] = None
+    return _HELD[key]
+
+
+def _from_the_row(held: Any, column: str, keys: set[str]) -> bool:
+    """Whether *held* has fills and each fills the value from one row of a statement testing a key column equal to a
+    bind, as *column*, with no in-place change on the way; its others are not read here."""
+    return held is not None and bool(held.fills) and all(
         fill.pick in (fills.PICK_ONE, fills.PICK_AT) and not fill.changes and fill.reads and all(
             one.column.lower() == column
             and any(t.test.kind == "equal" and t.test.column.lower() in keys and t.binds for t in one.tests)
             for one in fill.reads)
         for fill in held.fills)
-    _FILLED[key] = ok
-    return ok
+
+
+def _row_filled(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tuple, column: str, keys: set[str]) -> bool:
+    """Whether every write of *read* reaching it fills it from one row of a statement testing a key column equal to a
+    bind, as *column*, with no in-place change on the way (``fills.row_fills``)."""
+    held = _row_held(calls, rel, func, read, bound)
+    return held is not None and not held.others and _from_the_row(held, column, keys)
 
 
 #: what a conversion's tests and value may call: builtins with no effect, and the builtin types a test names
@@ -645,12 +662,12 @@ def _changed_in_place(fn: R.Function, name: str, since: ast.stmt, at: ast.stmt) 
         return True
 
 
-def _through_conversions(held: pathcond.HeldSince, name: str, text: str) -> Any:
-    """The value a conversion-turned local holds where it is read, or ``UNKNOWN``: each value the printed *text* can be
-    (itself, and its literal where that prints as the text) takes a way -- a decided conversion's where its tests hold,
-    the shown value's where none does, both where that is not known -- and only one value on every way is put.
-    killJob's ``code=2``: an int 2 takes ``code = str(code)`` under ``isinstance(code, int)``, the text "2" the other
-    way, and both are ``"2"``."""
+def _ways_through(held: pathcond.HeldSince, name: str, text: str) -> list[Any] | None:
+    """The values a conversion-turned local can hold where it is read, each once, or None where a way's value is not
+    known: each value the printed *text* can be (itself, and its literal where that prints as the text) takes a way --
+    a decided conversion's where its tests hold, the shown value's where none does, both where that is not known.  One
+    value is what :func:`printed_before` puts.  killJob's ``code=2``: an int 2 takes ``code = str(code)`` under
+    ``isinstance(code, int)``, the text "2" the other way, and both are ``"2"``; ``code=None``: None and "None"."""
     candidates: list[Any] = [text]
     try:
         literal = ast.literal_eval(text)
@@ -676,9 +693,9 @@ def _through_conversions(held: pathcond.HeldSince, name: str, text: str) -> Any:
                 raw = False
         values = [SE.evaluate(way, env) for way in ways] + ([candidate] if raw else [])
         if any(v is SE.UNKNOWN for v in values):
-            return E.UNKNOWN
+            return None
         got.update({(type(v).__name__, repr(v)): v for v in values})
-    return next(iter(got.values())) if len(got) == 1 else E.UNKNOWN
+    return list(got.values())
 
 
 def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, int] | None:
@@ -941,6 +958,249 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
             return (f"P1: row {row.line} printed {name}={shown!r} {where}, at {records[r_i].span}; every way from {since} to "
                     f"it binds {name}, and of the bindings run since ({lines}) only {stmt.lineno} gives {shown!r}")
     return ""
+
+
+#: the installed dump's handler records by owner and ``except`` line (:func:`_handler_marks`), with the fragment read
+_MARKS: list[tuple[Any, dict[str, dict[int, Any]]]] = []
+_TRIES: tuple[type, ...] = (ast.Try, getattr(ast, "TryStar", ast.Try))
+
+
+def _handler_marks(owner: str) -> dict[int, Any]:
+    """The map's records of *owner*'s ``except`` handlers (``MapFragment.handler_marks``), by line; empty with no dump."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return {}
+    if not _MARKS or _MARKS[0][0] is not fragment:
+        by: dict[str, dict[int, Any]] = {}
+        for one in fragment.handler_marks:
+            by.setdefault(one.owner, {})[one.line] = one
+        _MARKS[:] = [(fragment, by)]
+    return _MARKS[0][1].get(owner, {})
+
+
+def _tries(func: ast.AST) -> list[Any]:
+    """The ``try`` statements of *func*'s own body, ``try``/``except*`` too where the Python has it."""
+    return [t for t in R.own_nodes(func) if isinstance(t, _TRIES)]
+
+
+def _unshown(sn: R.Seen, lines: list[int]) -> bool:
+    """Whether no row of *sn*'s function at *lines* is in its run, each where the run would show it
+    (``Seen.would_show``)."""
+    for line in lines:
+        row = next((r for r in sn.fn.rows if r.line == line), None)
+        if row is None or sn.present(row) or not sn.would_show(row):
+            return False
+    return True
+
+
+def _not_entered(sn: R.Seen, mark: Any) -> bool:
+    """Whether the run *sn* reads shows the call did not enter the handler *mark* records: every way through it passes
+    one of its own prints (the map's ``HandlerMark.prints_on_every_way``), and none of them is in the run where the
+    run would show it.  A marking call's prints are not read: the key's run need not hold them.  killJob's 1161 calls
+    ``_rollback``, which writes to ``self._log_stream`` with no key, and ``dump_error_message``, whose 319 prints a
+    traceback the reader cannot read; its own 1170 (``time=...``) is on every way.  As the map reads every way, a raise
+    inside the handler that leaves it is no exit: a ``dump_error_message`` that raised would leave 1161 without 1170."""
+    return mark is not None and bool(mark.prints_on_every_way) and _unshown(sn, mark.prints)
+
+
+def _holds(outer: ast.AST, node: ast.AST) -> bool:
+    return any(a is outer for a in pathcond.ancestors(node))
+
+
+def _head_ran(fn: R.Function, sn: R.Seen, head: ast.stmt) -> str:
+    """Why the one call *sn* reads ran the statement *head*, or '': a row the call printed is reached from an earlier
+    placed record (or the call's entry) only through *head*; or the value a row printed of a local, bound on every way
+    from such a record to it, can be given only by bindings reached from there only through *head* (the givers, as
+    :func:`printed_local` reads them).  The map's flow from a print (``flow.runs_after``, *head* a stop)."""
+    func, records = fn.node, sn.run.records
+    placed = sorted(((i, rw) for rw in fn.rows if pathcond.enclosing_function(rw.stmt) is func
+                     for i in sn.unambiguous.get(rw.line, ())), key=lambda x: x[0])
+    for k, (r_i, row) in enumerate(placed):
+        at = f"row {row.line} at {records[r_i].span}"
+        if _holds(head, row.stmt):
+            return f"{at} printed inside it"
+        froms: list[tuple[Any, str]] = [(rw.stmt, f"row {rw.line} (at {records[i].span})") for i, rw in reversed(placed[:k])]
+        froms.append((func.args, "the call's entry"))
+        since = next((s for first, s in froms if not flow.runs_after(first, row.stmt, [head], printed=True)), None)
+        if since is not None:
+            return f"{at} printed, and every way from {since} to it passes {head.lineno}"
+        for expr, text in row.capture(records[r_i]).items():
+            inner = re.fullmatch(r"str\((\w+)\)", expr)
+            name = inner[1] if inner else expr
+            if not name.isidentifier():
+                continue
+            binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
+            # from the latest record (or the entry) every way from which to the row binds the name
+            q = next(((first, s) for first, s in froms if not flow.runs_after(first, row.stmt, binds, printed=True)), None)
+            if not binds or q is None:
+                continue
+            shown = text.strip()
+            reached = {id(b) for b in reaching.reaching(row.stmt, binds)}
+            givers = [b for b in binds if id(b) in reached and flow.runs_after(q[0], b, printed=True)
+                      and ((c := _constant_of(b)) is _NOT_CONSTANT or str(c) == shown)]
+            if givers and not any(flow.runs_after(q[0], b, [head], printed=True) for b in givers):
+                lines = sorted(getattr(b, "lineno", 0) for b in givers)
+                return (f"{at} printed {name}={shown!r}, which of the bindings run since {q[1]} only {lines} can give, "
+                        f"every way to them passing {head.lineno}")
+    return ""
+
+
+#: how many readings of a test :func:`_truth` reads at most
+_READINGS = 16
+
+
+def _truth(test: ast.expr, env: E.Env, several: dict[str, list[Any]]) -> tuple[Any, str]:
+    """``(value, how)``: *test*'s value with *env*, read under every value *several* gives a name it reads
+    (:func:`printed_before`) -- the one answer they all give, or ``UNKNOWN``; *how* says which names were so read."""
+    text = ast.unparse(test)
+    names = sorted(n for n in several if re.search(rf"(?<![\w.]){re.escape(n)}(?!\w)", text))
+    readings = list(itertools.product(*(several[n] for n in names)))
+    if len(readings) > _READINGS or (names and env.reader is None):
+        return E.UNKNOWN, ""
+    answers: set[bool] = set()
+    for values in readings:
+        # each reading on a copy of the env (Env.reading), what else it used kept on the env
+        e = env.reading(*env.reader) if names and env.reader is not None else env
+        for name, value in zip(names, values, strict=True):
+            e.put(name, value, "one of the values its print can be")
+        try:
+            got = E.evaluate(text, e)
+        except SyntaxError:
+            return E.UNKNOWN, ""
+        if e is not env:
+            env.used.update({k: v for k, v in e.used.items() if k not in names})
+        if got is E.UNKNOWN:
+            return E.UNKNOWN, ""
+        answers.add(bool(got))
+    if len(answers) != 1:
+        return E.UNKNOWN, ""
+    how = "; ".join(f"{n} read as each of {several[n]!r}" for n in names)
+    return answers.pop(), how
+
+
+def ran_down_to(fn: R.Function, sn: R.Seen, psn: R.Seen, stmt: ast.stmt, env: E.Env, raised_at: set[int] | None) -> str:
+    """Why the kept arm *stmt* ran in the one call *psn* reads (its run less the rows printed for other objects; *sn*
+    the run whole), or '' where that is not read (J, KNOWN_ISSUES.md K73).
+
+    - *The head* H: of the ``if`` s holding *stmt*, outermost first, the first the call is shown to have run
+      (:func:`_head_ran`), with no loop, handler or ``match`` between it and *stmt*.
+    - *No raise between*: a ``try`` whose body holds H has a catch-all handler, and the call entered none of the
+      handlers of the ``try`` s holding H or inside it before *stmt* (:func:`_not_entered`, the map's
+      ``handler_marks``).
+    - *The tests from H down* (``pathcond.guards``, H's own included, an early exit's on the way it stays) hold, each
+      read at its own ``if`` with the values printed before it (:func:`printed_before`, a name its print shows as
+      several values read under each, :func:`_truth`) and the question's column the pass filled from the row (K71):
+      the statuslog's state before the pass, where each other write reaching the read is of this function and stands
+      under a test those values make false.
+
+    killJob in MJE-7397556704: the call printed 840 ``code=50``, 942 and 1145 ``kill=True``; of ``flagKilled``'s
+    bindings only 1098 gives True, reached from 840 only through 1017.  1161's own prints (1164, 1170) are not in the
+    call.  1017's ``job.jobStatus != "failed"`` holds with 'merging', the state before the pass, and so does 1071's
+    ``job.jobStatus != "closed"``: 1028 .. 1063 assign 'closed' under ``code`` tests false with "50".  A run of two
+    calls (MJE-7396802500: 840 is printed twice) is not read."""
+    func = fn.node
+    if pathcond.enclosing_function(stmt) is not func or not psn.single_call() or R.raised_in(fn, sn.run)[0]:
+        return ""
+    chain = [a for a in pathcond.ancestors(stmt) if isinstance(a, ast.If) and _holds(func, a)]
+    marks = _handler_marks(f"{fn.rel}::{pathcond.qualified_name(func)}")
+    envs: dict[int, tuple[E.Env, dict[str, list[Any]]]] = {}
+
+    def env_at(at: ast.stmt) -> tuple[E.Env, dict[str, list[Any]]]:
+        if at.lineno not in envs:
+            e = env.reading(fn.owner, at.lineno, arm=(fn.owner, stmt.lineno))
+            several: dict[str, list[Any]] = {}
+            printed_before(fn, psn, at, R.must_rows(func, at, raised_at)[0], e, several)
+            envs[at.lineno] = (e, several)
+        return envs[at.lineno]
+
+    for head in reversed(chain):
+        between = [a for a in pathcond.ancestors(stmt) if _holds(head, a)]
+        if any(isinstance(a, (*R.LOOPS, ast.ExceptHandler, ast.Match)) for a in between):
+            continue
+        ran = _head_ran(fn, psn, head)
+        if not ran:
+            continue
+        tries = [t for t in _tries(func)
+                 if any(_holds(s, head) or s is head for s in t.body) or (_holds(head, t) and t.lineno <= stmt.lineno)]
+        if not any(reaching.catches_all(h) for t in tries if any(_holds(s, head) or s is head for s in t.body)
+                   for h in t.handlers):
+            return ""
+        handlers = [h for t in tries for h in t.handlers]
+        if not all(_not_entered(sn, marks.get(h.lineno)) for h in handlers):
+            return ""
+        tests = []
+        for guard in pathcond.guards(stmt, func, head=head):
+            e, several = env_at(guard.at)
+            for text, (value, why) in _filled_at(fn, psn, guard, env_at).items():
+                e.put(text, value, why)
+            value, how = _truth(guard.test, e, several)
+            if value is E.UNKNOWN or value != guard.runs_on:
+                return ""
+            used = {k: v for k, v in e.used.items() if k in ast.unparse(guard.test)}
+            tests.append(f"{ast.unparse(guard.test)!r} {value} ({used}{'; ' + how if how else ''})")
+        entered = sorted(h.lineno for h in handlers)
+        return (f"J: the call ran {head.lineno} ({ran}); it entered none of the handlers {entered} around "
+                f"{head.lineno}..{stmt.lineno} (their own prints not in the run); the tests from {head.lineno} down to "
+                f"{stmt.lineno} hold: {'; '.join(tests)}")
+    return ""
+
+
+def _filled_at(fn: R.Function, sn: R.Seen, guard: pathcond.Guard,
+               env_at: Callable[[ast.stmt], tuple[E.Env, dict[str, list[Any]]]]) -> dict[str, tuple[str, str]]:
+    """The question's column where *guard*'s test reads it from the row the pass filled, as :func:`row_state` puts it,
+    by its text: ``(value, source)``.  Each other write reaching the read (``fills.row_fills``' others) must be of this
+    function, reached with no call crossed, and stand under a test (``pathcond.guards``) false with the values printed
+    before that test (*env_at*, :func:`_truth`)."""
+    env = env_at(guard.at)[0]
+    if not env.subject or not env.statuslog:
+        return {}
+    column = env.subject.rpartition(".")[2].lower()
+    keys = {k.lower() for k in env.keys}
+    reads = {ast.unparse(r): r for r in _chains(guard.test) if env.canonical(ast.unparse(r)) == env.subject}
+    if not reads or any(env.knows(text) for text in reads):
+        return {}
+    try:
+        types = asked._types()
+        tree = types.tree(fn.rel)
+        if tree is None:
+            return {}
+        func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
+        node = R.statement_at(func, guard.at.lineno)
+        calls = PR._calls_index(types)
+        owned = types.method_class(fn.rel, func)
+    except (StopIteration, LookupError, ValueError):
+        return {}
+    if node is None:
+        return {}
+    bound = tuple(calls.objects_of(owned)) if owned else ()
+    own_reads = {ast.unparse(r): r for r in _chains(node.test)} if isinstance(node, ast.If) else {}
+    out: dict[str, tuple[str, str]] = {}
+    for text in reads:
+        read = own_reads.get(text)
+        held = _row_held(calls, fn.rel, func, read, bound) if read is not None else None
+        if held is None or not _from_the_row(held, column, keys):
+            return {}
+        off = []
+        for other in held.others:
+            site = R.statement_at(fn.node, getattr(other.site, "lineno", 0)) if not other.route and other.file in ("", fn.rel) else None
+            if site is None or type(site) is not type(other.site):
+                return {}
+            why = ""
+            for g in pathcond.guards(site, fn.node):
+                value, how = _truth(g.test, *env_at(g.at))
+                if value is not E.UNKNOWN and value != g.runs_on:
+                    why = f"{site.lineno} under {ast.unparse(g.test)!r} {value}" + (f" ({how})" if how else "")
+                    break
+            if not why:
+                return {}
+            off.append(why)
+        state, _ = state_before(sn.run, env.statuslog)
+        if state is None:
+            return {}
+        when = state.get("time_extended") or state["time"]
+        out[text] = (state["status"], f"the statuslog row before the pass, {state['status']!r} at {when}"
+                     + (f"; the other writes reaching it do not run: {', '.join(off)}" if off else ""))
+    return out
 
 
 def held_in_calls(
@@ -1426,6 +1686,19 @@ def judge(
             sn = arm_seen.get((c.owner, v.line), seens[c.owner])
             named, raised = R.raised_in(sn.fn, sn.run)
             if why := printed_local(sn.fn, sn, stmt, observed, env, raised if named else set()):
+                v.kind = "positive"
+                v.reasons.append(why)
+
+    # J on each kept candidate: the call ran the outermost if of its chain a print shows it ran, entered no handler
+    # around it, and every test from there down to it holds (ran_down_to)
+    if env is not None:
+        for v in verdicts:
+            c = v.candidate
+            if v.kind != "kept" or c.owner not in seens or (stmt := R.statement_at(seens[c.owner].fn.node, v.line)) is None:
+                continue
+            sn = seens[c.owner]
+            named, raised = R.raised_in(sn.fn, sn.run)
+            if why := ran_down_to(sn.fn, sn, arm_seen.get((c.owner, v.line), sn), stmt, env, raised if named else set()):
                 v.kind = "positive"
                 v.reasons.append(why)
 
