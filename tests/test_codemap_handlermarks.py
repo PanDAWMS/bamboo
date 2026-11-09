@@ -94,6 +94,26 @@ class Proxy(Base):
             x.go()
         except Exception:  # H9
             print("failed")
+
+    def mixed(self, x):
+        try:
+            x.go()
+        except Exception as e:  # H10
+            if x.busy(e):
+                log.debug("skip")  # P6
+            else:
+                self.dump_error_message(log)  # C3
+            log.debug("time")  # P7
+        for attempt in range(3):
+            try:
+                x.go()
+                return True
+            except Exception:  # H11
+                if attempt + 1 < 3:
+                    log.debug("retry")  # P8
+                    continue
+                self.dump_error_message(log)  # C4
+                return False
 """
 
 
@@ -109,6 +129,7 @@ PRINTS = {
     f"{FILE}::Base.cleanup": {_line("P2")},
     f"{FILE}::Proxy.own": {_line("P3"), _line("P4")},
     f"{FILE}::Proxy.nowait": {_line("P5")},
+    f"{FILE}::Proxy.mixed": {_line("P6"), _line("P7"), _line("P8")},
 }
 
 
@@ -142,12 +163,13 @@ def marks(corpus):
 
 
 def test_every_handler_has_a_record(marks):
-    assert sorted(marks) == sorted(_line(f"H{i}") for i in range(1, 10))
+    assert sorted(marks) == sorted(_line(f"H{i}") for i in range(1, 12))
     assert {one.owner for one in marks.values()} == {
         f"{FILE}::Proxy.own",
         f"{FILE}::Proxy.callee",
         f"{FILE}::Proxy.nowait",
         f"{FILE}::Proxy.quiet",
+        f"{FILE}::Proxy.mixed",
     }
     h5 = marks[_line("H5")]
     assert (h5.catches, h5.catch_all) == ("(ValueError, KeyError)", False)
@@ -203,6 +225,26 @@ def test_a_handler_without_a_mark_is_silent_or_holds_a_call_that_may_print(marks
     assert marks[_line("H8")].kind == HANDLER_SILENT
     assert marks[_line("H7")].kind == HANDLER_UNPLACED
     assert marks[_line("H9")].kind == HANDLER_UNPLACED
+
+
+def test_a_handler_s_own_prints_alone_cover_every_way_or_not(marks):
+    """A reader of one key's run can read only the owner's own prints absent.  H1 prints one of its own on
+    every way out, and so does H10, after calling ``dump_error_message`` on one way (killJob's ``time=``
+    line).  H11, a retry, prints its own only on the way that goes round again and leaves its last try by the
+    call alone; H2 and H4 are marked by calls only; H3 is conditional."""
+    h10, h11 = marks[_line("H10")], marks[_line("H11")]
+    assert (h10.kind, h10.prints, [c.line for c in h10.calls]) == (
+        HANDLER_MARKED,
+        [_line("P6"), _line("P7")],
+        [_line("C3")],
+    )
+    assert (h11.kind, h11.prints, [c.line for c in h11.calls]) == (
+        HANDLER_MARKED,
+        [_line("P8")],
+        [_line("C4")],
+    )
+    covered = sorted(line for line, one in marks.items() if one.prints_on_every_way)
+    assert covered == [_line("H1"), _line("H10")]
 
 
 def test_a_handler_passing_a_raise_on_is_entered_with_the_handler_it_reaches(

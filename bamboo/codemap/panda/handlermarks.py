@@ -18,6 +18,10 @@ A handler that can reach a ``raise`` of its own without passing a mark (:attr:`H
 raise on without a word: ``except Exception as e: if self.is_no_wait_exception(e): tmpLog.debug(...) else:
 raise``, inside a ``try`` whose handler prints.  A run that shows the outer mark may have entered it, so
 :func:`entered` adds it.
+
+A reader of one key's run can read only the owner's own prints absent, not a call's callee's: whether every
+way passes one of them alone is asked again where a call is among the marks
+(:attr:`HandlerMark.prints_on_every_way`).
 """
 
 from __future__ import annotations
@@ -331,6 +335,11 @@ class _Reader:
                 )
             else:
                 kind = HANDLER_UNPLACED if unplaced else HANDLER_SILENT
+            # Its own prints alone, the calls aside: asked again only where calls are among the marks.
+            own = [by_key[_key(node)] for node in own_prints]
+            covered = kind == HANDLER_MARKED and (
+                not marking or _every_way(mine, mine, own, end)
+            )
             raises = [node for node in _own(mine) if isinstance(node, ast.Raise)]
             # the try the handler guards (a ``try`` or a ``try`` with ``except*``), by its parent link
             body = getattr(getattr(handler, "parent", None), "body", None)
@@ -355,6 +364,7 @@ class _Reader:
                     and any(
                         reached for reached in reaching_each(raises, [mine], marks)
                     ),
+                    prints_on_every_way=covered,
                 )
             )
         return out
