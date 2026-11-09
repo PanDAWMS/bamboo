@@ -984,15 +984,43 @@ def _tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
     held = getattr(node, "_tests_on", None)
     if held is not None and held[0] is func:
         return held[1]
-    found = _read_tests_on(node, func)
+    found = [(guard.test, guard.runs_on) for guard in guards(node, func)]
     node._tests_on = (func, found)  # type: ignore[attr-defined]
     return found
 
 
-def _read_tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
-    if enclosing_function(node) is not func:
+class Guard(NamedTuple):
+    """One ``if`` deciding whether a node runs (:func:`guards`).
+
+    *test* is the ``if``'s test, *runs_on* the value of it the node runs on, and *at* the ``if`` itself.  *exit*
+    says how it decides: an early exit above the node in a block holding it, whose body or ``else`` ends in a
+    ``return``, ``continue``, ``break`` or ``raise`` (True), or an ``if`` whose body or ``else`` holds the node
+    (False).
+    """
+
+    test: ast.expr
+    runs_on: bool
+    at: ast.If
+    exit: bool
+
+
+def guards(node: ast.AST, func: ast.AST, head: Optional[ast.AST] = None) -> list[Guard]:
+    """Each ``if`` of *func* that decides whether *node* runs, innermost first: at each statement holding *node*,
+    the early exits above it in its block, then the ``if`` itself where it is one.
+
+    *head*, a statement holding *node*: only the ``if``s at *head* or inside it, the tests from *head* down to
+    *node*.  A reader knowing its run reached *head* asks these: ``killJob``'s arm at 1028 under the chain of
+    ``if``s its pass entered.  *head* being *node* leaves none; a *head* not holding *node* is a wrong question
+    and raises :class:`ValueError`.
+
+    Nothing above *func* is read, nor anything above a ``lambda`` holding *node*, and nothing where *node* is
+    not *func*'s own.  :func:`_tests_on` is this with the ``if``s and the kinds dropped.
+    """
+    if head is not None and head is not node and not any(one is head for one in ancestors(node)):
+        raise ValueError(f"line {getattr(head, 'lineno', '?')} does not hold line {getattr(node, 'lineno', '?')}")
+    if enclosing_function(node) is not func or head is node:
         return []
-    found: list[tuple[ast.expr, bool]] = []
+    found: list[Guard] = []
     child = node
     for ancestor in ancestors(node):
         for field in ("body", "orelse", "finalbody"):
@@ -1002,16 +1030,18 @@ def _read_tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
             for statement in block[: next(i for i, one in enumerate(block) if one is child)]:
                 if isinstance(statement, ast.If):
                     if _jumps(statement.body):
-                        found.append((statement.test, False))
+                        found.append(Guard(statement.test, False, statement, True))
                     elif statement.orelse and _jumps(statement.orelse):
-                        found.append((statement.test, True))
+                        found.append(Guard(statement.test, True, statement, True))
         if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             break
         if isinstance(ancestor, ast.If):
             if any(child is one for one in ancestor.body):
-                found.append((ancestor.test, True))
+                found.append(Guard(ancestor.test, True, ancestor, False))
             elif any(child is one for one in ancestor.orelse):
-                found.append((ancestor.test, False))
+                found.append(Guard(ancestor.test, False, ancestor, False))
+        if ancestor is head:
+            break
         child = ancestor
     return found
 
@@ -1048,10 +1078,10 @@ def site_of(expression: ast.AST) -> ast.AST:
 
 def loops_over(node: ast.AST) -> set[int]:
     """The header line of every loop whose *body* holds *node*."""
-    return {loop.lineno for loop in _loops_holding(node)}
+    return {loop.lineno for loop in loops_holding(node)}
 
 
-def _loops_holding(node: ast.AST) -> list[ast.For | ast.AsyncFor | ast.While]:
+def loops_holding(node: ast.AST) -> list[ast.For | ast.AsyncFor | ast.While]:
     """Every loop whose *body* holds *node*, innermost first."""
     found: list[ast.For | ast.AsyncFor | ast.While] = []
     previous = node
@@ -1827,10 +1857,10 @@ def _round_a_loop(
     *target* with nothing overwriting it.  With *beside*, the loop holds it too
     and does not part it from *site* either: the later pass runs it.
     """
-    theirs = {id(loop) for loop in _loops_holding(target)}
+    theirs = {id(loop) for loop in loops_holding(target)}
     if beside is not None:
-        theirs &= {id(loop) for loop in _loops_holding(beside)}
-    for loop in _loops_holding(site):
+        theirs &= {id(loop) for loop in loops_holding(beside)}
+    for loop in loops_holding(site):
         if id(loop) not in theirs or parted(site, target, around=loop):
             continue
         if beside is not None and parted(beside, site, around=loop):
@@ -2581,7 +2611,7 @@ def _skipped(
         if parted(write, jump, exits=False) or parted(jump, other, exits=False):
             continue
         if isinstance(jump, (ast.Continue, ast.Break)):
-            loops = _loops_holding(jump)
+            loops = loops_holding(jump)
             if not loops or not _within(other, loops[0]):
                 continue
         if not any(site is write for site in surviving_writes(sites, jump, keeping, as_run=True, killers=killers)):

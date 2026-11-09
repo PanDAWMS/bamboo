@@ -159,19 +159,6 @@ def attach(reader: "runs._Reader", modules: list[SourceModule]) -> int:
     return found
 
 
-def _tested(func: ast.AST) -> list[str]:
-    """The names *func*'s own ``if`` tests read."""
-    return sorted(
-        {
-            name.id
-            for node in C.own_nodes(func)
-            if isinstance(node, ast.If)
-            for name in ast.walk(node.test)
-            if isinstance(name, ast.Name)
-        }
-    )
-
-
 def _statements_by_line(func: ast.AST) -> dict[int, ast.stmt]:
     """Each line of *func*'s own body, with the innermost of its statements holding it."""
     found: dict[int, ast.stmt] = {}
@@ -694,8 +681,7 @@ class _Later:
     def _handed_constants(
         self, caller: str, line: int, owner: str
     ) -> tuple[tuple[str, object], ...]:
-        """The constants the one call at *caller*:*line* into *owner* hands the parameters *owner*'s ``if`` tests
-        read and it never binds again: a literal, or the default the call leaves (:meth:`Calls.route_constant`).
+        """The constants the one call at *caller*:*line* into *owner* hands it (:func:`panda_objects.route_constants`).
         Empty where the line holds no call into it or more than one."""
         key = (caller, line, owner)
         if key not in self._constants:
@@ -707,16 +693,9 @@ class _Later:
                 else []
             )
             if len(sites) == 1:
-                func = held[1]  # type: ignore[index]
-                target = self.reader._target(owner)
-                for name in _tested(func):
-                    if not panda_objects.is_parameter(func, name) or C._rebinds(
-                        func, name
-                    ):
-                        continue
-                    value = self.reader.calls.route_constant(name, target, (sites[0],))
-                    if isinstance(value, (str, int, float, bool, type(None))):
-                        found[name] = value
+                found = panda_objects.route_constants(
+                    self.reader.calls, self.reader._target(owner), (sites[0],)
+                )
             self._constants[key] = tuple(sorted(found.items(), key=lambda one: one[0]))
         return self._constants[key]
 
