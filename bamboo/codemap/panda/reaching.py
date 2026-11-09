@@ -262,6 +262,32 @@ def reaching_exit(
     return [site for site in sites if state & bits.get(id(_placed(site)), 0)]
 
 
+def reaching_end(
+    scope: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST] = (),
+    rereads: Sequence[ast.AST] = (),
+    *,
+    entered: Sequence[ast.AST] = (),
+    once: Sequence[ast.AST] = (),
+    raised: Optional[Sequence[ast.ExceptHandler]] = None,
+) -> list[ast.AST]:
+    """Of *sites*, the writes that can be live where *scope*'s body runs off its end: not at a ``return``, not by
+    a raise.  The rest as :func:`reaching` reads them.
+
+    A reader of where control goes asks it (:func:`bamboo.codemap.panda.flow.ends_after`): a call that ends
+    there took none of the function's ``return`` statements it may be choosing among.
+    """
+    held = _writes(scope, sites, killers, rereads, entered, once, raised)
+    if held is None:
+        return []
+    flow, bits = held
+    state = flow.end
+    if not state:
+        return []
+    return [site for site in sites if state & bits.get(id(_placed(site)), 0)]
+
+
 def _scope_of(node: ast.AST) -> Optional[ast.AST]:
     current = getattr(node, "parent", None)
     while current is not None and not isinstance(current, _SCOPES):
@@ -587,11 +613,13 @@ class _Flow:
         self.entry: dict[int, int] = {}
         #: The state where the scope returns normally: each ``return`` that leaves it, and off its end.
         self.exit: Optional[int] = None
+        #: The state where the scope's body runs off its end: no ``return``, no raise.
+        self.end: Optional[int] = None
         self._catchers: list[_Handlers | _Finally] = []
         self._loops: list[_Loop] = []
         # A parameter list among the writes holds at entry: the call wrote it.
-        end = self._block(scope.body, bits.get(id(getattr(scope, "args", None)), 0))  # type: ignore[attr-defined]
-        self.exit = _join(self.exit, end)
+        self.end = self._block(scope.body, bits.get(id(getattr(scope, "args", None)), 0))  # type: ignore[attr-defined]
+        self.exit = _join(self.exit, self.end)
 
     # -- plumbing -------------------------------------------------------------
     def _gen(self, state: Optional[int], node: ast.AST) -> Optional[int]:

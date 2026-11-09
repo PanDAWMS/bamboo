@@ -14,7 +14,7 @@ import re
 import pytest
 
 from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching, reaching_exit
+from bamboo.codemap.panda.reaching import reaching, reaching_end, reaching_exit
 
 SHAPES = '''
 def s1_if_else_cover(c):
@@ -662,6 +662,44 @@ def test_the_writes_live_at_a_normal_exit_are_those_a_return_or_the_end_sees():
 
     assert reaching_exit(func, sites) == [second, last]
     assert reaching_exit(func, [func.args, first], [second, last]) == []
+
+
+def test_the_writes_live_off_the_end_are_those_no_return_or_raise_takes():
+    """``reaching_exit`` joins the returns and the end; ``reaching_end`` is the end alone.  ``f`` leaves by a
+    ``return`` or a raise on every way, so nothing is live off its end; ``g`` runs off its end past ``x = 3``."""
+    source = (
+        "def f(c, d):\n"
+        "    x = 1\n"
+        "    if c:\n"
+        "        x = 2\n"
+        "        return\n"
+        "    if d:\n"
+        "        x = 3\n"
+        "        raise ValueError\n"
+        "    try:\n"
+        "        x = 4\n"
+        "        return\n"
+        "    finally:\n"
+        "        x = 5\n"
+        "\n"
+        "\n"
+        "def g(c):\n"
+        "    x = 1\n"
+        "    if c:\n"
+        "        x = 2\n"
+        "        return\n"
+        "    x = 3\n"
+    )
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    f, g = tree.body
+    assert reaching_end(f, [f.args, f.body[0], f.body[3].finalbody[0]]) == []
+    first, second, third = g.body[0], g.body[1].body[0], g.body[2]
+    sites = [g.args, first, second, third]
+    assert reaching_exit(g, sites) == [second, third]
+    assert reaching_end(g, sites) == [third]
+    assert reaching_end(g, [g.args], [third]) == []
+    assert reaching_end(g, [g.args], [first], entered=[first]) == []
 
 
 def test_a_walrus_handed_in_as_itself_writes_where_its_statement_does():
