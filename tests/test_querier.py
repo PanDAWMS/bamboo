@@ -5185,6 +5185,146 @@ def test_a_value_carried_past_a_call_the_maps_reach_reads_as_keeping_it_or_past_
     assert got["m.py"]["handle"][0] == "positive"
 
 
+# the adder's pass with a call H2 holds as an arm (finalize, by the map's reading) and a call the DB's run ran inside
+_ARCHIVING_ADDER = """
+class Adder:
+    def __init__(self, job, proxy):
+        self.logger = logger
+        self.job = job
+        self.proxy = proxy
+
+    def process(self):
+        self.logger.debug("start the report of the job")
+        if self.job.broken:
+            raise RuntimeError("a broken job")
+        self.job.jobStatus = self.job.reported
+        self.logger.debug(f"status before finalize :job.jobStatus={self.job.jobStatus}")
+        self.finalize()
+        self.proxy.archive(self.job)
+        self.logger.debug("updating the job in the DB")
+        return True
+
+    def finalize(self):
+        self.job.jobStatus = self.job.final
+"""
+_ARCHIVING_PROXY = """
+class Proxy:
+    def __init__(self):
+        self.logger = logger
+
+    def archive(self, job):
+        self.logger.debug(f"archive start status={job.jobStatus}")
+        if job.check:
+            self.logger.debug("set jobStatus=failed due to inconsistent input")
+            job.jobStatus = "failed"
+        if job.fine:
+            job.jobStatus = "finished"
+        self.logger.debug("archive done")
+        return True
+
+    def unmerged(self, job):
+        self.logger.debug("updating the unmerged jobs")
+        um_job = self.fetch(job)
+        um_job.jobStatus = job.jobStatus
+        return True
+"""
+
+
+def test_a_call_and_a_write_inside_one_are_stays_read_before_the_order_the_inside_one_in_its_own_frame(tmp_path):
+    corpus = _corpus(tmp_path) / "pandaserver"
+    (corpus / "a.py").write_text(_ARCHIVING_ADDER)
+    (corpus / "db.py").write_text(_ARCHIVING_PROXY)
+    adder, proxy = _ARCHIVING_ADDER.splitlines(), _ARCHIVING_PROXY.splitlines()
+    at: dict[str, int] = {}
+    for k, text, n, s in [
+        ("raise", adder, 12, 'raise RuntimeError("a broken job")'),
+        ("assign", adder, 8, "self.job.jobStatus = self.job.reported"), ("finalize", adder, 8, "self.finalize()"),
+        ("call", adder, 8, "self.proxy.archive(self.job)"), ("failed", proxy, 12, 'job.jobStatus = "failed"'),
+        ("write", proxy, 12, 'job.jobStatus = "finished"'), ("unmerged", proxy, 8, "um_job.jobStatus = job.jobStatus"),
+    ]:
+        at[k] = text.index(f"{' ' * n}{s}") + 1
+    for k, text, s in [("row", adder, "status before finalize"), ("start", proxy, "archive start"),
+                       ("inconsistent", proxy, "due to inconsistent input")]:
+        at[k] = next(n for n, line in enumerate(text, 1) if s in line)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    before = "status before finalize :job.jobStatus={}"
+    logs = {
+        "finished": ["start the report of the job", before.format("finished"), "updating the job in the DB"],
+        "failed": ["start the report of the job", before.format("failed"), "updating the job in the DB"],
+        "clean": ["archive start status=finished", "archive done"],
+        "ran": ["archive start status=finished", "set jobStatus=failed due to inconsistent input", "archive done"],
+        "twice": ["archive start status=finished", "archive done", "archive start status=finished", "archive done"],
+        "both": ["archive start status=finished", "archive done", "updating the unmerged jobs"],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import changed as CH
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, Verdict
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for name, adder, db, writes in [("stays", "finished", "clean", ["write"]), ("ran", "finished", "ran", ["write"]),
+                                        ("twice", "finished", "twice", ["write"]), ("changed", "failed", "clean", ["write"]),
+                                        ("unmerged", "finished", "both", ["write", "unmerged"]),
+                                        ("raise", "finished", "clean", ["write", "raise"])]:
+            question, = runs_for(read_log(f"{adder}.log"), "1")
+            inner, = runs_for(read_log(f"{db}.log"), "1")
+            verdicts, seens, runs_of = [], {}, {}
+            mine = [("assign", "positive"), ("finalize", "positive")] + ([("raise", "kept")] if "raise" in writes else [])
+            arms = [("pandaserver/a.py", "process", mine, question),
+                    ("pandaserver/db.py", "archive", [("write", "kept")], inner)]
+            if "unmerged" in writes:
+                arms.append(("pandaserver/db.py", "unmerged", [("unmerged", "kept")], inner))
+            for rel, func, lines, run in arms:
+                c = Candidate(rel, func, [AT[k] for k, _ in lines], [run.log.name], run=run)
+                seens[c.owner] = R.seen(R.function(rel, func, tuple(c.lines)), run, "outside")
+                runs_of[c.owner] = run
+                verdicts += [Verdict(c, AT[k], kind) for k, kind in lines]
+            call = AT["call"]
+            ch = CH.last_change(verdicts, seens, runs_of, question, {id(inner): f"pandaserver/a.py:{call}"},
+                                "jobStatus", "finished", None)
+            got[name] = None if ch is None else {
+                "dropped": [[CH._name(v), why] for v, why in ch.dropped], "left": [CH._name(v) for v in ch.left],
+                "chosen": CH._name(ch.chosen) if ch.chosen else None, "how": ch.how}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    assign, finalize, write = f"a.py::process:{at['assign']}", f"a.py::process:{at['finalize']}", f"db.py::archive:{at['write']}"
+    # the row before finalize shows 'finished': the call is a stay (R1), the way inside it unread; archive's start row
+    # shows it too, and the one way to change it on the way there, 'failed', did not run -- its must row is missing
+    # (R2): the assignment from the report is the last change
+    stays = got["stays"]
+    assert stays["dropped"] == [
+        [finalize, f"rule R: a stay, self.job.jobStatus already held 'finished' before it (row process:{at['row']} at finished.log:2, "
+                   "nothing on the way binding it; what the call runs before its write not read)"],
+        [write, f"rule R: a stay, job.jobStatus already held 'finished' before it in its own frame (row archive:{at['start']} at "
+                f"clean.log:1, nothing on the way binding it; not run: db.py:{at['failed']} (must row(s) [{at['inconsistent']}] "
+                "not in the run))"],
+    ]
+    assert stays["chosen"] == assign and stays["how"] == "the last change in the pass"
+    # the 'failed' arm printed its row: the start row's value is not carried, and the write is read at the call, where
+    # its own target is bound before it -- it may be the change
+    assert got["ran"]["dropped"] == [stays["dropped"][0]] and got["ran"]["chosen"] is None
+    assert got["ran"]["how"] == f"2 may have changed it last in the pass: {write}, {assign}"
+    # the start row printed twice: not read as the one call that ran the write
+    assert got["twice"] == got["ran"]
+    # another value before finalize: the call is no stay, and no write of another value either -- it changed it last
+    assert [name for name, _ in got["changed"]["dropped"]] == [write]
+    assert got["changed"]["chosen"] == finalize and got["changed"]["how"] == "the last change in the pass"
+    # two writes inside the one call, no order between them: archive's is a stay read without the order, and the
+    # order is read between the rest -- the unmerged job's write (another object, K58) is left
+    unmerged = got["unmerged"]
+    assert [name for name, _ in unmerged["dropped"]] == [finalize, write] and unmerged["chosen"] is None
+    assert unmerged["how"] == f"2 may have changed it last in the pass: db.py::unmerged:{at['unmerged']}, {assign}"
+    # a raise writes through a handler, not through the call that builds its exception: none of the pass's writes
+    assert got["raise"] == stays
+
+
 def test_a_call_keeps_a_field_where_the_maps_reach_from_it_alone_assigns_it_no_other_value_in_memory(tmp_path):
     out = _ok(
         _run(

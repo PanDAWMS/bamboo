@@ -2193,6 +2193,22 @@ value (the harness's reading of adder_gen at the pin, 2026-11-03).
 - *The order.*  One function of the pass, the anchor, holds the others or calls on into them (the map's reach,
   `Rerun._called_at`), and its rows read as one call.  A run inside a call sits at that call.  Two places are in
   order where the flow runs one after the other and never the reverse.  Any pair out of order, and R says nothing.
+- *A call, and a write inside one* (P4, 2026-11-09).
+  - A candidate at a statement of the anchor (or of a method of its class, for a chain of self) that runs a call is
+    one of the pass's writes too (R1): `process_job_report:446 self.finalize_job_status()`, an arm by the map's
+    reading.  It sits at its own statement.  What the call writes is not read, only the value before it, so it is a
+    stay or left, never a write of another value.  What the call runs before the write it stands for is not read
+    either, as the frames between the anchor and handle_failed_job are not: a call that sets another value and then
+    the observed one changed it, and R1 reads it as a stay.  finalize_job_status writes jobStatus once on each way.
+    A `raise` writes through the handler it leaves for, and is none.
+  - A write inside a call reads the value before it in its own frame first (R2).  That is a hole of the chain it
+    assigns at a row every way to it prints first (`rows.must_rows`), printed once in its run, so by the call that ran
+    the write.  It is carried to the write as above, past a statement that could change it where the run shows it did
+    not run: a must row of it is missing, its absence trusted at a level the run prints (rule 4's reading).  Else, as
+    before, the value at the call.
+  - A stay read this way, from the rows alone, is out before the order is read (R3); the order is read between the
+    rest.  archiveJob:1668 and updateUnmergedJobs:1236 both sit at the call at 472 with no order between them, and
+    1668's stay no longer silences R.
 - *The value before a write.*  It is read from a printed hole of the chain the write assigns, at a row before it, or
   from the constant an earlier write that ran assigned.  Either counts only where nothing on the way binds the chain
   or hands what holds it to a call that can change it, by P's reading of a call (`printed.self_effects`).
@@ -2250,10 +2266,23 @@ With CK (ck1 against rb2, map x13xxB3m read with codemap-xx 5ccd571, out/ck/ck1-
 held: MF-7397938541 H2 -> H3, MJ-sent-late H2 -> L2 (m-cut) and H2 -> S2 (m-cut2); MF-7397695467 and MF-7398402231
 "4 may" -> "3 may" (441 a stay); everything else the same, the 65, attr and MT included.
 
+With P4, in the adder's pass of MJE-7398471285 ('finished'), row 444 prints `job.jobStatus=finished` right before
+446, so 446 is a stay.  archiveJob's 1268 prints `start status=finished`; between it and 1668 only 1495
+`job.jobStatus = "failed"` can change it (the calls on the way kept by the map's reach), and its must row 1494 "set
+jobStatus=failed due to inconsistent input" is not in the run.  So 1668 is a stay, and 416 is the last change.  In
+MJE-7398264739, 446 and 1668 are stays the same way, and 1236 and 416 are named: 1236 writes `umJob`, another job
+the SELECT filled, which R does not tell from the question's (K58).
+
+With P4 (u76n against u74n, dump 5c1172d, out/h2wcr/u76-predictions.txt), every prediction held: MJE-7398471285 H2 ->
+H3 (416 chosen, its guards all held), MJE-7398264739 "2 positive" -> "2 may have changed it last in the pass: 1236,
+416"; everything else the same, the 65, attr and MT included.
+
 *Shows:* "rule R: a stay, ... already held ... before it (...)", "rule R: it assigns ... no write of ...", and the
 choice's "the last change in the pass" or "N may have changed it last in the pass: ...".  A way kept by CK adds "but to
 '<value>' again at <file:line>" and "the calls at <file:line>, ... reach no assignment of <field> but '<value>' (the
-map's reach, N call(s) closed by their name)".
+map's reach, N call(s) closed by their name)".  A stay read in a write's own frame says "... before it in its own
+frame (...)", a statement passed as not run "not run: <file:line> (must row(s) [...] not in the run)", and a call's
+stay "what the call runs before its write not read".
 *Revisit:*
 - with the status at the pass's start (the statuslog's row before the question's, under the premise that no status
   change went unlogged): 416's guard is then read, and the adder's MF-7396944927 and MF-7397944082, where no value
@@ -2262,7 +2291,13 @@ map's reach, N call(s) closed by their name)".
 - when the frames between a join's call and the write inside it are read: in the Watcher's pass, updateJobs (between
   run's call at 135 and archiveJob) assigns jobStatus in memory at 649, 652 and 654 for a jumbo job, and the stay of
   1813 rests on that frame unread;
-- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes.
+- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes;
+- with the identity of the object a write inside a call writes (K58): 1236's `umJob` is then out of the pass's
+  writes;
+- when the way from a call R1 reads to the write it stands for is read (the map's arm behind the call): a call that
+  can write the field twice on one way is then no stay;
+- the carry passes a statement the run shows did not run only in a write's own frame (R2); the anchor's frame and the
+  way across frames do not yet.
 
 ### K52. A writer that writes its loop's objects after the loop is read on its latest run before the row
 
