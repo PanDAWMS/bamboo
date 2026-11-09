@@ -285,6 +285,14 @@ TEMPLATES: dict[str, str] = {
     "a-birth-no-run": "a birth: it wrote as the row was made, at {time}; no run is read",
     "logs-not-searched-whole-over": "its logs were not searched whole over {why}: it may have written in what was not",
     "no-line-holds-the-key": "no line of {logs:join=, } in the records holds {key}: its runs are not shown to name it",
+    # the run that recorded the row (rerun._recorder_read, KNOWN_ISSUES.md K67)
+    "its-pass-recorded-the-row": "its pass at the row is {run}: {methods:join=, }'s run of {key} ran inside its call at "
+                                 "{site}; whether the line ran in it is not read",
+    "no-recorder-run-at-the-row": "{methods:join=, } ran no run of {key} near the row on {machine} ({logs:join=, }, read "
+                                  "whole there): no pass through its call that records the row wrote it",
+    "for-the-recorders-pass": "the pass of {func} around its call at {call}, for {marks:rjoin=, }",
+    "for-the-rows-recorder": "the run of {methods:join=, } that records the statuslog's {status!r} at {time}, on {machine}, "
+                             "the row's host",
     # L1's stay (rerun._stay_of, _stays_said)
     "a-statuslog-row-for": "a statuslog row for {observed!r}",
     "a-stay-beginning-at": "a stay of {observed!r} beginning at {since} (--since)",
@@ -298,6 +306,7 @@ TEMPLATES: dict[str, str] = {
     "run-line": "{where} token={token} {n} record(s) {first} .. {last} (key on {found}{cut}{asked})",
     "log-at-machine": "{log}@{machine}",
     "read-as-cut": "; read as cut: {cut}",
+    "read-alone": "; read alone: its logger writes no mark, so the token is the line's first word{then}",
     "asked-for-its-rows": "; asked for {method}'s rows and WARNING and above",
     "mover-label": "mover {owner}",
     "others-excluded": "; the other {n_excluded} arm(s) left excluded ({excluded:join=, })",
@@ -464,7 +473,7 @@ TEMPLATES: dict[str, str] = {
     "line-hole": "{line}: {hole}",
     "prints-not-known-named": "no line before the arm(s) at {lines} is known to name the written row's {columns}: the map did not read their names whole (KNOWN_ISSUES.md K19)",
     "prints-name-the-key": "a line before every arm at {lines} names the written row's {columns}",
-    "logs-the-maps-reading": "the logs are the map's reading's, not where it places the prints (ROWS_OWN_FILES, ROWS_FROM)",
+    "logs-the-maps-reading": "the logs are the map's reading's, not where it places the prints (ROWS_FROM)",
     "logs-no-prints-of-its-own": "the map has no prints of its own for it",
     "logs-placed-by": "the map places some of its prints by {bases}, not by their logger: where they land is not known whole",
     "logs-in-no-file": "the map places its prints in no file",
