@@ -859,8 +859,15 @@ class _Reading:
         return self._setters  # type: ignore[return-value]
 
     def _index(self) -> None:
+        """Every module of the corpus (:meth:`Types.corpus_files`), each by the tree the reader holds for it
+        (:meth:`Types.tree`): the corpus, not the trees a build handed the reader -- one made with none, as a
+        reader of a run makes it, reads every method of a name and every definition by an attribute's name the
+        same."""
         self._methods, self._functions, self._setters = {}, {}, {}
-        for file, (_sha, tree) in sorted(self.types.walked.items()):
+        for file in sorted(self.types.corpus_files()):
+            tree = self.types.tree(file)
+            if tree is None:
+                continue
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     for member in node.body:

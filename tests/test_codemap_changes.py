@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from bamboo.codemap.calls import UNPLACED_DYNAMIC
+from bamboo.codemap.calls import UNPLACED_DYNAMIC, Calls, Types
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import changes, pathcond
@@ -572,3 +572,79 @@ def test_a_method_of_the_driver_s_wrapper_is_the_driver_read_at_the_call_handing
             tmp_path, "':newID' in params", "wrapped_returns"
         )
     ] == [("store", "':newID'", "self.cur.execute")]
+
+
+HOLDER = """\
+class Plugin:
+    def __init__(self, job):
+        self.job = job
+        self.status = "new"
+
+    def run(self):
+        self.job.jobStatus = "failed"
+
+
+class Marker:
+    def mark(self, job):
+        job.jobStatus = "marked"
+
+
+class Gen:
+    def __init__(self, job):
+        self.job = job
+        self.plugin_class = Plugin
+
+    def build(self):
+        self.plugin_class(self.job)
+
+    def untyped(self, thing):
+        thing.mark(self.job)
+"""
+
+
+def _holder_changes(tmp_path: Path, walked: bool) -> dict[str, list[tuple[str, str]]]:
+    """``call_changes`` for ``self`` at each call ``Gen``'s methods make, read with a reader the build makes
+    (*walked*: every module handed in) or one a reader of a run makes (none handed in)."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "holder.py").write_text(HOLDER)
+    file = f"{PACKAGE}/holder.py"
+    if walked:
+        tree = ast.parse(HOLDER)
+        pathcond.attach_parents(tree)
+        module = SourceModule(
+            package=PACKAGE,
+            rel_path=file,
+            tree=tree,
+            source=HOLDER,
+            blob_sha=blob_sha(HOLDER),
+        )
+        calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    else:
+        calls = Calls(Types({PACKAGE: root}, {}))
+    assert calls is not None
+    held = calls.types.tree(file)
+    assert held is not None
+    found = {}
+    for func in ast.walk(held):
+        if isinstance(func, ast.FunctionDef) and func.name in ("build", "untyped"):
+            (call,) = [n for n in ast.walk(func) if isinstance(n, ast.Call)]
+            found[ast.unparse(call)] = [
+                (one.kind, one.key)
+                for one in changes.call_changes(calls, file, func, call, "self")
+            ]
+    return found
+
+
+def test_a_reader_handed_no_trees_reads_the_corpus_by_names_as_the_build_does(
+    tmp_path,
+):
+    """A reader of a run makes its calls with no trees handed in: what it reads by a name -- a method on a receiver
+    no class is said of (``thing.mark``), an object kept where the reading loses it -- is the corpus's all the
+    same."""
+    built = _holder_changes(tmp_path / "built", walked=True)
+    run = _holder_changes(tmp_path / "run", walked=False)
+
+    assert built["thing.mark(self.job)"] == [("inner", ".job")]
+    assert run == built
