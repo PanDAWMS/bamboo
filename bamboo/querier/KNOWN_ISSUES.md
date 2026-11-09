@@ -2095,6 +2095,49 @@ at ..."})" where the state makes a guard false; nothing where it holds.
 *Revisit:* the select item's table (a part to ask the map), and a value filled in another function (the adder's
 `self.job`, filled in `run()` at 111 and read in `process_job_report` at 415: the map's next part).
 
+### K72. A kept arm binding a local to the observed value is positive where a row of its pass printed the local with it and only it gives it (P1)
+
+H2's step 6.  P reads no run where a row inside a loop printed more than once.  A batched pass left an arm kept that
+its turn's own row shows ran: `prepareTasksToBeFinished_JEDI` goes round seven tasks from 3852 in MT-running-late, and
+the question's task's turn printed "done new status=prepared" at 4074; 4061 `newTaskStatus = "prepared"` was kept.
+
+Now (`which_ran.printed_local`, after P is read again with the other verdicts, on the kept arms): an arm binding a
+local T to a constant equal to the observed value is positive where a row R of its function printed T (or `str(T)`)
+with that value in one placed record of the pass, and only it can have given it:
+- the pass: in the key's turn of the innermost `for` around R -- from the record of the loop's turn start
+  (`which_ran.turn_start`: of R's must rows before it, the first whose innermost loop is that one) whose hole of the
+  loop's target holds the question's key (`Env.keys`), to that row's next record -- or, R in no loop, a run that is
+  one call (`Seen.single_call`);
+- Q: the latest placed record before R in the turn or call from which every way to R binds T (`flow.runs_after`, T's
+  bindings and the turn start as stops).  With none, R in no loop, the call's entry, where no way from it reaches R
+  with T unbound (`pathcond.held_at`);
+- the givers: of the bindings that can be what R reads (`reaching.reaching`), the ones run after Q within the turn
+  (`flow.runs_after` from Q, the turn start a stop) that can give the shown value -- a constant equal to it, or a value
+  no constant spells.  P1 holds where they are the arm alone.
+
+Q, not the loop's head: the map's reaching reads no path's condition.  3852 does not bind `newTaskStatus` again at its
+head, and the ways skipping 3906's and 4015's bodies, open only when `toSkip` is True, reach 4074 unbound.  From 4025,
+the latest record of the turn, every way binds it (4028's and 4051's if/else), and of 4030, 4053 and 4061 only 4061
+gives 'prepared'.  A turn that printed no row after 3907 says nothing.
+
+Premises: a turn's records follow one another in the run (one thread goes round the loop); the map's reaching may give
+a binding that cannot reach R, never leaves out one that can; T's hole is read right (`rows._regex` splits two holes with
+no text between them wrongly -- 4074's `jediTaskID` and the conditional after it -- and 4074's T is apart from both).
+
+Measured as u77n against u76n (querier-v 7ea1de8 with the change; xxix's dump 5c1172d, pin m), every set: no run
+crashed.  MT-running-late and MT-scouting-late in m-cut2 move as predicted: 4061 and 3966 are positive by P1 (Q at 4025
+and at 3956), chosen by positive evidence, and the walk goes on from H2 through L2 to U2, where it stops on both callers
+(K55).  Nothing else moves.  Against the prediction, the MT set's runs of the same two questions do not move: there H2
+stops asking a log its records lack, and no run is read.  The time is not compared (5 jobs, beside the map's builds).
+
+*Shows:* "P1: row R printed T='v' in the turn of jediTaskID=<key> (row S at <span>), at <span>; every way from row Q
+(at <span>) to it binds T, and of the bindings run since ([...]) only A gives 'v'".
+*Revisit:* an attribute's arm (MT-ready-late 905 twice, `taskSpec.status`; MT-aborting-late 197,
+`tmpTaskSpec.status`): an attribute changes inside a call, and another function's arm may write the same value -- it
+needs the map's reach from the calls between Q and R, and rule R's breaks and keeps in place of the bindings.  A run
+not readable as one call, R in no loop (MT-toincexec-late 5334: `retryTask_JEDI`'s rows printed several times): a
+reading splitting a run into calls.
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one

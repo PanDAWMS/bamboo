@@ -9954,3 +9954,165 @@ def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_r
     assert got["sql via, not caught"] == ""
     # no branch of the arm in the map: nothing said
     assert got["no branch"] == ""
+
+
+_TURNS = """
+class Proxy:
+    def __init__(self):
+        self.logger = logger
+
+    def finish(self, task_ids, status_map):
+        for jediTaskID in task_ids:
+            taskStatus = status_map[jediTaskID]
+            self.logger.debug(f"start jediTaskID={jediTaskID} status={taskStatus}")
+            toSkip = False
+            if self.locked(jediTaskID):
+                toSkip = True
+            if not toSkip:
+                self.logger.debug(f"read jediTaskID={jediTaskID} status={taskStatus}")
+                if self.scouting(jediTaskID):
+                    newTaskStatus = "scouted"
+                elif self.running(jediTaskID):
+                    if self.unprocessed(jediTaskID):
+                        toSkip = True
+                    if not toSkip:
+                        n = self.mutable(jediTaskID)
+                        self.logger.debug(f"jediTaskID={jediTaskID} has {n} mutable datasets")
+                        if n > 0:
+                            newTaskStatus = "defined"
+                        elif self.ready(jediTaskID):
+                            newTaskStatus = "registered"
+                        else:
+                            newTaskStatus = "prepared"
+                else:
+                    toSkip = True
+                if not toSkip:
+                    self.update(jediTaskID, newTaskStatus)
+                    self.logger.debug(f"done new status={newTaskStatus} for jediTaskID={jediTaskID}")
+
+    def once(self, task):
+        self.logger.debug(f"begin status={task.status}")
+        if self.scouting(task):
+            newTaskStatus = "scouted"
+        elif self.ready(task):
+            newTaskStatus = "registered"
+        else:
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+
+    def bare(self, task):
+        if self.ready(task):
+            newTaskStatus = "registered"
+        else:
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+
+    def maybe(self, task):
+        self.logger.debug(f"begin status={task.status}")
+        if self.ready(task):
+            newTaskStatus = "registered"
+        elif self.done(task):
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+"""
+
+
+def test_a_kept_arm_binding_a_local_to_the_value_a_row_of_the_keys_turn_printed_is_positive_where_only_it_gives_it(tmp_path):
+    # prepareTasksToBeFinished_JEDI's batched run (MT-running-late): the turn of the question's task printed "start"
+    # (3854), the mutable datasets (4025) and "done new status=prepared" (4074).  Every way from 4025 to 4074 binds
+    # newTaskStatus, and of the bindings run since, only 4061 gives 'prepared' (P1).  From 3907 a way skipping 4015's
+    # body (open only when toSkip is True, which the map's reaching does not read) reaches 4074 unbound: a turn that
+    # printed no row after 3907 says nothing
+    (_corpus(tmp_path) / "pandaserver" / "p.py").write_text(_TURNS)
+    lines = _TURNS.splitlines()
+    at = {v: lines.index(f'{" " * n}newTaskStatus = "{v}"') + 1
+          for v, n in (("scouted", 20), ("defined", 28), ("registered", 28), ("prepared", 28))}
+    done = lines.index('                    self.logger.debug(f"done new status={newTaskStatus} for jediTaskID={jediTaskID}")') + 1
+    has = lines.index('                        self.logger.debug(f"jediTaskID={jediTaskID} has {n} mutable datasets")') + 1
+    start = lines.index('            self.logger.debug(f"start jediTaskID={jediTaskID} status={taskStatus}")') + 1
+    # the 'prepared' arm of each one-call function
+    one = {func: lines.index('            newTaskStatus = "prepared"', lines.index(f"    def {func}(self, task):")) + 1
+           for func in ("once", "bare", "maybe")}
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.X: DEBUG    <label=user> {}\n"
+
+    def turn(key: int, status: str, n: int | None) -> list[str]:
+        return ([f"start jediTaskID={key} status=running", f"read jediTaskID={key} status=running"]
+                + ([f"jediTaskID={key} has {n} mutable datasets"] if n is not None else [])
+                + [f"done new status={status} for jediTaskID={key}"])
+
+    logs = {
+        # the question's task 2: its turn printed 'prepared'; the turns around it printed other values
+        "turns": turn(1, "defined", 3) + turn(2, "prepared", 0) + turn(3, "registered", 0),
+        # task 2's turn printed nothing after "read": from there a way reaches "done" with nothing bound
+        "scout": turn(1, "prepared", 0) + turn(2, "scouted", None),
+        # task 2 went round twice: which turn is the question's is not read
+        "again": turn(2, "prepared", 0) + turn(2, "prepared", 0),
+        # 'prepared' printed in task 1's turn, not in task 2's
+        "other": turn(1, "prepared", 0) + turn(2, "defined", 3),
+        "once": ["begin status=running", "end new status=prepared"],
+        "bare": ["end new status=prepared"],
+        "maybe": ["begin status=running", "end new status=prepared"],
+    }
+    for name, texts in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rows as R
+            from bamboo.querier import which_ran as W
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            env = E.Env(subject="<task>.status", keys=frozenset({"jediTaskID"}), table={"task": {"jediTaskID": E.Value(2, "the rows file")}},
+                        call=None)  # the guards' calls are not run: the corpus here has no helpers
+            got = {}
+            for name, observed in (("turns", "prepared"), ("scout", "scouted"), ("again", "prepared"), ("other", "prepared")):
+                run, = runs_for(read_log(f"{name}.log"), "2")
+                c = Candidate("pandaserver/p.py", "finish", ARMS, [run.log.name], run=run)
+                got[name] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, observed=observed, env=env).verdicts}
+            # one call, no loop: P1's own reading, as the judge reads it after P
+            for func, line in ONE.items():
+                run, = runs_for(read_log(f"{func}.log"), "prepared")
+                fn = R.function("pandaserver/p.py", func, [line])
+                got[func] = W.printed_local(fn, R.seen(fn, run, "outside"), R.statement_at(fn.node, line), "prepared", None, set())
+            print(json.dumps(got))
+            """.replace("ARMS", str(sorted(at.values()))).replace("ONE", repr(one)),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    turns, scout, again, other = ({int(k): v for k, v in got[name].items()} for name in ("turns", "scout", "again", "other"))
+
+    def p1(verdict: list) -> list[str]:
+        return [r for r in verdict[1] if r.startswith("P1:")]
+
+    # the key's turn printed 'prepared'; from the mutable datasets' row every way binds newTaskStatus, and of the
+    # bindings run since, defined and registered give other values
+    assert turns[at["prepared"]][0] == "positive", turns[at["prepared"]]
+    assert p1(turns[at["prepared"]]) == [
+        f"P1: row {done} printed newTaskStatus='prepared' in the turn of jediTaskID=2 (row {start} at turns.log:5), at "
+        f"turns.log:8; every way from row {has} (at turns.log:7) to it binds newTaskStatus, and of the bindings run since "
+        f"({[at['defined'], at['registered'], at['prepared']]}) only {at['prepared']} gives 'prepared'"
+    ], turns[at["prepared"]]
+    assert not p1(turns[at["defined"]]) and not p1(turns[at["registered"]]), turns
+    # no record of the turn from which every way to "done" binds the name: nothing said
+    assert scout[at["scouted"]][0] == "kept" and not p1(scout[at["scouted"]]), scout[at["scouted"]]
+    # two turns of the key, or the key's turn showing another value: nothing said
+    assert again[at["prepared"]][0] == "kept" and not p1(again[at["prepared"]]), again[at["prepared"]]
+    assert other[at["prepared"]][0] == "kept" and not p1(other[at["prepared"]]), other[at["prepared"]]
+    # one call: from the print before it, or from the entry where every way binds the name
+    assert got["once"] == (
+        f"P1: row {one['once'] + 1} printed newTaskStatus='prepared' in the call, at once.log:2; every way from row "
+        f"{one['once'] - 6} (at once.log:1) to it binds newTaskStatus, and of the bindings run since "
+        f"({[one['once'] - 4, one['once'] - 2, one['once']]}) only {one['once']} gives 'prepared'"
+    ), got["once"]
+    assert got["bare"] == (
+        f"P1: row {one['bare'] + 1} printed newTaskStatus='prepared' in the call, at bare.log:1; every way from the call's "
+        f"entry to it binds newTaskStatus, and of the bindings run since ({[one['bare'] - 2, one['bare']]}) only "
+        f"{one['bare']} gives 'prepared'"
+    ), got["bare"]
+    # a way binding nothing reaches the row: neither the print before it nor the entry binds it on every way
+    assert got["maybe"] == "", got["maybe"]

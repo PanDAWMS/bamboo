@@ -24,7 +24,10 @@ Every candidate comes out as one of four, with the rule that put it there:
   that failing, the rows printed around the ``if`` chain it sits under leave no
   other way through (P, :mod:`bamboo.querier.printed`) -- read once more after
   every other verdict, where a call changes the subject to the observed value
-  only through a writer of it not excluded (``printed.Reaching``);
+  only through a writer of it not excluded (``printed.Reaching``); or, one
+  binding a local to the observed value, a row of its pass printed the local
+  with it, and of the bindings it can have read only this one gives it (P1,
+  :func:`printed_local`);
 * **unexamined** -- no run to read it against: no log to hand, the log does
   not cover the time the question is about, or no pass of the candidate's
   function at the window holds the key (:func:`passes_at`);
@@ -55,7 +58,7 @@ from bamboo.codemap import trace  # noqa: E402
 from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import evaluate as SE  # noqa: E402
-from bamboo.codemap.panda import fills, flow, pathcond  # noqa: E402
+from bamboo.codemap.panda import fills, flow, pathcond, reaching  # noqa: E402
 from bamboo.querier import asked, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
@@ -794,6 +797,152 @@ def rows_around(fn: R.Function, sn: R.Seen, stmt: ast.stmt) -> tuple[int, int] |
     return None
 
 
+#: what :func:`_constant_of` answers for a binding whose value no constant spells
+_NOT_CONSTANT = object()
+
+
+def _constant_of(site: ast.AST) -> Any:
+    """The constant *site* binds its names to (``x = "prepared"``); ``_NOT_CONSTANT`` for any other binding -- a loop's
+    target, an unpacking, a value computed."""
+    if isinstance(site, (ast.Assign, ast.AnnAssign)) and isinstance(site.value, ast.Constant):
+        targets = site.targets if isinstance(site, ast.Assign) else [site.target]
+        if all(isinstance(t, ast.Name) for t in targets):
+            return site.value.value
+    return _NOT_CONSTANT
+
+
+def _loops_holding(node: ast.AST, func: ast.AST) -> list[ast.stmt]:
+    """The loops of *func* whose body holds *node*, innermost first (as ``rows.loops_over`` reads them)."""
+    out: list[ast.stmt] = []
+    previous = node
+    for ancestor in pathcond.ancestors(node):
+        if ancestor is func:
+            break
+        if isinstance(ancestor, R.LOOPS) and any(previous is s for s in ancestor.body):
+            out.append(ancestor)
+        previous = ancestor
+    return out
+
+
+def turn_start(fn: R.Function, site: ast.stmt, loop: ast.stmt, raised_at: set[int] | None) -> R.Row | None:
+    """The row every turn of *loop* that runs *site* prints before it, first in the loop's body: of *site*'s must rows
+    before it (``rows.must_rows``), the first whose innermost loop is *loop*; None where none is.  A turn's records run
+    from its record to the next one's: a turn that does not print it does not run *site* either."""
+    before, _ = R.must_rows(fn.node, site, raised_at)
+    own = [s for s in before if fn.row_at(s) is not None and next(iter(_loops_holding(s, fn.node)), None) is loop]
+    first = min(own, key=lambda s: (s.lineno, s.col_offset), default=None)
+    return fn.row_at(first) if first is not None else None
+
+
+def _key_values(env: E.Env | None) -> set[str]:
+    """The question's key as the rows file holds it: the values of its key columns (``Env.keys``) in the row."""
+    m = re.fullmatch(r"<(\w+)>\.\w+", env.subject) if env is not None else None
+    if env is None or m is None:
+        return set()
+    row = env.table.get(m[1], {})
+    return {str(held.value) for column in env.keys if (held := row.get(column)) is not None}
+
+
+def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env: E.Env | None,
+                  raised_at: set[int] | None) -> str:
+    """Why the arm *stmt*, binding a local to the observed value as a constant (``newTaskStatus = "prepared"``), ran in
+    the pass *sn* reads; '' where that is not read (P1, KNOWN_ISSUES.md K72).
+
+    A row *R* of *fn* printed the local with the observed value in the pass: in the key's turn of the innermost ``for``
+    around *R* -- from the record of the loop's :func:`turn_start` whose hole of the loop's target is the question's key
+    (``Env.keys``), to that row's next record -- or, *R* in no loop, in a run that is one call (``Seen.single_call``);
+    one record of *R* there, placed.  *Q*, the latest placed record before it in the turn or call from which every way
+    to *R* binds the local (the map's ``flow.runs_after``, the local's bindings and the turn start as stops): what *R*
+    printed was bound after *Q*, in the same turn.  Without such a record, *R* in no loop, the call's entry, where no
+    way from it reaches *R* unbound (``pathcond.held_at``).  Of the bindings that can be what *R* reads
+    (``reaching.reaching``), the ones run after *Q* within the turn may have given it; of those, the ones that can give
+    the shown value -- a constant equal to it, or a value no constant spells -- are *stmt* alone.
+
+    The map's reaching reads no path's condition, so it is asked from *Q*, a print of the turn, not from the loop's
+    head: ``prepareTasksToBeFinished_JEDI``'s loop at 3852 does not bind ``newTaskStatus`` again at its head, and the
+    ways skipping 3906's and 4015's bodies, open only when ``toSkip`` is True, reach 4074 unbound."""
+    if (value := _constant_of(stmt)) is _NOT_CONSTANT or str(value) != observed:
+        return ""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        target = stmt.targets[0]
+    elif isinstance(stmt, ast.AnnAssign):
+        target = stmt.target
+    else:
+        return ""
+    if not isinstance(target, ast.Name):
+        return ""
+    func, name = fn.node, target.id
+    if any(isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names for n in R.own_nodes(func)):
+        return ""
+    # a binding's site is a statement, a handler or a ``:=`` (``pathcond.Binding``): the flow reads each as reaching's
+    # writes do, though it is typed for statements
+    binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
+    records = sn.run.records
+    keys = _key_values(env)
+    for row in fn.rows:
+        hits = sorted(i for i, _, _ in sn.hits.get(row.line, ()))
+        if not hits or pathcond.enclosing_function(row.stmt) is not func:
+            continue
+        loops = _loops_holding(row.stmt, func)
+        turn_stops: list[ast.stmt] = []
+        if loops:
+            loop = next((lp for lp in loops if isinstance(lp, (ast.For, ast.AsyncFor))), None)
+            if not isinstance(loop, (ast.For, ast.AsyncFor)) or not isinstance(loop.target, ast.Name) or not keys:
+                continue
+            var = loop.target.id
+            start = turn_start(fn, row.stmt, loop, raised_at)
+            if start is None or start.line == row.line:
+                continue
+            starts = sorted(i for i, _, _ in sn.hits.get(start.line, ()))
+            mine = [i for i in starts if start.capture(records[i]).get(var, "").strip() in keys]
+            if len(mine) != 1:
+                continue
+            lo = mine[0]
+            hi = next((i for i in starts if i > lo), len(records))
+            turn_stops = [start.stmt]
+            where = f"in the turn of {var}={start.capture(records[lo])[var].strip()} (row {start.line} at {records[lo].span})"
+        elif sn.single_call():
+            lo, hi, where = -1, len(records), "in the call"
+        else:
+            continue
+        at = [i for i in hits if lo < i < hi]
+        if len(at) != 1 or at[0] not in sn.unambiguous.get(row.line, ()):
+            continue
+        r_i = at[0]
+        shown = next((v.strip() for e, v in row.capture(records[r_i]).items() if e in (name, f"str({name})")), None)
+        if shown != observed:
+            continue
+        stops = [*binds, *turn_stops]
+        placed = sorted(((i, rw) for rw in fn.rows if rw is not row and pathcond.enclosing_function(rw.stmt) is func
+                         for i in sn.unambiguous.get(rw.line, ()) if lo <= i < r_i), key=lambda x: -x[0])
+        q: tuple[int, R.Row] | None = None
+        asked_rows: set[int] = set()
+        for i, rw in placed:
+            if rw.line in asked_rows:
+                continue
+            asked_rows.add(rw.line)
+            if not flow.runs_after(rw.stmt, row.stmt, stops, printed=True):
+                q = (i, rw)
+                break
+        if q is not None:
+            reached = {id(b) for b in reaching.reaching(row.stmt, binds)}
+            sources = [b for b in binds if id(b) in reached and flow.runs_after(q[1].stmt, b, turn_stops, printed=True)]
+            since = f"row {q[1].line} (at {records[q[0]].span})"
+        elif not loops:
+            held = pathcond.held_at(func, name, row.stmt)  # type: ignore[arg-type]
+            if any(getattr(s, "lineno", None) is None for s in held.sites):
+                continue
+            sources, since = list(held.sites), "the call's entry"
+        else:
+            continue
+        givers = [b for b in sources if (c := _constant_of(b)) is _NOT_CONSTANT or str(c) == shown]
+        if len(givers) == 1 and givers[0] is stmt:
+            lines = sorted(getattr(b, "lineno", 0) for b in sources)
+            return (f"P1: row {row.line} printed {name}={shown!r} {where}, at {records[r_i].span}; every way from {since} to "
+                    f"it binds {name}, and of the bindings run since ({lines}) only {stmt.lineno} gives {shown!r}")
+    return ""
+
+
 def held_in_calls(
     inner: Run, pairs: list[tuple[Candidate, R.Seen]], called_at: Callable[[R.Function, Candidate], list[str]]
 ) -> tuple[int, int, str] | None:
@@ -1266,6 +1415,19 @@ def judge(
             if proof.kind == "positive":
                 v.kind = "positive"
                 v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
+
+    # P1 on each kept candidate: a row of its pass printed the local it binds to the observed value, and of the
+    # bindings that can be what the row printed, only it gives that value (printed_local)
+    if observed:
+        for v in verdicts:
+            c = v.candidate
+            if v.kind != "kept" or c.owner not in seens or (stmt := R.statement_at(seens[c.owner].fn.node, v.line)) is None:
+                continue
+            sn = arm_seen.get((c.owner, v.line), seens[c.owner])
+            named, raised = R.raised_in(sn.fn, sn.run)
+            if why := printed_local(sn.fn, sn, stmt, observed, env, raised if named else set()):
+                v.kind = "positive"
+                v.reasons.append(why)
 
     # rule R: of one pass's writes, the last that changed the value -- the stays and the writes of another value out
     change = None
