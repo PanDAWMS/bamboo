@@ -78,7 +78,7 @@ SOURCES = {
                 except Exception:
                     self.result.set_fatal()  # P1
                     return
-                if out is None:
+                if out is None:  # PG
                     self.result.set_temporary()  # P2
         """,
     HOLDER: """\
@@ -423,6 +423,23 @@ def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it
         RESULT_CLASS,
     )
     assert _ends(constant.sources) == {("constant", "2", "", (), ())}
+
+
+def test_a_test_on_the_way_to_a_change_of_a_way_s_object_guards_that_change(
+    built: MapFragment,
+) -> None:
+    """register_files 788's shape: ``if out is None: self.result.set_temporary()`` is on no arm's way, but on the
+    way to a change the plugin's result FieldFrom records (P2); its GuardFrom holds that line among its calls.  P1,
+    in an except handler, has no test on its way and no guard."""
+    guard = _guard(built, PLUGIN, "PG", "out")
+    assert guard.calls == [_line(PLUGIN, "P2")]
+    assert guard.arms == []
+    assert guard.owner.endswith("register_files")
+    assert {
+        (one.name, one.test_line)
+        for one in built.guard_froms
+        if one.owner.startswith(f"{PLUGIN}::")
+    } == {("out", _line(PLUGIN, "PG"))}
 
 
 def test_a_guard_reading_self_itself_asks_each_field_it_reads_and_not_a_method_it_calls(

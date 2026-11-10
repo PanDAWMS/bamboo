@@ -5973,7 +5973,10 @@ class GuardFrom(BaseModel):
         default_factory=list,
         description=(
             "The lines of the calls the test is on the way to that enter a function holding arms: the sites of an "
-            ":class:`EnteredFrom` whose caller is this one's *owner*."
+            ":class:`EnteredFrom` whose caller is this one's *owner*; and of the places it is on the way to where a "
+            "way's object may be changed (a :class:`HeldChange`'s first *via*, else its *at*, on a GuardFrom's, a "
+            "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
+            "``self.result.set_fatal()``."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")

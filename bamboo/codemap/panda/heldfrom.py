@@ -1941,6 +1941,31 @@ def guard_froms(
     written: dict[tuple[str, int, str, str, str], WriteFrom] = {}
     read_once: dict[int, tuple[list[HeldSource], list[KeyStop]]] = {}
     methods = _methods(trees)
+
+    def guards_on(owner: str, file: str, func: ast.AST, stmt: ast.stmt) -> list[GuardFrom]:
+        """The GuardFrom of each test on the way to *stmt* in *func* and name it reads, each read once."""
+        on: list[GuardFrom] = []
+        for test in pathcond.tests_on(stmt, func):
+            for read, node in _names(test, func).items():
+                key = (owner, test.lineno, test.col_offset, read)
+                guard = found.get(key)
+                if guard is None:
+                    sources, stops = _said(reader._safely(node, node, file, func))
+                    reader.queue(sources)
+                    if read == "self":
+                        for field in _self_values(test):
+                            reader.ask_field(reader.class_owner(file, func), field)
+                    guard = found[key] = GuardFrom(
+                        owner=owner,
+                        test_line=test.lineno,
+                        test=ast.unparse(test),
+                        name=read,
+                        sources=sources,
+                        stops=stops,
+                    )
+                on.append(guard)
+        return on
+
     for junction in junctions:
         file, _, name = junction.owner.partition("::")
         tree = trees.get(file)
@@ -1982,26 +2007,9 @@ def guard_froms(
                         sources=part_ways[0],
                         stops=part_ways[1],
                     )
-            for test in pathcond.tests_on(stmt, func):
-                for read, node in _names(test, func).items():
-                    key = (junction.owner, test.lineno, test.col_offset, read)
-                    guard = found.get(key)
-                    if guard is None:
-                        sources, stops = _said(reader._safely(node, node, file, func))
-                        reader.queue(sources)
-                        if read == "self":
-                            for field in _self_values(test):
-                                reader.ask_field(reader.class_owner(file, func), field)
-                        guard = found[key] = GuardFrom(
-                            owner=junction.owner,
-                            test_line=test.lineno,
-                            test=ast.unparse(test),
-                            name=read,
-                            sources=sources,
-                            stops=stops,
-                        )
-                    if line not in guard.arms:
-                        guard.arms.append(line)
+            for guard in guards_on(junction.owner, file, func, stmt):
+                if line not in guard.arms:
+                    guard.arms.append(line)
     for way in entered:
         for site in way.sites:
             if site.unread:
@@ -2019,27 +2027,35 @@ def guard_froms(
             stmt = _statement_holding(func, site.line) if func is not None else None
             if func is None or stmt is None:
                 continue
-            for test in pathcond.tests_on(stmt, func):
-                for read, node in _names(test, func).items():
-                    key = (site.owner, test.lineno, test.col_offset, read)
-                    guard = found.get(key)
-                    if guard is None:
-                        sources, stops = _said(reader._safely(node, node, file, func))
-                        reader.queue(sources)
-                        if read == "self":
-                            for field in _self_values(test):
-                                reader.ask_field(reader.class_owner(file, func), field)
-                        guard = found[key] = GuardFrom(
-                            owner=site.owner,
-                            test_line=test.lineno,
-                            test=ast.unparse(test),
-                            name=read,
-                            sources=sources,
-                            stops=stops,
-                        )
-                    if site.line not in guard.calls:
-                        guard.calls.append(site.line)
-    reader.settle()
+            for guard in guards_on(site.owner, file, func, stmt):
+                if site.line not in guard.calls:
+                    guard.calls.append(site.line)
+    # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
+    # a run made is read off them (``if is_fatal: self.result.set_fatal()``).  Their ways' changes too, until no
+    # place is new.
+    guarded: set[str] = set()
+    held: dict[str, list[ast.AST]] = {}
+    while True:
+        reader.settle()
+        fresh = sorted(_change_sites(found.values(), reader) - guarded)
+        if not fresh:
+            break
+        guarded.update(fresh)
+        for at in fresh:
+            file, _, number = at.rpartition(":")
+            tree = trees.get(file)
+            if tree is None or not number.isdigit():
+                continue
+            if file not in held:
+                held[file] = [node for node in walk(tree) if isinstance(node, _FUNCTIONS)]
+            line = int(number)
+            func = _function_holding(held[file], line)
+            stmt = _statement_holding(func, line) if func is not None else None
+            if func is None or stmt is None:
+                continue
+            for guard in guards_on(owner_of(file, func), file, func, stmt):
+                if line not in guard.calls:
+                    guard.calls.append(line)
     ended = _ended_columns(found.values(), reader.parameters)
     sets = [one for one in writes if one.column in ended]
     for one in sets:
@@ -2214,6 +2230,41 @@ def _chains(
 
     down(sources, (), frozenset(), False)
     return found, more, decoded
+
+
+def _change_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
+    """``file:line`` of each place a way's object may be changed: each change on a GuardFrom's, a ParameterFrom's or
+    a FieldFrom binding's way, and each of a FieldFrom's -- the change's first call or statement in the way's function
+    (*via*), else the change itself."""
+    found: set[str] = set()
+
+    def add(changes: Iterable[HeldChange]) -> None:
+        for one in changes:
+            found.add(one.via[0] if one.via else one.at)
+
+    for guard in guards:
+        for source in guard.sources:
+            add(source.changes)
+    for parameter in reader.parameters.values():
+        for source in parameter.sources:
+            add(source.changes)
+    for field in reader.fields.values():
+        add(field.changes)
+        for binding in field.bindings:
+            for source in binding.sources:
+                add(source.changes)
+    return found
+
+
+def _function_holding(functions: list[ast.AST], line: int) -> Optional[ast.AST]:
+    """The innermost of *functions* whose lines hold *line*."""
+    found: Optional[ast.AST] = None
+    for node in functions:
+        if node.lineno <= line <= (node.end_lineno or node.lineno) and (  # type: ignore[attr-defined]
+            found is None or node.lineno >= found.lineno  # type: ignore[attr-defined]
+        ):
+            found = node
+    return found
 
 
 def _statement_holding(func: ast.AST, line: int) -> Optional[ast.stmt]:
