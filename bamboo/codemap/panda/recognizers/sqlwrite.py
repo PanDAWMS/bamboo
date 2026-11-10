@@ -73,6 +73,7 @@ from bamboo.codemap.calls import (
     Recorded,
     Target,
     Types,
+    keyed_setattr,
     own_nodes,
     receiver_parameter,
 )
@@ -4627,7 +4628,8 @@ class CrossingCensus(NamedTuple):
 _DEPTH = 5
 #: The steps of an access path: ``.f`` a field, ``[0]`` / ``['k']`` an index or key a literal names, and
 #: ``[*]`` any element of a list, a set or a dict's values, ``[key]`` a dict's keys, ``.*`` any field (a field
-#: named by a value: ``setattr(x, n, v)``), ``...`` anything below the cut.
+#: named by a value: ``setattr(x, n, v)``, but over ``P.items()`` the field each key names, :func:`_keyed_fields`),
+#: ``...`` anything below the cut.
 _ALL, _KEY, _MORE, _ANY_FIELD = "[*]", "[key]", "...", ".*"
 #: The step for any field of an object: what a call filling it by name (``spec.pack(row)``) puts its value at.
 ANY_FIELD = _ANY_FIELD
@@ -5046,6 +5048,30 @@ def _same(paths: _Paths) -> _Paths:
     return paths
 
 
+def _key_named(step: str) -> Optional[str]:
+    """The text a ``['k']`` step names (:func:`_index_step`); ``None`` for any other step."""
+    if len(step) > 3 and step[0] == "[" and step[-1] == "]" and step[1] in ("'", '"'):
+        named = ast.literal_eval(step[1:-1])
+        return named if isinstance(named, str) else None
+    return None
+
+
+def _keyed_fields(paths: _Paths) -> _Paths:
+    """What ``setattr(x, key, value)`` in a ``for key, value in P.items()`` puts in ``x`` of what ``P`` holds
+    (:func:`calls.keyed_setattr`): what is under a key a literal names goes to the field of that name, what is under
+    any other key to any field (``.*``); a key itself goes to none -- it is the name.  The whole of P holds every
+    value."""
+    found: set[tuple[str, ...]] = set()
+    for path in paths:
+        path = _bare(path)
+        if not path:
+            found.add((_ANY_FIELD,))
+        elif path[0] != _KEY:
+            named = _key_named(path[0])
+            found.add(_cut(((f".{named}",) if named is not None else (_ANY_FIELD,)) + _bare(path[1:])))
+    return frozenset(found)
+
+
 class _Write:
     """One write of a name in a function: the steps it writes at, where the value comes from and how it is taken
     apart (*take*: a target unpacked, a loop's element), or the call keeping something in what the name holds."""
@@ -5148,6 +5174,8 @@ class _PathCarry:
     The rows come in through the statement's own seeds (*start*: a write holds them whole), the parameters a call
     hands parts of them to (*seeds*), or the value of a call the function made (*call_values*: the way back).  A
     write holds what its value holds, put at its steps -- ``x.a[k] = v`` puts what ``v`` holds at ``.a[*]`` of ``x``
+    -- ``setattr(x, n, v)`` at any field of ``x`` where ``n`` is computed, but in a ``for n, v in P.items()`` what
+    each key of ``P`` holds at the field it names (:func:`_keyed_fields`: ``AdderPluginBase.__init__``'s ``params``)
     -- and taken apart as its target is: ``a, b = v`` gives ``a`` what ``v[0]`` holds, a loop's target what an
     element does, and an element of a value known as a dict is its key (:func:`_dict_names`), wherever one is taken:
     ``for k in sorted(d)`` takes what ``d``'s keys hold, not what its values do.  A read takes the part it names:
@@ -5315,6 +5343,13 @@ class _PathCarry:
             for name in walk(node.target)
         }
         self._iterables = _loop_iterables(func, self.dicts)
+        self._keyed = {
+            id(node): held
+            for node in own_nodes(func)
+            if isinstance(node, ast.Call)
+            and _setattr_parts(node) is not None
+            and (held := keyed_setattr(func, node)) is not None
+        }
         for node in own_nodes(func):
             if (
                 isinstance(node, ast.AugAssign)
@@ -5365,6 +5400,12 @@ class _PathCarry:
             if found is not None:
                 base, steps = found
                 attr = call.args[1]
+                keyed = self._keyed.get(id(call))
+                if keyed is not None:
+                    # ``for key, value in params.items(): setattr(self, key, value)``: each key's value goes to the
+                    # field the key names, not to any field.
+                    self._add(_Write(base, statement, steps, keyed, _keyed_fields, True))
+                    return
                 field = (
                     ("." + attr.value,)
                     if isinstance(attr, ast.Constant) and isinstance(attr.value, str)

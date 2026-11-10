@@ -52,7 +52,16 @@ from typing import Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import Calls, CallSite, Target, bind, own_nodes, returns
+from bamboo.codemap.calls import (
+    Calls,
+    CallSite,
+    Target,
+    _rebinds,
+    bind,
+    keyed_setattr,
+    own_nodes,
+    returns,
+)
 from bamboo.codemap.models import (
     CHANGE_ESCAPED,
     CHANGE_INNER,
@@ -1537,9 +1546,15 @@ class _Reader:
                                         )
                                     )
                             else:
-                                stops.append(
-                                    KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
-                                )
+                                keyed = self._set_by_keyword(file, method, inner, node, field, family)
+                                if keyed is None:
+                                    stops.append(
+                                        KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
+                                    )
+                                elif keyed:
+                                    bindings.append(
+                                        _field_binding(file, node, owner_of(file, method), FIELD_SETATTR, keyed, inner, immutable)
+                                    )
                     elif isinstance(node, ast.Attribute) and node.attr == "__dict__" and isinstance(node.value, ast.Name) and node.value.id == me:
                         through_dict = True
                 if through_dict:
@@ -1606,12 +1621,92 @@ class _Reader:
     ) -> FieldBinding:
         """The binding of *value* at *statement*; whether it holds a value nothing changes in place goes on
         *immutable* (:func:`_immutable`)."""
-        ways = self._safely(value, statement, file, func)
-        immutable.append(_immutable(func, ways))
-        sources, stops = _said(ways)
-        return FieldBinding(
-            at=f"{file}:{getattr(statement, 'lineno', 0)}", owner=owner, how=how, sources=sources, stops=stops
-        )
+        return _field_binding(file, statement, owner, how, self._safely(value, statement, file, func), func, immutable)
+
+    def _set_by_keyword(
+        self,
+        file: str,
+        method: ast.AST,
+        inner: ast.AST,
+        call: ast.Call,
+        field: str,
+        family: list[tuple[str, ast.ClassDef]],
+    ) -> Optional[list[_Way]]:
+        """The ways of what ``setattr(self, key, value)`` in *method* sets *field* to, where the loop over
+        ``P.items()`` around it names each key and value and P is *method*'s parameter: at each caller, the value of the
+        keyword *field* that P's dict holds (:meth:`_keywords_handed`).  Empty where no caller hands the name; ``None``
+        for another setattr, or where a caller cannot be read -- the name may be any."""
+        if inner is not method:
+            return None
+        handed = _items_of_parameter(method, call)
+        if handed is None:
+            return None
+        return self._keywords_handed(file, method, handed, field, family, 1)
+
+    def _keywords_handed(
+        self,
+        file: str,
+        func: ast.AST,
+        name: str,
+        field: str,
+        family: list[tuple[str, ast.ClassDef]],
+        level: int,
+    ) -> Optional[list[_Way]]:
+        """The ways of the value each call of *func* hands under the key *field* in its parameter *name*'s dict -- a
+        dict of constant keys (a literal, or the keywords :func:`bind` leaves to ``**kwargs``), or the caller's own
+        parameter, read on at its callers up to :data:`_KEYWORD_LEVELS` calls -- each with the calls it came through
+        on its route.  ``None`` where any caller cannot be read, as a ParameterFrom stops: no caller, a call Calls
+        misses, a ``**`` at the call, another value, a level too deep.  A method read off its class that hands its own
+        ``self`` from a class outside *family* is skipped: that call sets the field of an object of another class."""
+        tree = self.trees.get(file)
+        target = Target(file, func, pathcond.class_of(tree, func) if tree is not None else None)
+        sites = self.calls.callers(target)
+        if not sites or self.calls.missed(target):
+            return None
+        ways: list[_Way] = []
+        for site in sites:
+            here = f"{site.file}:{site.call.lineno}"
+            try:
+                placed = self.calls.callees(site.file, site.func, site.call)
+                if placed.on_class and self._hands_other_self(site, family):
+                    continue
+                given = bind(site.call, target, placed.on_class).get(name)
+            except Exception:  # noqa: BLE001 -- as _safely
+                return None
+            if isinstance(given, ast.Dict) and all(
+                isinstance(key, ast.Constant) and isinstance(key.value, str) for key in given.keys
+            ):
+                for key, value in zip(given.keys, given.values, strict=True):
+                    if isinstance(key, ast.Constant) and key.value == field:
+                        ways += [
+                            one._replace(route=(here,) + one.route)
+                            for one in self._safely(value, site.call, site.file, site.func)
+                        ]
+            elif (
+                isinstance(given, ast.Name)
+                and given.id in _parameters(site.func)
+                and not _rebinds(site.func, given.id)
+                and level < _KEYWORD_LEVELS
+            ):
+                outer = self._keywords_handed(site.file, site.func, given.id, field, family, level + 1)
+                if outer is None:
+                    return None
+                ways += [one._replace(route=(here,) + one.route) for one in outer]
+            else:
+                return None
+        return ways
+
+    def _hands_other_self(self, site: CallSite, family: list[tuple[str, ast.ClassDef]]) -> bool:
+        """Whether *site*, a method read off its class, hands its own ``self`` and is a method of a class outside
+        *family*."""
+        me = _first_positional(site.func)
+        if me is None or not site.call.args or not (
+            isinstance(site.call.args[0], ast.Name) and site.call.args[0].id == me
+        ):
+            return False
+        tree = self.trees.get(site.file)
+        cls = pathcond.class_of(tree, site.func) if tree is not None else None
+        return cls is not None and (site.file, cls.lineno) not in {(one, held.lineno) for one, held in family}
 
     def _parameter_from(
         self, key: tuple[str, int, str], file: str, func: ast.AST
@@ -1760,6 +1855,33 @@ def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bo
         and not one.steps
         for one in ends
     )
+
+
+def _field_binding(
+    file: str, statement: ast.AST, owner: str, how: str, ways: list[_Way], func: ast.AST, immutable: list[bool]
+) -> FieldBinding:
+    """The binding at *statement* whose value's ways are *ways*; whether it holds a value nothing changes in place
+    goes on *immutable* (:func:`_immutable`)."""
+    immutable.append(_immutable(func, ways))
+    sources, stops = _said(ways)
+    return FieldBinding(
+        at=f"{file}:{getattr(statement, 'lineno', 0)}", owner=owner, how=how, sources=sources, stops=stops
+    )
+
+
+#: How many calls back a parameter's dict of keywords is read for a setattr's name: the plugin's ``__init__(self,
+#: job, **params)`` hands its ``params`` on to the base's, and the call that builds the plugin names the keywords.
+_KEYWORD_LEVELS = 3
+
+
+def _items_of_parameter(method: ast.AST, call: ast.Call) -> Optional[str]:
+    """P where *call* is ``setattr(self, key, value)`` in a ``for key, value in P.items()`` of *method*'s own body
+    (:func:`calls.keyed_setattr`), P a parameter *method* does not bind again (``AdderPluginBase.__init__``'s
+    ``params``); else ``None``."""
+    held = keyed_setattr(method, call)
+    if held is None or held.id not in _parameters(method) or _rebinds(method, held.id):
+        return None
+    return held.id
 
 
 def _immutable(func: ast.AST, ways: list[_Way]) -> bool:

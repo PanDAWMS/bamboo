@@ -6009,7 +6009,8 @@ WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
 
 
 #: How a :class:`FieldBinding` binds the field: ``self.f = v`` (with a tuple target at any depth), ``self.f: T = v``,
-#: ``self.f += v``, ``setattr(self, "f", v)``, ``f = v`` in the class's body.
+#: ``self.f += v``, ``setattr(self, "f", v)`` -- or ``setattr(self, key, value)`` in a ``for key, value in
+#: P.items()`` where a caller hands ``f`` among P's keywords -- ``f = v`` in the class's body.
 FIELD_ASSIGN = "assign"
 FIELD_ANNOTATED = "annotated"
 FIELD_AUGMENTED = "augmented"
@@ -6020,7 +6021,12 @@ FIELD_BINDS = (FIELD_ASSIGN, FIELD_ANNOTATED, FIELD_AUGMENTED, FIELD_SETATTR, FI
 
 class FieldBinding(BaseModel):
     """One statement of a :class:`FieldFrom`'s classes binding the field, with its value read as a
-    :class:`GuardFrom` reads a name there."""
+    :class:`GuardFrom` reads a name there.
+
+    ``setattr(self, key, value)`` in ``AdderPluginBase.__init__``'s ``for key, value in params.items()``, ``params``
+    its parameter, binds a field each call hands under the field's name: the value is read at those calls -- the
+    keywords ``AdderGen.execute_plugin`` 256 hands ``AdderAtlasPlugin``'s ``**params``, which its ``__init__`` hands
+    on -- each way with the calls on its *route*.  A field no caller names is not bound there."""
 
     at: str = Field(description="``file:line`` of the statement.")
     owner: str = Field(description="The method it is in (``file::name``), or the class for its body.")
@@ -6062,8 +6068,9 @@ class FieldFrom(BaseModel):
     stops: list[KeyStop] = Field(
         default_factory=list,
         description=(
-            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)``, or "
-            "``self.__dict__`` changed in place -- an item stored, a dict method, handed on; a read sets nothing); "
+            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)`` -- but over a "
+            "parameter's keywords every caller names, :class:`FieldBinding` -- or ``self.__dict__`` changed in "
+            "place -- an item stored, a dict method, handed on; a read sets nothing); "
             "``method``: the classes define it as a method or property; ``outside``: the places a field of its name "
             "is stored on another object than a method's ``self``."
         ),

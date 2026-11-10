@@ -303,6 +303,25 @@ SHAPES = {
             res = self.cur.fetchone()  # rows
             return os.path.join(base, res[0])  # holds
     """,
+    # AdderPluginBase.__init__'s loop over the keywords AdderGen hands the plugin: each key's value goes to the field
+    # the key names -- the job's field holds none of what extra_info does.
+    "set by the field its key names": """
+        def f(self, other):
+            res = self.cur.fetchall()  # rows
+            params = {"extra_info": res, "logger": other}
+            for key, value in params.items():
+                setattr(self, key, value)
+            g(self.extra_info)  # holds
+            g(self.job)  # not
+    """,
+    "set by a key not known": """
+        def f(self, name):
+            res = self.cur.fetchall()  # rows
+            params = {name: res}
+            for key, value in params.items():
+                setattr(self, key, value)
+            g(self.job)  # holds
+    """,
     # Over no corpus no method is placed, so what ``pack`` keeps of its
     # argument is not read (``_get_datasets_with_unprocessed_inputs``; placed,
     # it is -- test_codemap's rows put into an object).

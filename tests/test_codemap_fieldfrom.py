@@ -38,6 +38,7 @@ OTHER = "pandaserver/dataservice/other.py"
 BUFFER = "pandaserver/taskbuffer/task_buffer.py"
 QUEUE = "pandaserver/dataservice/adder_queue.py"
 STATUS = "pandaserver/dataservice/adder_status.py"
+DUMMY = "pandaserver/dataservice/adder_dummy_plugin.py"
 
 SOURCES = {
     RESULT: """\
@@ -62,14 +63,32 @@ SOURCES = {
         from pandaserver.dataservice.adder_result import AdderResult
 
         class AdderPluginBase:
-            def __init__(self, job):
+            def __init__(self, job, params):
                 self.job = job
                 self.result = AdderResult()  # B1
+                self.extra_info = None  # B3
+                for key, value in params.items():
+                    setattr(self, key, value)  # B2
+
+            def done(self):
+                if self.result is None:  # B4
+                    self.job.jobStatus = "failed"  # ARM6
+        """,
+    # AdderDummyPlugin's shape: a subclass no call in the corpus builds, handing its keywords to the base.
+    DUMMY: """\
+        from pandaserver.dataservice.adder_plugin_base import AdderPluginBase
+
+        class AdderDummyPlugin(AdderPluginBase):
+            def __init__(self, job, **params):
+                AdderPluginBase.__init__(self, job, params)  # U0
         """,
     PLUGIN: """\
         from pandaserver.dataservice.adder_plugin_base import AdderPluginBase
 
         class AdderAtlasPlugin(AdderPluginBase):
+            def __init__(self, job, **params):
+                AdderPluginBase.__init__(self, job, params)  # P0
+
             def execute(self):
                 self.register_files()
 
@@ -106,7 +125,7 @@ SOURCES = {
                 self.holder = Holder([])  # G4
 
             def execute_plugin(self):
-                self.adder_plugin = AdderAtlasPlugin(self.job)  # G2
+                self.adder_plugin = AdderAtlasPlugin(self.job, extra_info=self.attempt_nr, note="x")  # G2
                 self.adder_plugin.execute()
                 self.add_result = self.adder_plugin.result  # G3
 
@@ -123,13 +142,20 @@ SOURCES = {
                 held = self.holder.get()  # R2
                 if got and mine and held:  # R3
                     self.job.jobStatus = "closed"  # ARM2
+
+            def check_plugin(self):
+                info = self.adder_plugin.extra_info  # G5
+                if info:  # A2
+                    self.job.jobStatus = "merging"  # ARM7
         """,
     SETUP_BASE: """\
         class SetupperPluginBase:
-            def __init__(self, jobs):
+            def __init__(self, jobs, **params):
                 self.jobs = []  # S0
                 for job in jobs:
                     self.jobs.append(job)
+                for key, value in params.items():
+                    setattr(self, key, value)  # S5
 
             def load(self, values):
                 self.__dict__.update(values)  # D1
@@ -267,6 +293,8 @@ ARMS = (
     (SETUP, "subscribe", "ARM3", "FileSpec.dispatchDBlock"),
     (QUEUE, "check", "ARM4", "JobSpec.jobStatus"),
     (STATUS, "check", "ARM5", "JobSpec.jobStatus"),
+    (BASE, "done", "ARM6", "JobSpec.jobStatus"),
+    (GEN, "check_plugin", "ARM7", "JobSpec.jobStatus"),
 )
 
 
@@ -671,4 +699,42 @@ def test_a_field_every_binding_of_which_holds_an_immutable_value_has_no_changes(
     note = _field(built, STATUS_CLASS, "note")
     assert {(one.at, one.kind) for one in note.changes} == {
         (_at(STATUS, "I3"), "escaped")
+    }
+
+
+def test_a_setattr_over_a_parameter_s_keywords_binds_the_fields_its_callers_name(
+    built: MapFragment,
+) -> None:
+    """``AdderPluginBase.__init__``'s ``for key, value in params.items(): setattr(self, key, value)`` (B2): the
+    plugin's ``__init__(self, job, **params)`` hands its ``params`` on (P0), and AdderGen builds the plugin with
+    ``extra_info=`` and ``note=`` (G2).  The plugin's extra_info is bound at B2 to what G2 hands, read there; its
+    result is not set there, so the name computed there is no stop of it.  AdderDummyPlugin's call (U0) sets a
+    Dummy's fields, not the plugin's: not read for the plugin."""
+    extra = _field(built, PLUGIN_CLASS, "extra_info")
+    assert {(one.at, one.how, one.owner) for one in extra.bindings} == {
+        (_at(BASE, "B3"), "assign", f"{BASE}::__init__"),
+        (_at(BASE, "B2"), "setattr", f"{BASE}::__init__"),
+    }
+    (keyed,) = [one for one in extra.bindings if one.how == "setattr"]
+    assert _ends(keyed.sources) == {
+        (
+            "self_field",
+            "self.attempt_nr",
+            GEN_CLASS,
+            (),
+            (_at(GEN, "G2"), _at(PLUGIN, "P0")),
+        )
+    }
+    assert not extra.stops
+    result = _field(built, PLUGIN_CLASS, "result")
+    assert not [one for one in result.stops if one.kind == "computed"]
+    # The base's own field: self may be a Dummy, whose __init__ no call reaches -- the name may be any.
+    base_result = _field(built, f"{BASE}::AdderPluginBase", "result")
+    assert [one.at for one in base_result.stops if one.kind == "computed"] == [
+        [_at(BASE, "B2")]
+    ]
+    # A loop over a parameter no call hands: the name may be any.
+    jobs = _field(built, SETUP_CLASS, "jobs")
+    assert ("computed", (_at(SETUP_BASE, "S5"),)) in {
+        (one.kind, tuple(one.at)) for one in jobs.stops
     }
