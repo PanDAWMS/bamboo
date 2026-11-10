@@ -37,6 +37,7 @@ SETUP = "pandaserver/dataservice/setupper_atlas_plugin.py"
 OTHER = "pandaserver/dataservice/other.py"
 BUFFER = "pandaserver/taskbuffer/task_buffer.py"
 QUEUE = "pandaserver/dataservice/adder_queue.py"
+STATUS = "pandaserver/dataservice/adder_status.py"
 
 SOURCES = {
     RESULT: """\
@@ -227,6 +228,23 @@ SOURCES = {
             lists.add(3, others)  # M2
             Worker(task_buffer, lists).run()  # M3
         """,
+    # AdderGen.job_status's shape: a field bound to a parameter annotated str and to a text, handed on inside a
+    # structure; beside it one bound to a parameter with no annotation.
+    STATUS: """\
+        class Status:
+            def __init__(self, job, job_status: str, note):
+                self.job = job
+                self.job_status = job_status  # I0
+                self.note = note  # I1
+
+            def finish(self):
+                self.job_status = "failed"  # I2
+                self.job.extras = [self.job_status, self.note]  # I3
+
+            def check(self):
+                if self.job_status == "failed" or self.note:  # I4
+                    self.job.jobStatus = "closed"  # ARM5
+        """,
 }
 
 
@@ -248,6 +266,7 @@ ARMS = (
     (GEN, "process_job_report", "ARM2", "JobSpec.jobStatus"),
     (SETUP, "subscribe", "ARM3", "FileSpec.dispatchDBlock"),
     (QUEUE, "check", "ARM4", "JobSpec.jobStatus"),
+    (STATUS, "check", "ARM5", "JobSpec.jobStatus"),
 )
 
 
@@ -345,6 +364,7 @@ RESULT_CLASS = f"{RESULT}::AdderResult"
 SETUP_CLASS = f"{SETUP}::SetupperAtlasPlugin"
 READER_CLASS = f"{QUEUE}::Reader"
 WORKER_CLASS = f"{QUEUE}::Worker"
+STATUS_CLASS = f"{STATUS}::Status"
 
 
 def _parameter(
@@ -634,3 +654,21 @@ def test_a_container_outside_the_corpus_holds_what_its_method_puts(
         }
         assert not stays
     assert heldfrom.held_elements(add.value[0], "[0]") == ([], True)
+
+
+def test_a_field_every_binding_of_which_holds_an_immutable_value_has_no_changes(
+    built: MapFragment,
+) -> None:
+    """AdderGen.job_status's shape: bound to a parameter annotated ``str`` and to ``"failed"``, the field holds a text,
+    which nothing changes in place -- handed on inside a list (I3), it is not changed there; ``note``, bound to a
+    parameter with no annotation, may hold anything, and its object escapes at I3."""
+    status = _field(built, STATUS_CLASS, "job_status")
+    assert {(one.at, one.how) for one in status.bindings} == {
+        (_at(STATUS, "I0"), "assign"),
+        (_at(STATUS, "I2"), "assign"),
+    }
+    assert status.changes == []
+    note = _field(built, STATUS_CLASS, "note")
+    assert {(one.at, one.kind) for one in note.changes} == {
+        (_at(STATUS, "I3"), "escaped")
+    }

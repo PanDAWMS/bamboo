@@ -1478,6 +1478,7 @@ class _Reader:
         else:
             failed = []
         bindings: list[FieldBinding] = []
+        immutable: list[bool] = []
         changes: list[_Change] = []
         stops: list[KeyStop] = list(failed)
         for file, cls in family:
@@ -1488,7 +1489,7 @@ class _Reader:
                     for target, value in pathcond.assigned_targets(statement):
                         if isinstance(target, ast.Name) and target.id == field and value is not None:
                             bindings.append(
-                                self._binding(file, statement, _class_key(file, cls), FIELD_CLASS, value, cls)
+                                self._binding(file, statement, _class_key(file, cls), FIELD_CLASS, value, cls, immutable)
                             )
             for method in pathcond.methods_of(cls):
                 me = _first_positional(method)
@@ -1510,9 +1511,11 @@ class _Reader:
                                     KeyStop(kind="element", name=field, what="a starred unpacking", at=[f"{file}:{node.lineno}"])
                                 )
                                 continue
-                            bindings.append(self._binding(file, node, owner_of(file, method), how, value, inner))
+                            bindings.append(self._binding(file, node, owner_of(file, method), how, value, inner, immutable))
                     elif isinstance(node, ast.AugAssign) and _is_field(node.target, me, field):
-                        bindings.append(self._binding(file, node, owner_of(file, method), FIELD_AUGMENTED, node.value, inner))
+                        bindings.append(
+                            self._binding(file, node, owner_of(file, method), FIELD_AUGMENTED, node.value, inner, immutable)
+                        )
                     elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
                         bound = (
                             [node.target]
@@ -1529,7 +1532,9 @@ class _Reader:
                             if isinstance(name, ast.Constant):
                                 if name.value == field:
                                     bindings.append(
-                                        self._binding(file, node, owner_of(file, method), FIELD_SETATTR, node.args[2], inner)
+                                        self._binding(
+                                            file, node, owner_of(file, method), FIELD_SETATTR, node.args[2], inner, immutable
+                                        )
                                     )
                             else:
                                 stops.append(
@@ -1566,6 +1571,11 @@ class _Reader:
         outside = sorted(at for at, stored_on in self._stores().get(field, ()) if not stored_on)
         if outside:
             stops.append(KeyStop(kind="outside", name=field, what="stored on another object, by the name", at=outside))
+        if bindings and all(immutable) and not stops:
+            # Each binding holds a value nothing changes in place -- a text, a number, a column's value, a parameter
+            # annotated so: the field is only bound again, as its bindings say, and what it is handed to keeps a
+            # value no later step can change.
+            changes = []
         seen: set[tuple] = set()
         said: list[HeldChange] = []
         for change in changes:
@@ -1585,9 +1595,20 @@ class _Reader:
         )
 
     def _binding(
-        self, file: str, statement: ast.AST, owner: str, how: str, value: ast.expr, func: ast.AST
+        self,
+        file: str,
+        statement: ast.AST,
+        owner: str,
+        how: str,
+        value: ast.expr,
+        func: ast.AST,
+        immutable: list[bool],
     ) -> FieldBinding:
-        sources, stops = _said(self._safely(value, statement, file, func))
+        """The binding of *value* at *statement*; whether it holds a value nothing changes in place goes on
+        *immutable* (:func:`_immutable`)."""
+        ways = self._safely(value, statement, file, func)
+        immutable.append(_immutable(func, ways))
+        sources, stops = _said(ways)
         return FieldBinding(
             at=f"{file}:{getattr(statement, 'lineno', 0)}", owner=owner, how=how, sources=sources, stops=stops
         )
@@ -1738,6 +1759,25 @@ def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bo
         and not one.through
         and not one.steps
         for one in ends
+    )
+
+
+def _immutable(func: ast.AST, ways: list[_Way]) -> bool:
+    """Whether every way of a field's binding ends at a value nothing can change in place: a literal or a column's
+    value, through no call and stepped into nothing; or a parameter of *func* itself annotated with such types only
+    (``job_status: str``).  A way that stops says nothing, so it is not."""
+    return bool(ways) and all(
+        not one.steps
+        and not one.through
+        and (
+            one.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
+            or (
+                one.kind == KEY_PARAMETER
+                and not one.route
+                and callfacts.immutable_annotation(_annotation(func, one.name))
+            )
+        )
+        for one in ways
     )
 
 
