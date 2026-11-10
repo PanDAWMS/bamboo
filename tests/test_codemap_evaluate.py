@@ -71,6 +71,34 @@ def test_a_call_whose_whole_text_was_printed_takes_the_printed_value_before_it_i
     assert env.used["isJumboJob(job)"] == "called isJumboJob"
 
 
+def test_a_substitution_whose_pattern_does_not_match_the_string_is_the_string() -> None:
+    """insertNewJob's rewrite of a jobName: a name without the token is the name, whatever ``originPandaID`` is;
+    a match is unknown, even with a known replacement; so is an unknown or non-string string, a keyword, a pattern
+    that does not compile.  A printed hole comes first, and the call is not decidable before the values."""
+    rewrite = r"re.sub('\\$ORIGINPANDAID', str(originPandaID), PRIOR)"
+    env = _env(PRIOR="mc23_13p6TeV.801234.build")
+    assert evaluate.evaluate(rewrite, env) == "mc23_13p6TeV.801234.build"
+    assert env.used[rewrite] == "re.sub: the pattern does not match"
+    assert (
+        evaluate.evaluate(f"{rewrite} == taskName", _env(PRIOR="a.b", taskName="a.b"))
+        is True
+    )
+    assert evaluate.evaluate(rewrite, _env(PRIOR="a.b.$ORIGINPANDAID")) is UNKNOWN
+    assert evaluate.evaluate("re.sub('\\r', '', PRIOR)", _env(PRIOR="ab")) == "ab"
+    assert evaluate.evaluate("re.sub('\\r', '', PRIOR)", _env(PRIOR="a\rb")) is UNKNOWN
+    assert evaluate.evaluate(rewrite, _env()) is UNKNOWN
+    assert evaluate.evaluate(rewrite, _env(PRIOR=None)) is UNKNOWN
+    assert evaluate.evaluate(
+        "re.sub('x', '', PRIOR, flags=re.I)", _env(PRIOR="ab")
+    ) is (UNKNOWN)
+    assert evaluate.evaluate("re.sub('(', '', PRIOR)", _env(PRIOR="ab")) is UNKNOWN
+    printed = _env(PRIOR="a.b")
+    printed.put(rewrite, "a.b.7", "printed")
+    assert evaluate.evaluate(rewrite, printed) == "a.b.7"
+    node = ast.parse(rewrite, mode="eval").body
+    assert not evaluate.decidable(node, {"PRIOR"}, Env())
+
+
 def test_a_standard_function_is_run_on_a_known_value_and_says_what_it_raises() -> None:
     """Whether ``json.loads('')`` or ``int(None)`` raises is Python's to say; a function not run, or a value not
     known, is unknown."""
@@ -492,3 +520,70 @@ def test_held_since_refuses_a_tree_without_parent_links() -> None:
     statements = [node for node in ast.walk(func) if isinstance(node, ast.stmt)]
     with pytest.raises(ValueError, match="parent links"):
         pathcond.held_since(func, "n", statements[-1], statements[1])  # type: ignore[arg-type]
+
+
+GUARDS = """
+def run(job, items, flag):
+    if job is None:  # E1
+        return
+    for item in items:  # L1
+        if not item:  # E2
+            continue
+        if flag:  # G1
+            if item.ok:  # G2
+                pass
+            else:
+                item.mark()  # A1
+"""
+
+
+def _guards_at() -> tuple[ast.AST, dict[str, ast.stmt]]:
+    tree = ast.parse(GUARDS)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    marked = {
+        text.rpartition("# ")[2]: n
+        for n, text in enumerate(GUARDS.splitlines(), 1)
+        if "# " in text
+    }
+    at = {
+        marker: next(
+            node
+            for node in ast.walk(func)
+            if isinstance(node, ast.stmt) and node.lineno == line
+        )
+        for marker, line in marked.items()
+    }
+    return func, at
+
+
+def test_the_guards_on_a_node_are_its_ifs_and_the_early_exits_above_it_innermost_first() -> (
+    None
+):
+    """Each ``if`` deciding a node with the value it runs on, its ``if`` and its kind: the ``else`` it is in, the
+    ``if`` around that, the ``continue`` above in the loop, the ``return`` above the loop."""
+    func, at = _guards_at()
+    found = pathcond.guards(at["A1"], func)
+    assert [(ast.unparse(g.test), g.runs_on, g.at, g.exit) for g in found] == [
+        ("item.ok", False, at["G2"], False),
+        ("flag", True, at["G1"], False),
+        ("not item", False, at["E2"], True),
+        ("job is None", False, at["E1"], True),
+    ]
+    assert pathcond._tests_on(at["A1"], func) == [(g.test, g.runs_on) for g in found]
+    assert pathcond.loops_holding(at["A1"]) == [at["L1"]]
+
+
+def test_a_head_keeps_the_guards_at_it_or_inside_it_and_must_hold_the_node() -> None:
+    """From an ``if`` the run reached, its own test and the ones below; from the loop, the exit inside it too, not
+    the one above it.  A head that is the node leaves none, and one beside it is refused."""
+    func, at = _guards_at()
+
+    def tests(head: ast.AST) -> list[str]:
+        return [ast.unparse(g.test) for g in pathcond.guards(at["A1"], func, head)]
+
+    assert tests(at["G1"]) == ["item.ok", "flag"]
+    assert tests(at["L1"]) == ["item.ok", "flag", "not item"]
+    assert tests(at["A1"]) == []
+    with pytest.raises(ValueError):
+        pathcond.guards(at["A1"], func, at["E1"])

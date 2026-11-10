@@ -4931,12 +4931,15 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
         "c.py": _ADDER,
         # a subclass runs another parse, which binds self.job_status
         "d.py": _ADDER + "\n\nclass Adder2(Adder):\n    def parse(self):\n        self.job_status = 'failed'\n        return 0\n",
-        # a method lets self out: any call may reach it
+        # a method lets self out, though no call here runs a store of job_status: a call is read by what it runs
         "e.py": _ADDER + "\n    def register(self):\n        REGISTRY.append(self)\n",
     }
-    # the status bound from an object below self: handed to the plugin, the object may hold another status after
+    # the status bound from an object below self: handed to the plugin, which writes it, the object may hold another
+    # status after (a plugin of the corpus: one the map cannot read stores nothing on the corpus's objects)
     info = _ADDER.replace("self.job_status", "self.info.status").replace("self.report = report", "self.report, self.info = report, info")
-    files["h.py"] = info.replace("self.plugin_class(self.job)", "self.plugin_class(self.job, self.info)")
+    files["h.py"] = info.replace("self.plugin_class(self.job)", "self.plugin_class(self.job, self.info)") + (
+        "\n\nclass Plugin:\n    def __init__(self, job, info):\n        info.status = 'closed'\n\n    def execute(self):\n        return None\n"
+    )
     files["i.py"] = info
     for name, text in files.items():
         (_corpus(tmp_path) / "pandaserver" / name).write_text(text)
@@ -4991,8 +4994,10 @@ def test_p_reads_the_status_a_target_was_bound_from_at_a_later_row_with_the_judg
     assert why[-1].endswith("read with the other verdicts: a call reaching no writer of 'failed' left standing does not write it")
     # a writer of 'failed' standing behind the call: the job's status may be its
     assert got["c.py live"][0][0] == "kept"
-    # parse resolved to two methods, or self let out: a call may change any of self, self.job_status too
-    assert got["d.py core"][0][0] == "kept" and got["e.py core"][0][0] == "kept"
+    # parse resolved to two methods: the call may run Adder2.parse, which binds self.job_status
+    assert got["d.py core"][0][0] == "kept"
+    # self let out by a method not called here: the calls are read by what they run, and none of it writes job_status
+    assert got["e.py core"][0][0] == "positive"
     # bound from self.info.status: read at the row where no call is handed self.info, not where the plugin is
     assert got["i.py core"][0][0] == "positive" and got["h.py core"][0][0] == "kept"
     # a row printing another value than the observed one: any call handed the job may have written it
@@ -5178,6 +5183,146 @@ def test_a_value_carried_past_a_call_the_maps_reach_reads_as_keeping_it_or_past_
     assert kind == "excluded" and why.endswith(
         f"nothing on the way binding it but to 'failed' again at k.py:{k['way']}; the frames between process and handle_failed not read)")
     assert got["m.py"]["handle"][0] == "positive"
+
+
+# the adder's pass with a call H2 holds as an arm (finalize, by the map's reading) and a call the DB's run ran inside
+_ARCHIVING_ADDER = """
+class Adder:
+    def __init__(self, job, proxy):
+        self.logger = logger
+        self.job = job
+        self.proxy = proxy
+
+    def process(self):
+        self.logger.debug("start the report of the job")
+        if self.job.broken:
+            raise RuntimeError("a broken job")
+        self.job.jobStatus = self.job.reported
+        self.logger.debug(f"status before finalize :job.jobStatus={self.job.jobStatus}")
+        self.finalize()
+        self.proxy.archive(self.job)
+        self.logger.debug("updating the job in the DB")
+        return True
+
+    def finalize(self):
+        self.job.jobStatus = self.job.final
+"""
+_ARCHIVING_PROXY = """
+class Proxy:
+    def __init__(self):
+        self.logger = logger
+
+    def archive(self, job):
+        self.logger.debug(f"archive start status={job.jobStatus}")
+        if job.check:
+            self.logger.debug("set jobStatus=failed due to inconsistent input")
+            job.jobStatus = "failed"
+        if job.fine:
+            job.jobStatus = "finished"
+        self.logger.debug("archive done")
+        return True
+
+    def unmerged(self, job):
+        self.logger.debug("updating the unmerged jobs")
+        um_job = self.fetch(job)
+        um_job.jobStatus = job.jobStatus
+        return True
+"""
+
+
+def test_a_call_and_a_write_inside_one_are_stays_read_before_the_order_the_inside_one_in_its_own_frame(tmp_path):
+    corpus = _corpus(tmp_path) / "pandaserver"
+    (corpus / "a.py").write_text(_ARCHIVING_ADDER)
+    (corpus / "db.py").write_text(_ARCHIVING_PROXY)
+    adder, proxy = _ARCHIVING_ADDER.splitlines(), _ARCHIVING_PROXY.splitlines()
+    at: dict[str, int] = {}
+    for k, text, n, s in [
+        ("raise", adder, 12, 'raise RuntimeError("a broken job")'),
+        ("assign", adder, 8, "self.job.jobStatus = self.job.reported"), ("finalize", adder, 8, "self.finalize()"),
+        ("call", adder, 8, "self.proxy.archive(self.job)"), ("failed", proxy, 12, 'job.jobStatus = "failed"'),
+        ("write", proxy, 12, 'job.jobStatus = "finished"'), ("unmerged", proxy, 8, "um_job.jobStatus = job.jobStatus"),
+    ]:
+        at[k] = text.index(f"{' ' * n}{s}") + 1
+    for k, text, s in [("row", adder, "status before finalize"), ("start", proxy, "archive start"),
+                       ("inconsistent", proxy, "due to inconsistent input")]:
+        at[k] = next(n for n, line in enumerate(text, 1) if s in line)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    before = "status before finalize :job.jobStatus={}"
+    logs = {
+        "finished": ["start the report of the job", before.format("finished"), "updating the job in the DB"],
+        "failed": ["start the report of the job", before.format("failed"), "updating the job in the DB"],
+        "clean": ["archive start status=finished", "archive done"],
+        "ran": ["archive start status=finished", "set jobStatus=failed due to inconsistent input", "archive done"],
+        "twice": ["archive start status=finished", "archive done", "archive start status=finished", "archive done"],
+        "both": ["archive start status=finished", "archive done", "updating the unmerged jobs"],
+    }
+    for name, text in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    code = """
+        import json
+        from bamboo.querier import changed as CH
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, Verdict
+
+        R.ROWS_FROM = "walk"
+        got = {}
+        for name, adder, db, writes in [("stays", "finished", "clean", ["write"]), ("ran", "finished", "ran", ["write"]),
+                                        ("twice", "finished", "twice", ["write"]), ("changed", "failed", "clean", ["write"]),
+                                        ("unmerged", "finished", "both", ["write", "unmerged"]),
+                                        ("raise", "finished", "clean", ["write", "raise"])]:
+            question, = runs_for(read_log(f"{adder}.log"), "1")
+            inner, = runs_for(read_log(f"{db}.log"), "1")
+            verdicts, seens, runs_of = [], {}, {}
+            mine = [("assign", "positive"), ("finalize", "positive")] + ([("raise", "kept")] if "raise" in writes else [])
+            arms = [("pandaserver/a.py", "process", mine, question),
+                    ("pandaserver/db.py", "archive", [("write", "kept")], inner)]
+            if "unmerged" in writes:
+                arms.append(("pandaserver/db.py", "unmerged", [("unmerged", "kept")], inner))
+            for rel, func, lines, run in arms:
+                c = Candidate(rel, func, [AT[k] for k, _ in lines], [run.log.name], run=run)
+                seens[c.owner] = R.seen(R.function(rel, func, tuple(c.lines)), run, "outside")
+                runs_of[c.owner] = run
+                verdicts += [Verdict(c, AT[k], kind) for k, kind in lines]
+            call = AT["call"]
+            ch = CH.last_change(verdicts, seens, runs_of, question, {id(inner): f"pandaserver/a.py:{call}"},
+                                "jobStatus", "finished", None)
+            got[name] = None if ch is None else {
+                "dropped": [[CH._name(v), why] for v, why in ch.dropped], "left": [CH._name(v) for v in ch.left],
+                "chosen": CH._name(ch.chosen) if ch.chosen else None, "how": ch.how}
+        print(json.dumps(got))
+    """
+    out = _ok(_run(tmp_path, code.replace("AT", repr(at))))
+    got = json.loads(out.splitlines()[-1])
+    assign, finalize, write = f"a.py::process:{at['assign']}", f"a.py::process:{at['finalize']}", f"db.py::archive:{at['write']}"
+    # the row before finalize shows 'finished': the call is a stay (R1), the way inside it unread; archive's start row
+    # shows it too, and the one way to change it on the way there, 'failed', did not run -- its must row is missing
+    # (R2): the assignment from the report is the last change
+    stays = got["stays"]
+    assert stays["dropped"] == [
+        [finalize, f"rule R: a stay, self.job.jobStatus already held 'finished' before it (row process:{at['row']} at finished.log:2, "
+                   "nothing on the way binding it; what the call runs before its write not read)"],
+        [write, f"rule R: a stay, job.jobStatus already held 'finished' before it in its own frame (row archive:{at['start']} at "
+                f"clean.log:1, nothing on the way binding it; not run: db.py:{at['failed']} (must row(s) [{at['inconsistent']}] "
+                "not in the run))"],
+    ]
+    assert stays["chosen"] == assign and stays["how"] == "the last change in the pass"
+    # the 'failed' arm printed its row: the start row's value is not carried, and the write is read at the call, where
+    # its own target is bound before it -- it may be the change
+    assert got["ran"]["dropped"] == [stays["dropped"][0]] and got["ran"]["chosen"] is None
+    assert got["ran"]["how"] == f"2 may have changed it last in the pass: {write}, {assign}"
+    # the start row printed twice: not read as the one call that ran the write
+    assert got["twice"] == got["ran"]
+    # another value before finalize: the call is no stay, and no write of another value either -- it changed it last
+    assert [name for name, _ in got["changed"]["dropped"]] == [write]
+    assert got["changed"]["chosen"] == finalize and got["changed"]["how"] == "the last change in the pass"
+    # two writes inside the one call, no order between them: archive's is a stay read without the order, and the
+    # order is read between the rest -- the unmerged job's write (another object, K58) is left
+    unmerged = got["unmerged"]
+    assert [name for name, _ in unmerged["dropped"]] == [finalize, write] and unmerged["chosen"] is None
+    assert unmerged["how"] == f"2 may have changed it last in the pass: db.py::unmerged:{at['unmerged']}, {assign}"
+    # a raise writes through a handler, not through the call that builds its exception: none of the pass's writes
+    assert got["raise"] == stays
 
 
 def test_a_call_keeps_a_field_where_the_maps_reach_from_it_alone_assigns_it_no_other_value_in_memory(tmp_path):
@@ -9022,7 +9167,7 @@ def test_a_row_printing_the_key_of_what_the_arm_writes_shows_another_key_in_ever
                          sources=[N(kind="object", name="JobSpec", site_owner="", site_line=None, line=line - 1, steps=[],
                                     through=[], column="", route=[])])
             mapdump._FRAGMENT[:] = [N(write_froms=[w("f", 6), w("g", 15), w("k", 33)], guard_froms=[], key_froms=[],
-                                      function_prints=[])]
+                                      function_prints=[], handler_marks=[])]
             got = {}
             for name, func, line in (("others", "f", 6), ("mine", "f", 6), ("after", "g", 15), ("none", "h", 24),
                                      ("between", "k", 33)):
@@ -9809,3 +9954,313 @@ def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_r
     assert got["sql via, not caught"] == ""
     # no branch of the arm in the map: nothing said
     assert got["no branch"] == ""
+
+
+_TURNS = """
+class Proxy:
+    def __init__(self):
+        self.logger = logger
+
+    def finish(self, task_ids, status_map):
+        for jediTaskID in task_ids:
+            taskStatus = status_map[jediTaskID]
+            self.logger.debug(f"start jediTaskID={jediTaskID} status={taskStatus}")
+            toSkip = False
+            if self.locked(jediTaskID):
+                toSkip = True
+            if not toSkip:
+                self.logger.debug(f"read jediTaskID={jediTaskID} status={taskStatus}")
+                if self.scouting(jediTaskID):
+                    newTaskStatus = "scouted"
+                elif self.running(jediTaskID):
+                    if self.unprocessed(jediTaskID):
+                        toSkip = True
+                    if not toSkip:
+                        n = self.mutable(jediTaskID)
+                        self.logger.debug(f"jediTaskID={jediTaskID} has {n} mutable datasets")
+                        if n > 0:
+                            newTaskStatus = "defined"
+                        elif self.ready(jediTaskID):
+                            newTaskStatus = "registered"
+                        else:
+                            newTaskStatus = "prepared"
+                else:
+                    toSkip = True
+                if not toSkip:
+                    self.update(jediTaskID, newTaskStatus)
+                    self.logger.debug(f"done new status={newTaskStatus} for jediTaskID={jediTaskID}")
+
+    def once(self, task):
+        self.logger.debug(f"begin status={task.status}")
+        if self.scouting(task):
+            newTaskStatus = "scouted"
+        elif self.ready(task):
+            newTaskStatus = "registered"
+        else:
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+
+    def bare(self, task):
+        if self.ready(task):
+            newTaskStatus = "registered"
+        else:
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+
+    def maybe(self, task):
+        self.logger.debug(f"begin status={task.status}")
+        if self.ready(task):
+            newTaskStatus = "registered"
+        elif self.done(task):
+            newTaskStatus = "prepared"
+        self.logger.debug(f"end new status={newTaskStatus}")
+"""
+
+
+def test_a_kept_arm_binding_a_local_to_the_value_a_row_of_the_keys_turn_printed_is_positive_where_only_it_gives_it(tmp_path):
+    # prepareTasksToBeFinished_JEDI's batched run (MT-running-late): the turn of the question's task printed "start"
+    # (3854), the mutable datasets (4025) and "done new status=prepared" (4074).  Every way from 4025 to 4074 binds
+    # newTaskStatus, and of the bindings run since, only 4061 gives 'prepared' (P1).  From 3907 a way skipping 4015's
+    # body (open only when toSkip is True, which the map's reaching does not read) reaches 4074 unbound: a turn that
+    # printed no row after 3907 says nothing
+    (_corpus(tmp_path) / "pandaserver" / "p.py").write_text(_TURNS)
+    lines = _TURNS.splitlines()
+    at = {v: lines.index(f'{" " * n}newTaskStatus = "{v}"') + 1
+          for v, n in (("scouted", 20), ("defined", 28), ("registered", 28), ("prepared", 28))}
+    done = lines.index('                    self.logger.debug(f"done new status={newTaskStatus} for jediTaskID={jediTaskID}")') + 1
+    has = lines.index('                        self.logger.debug(f"jediTaskID={jediTaskID} has {n} mutable datasets")') + 1
+    start = lines.index('            self.logger.debug(f"start jediTaskID={jediTaskID} status={taskStatus}")') + 1
+    # the 'prepared' arm of each one-call function
+    one = {func: lines.index('            newTaskStatus = "prepared"', lines.index(f"    def {func}(self, task):")) + 1
+           for func in ("once", "bare", "maybe")}
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.X: DEBUG    <label=user> {}\n"
+
+    def turn(key: int, status: str, n: int | None) -> list[str]:
+        return ([f"start jediTaskID={key} status=running", f"read jediTaskID={key} status=running"]
+                + ([f"jediTaskID={key} has {n} mutable datasets"] if n is not None else [])
+                + [f"done new status={status} for jediTaskID={key}"])
+
+    logs = {
+        # the question's task 2: its turn printed 'prepared'; the turns around it printed other values
+        "turns": turn(1, "defined", 3) + turn(2, "prepared", 0) + turn(3, "registered", 0),
+        # task 2's turn printed nothing after "read": from there a way reaches "done" with nothing bound
+        "scout": turn(1, "prepared", 0) + turn(2, "scouted", None),
+        # task 2 went round twice: which turn is the question's is not read
+        "again": turn(2, "prepared", 0) + turn(2, "prepared", 0),
+        # 'prepared' printed in task 1's turn, not in task 2's
+        "other": turn(1, "prepared", 0) + turn(2, "defined", 3),
+        "once": ["begin status=running", "end new status=prepared"],
+        "bare": ["end new status=prepared"],
+        "maybe": ["begin status=running", "end new status=prepared"],
+    }
+    for name, texts in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rows as R
+            from bamboo.querier import which_ran as W
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, judge
+
+            R.ROWS_FROM = "walk"
+            env = E.Env(subject="<task>.status", keys=frozenset({"jediTaskID"}), table={"task": {"jediTaskID": E.Value(2, "the rows file")}},
+                        call=None)  # the guards' calls are not run: the corpus here has no helpers
+            got = {}
+            for name, observed in (("turns", "prepared"), ("scout", "scouted"), ("again", "prepared"), ("other", "prepared")):
+                run, = runs_for(read_log(f"{name}.log"), "2")
+                c = Candidate("pandaserver/p.py", "finish", ARMS, [run.log.name], run=run)
+                got[name] = {v.line: [v.kind, v.reasons] for v in judge([c], {run.log.name: [run]}, observed=observed, env=env).verdicts}
+            # one call, no loop: P1's own reading, as the judge reads it after P
+            for func, line in ONE.items():
+                run, = runs_for(read_log(f"{func}.log"), "prepared")
+                fn = R.function("pandaserver/p.py", func, [line])
+                got[func] = W.printed_local(fn, R.seen(fn, run, "outside"), R.statement_at(fn.node, line), "prepared", None, set())
+            print(json.dumps(got))
+            """.replace("ARMS", str(sorted(at.values()))).replace("ONE", repr(one)),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    turns, scout, again, other = ({int(k): v for k, v in got[name].items()} for name in ("turns", "scout", "again", "other"))
+
+    def p1(verdict: list) -> list[str]:
+        return [r for r in verdict[1] if r.startswith("P1:")]
+
+    # the key's turn printed 'prepared'; from the mutable datasets' row every way binds newTaskStatus, and of the
+    # bindings run since, defined and registered give other values
+    assert turns[at["prepared"]][0] == "positive", turns[at["prepared"]]
+    assert p1(turns[at["prepared"]]) == [
+        f"P1: row {done} printed newTaskStatus='prepared' in the turn of jediTaskID=2 (row {start} at turns.log:5), at "
+        f"turns.log:8; every way from row {has} (at turns.log:7) to it binds newTaskStatus, and of the bindings run since "
+        f"({[at['defined'], at['registered'], at['prepared']]}) only {at['prepared']} gives 'prepared'"
+    ], turns[at["prepared"]]
+    assert not p1(turns[at["defined"]]) and not p1(turns[at["registered"]]), turns
+    # no record of the turn from which every way to "done" binds the name: nothing said
+    assert scout[at["scouted"]][0] == "kept" and not p1(scout[at["scouted"]]), scout[at["scouted"]]
+    # two turns of the key, or the key's turn showing another value: nothing said
+    assert again[at["prepared"]][0] == "kept" and not p1(again[at["prepared"]]), again[at["prepared"]]
+    assert other[at["prepared"]][0] == "kept" and not p1(other[at["prepared"]]), other[at["prepared"]]
+    # one call: from the print before it, or from the entry where every way binds the name
+    assert got["once"] == (
+        f"P1: row {one['once'] + 1} printed newTaskStatus='prepared' in the call, at once.log:2; every way from row "
+        f"{one['once'] - 6} (at once.log:1) to it binds newTaskStatus, and of the bindings run since "
+        f"({[one['once'] - 4, one['once'] - 2, one['once']]}) only {one['once']} gives 'prepared'"
+    ), got["once"]
+    assert got["bare"] == (
+        f"P1: row {one['bare'] + 1} printed newTaskStatus='prepared' in the call, at bare.log:1; every way from the call's "
+        f"entry to it binds newTaskStatus, and of the bindings run since ({[one['bare'] - 2, one['bare']]}) only "
+        f"{one['bare']} gives 'prepared'"
+    ), got["bare"]
+    # a way binding nothing reaches the row: neither the print before it nor the entry binds it on every way
+    assert got["maybe"] == "", got["maybe"]
+
+
+_J_PROXY = """\
+from pandaserver.spec import JobSpec
+
+
+class Proxy:
+    def killJob(self, pandaID, code):
+        self.logger.debug(f"code={code}")
+        if isinstance(code, int):
+            code = str(code)
+        try:
+            flagKilled = False
+            for attempt in range(2):
+                sql2 = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+                varMap = {}
+                varMap[":PandaID"] = pandaID
+                self.cur.execute(sql2, varMap)
+                res = self.cur.fetchall()
+                if len(res) == 0:
+                    continue
+                job = JobSpec()
+                job.pack(res[0])
+                if job.jobStatus != "failed":
+                    if code in ["2", "4"]:
+                        job.jobStatus = "closed"
+                    elif code == "51":
+                        job.jobStatus = "closed"
+                    if job.jobStatus != "closed":
+                        job.jobStatus = "cancelled"
+                flagKilled = True
+                break
+            self.logger.debug(f"kill={flagKilled}")
+            return flagKilled
+        except Exception as e:
+            if self.no_wait(e):
+                self.logger.debug("skipped with NOWAIT")
+            self.logger.debug("rolled back")
+            return False
+"""
+
+
+def test_a_kept_arm_is_positive_where_its_call_ran_the_head_if_entered_no_handler_and_every_test_down_to_it_holds(tmp_path):
+    # killJob's arms under 1017 (MJE-7397556704, code=50): the call printed kill=True, which only the binding after
+    # the if gives, so the call ran the if; the handler's own print on every way is not in the run; the tests from the
+    # if down hold with the state before the pass and the printed code, the stores of 'closed' under code tests false
+    # (J; KNOWN_ISSUES.md K73).  code=None is None or "None": the tests are false under both
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "proxy.py").write_text(_J_PROXY)
+    lines = _J_PROXY.splitlines()
+    at = {t: lines.index(t) + 1 for t in (
+        '                        job.jobStatus = "cancelled"', '                if job.jobStatus != "failed":',
+        "        except Exception as e:", '                self.logger.debug("skipped with NOWAIT")',
+        '            self.logger.debug("rolled back")')}
+    closed = lines.index('                        job.jobStatus = "closed"') + 1
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.X: DEBUG    < PandaID=1 > {}\n"
+    logs = {
+        "fifty": ["code=50", "kill=True"],
+        "none": ["code=None", "kill=True"],
+        # the handler printed: it was entered
+        "entered": ["code=50", "kill=True", "rolled back"],
+        # no row shows the if ran
+        "short": ["code=50"],
+        # two calls in the run
+        "twice": ["code=50", "kill=True", "code=50", "kill=True"],
+        # a store of 'closed' runs
+        "two": ["code=2", "kill=True"],
+    }
+    for name, texts in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(5 + i, t) for i, t in enumerate(texts)))
+    handler = {"owner": "pandaserver/proxy.py::Proxy.killJob", "line": at["        except Exception as e:"],
+               "catches": "Exception", "catch_all": True, "try_first": lines.index("            flagKilled = False") + 1,
+               "try_last": at["        except Exception as e:"] - 1, "kind": "marked",
+               "prints": [at['                self.logger.debug("skipped with NOWAIT")'], at['            self.logger.debug("rolled back")']]}
+    got = {}
+    for covered in (True, False):
+        # one dump a process (mapdump.install): the handler covered by its own prints, then not
+        out = _ok(
+            _run(
+                tmp_path,
+                f"""
+                import json
+                from bamboo.codemap.models import HandlerMark, MapFragment
+                from bamboo.querier import evaluate as E
+                from bamboo.querier import mapdump
+                from bamboo.querier import rows as R
+                from bamboo.querier import which_ran as W
+                from bamboo.querier.records import read_log, runs_for
+
+                R.ROWS_FROM = "walk"
+                before = {{"status": "merging", "time": "2026-01-01 00:00:00", "time_extended": "2026-01-01 00:00:00.000000",
+                           "host": "m1"}}
+                fragment = MapFragment(map_id="panda", derived_from="source-root:{_corpus(tmp_path)}",
+                                       handler_marks=[HandlerMark(**{handler!r}, prints_on_every_way={covered})])
+                with open("map.json", "w") as f:
+                    f.write(fragment.model_dump_json())
+                mapdump.install("map.json")
+                fn = R.function("pandaserver/proxy.py", "killJob")
+                got = {{}}
+                for name in {sorted(logs) if covered else ["fifty"]!r}:
+                    run, = runs_for(read_log(f"{{name}}.log"), "1")
+                    sn = R.seen(fn, run, "outside")
+                    for line in ({at['                        job.jobStatus = "cancelled"']}, {closed}):
+                        env = E.Env(rows={{"job": "job"}}, subject="<job>.jobStatus", keys=frozenset({{"PandaID"}}),
+                                    statuslog=[before], call=None)
+                        got[f"{{name}} {{line}} {covered}"] = W.ran_down_to(fn, sn, sn, R.statement_at(fn.node, line), env, set())
+                print(json.dumps(got))
+                """,
+            )
+        )
+        got.update(json.loads(out.splitlines()[-1]))
+    cancelled, head = at['                        job.jobStatus = "cancelled"'], at['                if job.jobStatus != "failed":']
+    code_row, kill_row = lines.index('        self.logger.debug(f"code={code}")') + 1, lines.index('            self.logger.debug(f"kill={flagKilled}")') + 1
+    flag, handler_line = lines.index("                flagKilled = True") + 1, at["        except Exception as e:"]
+    second = lines.index('                        job.jobStatus = "closed"', closed) + 1
+    state = "the statuslog row before the pass, 'merging' at 2026-01-01 00:00:00.000000"
+
+    def ran(name: str, arm: int) -> str:
+        return (f"J: the call ran {head} (row {kill_row} at {name}.log:2 printed flagKilled='True', which of the bindings run "
+                f"since row {code_row} (at {name}.log:1) only [{flag}] can give, every way to them passing {head}); it entered "
+                f"none of the handlers [{handler_line}] around {head}..{arm} (their own prints not in the run); the tests from "
+                f"{head} down to {arm} hold: ")
+
+    # the print after the loop shows flagKilled True, which only the binding after the if gives; 1161's own prints are
+    # not in the call; 1071's read: the stores of 'closed' under code tests false with "50", the state before the pass
+    off = f"""{closed} under "code in ['2', '4']" False, {second} under "code == '51'" False"""
+    assert got[f"fifty {cancelled} True"] == ran("fifty", cancelled) + (
+        f""""job.jobStatus != 'closed'" True ({ {'job.jobStatus': f'{state}; the other writes reaching it do not run: {off}'} }); """
+        f""""job.jobStatus != 'failed'" True ({ {'job.jobStatus': state} })"""
+    ), got[f"fifty {cancelled} True"]
+    # code=None is None or "None": the stores' tests are false under both
+    both = "code read as each of ['None', None]"
+    off = f"""{closed} under "code in ['2', '4']" False ({both}), {second} under "code == '51'" False ({both})"""
+    assert got[f"none {cancelled} True"] == ran("none", cancelled) + (
+        f""""job.jobStatus != 'closed'" True ({ {'job.jobStatus': f'{state}; the other writes reaching it do not run: {off}'} }); """
+        f""""job.jobStatus != 'failed'" True ({ {'job.jobStatus': state} })"""
+    ), got[f"none {cancelled} True"]
+    # the store of 'closed' under code in ['2', '4'] does not run with code 50
+    assert got[f"fifty {closed} True"] == "", got
+    # the handler is not covered by its own prints, entered, or no row shows the if ran, or two calls
+    assert got[f"fifty {cancelled} False"] == "", got
+    assert got[f"entered {cancelled} True"] == "" and got[f"short {cancelled} True"] == "", got
+    assert got[f"twice {cancelled} True"] == "", got
+    # with code 2 the store of 'closed' runs: the arm of 'closed' is read, 'cancelled' is not
+    assert got[f"two {closed} True"].startswith(ran("two", closed) + "\"code in ['2', '4']\" True"), got
+    assert got[f"two {cancelled} True"] == "", got

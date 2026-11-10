@@ -691,3 +691,28 @@ def test_what_the_run_read_is_told_apart_as_the_time_a_draw_or_the_machine():
     for same in ("time.strptime", "uuid.uuid5", "uuid.UUID"):
         assert callfacts.run_dependent(same) == "" and callfacts.listed(same, callfacts.RUNS_ALIKE), same
     assert callfacts.run_dependent("time.sleep") == "" and not callfacts.listed("time.sleep", callfacts.RUNS_ALIKE)
+
+
+_OBJECT_GETATTRIBUTE = '''\
+def reads(job):
+    return object.__getattribute__(job, "PandaID")
+
+
+def shadowed(job, object):
+    return object.__getattribute__(job, "PandaID")
+'''
+
+
+def test_object_getattribute_on_the_class_is_read_as_getattr_where_object_is_the_builtin(tmp_path):
+    """``object.__getattribute__(job, "PandaID")`` (a spec's ``addFile``) takes an attribute off what it is handed, as
+    ``getattr`` does; with ``object`` a parameter it is that object's method, not said."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_OBJECT_GETATTRIBUTE), {})
+    file = f"{PACKAGE}/mod.py"
+    for name, expected in (("reads", callfacts.ATTRIBUTE), ("shadowed", None)):
+        func = next(
+            node for node in ast.walk(types.tree(file)) if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        call = next(node for node in ast.walk(func) if isinstance(node, ast.Call))
+        function = callfacts.builtin_function(types, file, func, call)
+        assert (function.gives if function is not None else None) == expected
+        assert callfacts.builtin_function_at(call) == function

@@ -2095,6 +2095,100 @@ at ..."})" where the state makes a guard false; nothing where it holds.
 *Revisit:* the select item's table (a part to ask the map), and a value filled in another function (the adder's
 `self.job`, filled in `run()` at 111 and read in `process_job_report` at 415: the map's next part).
 
+### K72. A kept arm binding a local to the observed value is positive where a row of its pass printed the local with it and only it gives it (P1)
+
+H2's step 6.  P reads no run where a row inside a loop printed more than once.  A batched pass left an arm kept that
+its turn's own row shows ran: `prepareTasksToBeFinished_JEDI` goes round seven tasks from 3852 in MT-running-late, and
+the question's task's turn printed "done new status=prepared" at 4074; 4061 `newTaskStatus = "prepared"` was kept.
+
+Now (`which_ran.printed_local`, after P is read again with the other verdicts, on the kept arms): an arm binding a
+local T to a constant equal to the observed value is positive where a row R of its function printed T (or `str(T)`)
+with that value in one placed record of the pass, and only it can have given it:
+- the pass: in the key's turn of the innermost `for` around R -- from the record of the loop's turn start
+  (`which_ran.turn_start`: of R's must rows before it, the first whose innermost loop is that one) whose hole of the
+  loop's target holds the question's key (`Env.keys`), to that row's next record -- or, R in no loop, a run that is
+  one call (`Seen.single_call`);
+- Q: the latest placed record before R in the turn or call from which every way to R binds T (`flow.runs_after`, T's
+  bindings and the turn start as stops).  With none, R in no loop, the call's entry, where no way from it reaches R
+  with T unbound (`pathcond.held_at`);
+- the givers: of the bindings that can be what R reads (`reaching.reaching`), the ones run after Q within the turn
+  (`flow.runs_after` from Q, the turn start a stop) that can give the shown value -- a constant equal to it, or a value
+  no constant spells.  P1 holds where they are the arm alone.
+
+Q, not the loop's head: the map's reaching reads no path's condition.  3852 does not bind `newTaskStatus` again at its
+head, and the ways skipping 3906's and 4015's bodies, open only when `toSkip` is True, reach 4074 unbound.  From 4025,
+the latest record of the turn, every way binds it (4028's and 4051's if/else), and of 4030, 4053 and 4061 only 4061
+gives 'prepared'.  A turn that printed no row after 3907 says nothing.
+
+Premises: a turn's records follow one another in the run (one thread goes round the loop); the map's reaching may give
+a binding that cannot reach R, never leaves out one that can; T's hole is read right (`rows._regex` splits two holes with
+no text between them wrongly -- 4074's `jediTaskID` and the conditional after it -- and 4074's T is apart from both).
+
+Measured as u77n against u76n (querier-v 7ea1de8 with the change; xxix's dump 5c1172d, pin m), every set: no run
+crashed.  MT-running-late and MT-scouting-late in m-cut2 move as predicted: 4061 and 3966 are positive by P1 (Q at 4025
+and at 3956), chosen by positive evidence, and the walk goes on from H2 through L2 to U2, where it stops on both callers
+(K55).  Nothing else moves.  Against the prediction, the MT set's runs of the same two questions do not move: there H2
+stops asking a log its records lack, and no run is read.  The time is not compared (5 jobs, beside the map's builds).
+
+*Shows:* "P1: row R printed T='v' in the turn of jediTaskID=<key> (row S at <span>), at <span>; every way from row Q
+(at <span>) to it binds T, and of the bindings run since ([...]) only A gives 'v'".
+*Revisit:* an attribute's arm (MT-ready-late 905 twice, `taskSpec.status`; MT-aborting-late 197,
+`tmpTaskSpec.status`): an attribute changes inside a call, and another function's arm may write the same value -- it
+needs the map's reach from the calls between Q and R, and rule R's breaks and keeps in place of the bindings.  A run
+not readable as one call, R in no loop (MT-toincexec-late 5334: `retryTask_JEDI`'s rows printed several times): a
+reading splitting a run into calls.
+
+### K73. A kept arm is positive where its call ran the head if, entered no handler around it, and every test down to it holds (J)
+
+H2's step 3.  An arm left kept by P and P1 under a chain of ifs whose tests the run's values decide had nothing to
+show it ran.  killJob's cancelled arm at 1072 under 1017 and 1071 (MJE-7397556704): the call printed 840 "code=50",
+942 and 1145 "com=True kill=True time=0", and no row prints only through 1072.  14 H2 stops of m-gaps and m-cut2
+were so, each with one killJob arm kept beside unexamined candidates (and, in two, beside kept arms of other functions
+none of whose rows the run printed).
+
+Now (`which_ran.ran_down_to`, after P1 on the kept verdicts, where an env is handed), in a run that is one call
+(`Seen.single_call`) with no traceback of the function:
+- *the head* H: of the ifs holding the arm, outermost first, the first the call is shown to have run, with no loop,
+  handler or `match` between it and the arm (`_head_ran`).  A placed row from which, or from an earlier placed record
+  (or the call's entry), every way passes H (`flow.runs_after`, H a stop); or a row printing a local whose shown value,
+  of the bindings run since a record from which every way to the row binds it, only bindings behind H can give (P1's
+  givers, `reaching.reaching`).  killJob: 1145's `flagKilled=True`; of 875 (False) and 1098 (True) only 1098 gives
+  it, and every way from 840 to 1098 passes 1017;
+- *no raise between*: a try whose body holds H has a catch-all handler, and the call entered none of the handlers of
+  the tries holding H or inside it before the arm.  A handler is read as not entered where the map says every way
+  through it passes one of its own prints (`HandlerMark.prints_on_every_way`, HPC) and none of them is in the run,
+  each where the run would show it (rule 4's reading).  A marking call's prints are not read: 1161 calls `_rollback`,
+  which writes to `self._log_stream` with no key, and `dump_error_message`, whose 319 prints a traceback the reader
+  cannot read; its own 1170 (`time=...`) is on every way;
+- *the tests from H down* (`pathcond.guards(arm, f, head=H)`, H's own included, an early exit's on the way it stays)
+  hold, each read at its own if: the values printed before it (`printed_before`), a name its print shows as several
+  values read under each and taken where all give one answer (`_truth`: killJob's `code=None` is None or "None", and
+  `code in ['2', '4']` is false under both), and the question's column the pass filled from the row (K71's state
+  before the pass), also where other writes reach the read: each must be this function's, reached with no call
+  crossed, under a test those values make false (`_filled_at`).  1071's `job.jobStatus != "closed"` is reached by the
+  stores of 'closed' at 1028 .. 1063, under `code in ['2', '4']`, `code == '51'`, '55', '60' and '10', all false with
+  "50": 'merging' holds.
+
+Premises: the map's flow reads every way a raise may take (`raised` not handed); a handler entered leaves by one of
+its exits, not by a raise inside it (the map's every way: a `dump_error_message` that raised would leave 1161
+without 1170); rule 4's reading of a missing row; K68's values of a print; K71's premises.
+
+Measured as j1j against j1m (querier-v df23a01, codemap-xxxii merged, with J and without; the map's dump 0a82bd3, pin m,
+the same live records) on the cases behind the base's 102 outputs holding a kept verdict (m-failed 8, m-cut2 39,
+m-gaps 31, MT 4; the 65 and attr whole): no run crashed.  13 move as predicted: killJob's arm is positive by J and
+chosen by positive evidence -- 1028, 1047, 1059 (code=60, beside 13 kept arms of archiveJob and others), 1063 and 1072
+(three with code=None, read as None and as "None") -- and the walk goes on from H2 to H4 (11: "3 classes define
+_commit") or to L2 (MJ-pending-late, MJ-starting-late: two asks of logs the records lack).  MJE-7396802500 stays at H2.
+Nothing else moves; the 65's and attr/MT's outputs are equal.  The time is not compared.
+
+*Shows:* "J: the call ran H (row R at <span> printed T='v', which of the bindings run since row Q (at <span>) only
+[...] can give, every way to them passing H); it entered none of the handlers [...] around H..A (their own prints not
+in the run); the tests from H down to A hold: '<test>' True ({...}) ...".
+*Revisit:* a run of several calls (MJE-7396802500: killJob's two calls at 05:27:04 and 05:40:46 stay one run, 840
+not cut, K47) -- a reading splitting a run into calls, or the map's capture of 840; the key's turn of a loop (P1's
+turn) as the unit; a handler covered only with its marking calls (the DB proxy retry idiom: `retry : {iTry}` on the
+way that continues).
+
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
 H2 (`which_ran.judge`) read a candidate on whichever run of the key in its log spanned the window, and took the one
@@ -2193,6 +2287,22 @@ value (the harness's reading of adder_gen at the pin, 2026-11-03).
 - *The order.*  One function of the pass, the anchor, holds the others or calls on into them (the map's reach,
   `Rerun._called_at`), and its rows read as one call.  A run inside a call sits at that call.  Two places are in
   order where the flow runs one after the other and never the reverse.  Any pair out of order, and R says nothing.
+- *A call, and a write inside one* (P4, 2026-11-09).
+  - A candidate at a statement of the anchor (or of a method of its class, for a chain of self) that runs a call is
+    one of the pass's writes too (R1): `process_job_report:446 self.finalize_job_status()`, an arm by the map's
+    reading.  It sits at its own statement.  What the call writes is not read, only the value before it, so it is a
+    stay or left, never a write of another value.  What the call runs before the write it stands for is not read
+    either, as the frames between the anchor and handle_failed_job are not: a call that sets another value and then
+    the observed one changed it, and R1 reads it as a stay.  finalize_job_status writes jobStatus once on each way.
+    A `raise` writes through the handler it leaves for, and is none.
+  - A write inside a call reads the value before it in its own frame first (R2).  That is a hole of the chain it
+    assigns at a row every way to it prints first (`rows.must_rows`), printed once in its run, so by the call that ran
+    the write.  It is carried to the write as above, past a statement that could change it where the run shows it did
+    not run: a must row of it is missing, its absence trusted at a level the run prints (rule 4's reading).  Else, as
+    before, the value at the call.
+  - A stay read this way, from the rows alone, is out before the order is read (R3); the order is read between the
+    rest.  archiveJob:1668 and updateUnmergedJobs:1236 both sit at the call at 472 with no order between them, and
+    1668's stay no longer silences R.
 - *The value before a write.*  It is read from a printed hole of the chain the write assigns, at a row before it, or
   from the constant an earlier write that ran assigned.  Either counts only where nothing on the way binds the chain
   or hands what holds it to a call that can change it, by P's reading of a call (`printed.self_effects`).
@@ -2250,10 +2360,23 @@ With CK (ck1 against rb2, map x13xxB3m read with codemap-xx 5ccd571, out/ck/ck1-
 held: MF-7397938541 H2 -> H3, MJ-sent-late H2 -> L2 (m-cut) and H2 -> S2 (m-cut2); MF-7397695467 and MF-7398402231
 "4 may" -> "3 may" (441 a stay); everything else the same, the 65, attr and MT included.
 
+With P4, in the adder's pass of MJE-7398471285 ('finished'), row 444 prints `job.jobStatus=finished` right before
+446, so 446 is a stay.  archiveJob's 1268 prints `start status=finished`; between it and 1668 only 1495
+`job.jobStatus = "failed"` can change it (the calls on the way kept by the map's reach), and its must row 1494 "set
+jobStatus=failed due to inconsistent input" is not in the run.  So 1668 is a stay, and 416 is the last change.  In
+MJE-7398264739, 446 and 1668 are stays the same way, and 1236 and 416 are named: 1236 writes `umJob`, another job
+the SELECT filled, which R does not tell from the question's (K58).
+
+With P4 (u76n against u74n, dump 5c1172d, out/h2wcr/u76-predictions.txt), every prediction held: MJE-7398471285 H2 ->
+H3 (416 chosen, its guards all held), MJE-7398264739 "2 positive" -> "2 may have changed it last in the pass: 1236,
+416"; everything else the same, the 65, attr and MT included.
+
 *Shows:* "rule R: a stay, ... already held ... before it (...)", "rule R: it assigns ... no write of ...", and the
 choice's "the last change in the pass" or "N may have changed it last in the pass: ...".  A way kept by CK adds "but to
 '<value>' again at <file:line>" and "the calls at <file:line>, ... reach no assignment of <field> but '<value>' (the
-map's reach, N call(s) closed by their name)".
+map's reach, N call(s) closed by their name)".  A stay read in a write's own frame says "... before it in its own
+frame (...)", a statement passed as not run "not run: <file:line> (must row(s) [...] not in the run)", and a call's
+stay "what the call runs before its write not read".
 *Revisit:*
 - with the status at the pass's start (the statuslog's row before the question's, under the premise that no status
   change went unlogged): 416's guard is then read, and the adder's MF-7396944927 and MF-7397944082, where no value
@@ -2262,7 +2385,13 @@ map's reach, N call(s) closed by their name)".
 - when the frames between a join's call and the write inside it are read: in the Watcher's pass, updateJobs (between
   run's call at 135 and archiveJob) assigns jobStatus in memory at 649, 652 and 654 for a jumbo job, and the stay of
   1813 rests on that frame unread;
-- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes.
+- when the map gives a write by a name made at run time (`JobSpec.pack`) as an arm, or says which object it writes;
+- with the identity of the object a write inside a call writes (K58): 1236's `umJob` is then out of the pass's
+  writes;
+- when the way from a call R1 reads to the write it stands for is read (the map's arm behind the call): a call that
+  can write the field twice on one way is then no stay;
+- the carry passes a statement the run shows did not run only in a write's own frame (R2); the anchor's frame and the
+  way across frames do not yet.
 
 ### K52. A writer that writes its loop's objects after the loop is read on its latest run before the row
 

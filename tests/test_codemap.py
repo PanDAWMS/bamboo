@@ -9876,14 +9876,16 @@ def test_a_stop_in_any_variant_marks_the_statement():
 
 
 def test_two_statements_sharing_one_var_map_keep_their_own_rows():
-    """The region ends at the next *call* when the next window opens above it.
+    """The region ends where the next statement's own binds start when its window opens above it.
 
     Twenty of the corpus's 264 statements fill their binds into a ``var_map``
     a statement above them opened.  Both windows then start on the same line,
     so ending the first region "just before the next window" put its close
     above its own ``execute`` -- and the ``fetchall`` two lines under the call,
     which is where the rows the statement asked for actually arrive, fell
-    outside the stretch the statement owns.
+    outside the stretch the statement owns.  Starting the second region at the
+    shared window gave it the first one's ``fetchall`` too (``peekJob`` 's,
+    in its files' and its metadata's selects).
     """
     source = (
         "class TaskModule:\n"
@@ -9922,8 +9924,10 @@ def test_two_statements_sharing_one_var_map_keep_their_own_rows():
         (12, [3, 12]),
     ]
     # The first statement still owns its ``fetchall`` on line 8: the second
-    # statement's *call* ends the region, not the window they share.
-    assert [n.region for n in nodes] == [[3, 11], [3, 13]]
+    # statement's first store into the shared ``varMap`` after the first's
+    # call (line 9) ends the region, not the window they share; and the
+    # second starts there, so neither holds the other's lines.
+    assert [n.region for n in nodes] == [[3, 8], [9, 13]]
 
 
 def _read_nodes(source: str, rel: str = "x.py"):

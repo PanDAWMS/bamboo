@@ -22,6 +22,12 @@ the values are the caller's, and each carries where it came from.
   for its name (:attr:`Env.call`): a reader that has read a helper as pure
   -- the querier's ``DataServiceUtils.getDestinationSE`` -- runs it there.
   A ``**`` spread is not read, so such a call is unknown.
+* **A substitution that finds nothing** (:func:`_sub_unmatched`).  Where no
+  hole and no reader's function says it, ``re.sub(pattern, repl, string)``
+  whose pattern and string are known and do not match is the string, whatever
+  it would have put in: insertNewJob's ``re.sub('\\$ORIGINPANDAID',
+  str(originPandaID), job.jobName)`` on a name without the token.  A match is
+  unknown, its replacement known or not.
 * **A standard function on a literal** (:func:`run`).  A few functions of
   Python's own, whose value depends on what they are handed alone and which
   change nothing, are run on a known value: whether ``json.loads('')`` or
@@ -171,6 +177,10 @@ def _call(node: ast.Call, env: Env) -> Any:
     name = text_of(node.func)
     run = env.call(name) if env.call is not None else None
     if run is None:
+        unmatched = _sub_unmatched(node, name, env)
+        if unmatched is not UNKNOWN:
+            env.used[text_of(node)] = "re.sub: the pattern does not match"
+            return unmatched
         return env.lookup(text_of(node))
     if any(one.arg is None for one in node.keywords):
         return UNKNOWN  # a ** spread: what it hands is not read
@@ -181,6 +191,22 @@ def _call(node: ast.Call, env: Env) -> Any:
     result = run(*args, **kwargs)
     env.used[text_of(node)] = f"called {name}"
     return result
+
+
+def _sub_unmatched(node: ast.Call, name: str, env: Env) -> Any:
+    """The string of ``re.sub(pattern, repl, string)`` -- three arguments by position, no keyword -- where the
+    known pattern does not match the known string, the replacement unread; :data:`UNKNOWN` otherwise.  Whether
+    it matches is a value's question, so :func:`decidable` does not read the call."""
+    if name != "re.sub" or len(node.args) != 3 or node.keywords:
+        return UNKNOWN
+    pattern, string = ev(node.args[0], env), ev(node.args[2], env)
+    if not (isinstance(pattern, str) and isinstance(string, str)):
+        return UNKNOWN
+    try:
+        found = re.search(pattern, string)
+    except re.error:
+        return UNKNOWN
+    return string if found is None else UNKNOWN
 
 
 def _literal(node: ast.AST) -> Any:
