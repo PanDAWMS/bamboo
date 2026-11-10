@@ -181,7 +181,8 @@ class ObjectChange(NamedTuple):
     :data:`EVERY`, *what* the method, where the object went or the call not followed.  *via*: the calls and
     statements from the function asked of to it, ``file:line`` in the order they run -- one way of them, where
     several reach it.  *func* and *value*: the
-    definition holding it and what a store stores, for a reader to read the value there."""
+    definition holding it and what a store stores or a method puts, for a reader to read the value there; *element*
+    the step from *value* to what is put, ``[*]`` where its elements are (``xs.extend(ys)``)."""
 
     file: str
     line: int
@@ -191,6 +192,7 @@ class ObjectChange(NamedTuple):
     via: tuple[str, ...] = ()
     func: Optional[ast.AST] = None
     value: Optional[ast.expr] = None
+    element: str = ""
 
 
 class _Follow(NamedTuple):
@@ -1464,11 +1466,16 @@ class _Reading:
         called = call.func
         found: list[ObjectChange] = []
         if isinstance(called, ast.Attribute) and (on_object or within):
+            try:
+                library = self.types.library_classes(file, func, called.value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                library = None
             found += _container_changes(
                 file,
                 func,
                 call,
                 None if on_object else _first_step(called.value, holds),
+                callfacts.library_method(library, called.attr),
             )
         if not (handed and isinstance(called, ast.Attribute) and not on_object):
             return found
@@ -1744,21 +1751,28 @@ def _builtin_changes(
 
 
 def _container_changes(
-    file: str, func: ast.AST, call: ast.Call, inner: Optional[str]
+    file: str,
+    func: ast.AST,
+    call: ast.Call,
+    inner: Optional[str],
+    library: Optional[callfacts.Method] = None,
 ) -> list[ObjectChange]:
-    """A builtin container's method changing its receiver (:data:`callfacts.BUILTIN_METHODS`): by the key where it
-    names one -- ``pop`` and ``setdefault`` of a literal, ``update`` of a dict literal and keywords -- else of any
-    key; on a part of the object (*inner*, its step), a change inside it.  Another method changes nothing."""
+    """A container's method changing its receiver: a builtin's (:data:`callfacts.BUILTIN_METHODS`, by its name), or
+    one outside the corpus *library* says (:data:`callfacts.LIBRARY_METHODS`).  By the key where it names one --
+    ``pop`` and ``setdefault`` of a literal, ``update`` of a dict literal and keywords -- else of any key; with what
+    it puts where one argument is put as an element or as its elements (``append(v)``, ``extend(vs)``,
+    ``WeightedLists.add(weight, list_data)``); on a part of the object (*inner*, its step), a change inside it.
+    Another method changes nothing."""
     method = call.func.attr  # type: ignore[attr-defined]
-    if not any(
-        said.changes
-        for (_kind, name), said in callfacts.BUILTIN_METHODS.items()
-        if name == method
-    ):
+    said = library or callfacts.by_name(method)
+    if said is None or not said.changes:
         return []
     line = call.lineno
     if inner is not None:
         return [ObjectChange(file, line, CHANGE_INNER, inner, method, func=func)]
+    put = _put_value(said, call)
+    if put is not None:
+        return [ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func, value=put[0], element=put[1])]
     first = call.args[0] if call.args else None
     if (
         method in ("pop", "setdefault")
@@ -1816,6 +1830,19 @@ def _container_changes(
             ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func)
         ]
     return [ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func)]
+
+
+def _put_value(said: callfacts.Method, call: ast.Call) -> Optional[tuple[ast.expr, str]]:
+    """What *call* of a method *said* puts, where it puts one argument as an element (``""``) or as its elements
+    (``[*]``) and nothing else: ``None`` where it hands a ``*`` or ``**`` argument or puts under a key, a merge or
+    several arguments."""
+    if any(isinstance(one, ast.Starred) for one in call.args) or any(one.arg is None for one in call.keywords):
+        return None
+    puts = callfacts.put_arguments(said, call)
+    if len(puts) != 1 or puts[0][1].into not in (callfacts.ELEMENT, callfacts.ELEMENTS):
+        return None
+    value, put, _key, _keyword = puts[0]
+    return value, "[*]" if put.into == callfacts.ELEMENTS else ""
 
 
 def _is_setter(decorator: ast.expr) -> bool:

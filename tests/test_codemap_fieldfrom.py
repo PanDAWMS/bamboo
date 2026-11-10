@@ -20,6 +20,7 @@ from bamboo.codemap.models import (
     HeldSource,
     JunctionNode,
     MapFragment,
+    ParameterFrom,
     SourceModule,
 )
 from bamboo.codemap.panda import attribution, heldfrom, sql
@@ -34,6 +35,8 @@ HOLDER = "pandaserver/dataservice/holder.py"
 SETUP_BASE = "pandaserver/dataservice/setupper_plugin_base.py"
 SETUP = "pandaserver/dataservice/setupper_atlas_plugin.py"
 OTHER = "pandaserver/dataservice/other.py"
+BUFFER = "pandaserver/taskbuffer/task_buffer.py"
+QUEUE = "pandaserver/dataservice/adder_queue.py"
 
 SOURCES = {
     RESULT: """\
@@ -159,6 +162,71 @@ SOURCES = {
         def elsewhere(plugin, jobs):
             plugin.jobs = jobs  # O1
         """,
+    # TaskBuffer.peekJobs' and add_main's shapes: a list filled by append, a WeightedLists filled by add and taken
+    # from by pop.
+    BUFFER: """\
+        class JobSpec:
+            def __init__(self, panda_id):
+                self.PandaID = panda_id
+
+        class TaskBuffer:
+            def peek_jobs(self, ids):
+                ret_jobs = []  # T0
+                for one in ids:
+                    res = self.peek(one)  # T5
+                    if res is None:
+                        ret_jobs.append(None)  # T1
+                    else:
+                        ret_jobs.append(res)  # T2
+                return ret_jobs
+
+            def peek(self, one):
+                return JobSpec(one)
+
+            def list_reports(self):
+                return [(1, "finished")]  # T4
+
+            def collect(self, more):
+                found = []  # T6
+                found.append(2)
+                found.extend(*more)
+                return found[0]
+        """,
+    QUEUE: """\
+        import multiprocessing
+
+        from pandacommon.pandautils.thread_utils import WeightedLists
+        from pandaserver.taskbuffer.task_buffer import TaskBuffer
+
+        class Reader:
+            def __init__(self, task_buffer: TaskBuffer, job_status):  # QI
+                self.job = task_buffer.peek_jobs([1])[0]  # Q0
+                self.job_status = job_status  # Q1
+                self.extra = task_buffer.collect([])  # Q3
+
+            def check(self):
+                if self.job is None or self.job_status == "failed" or self.extra:  # Q2
+                    self.job.jobStatus = "closed"  # ARM4
+
+        class Worker:
+            def __init__(self, task_buffer: TaskBuffer, reports: WeightedLists):  # WI
+                self.task_buffer = task_buffer
+                self.reports = reports  # W0
+
+            def run(self):
+                while True:
+                    one = self.reports.pop()  # W1
+                    if not one:
+                        break
+                    panda_id, job_status = one  # W2
+                    Reader(self.task_buffer, job_status).check()  # W3
+
+        def main(task_buffer: TaskBuffer):
+            lists = WeightedLists(multiprocessing.Lock())  # M0
+            others = task_buffer.list_reports()  # M1
+            lists.add(3, others)  # M2
+            Worker(task_buffer, lists).run()  # M3
+        """,
 }
 
 
@@ -179,6 +247,7 @@ ARMS = (
     (GEN, "process_job_report", "ARM", "JobSpec.jobStatus"),
     (GEN, "process_job_report", "ARM2", "JobSpec.jobStatus"),
     (SETUP, "subscribe", "ARM3", "FileSpec.dispatchDBlock"),
+    (QUEUE, "check", "ARM4", "JobSpec.jobStatus"),
 )
 
 
@@ -274,6 +343,21 @@ GEN_CLASS = f"{GEN}::AdderGen"
 PLUGIN_CLASS = f"{PLUGIN}::AdderAtlasPlugin"
 RESULT_CLASS = f"{RESULT}::AdderResult"
 SETUP_CLASS = f"{SETUP}::SetupperAtlasPlugin"
+READER_CLASS = f"{QUEUE}::Reader"
+WORKER_CLASS = f"{QUEUE}::Worker"
+
+
+def _parameter(
+    fragment: MapFragment, rel: str, line_marker: str, name: str
+) -> ParameterFrom:
+    (found,) = [
+        one
+        for one in fragment.parameter_froms
+        if one.owner.startswith(f"{rel}::")
+        and one.line == _line(rel, line_marker)
+        and one.parameter == name
+    ]
+    return found
 
 
 def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it(
@@ -448,3 +532,88 @@ def test_the_gates_find_a_record_for_each_field_and_parameter_a_way_ends_at(
     assert fields.checked > 0
     parameters = guard_parameters_are_read(built)
     assert parameters.passed, parameters.failures
+
+
+def test_an_element_of_a_list_filled_by_append_is_what_was_appended(
+    built: MapFragment,
+) -> None:
+    # TaskBuffer.peekJobs' shape: ``retJobs = []`` filled by ``append``, read at ``[0]`` by the caller.
+    job = _field(built, READER_CLASS, "job")
+    (bound,) = job.bindings
+    assert _ends(bound.sources) == {
+        ("constant", "None", "", (), (_at(QUEUE, "Q0"),)),
+        (
+            "object",
+            "JobSpec",
+            f"{BUFFER}::JobSpec",
+            (),
+            (_at(BUFFER, "T5"), _at(QUEUE, "Q0")),
+        ),
+    }
+    assert not any(one.made_empty for one in bound.sources)
+    # A put whose value is not read (``extend(*more)``) leaves the list's own end too.
+    (extra,) = _field(built, READER_CLASS, "extra").bindings
+    assert _ends(extra.sources) == {
+        ("constant", "2", "", (), (_at(QUEUE, "Q3"),)),
+        ("unknown", "[]", "", ("[0]",), (_at(QUEUE, "Q3"),)),
+    }
+    (kept,) = [one for one in extra.sources if one.kind == "unknown"]
+    assert kept.made_empty == "collection"
+    assert [(one.what, len(one.value)) for one in kept.changes] == [
+        ("append", 1),
+        ("extend", 0),
+    ]
+
+
+def test_a_take_from_a_container_reads_its_receiver_s_element(
+    built: MapFragment,
+) -> None:
+    # add_main's shape: ``one_jor = self.job_output_reports.pop()`` unpacked, its second the job's status.
+    status = _parameter(built, QUEUE, "QI", "job_status")
+    assert _ends(status.sources) == {
+        (
+            "self_field",
+            "self.reports",
+            WORKER_CLASS,
+            ("[*]", "[1]"),
+            (_at(QUEUE, "W3"),),
+        ),
+    }
+    # The field read on with the steps past it: its binding's parameter, its caller's WeightedLists.
+    (bound,) = _field(built, WORKER_CLASS, "reports").bindings
+    assert _ends(bound.sources) == {
+        ("parameter", "reports", f"{QUEUE}::__init__", (), ())
+    }
+
+
+def test_a_container_outside_the_corpus_holds_what_its_method_puts(
+    built: MapFragment,
+) -> None:
+    # ``WeightedLists(lock)`` made empty, then ``add(3, others)`` puts others' elements.
+    reports = _parameter(built, QUEUE, "WI", "reports")
+    (made,) = reports.sources
+    assert (made.kind, made.name, made.made_empty, made.route) == (
+        "call",
+        "WeightedLists",
+        "collection",
+        [_at(QUEUE, "M3")],
+    )
+    (add,) = made.changes
+    assert (add.at, add.kind, add.what) == (_at(QUEUE, "M2"), "method", "add")
+    assert _ends(add.value) == {
+        ("unknown", "[(1, 'finished')]", "", ("[*]",), (_at(QUEUE, "M1"),))
+    }
+    # A step taken past the record's end reads on into what was put, through the route to the container.
+    for step in ("[*]", "[0]"):
+        values, stays = heldfrom.held_elements(made, step)
+        assert _ends(values) == {
+            (
+                "unknown",
+                "[(1, 'finished')]",
+                "",
+                ("[*]",),
+                (_at(QUEUE, "M1"), _at(QUEUE, "M3")),
+            ),
+        }
+        assert not stays
+    assert heldfrom.held_elements(add.value[0], "[0]") == ([], True)

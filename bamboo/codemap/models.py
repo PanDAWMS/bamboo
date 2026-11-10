@@ -3419,6 +3419,16 @@ class HeldSource(KeySource):
         default_factory=list,
         description="Each such write the changes after the read were not read for, and why: :data:`KEY_STOPS`.",
     )
+    made_empty: str = Field(
+        default="",
+        description=(
+            "Where the way ends at a container made empty -- ``[]``, ``{}``, ``dict()``, ``WeightedLists(lock)`` "
+            "(:data:`bamboo.codemap.callfacts.LIBRARY_CONTAINERS`) --, what it holds: ``collection`` or ``mapping``.  "
+            "What it holds is what *changes* put: a step taken past the end reads on into their *value* "
+            "(:func:`bamboo.codemap.panda.heldfrom.held_elements`), as the map does where the way takes it.  Empty for "
+            "any other end."
+        ),
+    )
 
 
 class HeldChange(BaseModel):
@@ -3443,7 +3453,11 @@ class HeldChange(BaseModel):
     )
     value: list[HeldSource] = Field(
         default_factory=list,
-        description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
+        description=(
+            "What a store stores or a method puts, read as a way is -- ``xs.append(v)``'s ``v``, ``xs.extend(vs)``'s "
+            "elements (``vs`` with ``[*]``) --; empty for the other kinds, a computed store (``+=``) and a put whose "
+            "value is not read (a ``*`` argument, a merge, several)."
+        ),
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
 

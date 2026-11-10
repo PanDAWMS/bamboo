@@ -54,6 +54,10 @@ from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind, own_nodes, returns
 from bamboo.codemap.models import (
+    CHANGE_ESCAPED,
+    CHANGE_INNER,
+    CHANGE_METHOD,
+    CHANGE_STORE,
     CHANGE_UNREAD,
     FIELD_ANNOTATED,
     FIELD_ASSIGN,
@@ -127,6 +131,8 @@ class _Way(NamedTuple):
     route: tuple[str, ...] = ()
     #: In the order run.
     changes: tuple["_Change", ...] = ()
+    #: Where the end is a container made empty: what it holds (:data:`callfacts.COLLECTION`, :data:`callfacts.MAPPING`).
+    made_empty: str = ""
 
 
 class _Through(NamedTuple):
@@ -178,6 +184,94 @@ def _step(way: _Way, step: str) -> _Way:
     ):
         return way._replace(through=way.through[1:])
     return way._replace(steps=way.steps + (step,))
+
+
+#: The changes of a container that may change an element it holds: carried onto the element's ways.
+_ELEMENT_CHANGES = frozenset({CHANGE_INNER, CHANGE_ESCAPED, CHANGE_UNREAD})
+#: What :func:`callfacts.meaning` reads a call as where a container's method takes out of it.
+_TAKING = frozenset({callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED})
+
+
+def _puts_at(change, step: str) -> bool:
+    """Whether *change* (a :class:`_Change` or a :class:`HeldChange`), of a container, puts a value it reads that
+    the element step *step* may take: a method's put or an item's store, under any key or under the step's."""
+    if not change.value or change.kind not in (CHANGE_METHOD, CHANGE_STORE) or change.key.startswith("."):
+        return False
+    return step == "[*]" or change.key == changes_mod.EVERY or step == f"[{change.key}]"
+
+
+def _puts_unread(change) -> bool:
+    """Whether *change* may put into a container what it does not read: the container gone where it is not followed,
+    a call not read, a put or an item's store with no value (``xs.append(*ys)``, ``d[k] += 1``)."""
+    if change.kind in (CHANGE_ESCAPED, CHANGE_UNREAD):
+        return True
+    if change.value:
+        return False
+    return (change.kind == CHANGE_METHOD and change.what in callfacts.PUTTING) or (
+        change.kind == CHANGE_STORE and not change.key.startswith(".")
+    )
+
+
+def _joined(way: _Way) -> list[_Way]:
+    """*way*, where its end is a container made empty and its first step takes an element: the ways of the values
+    its changes put that the step may take, with the rest of the steps -- each through the calls to its put
+    (*via*), carrying what may change an element in the container --; *way* too where a put is not read or the step
+    may take a mapping's key (``[*]``).  ``TaskBuffer.peekJobs``' ``retJobs = []`` filled by ``retJobs.append(res)``:
+    ``retJobs[0]`` is ``res``.  Any other way, itself."""
+    if way.kind == _STOP or not way.made_empty or way.through or not way.steps or not way.steps[0].startswith("["):
+        return [way]
+    step, rest = way.steps[0], way.steps[1:]
+    puts = [one for one in way.changes if _puts_at(one, step)]
+    if not puts:
+        return [way]
+    kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
+    found = [
+        value
+        if value.kind == _STOP
+        else value._replace(
+            steps=value.steps + rest, route=way.route + one.via + value.route, changes=value.changes + kept
+        )
+        for one in puts
+        for value in one.value
+    ]
+    if any(_puts_unread(one) for one in way.changes) or (way.made_empty == callfacts.MAPPING and step == "[*]"):
+        found.append(way)
+    return found
+
+
+def held_elements(source: HeldSource, step: str) -> tuple[list[HeldSource], bool]:
+    """:func:`_joined` on a record's way, for a step taken past its end (a FieldFrom's or ParameterFrom's way, read on
+    with the steps still to take): where *source* ends at a container made empty and is the container whole, the
+    ways of the values its changes put that the element step *step* may take -- each with the calls to its put and
+    *source*'s route after its own, carrying what may change an element in the container -- and whether *source*
+    stays a way too (a put not read, a mapping's ``[*]``).  ``([], True)`` for any other source."""
+    if not source.made_empty or source.steps or source.through or not step.startswith("["):
+        return [], True
+    puts = [one for one in source.changes if _puts_at(one, step)]
+    kept = [one for one in source.changes if one.kind in _ELEMENT_CHANGES]
+    values = [
+        value.model_copy(
+            update={"route": [*value.route, *reversed(one.via), *source.route], "changes": [*value.changes, *kept]}
+        )
+        for one in puts
+        for value in one.value
+    ]
+    stays = (
+        not puts
+        or any(_puts_unread(one) for one in source.changes)
+        or any(one.value_stops for one in puts)
+        or (source.made_empty == callfacts.MAPPING and step == "[*]")
+    )
+    return values, stays
+
+
+def _empty_literal(expr: ast.expr) -> str:
+    """What a literal making an empty container holds: ``[]`` a collection, ``{}`` a mapping; ``""`` for another."""
+    if isinstance(expr, (ast.List, ast.Set)) and not expr.elts:
+        return callfacts.COLLECTION
+    if isinstance(expr, ast.Dict) and not expr.keys:
+        return callfacts.MAPPING
+    return ""
 
 
 def owner_of(file: str, func: ast.AST) -> str:
@@ -523,7 +617,7 @@ class _Reader:
                 )
             else:
                 step = f".{expr.attr}"
-            return [_step(one, step) for one in self.read(expr.value, at, file, func)]
+            return [joined for one in self.read(expr.value, at, file, func) for joined in _joined(_step(one, step))]
         if isinstance(expr, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # A new collection of the element's values: the element's ways, through the comprehension.
             element = expr.value if isinstance(expr, ast.DictComp) else expr.elt
@@ -535,11 +629,15 @@ class _Reader:
                 for one in self.read(element, element, file, func)
             ]
         found = self._sources(expr, at, file, func)
+        empty = _empty_literal(expr)
+        if empty:
+            found = [one._replace(made_empty=empty) if one.kind == KEY_UNKNOWN else one for one in found]
         return found or [
             _Way(
                 KEY_ATTRIBUTE if isinstance(expr, ast.Attribute) else KEY_UNKNOWN,
                 ast.unparse(expr),
                 line,
+                made_empty=empty,
             )
         ]
 
@@ -756,7 +854,7 @@ class _Reader:
 
     @staticmethod
     def _stepped(ways: list[_Way], step: str) -> list[_Way]:
-        return [one if one.kind == _STOP else _step(one, step) for one in ways]
+        return [joined for one in ways for joined in ([one] if one.kind == _STOP else _joined(_step(one, step)))]
 
     @classmethod
     def _of_field(cls, ways: list[_Way], field: Optional[str]) -> list[_Way]:
@@ -818,11 +916,11 @@ class _Reader:
             seen.add(mark)
             value: tuple[_Way, ...] = ()
             if one.value is not None and isinstance(one.func, _FUNCTIONS):
+                read = self._safely(one.value, one.value, one.file, one.func)
+                if one.element:
+                    read = self._stepped(read, one.element)
                 # Its own way's end, not what was done to the stored value before: a record of a record.
-                value = tuple(
-                    way._replace(changes=())
-                    for way in self._safely(one.value, one.value, one.file, one.func)
-                )
+                value = tuple(way._replace(changes=()) for way in read)
             made.append(
                 _Change(
                     f"{one.file}:{one.line}",
@@ -1002,7 +1100,12 @@ class _Reader:
                     _stop("open", ast.unparse(call.func), what=placed.unplaced, at=here)
                 )
             return found
-        named = self._through(call, file, func)
+        taken = self._taken(call, placed, file, func)
+        if taken is not None:
+            return self._of_field(taken, field)
+        # A container made, not a value made of what it is handed: ``WeightedLists(lock)``.
+        made = self._made_empty(call, file, func)
+        named = None if made else self._through(call, file, func)
         if named is not None:
             ways = [
                 one._replace(
@@ -1011,8 +1114,56 @@ class _Reader:
                 for one in self.read(call.args[0], call, file, func)
             ]
         else:
-            ways = [_Way(KEY_CALL, ast.unparse(call.func), call.lineno, what=placed.unplaced)]
+            ways = [
+                _Way(
+                    KEY_CALL,
+                    ast.unparse(call.func),
+                    call.lineno,
+                    what=placed.unplaced,
+                    made_empty=made,
+                )
+            ]
         return self._of_field(ways, field)
+
+    def _taken(self, call: ast.Call, placed, file: str, func: ast.AST) -> Optional[list[_Way]]:
+        """The ways of what a container's method outside the corpus takes out of its receiver, as callfacts says
+        (:data:`callfacts.AT`): the receiver's, with the step of the constant key the call names, ``[*]`` where it
+        names none or computes it; and the default's, or ``None``, where the value may be either instead
+        (``d.get(k, default)``, ``d.get(k)``, a ``WeightedLists``' ``pop()``).  ``None`` for another call."""
+        called = call.func
+        if not isinstance(called, ast.Attribute) or any(isinstance(one, ast.Starred) for one in call.args):
+            return None
+        meant = callfacts.meaning(self.calls, file, func, call, placed)
+        gives = meant.method.gives if meant.kind in _TAKING and meant.method is not None else None
+        if gives is None or gives.part != callfacts.AT:
+            return None
+        key = call.args[gives.key] if gives.key is not None and gives.key < len(call.args) else None
+        step = f"[{key.value!r}]" if isinstance(key, ast.Constant) else "[*]"
+        found = self._stepped(self.read(called.value, call, file, func), step)
+        if gives.default is not None and gives.default < len(call.args):
+            found += self.read(call.args[gives.default], call, file, func)
+        elif gives.none:
+            found.append(_Way(KEY_CONSTANT, name="None", line=call.lineno))
+        return found
+
+    def _made_empty(self, call: ast.Call, file: str, func: ast.AST) -> str:
+        """What *call* makes empty holds: a builtin container's of no argument (``dict()``), a class outside the
+        corpus callfacts says a container (:data:`callfacts.LIBRARY_CONTAINERS`: ``WeightedLists(lock)``); ``""``
+        for another call."""
+        called = call.func
+        if isinstance(called, ast.Name) and not call.args and not call.keywords:
+            made = callfacts.CONTAINERS.get(called.id)
+            if (
+                made is not None
+                and made.builtin == called.id
+                and made.holds in (callfacts.COLLECTION, callfacts.MAPPING)
+                and self.calls.types.is_builtin(file, func, called.id)
+            ):
+                return made.holds
+        if not isinstance(called, (ast.Name, ast.Attribute)):
+            return ""
+        library = self.calls.types.library_class(file, called)
+        return callfacts.LIBRARY_CONTAINERS.get(library, "") if library is not None else ""
 
     def _receiver(
         self, call: ast.Call, target: Target, on_class: bool, handed: dict, file: str, func: ast.AST
@@ -1206,6 +1357,10 @@ class _Reader:
                         self._ask("field", (source.site_owner, field.group(1)), path[1:])
             for change in source.changes:
                 self.queue(change.value)
+            if rest:
+                # A container made empty, read on at an element: what its changes put.
+                values, _stays = held_elements(source, rest[0])
+                self.queue(values, rest[1:])
 
     def ask_field(self, owner: str, field: str) -> None:
         """Read the FieldFrom of *owner*'s *field*: one a guard reading ``self.<field>`` off ``self`` names."""
@@ -1566,6 +1721,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 ],
                 route=route,
                 changes=[_change_said(change) for change in one.changes],
+                made_empty=one.made_empty,
             ),
         )
     return list(sources.values()), list(stops.values())
