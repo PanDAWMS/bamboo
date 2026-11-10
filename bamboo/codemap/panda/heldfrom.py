@@ -1341,7 +1341,7 @@ class _Reader:
                     isinstance(one, ast.Name) and one.id == "staticmethod" for one in method.decorator_list
                 ):
                     continue
-                touched = False
+                touched = through_dict = False
                 for node, inner in _with_functions(method):
                     if _is_field(node, me, field):
                         touched = True
@@ -1381,7 +1381,23 @@ class _Reader:
                                     KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
                                 )
                     elif isinstance(node, ast.Attribute) and node.attr == "__dict__" and isinstance(node.value, ast.Name) and node.value.id == me:
-                        stops.append(KeyStop(kind="computed", name=field, what=f"{me}.__dict__", at=[f"{file}:{node.lineno}"]))
+                        through_dict = True
+                if through_dict:
+                    # Read -- ``__str__``'s ``for key in self.__dict__`` -- it sets nothing; changed in place, as
+                    # the changes reading reads a field's object, it may set any field.
+                    try:
+                        raw = changes_mod.field_changes(self.calls, file, method, f"{me}.__dict__")
+                    except Exception as error:  # noqa: BLE001 -- as _changed
+                        raw = [
+                            changes_mod.ObjectChange(
+                                file, method.lineno, CHANGE_UNREAD, changes_mod.EVERY, f"{type(error).__name__}: {error}"
+                            )
+                        ]
+                    sites = sorted({f"{one.file}:{one.line}" for one in raw})
+                    if sites:
+                        stops.append(
+                            KeyStop(kind="computed", name=field, what=f"{me}.__dict__ changed in place", at=sites)
+                        )
                 if touched:
                     try:
                         raw = changes_mod.field_changes(self.calls, file, method, f"{me}.{field}")

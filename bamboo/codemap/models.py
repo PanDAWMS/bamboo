@@ -6045,7 +6045,8 @@ class FieldFrom(BaseModel):
     stops: list[KeyStop] = Field(
         default_factory=list,
         description=(
-            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)``, ``__dict__``); "
+            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)``, or "
+            "``self.__dict__`` changed in place -- an item stored, a dict method, handed on; a read sets nothing); "
             "``method``: the classes define it as a method or property; ``outside``: the places a field of its name "
             "is stored on another object than a method's ``self``."
         ),

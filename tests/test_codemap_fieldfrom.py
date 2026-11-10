@@ -126,6 +126,9 @@ SOURCES = {
                 self.jobs = []  # S0
                 for job in jobs:
                     self.jobs.append(job)
+
+            def load(self, values):
+                self.__dict__.update(values)  # D1
         """,
     SETUP: """\
         from pandaserver.dataservice.setupper_plugin_base import SetupperPluginBase
@@ -143,6 +146,9 @@ SOURCES = {
 
             def tune(self, name, value):
                 setattr(self, name, value)  # S2
+
+            def __str__(self):
+                return ", ".join(f"{key}={self.__dict__[key]}" for key in self.__dict__)  # D0
 
             def subscribe(self):
                 for job in self.jobs:  # S3
@@ -205,17 +211,27 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
             derived_from="v",
             subject=subject,
             owner=f"{rel}::{owner}",
-            anchor=Anchor(package="pandaserver", file=rel, line_start=_line(rel, marker)),
+            anchor=Anchor(
+                package="pandaserver", file=rel, line_start=_line(rel, marker)
+            ),
             branches=[Branch(outcome=marker, line=_line(rel, marker))],
         )
         for rel, owner, marker, subject in ARMS
     ]
     with sql.across_calls(calls):
-        attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
-        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, "m", "v")
+        attributor = attribution.SpecAttributor(
+            progress.spec_attributes(modules), attribution.class_bases(modules)
+        )
+        sites = sqlwrite.read_site_nodes(
+            sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+        )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
         guards, parameters, _sets, written, fields = heldfrom.guard_froms(
-            junctions, sites, {module.rel_path: module.tree for module in modules}, calls, record
+            junctions,
+            sites,
+            {module.rel_path: module.tree for module in modules},
+            calls,
+            record,
         )
     return MapFragment(
         map_id="m",
@@ -233,18 +249,25 @@ def _guard(fragment: MapFragment, rel: str, marker: str, name: str) -> GuardFrom
     (found,) = [
         one
         for one in fragment.guard_froms
-        if one.owner.startswith(f"{rel}::") and one.test_line == _line(rel, marker) and one.name == name
+        if one.owner.startswith(f"{rel}::")
+        and one.test_line == _line(rel, marker)
+        and one.name == name
     ]
     return found
 
 
 def _field(fragment: MapFragment, owner: str, field: str) -> FieldFrom:
-    (found,) = [one for one in fragment.field_froms if one.owner == owner and one.field == field]
+    (found,) = [
+        one for one in fragment.field_froms if one.owner == owner and one.field == field
+    ]
     return found
 
 
 def _ends(sources: list[HeldSource]) -> set[tuple]:
-    return {(one.kind, one.name, one.site_owner, tuple(one.steps), tuple(one.route)) for one in sources}
+    return {
+        (one.kind, one.name, one.site_owner, tuple(one.steps), tuple(one.route))
+        for one in sources
+    }
 
 
 GEN_CLASS = f"{GEN}::AdderGen"
@@ -253,7 +276,9 @@ RESULT_CLASS = f"{RESULT}::AdderResult"
 SETUP_CLASS = f"{SETUP}::SetupperAtlasPlugin"
 
 
-def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it(built: MapFragment) -> None:
+def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it(
+    built: MapFragment,
+) -> None:
     # 440's shape: the guard's way ends at ``self.add_result``, and names its class.
     guard = _guard(built, GEN, "A1", "self.add_result")
     assert ("self_field", "self.add_result", GEN_CLASS, (), ()) in _ends(guard.sources)
@@ -265,7 +290,9 @@ def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it
     }
     (alias,) = [one for one in add_result.bindings if one.at == _at(GEN, "G3")]
     # (A part of the plugin holds self.job, handed to it: a way with paths, read as before.)
-    assert ("self_field", "self.adder_plugin", GEN_CLASS, (".result",), ()) in _ends(alias.sources)
+    assert ("self_field", "self.adder_plugin", GEN_CLASS, (".result",), ()) in _ends(
+        alias.sources
+    )
     # The plugin is an object AdderAtlasPlugin builds ...
     plugin = _field(built, GEN_CLASS, "adder_plugin")
     (made,) = plugin.bindings
@@ -276,25 +303,53 @@ def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it
     (built_result,) = result.bindings
     assert built_result.at == _at(BASE, "B1")
     assert built_result.owner == f"{BASE}::__init__"
-    assert _ends(built_result.sources) == {("object", "AdderResult", RESULT_CLASS, (), ())}
+    assert _ends(built_result.sources) == {
+        ("object", "AdderResult", RESULT_CLASS, (), ())
+    }
     stored = {
-        (one.at, one.kind, one.key, tuple(one.via), tuple(source.name for source in one.value))
+        (
+            one.at,
+            one.kind,
+            one.key,
+            tuple(one.via),
+            tuple(source.name for source in one.value),
+        )
         for one in result.changes
     }
-    assert (_at(RESULT, "SF"), "store", ".status_code", (_at(PLUGIN, "P1"),), ("self.rc_fatal",)) in stored
-    assert (_at(RESULT, "ST"), "store", ".status_code", (_at(PLUGIN, "P2"),), ("self.rc_temporary",)) in stored
+    assert (
+        _at(RESULT, "SF"),
+        "store",
+        ".status_code",
+        (_at(PLUGIN, "P1"),),
+        ("self.rc_fatal",),
+    ) in stored
+    assert (
+        _at(RESULT, "ST"),
+        "store",
+        ".status_code",
+        (_at(PLUGIN, "P2"),),
+        ("self.rc_temporary",),
+    ) in stored
     # The value stored reads on in its class: a constant of the class's body.
     fatal = _field(built, RESULT_CLASS, "rc_fatal")
     (constant,) = fatal.bindings
-    assert (constant.at, constant.how, constant.owner) == (_at(RESULT, "RC"), "class", RESULT_CLASS)
+    assert (constant.at, constant.how, constant.owner) == (
+        _at(RESULT, "RC"),
+        "class",
+        RESULT_CLASS,
+    )
     assert _ends(constant.sources) == {("constant", "2", "", (), ())}
 
 
-def test_a_guard_reading_self_itself_asks_each_field_it_reads_and_not_a_method_it_calls(built: MapFragment) -> None:
+def test_a_guard_reading_self_itself_asks_each_field_it_reads_and_not_a_method_it_calls(
+    built: MapFragment,
+) -> None:
     guard = _guard(built, GEN, "A0", "self")
     assert _ends(guard.sources) == {("self_field", "self", GEN_CLASS, (), ())}
     attempt = _field(built, GEN_CLASS, "attempt_nr")
-    assert [(one.at, one.how) for one in attempt.bindings] == [(_at(GEN, "G0"), "assign")]
+    assert [(one.at, one.how) for one in attempt.bindings] == [
+        (_at(GEN, "G0"), "assign")
+    ]
     assert [source.kind for source in attempt.bindings[0].sources] == ["parameter"]
     # S4 calls self._commit(): no FieldFrom is asked for it.
     assert not [one for one in built.field_froms if one.field == "_commit"]
@@ -307,45 +362,87 @@ def test_a_callee_s_self_is_read_back_at_the_receiver(built: MapFragment) -> Non
     caller = f"{GEN}::process_job_report"
     assert _ends(got.sources) == {
         ("parameter", "holder", caller, (".items",), (_at(GEN, "R0"),)),
-        ("parameter", "holder", caller, (".items",), (_at(HOLDER, "H2"), _at(GEN, "R0"))),
+        (
+            "parameter",
+            "holder",
+            caller,
+            (".items",),
+            (_at(HOLDER, "H2"), _at(GEN, "R0")),
+        ),
     }
     # self.own() returns AdderGen's self.attempt_nr: the caller's own self, with the field.
     mine = _guard(built, GEN, "R3", "mine")
-    assert _ends(mine.sources) == {("self_field", "self", GEN_CLASS, (".attempt_nr",), (_at(GEN, "R1"),))}
+    assert _ends(mine.sources) == {
+        ("self_field", "self", GEN_CLASS, (".attempt_nr",), (_at(GEN, "R1"),))
+    }
     # self.holder.get() returns the held Holder's self.items: the caller's field, then the step.
     held = _guard(built, GEN, "R3", "held")
     assert _ends(held.sources) == {
         ("self_field", "self.holder", GEN_CLASS, (".items",), (_at(GEN, "R2"),)),
-        ("self_field", "self.holder", GEN_CLASS, (".items",), (_at(HOLDER, "H2"), _at(GEN, "R2"))),
+        (
+            "self_field",
+            "self.holder",
+            GEN_CLASS,
+            (".items",),
+            (_at(HOLDER, "H2"), _at(GEN, "R2")),
+        ),
     }
     # And the step past the field is read on: the Holder AdderGen builds binds items to its parameter.
     holder = _field(built, GEN_CLASS, "holder")
-    assert {source.name for one in holder.bindings for source in one.sources} == {"Holder"}
+    assert {source.name for one in holder.bindings for source in one.sources} == {
+        "Holder"
+    }
     items = _field(built, f"{HOLDER}::Holder", "items")
-    assert [(one.at, [source.kind for source in one.sources]) for one in items.bindings] == [
-        (_at(HOLDER, "H0"), ["parameter"])
-    ]
+    assert [
+        (one.at, [source.kind for source in one.sources]) for one in items.bindings
+    ] == [(_at(HOLDER, "H0"), ["parameter"])]
 
 
 def test_a_field_reads_every_binding_of_the_class_and_its_bases_and_says_what_it_does_not_read(
     built: MapFragment,
 ) -> None:
     guard = _guard(built, SETUP, "S4", "job")
-    assert ("self_field", "self.jobs", SETUP_CLASS, ("[*]",), ()) in _ends(guard.sources)
+    assert ("self_field", "self.jobs", SETUP_CLASS, ("[*]",), ()) in _ends(
+        guard.sources
+    )
     jobs = _field(built, SETUP_CLASS, "jobs")
     assert {(one.at, one.owner) for one in jobs.bindings} == {
         (_at(SETUP_BASE, "S0"), f"{SETUP_BASE}::__init__"),
         (_at(SETUP, "S1"), f"{SETUP}::run"),
     }
     # The base's append is a change of the list the field holds; the value it puts in is not read.
-    assert ("method", "*", "append") in {(one.kind, one.key, one.what) for one in jobs.changes}
+    assert ("method", "*", "append") in {
+        (one.kind, one.key, one.what) for one in jobs.changes
+    }
     stops = {(one.kind, tuple(one.at)) for one in jobs.stops}
     # A name computed in setattr may be the field; elsewhere stores the field on another object.
     assert ("computed", (_at(SETUP, "S2"),)) in stops
     assert ("outside", (_at(OTHER, "O1"),)) in stops
 
 
-def test_the_gates_find_a_record_for_each_field_and_parameter_a_way_ends_at(built: MapFragment) -> None:
+def test_a_read_of_self_dict_sets_no_field(built: MapFragment) -> None:
+    # __str__ only reads self.__dict__ (JediDatasetSpec's, InputChunk's): no field is set there.
+    jobs = _field(built, SETUP_CLASS, "jobs")
+    assert not [
+        one
+        for one in jobs.stops
+        if one.kind == "computed" and _at(SETUP, "D0") in one.at
+    ]
+
+
+def test_self_dict_changed_in_place_may_set_any_field(built: MapFragment) -> None:
+    # The base's load() updates self.__dict__: the field read, like any, may be set there.
+    jobs = _field(built, SETUP_CLASS, "jobs")
+    assert [
+        one.at
+        for one in jobs.stops
+        if one.kind == "computed" and _at(SETUP_BASE, "D1") in one.at
+    ] == [[_at(SETUP_BASE, "D1")]]
+
+
+def test_the_gates_find_a_record_for_each_field_and_parameter_a_way_ends_at(
+    built: MapFragment,
+) -> None:
     fields = guard_fields_are_read(built)
     assert fields.passed, fields.failures
     assert fields.checked > 0
