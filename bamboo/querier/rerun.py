@@ -88,11 +88,12 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types, call_statements
 from bamboo.codemap.models import (
+    HISTORY_AFTER,
     KEY_BOUND,
     KEY_HANDED,
     KEY_KEPT,
@@ -130,10 +131,11 @@ from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import value_diff as V
 from bamboo.querier import windows as W
-from bamboo.querier.recorded import RecordedLogs
+from bamboo.querier.recorded import EDGE, RecordedLogs
 from bamboo.querier.records import (
     CORPUS,
     FileLogs,
+    Log,
     Logs,
     Owners,
     Run,
@@ -150,6 +152,8 @@ from bamboo.querier.which_ran import (
     judge,
     of_mover,
     once_loops_of,
+    passes_of,
+    recorded_in_pass,
     spans,
     stable_holes,
 )
@@ -162,9 +166,6 @@ BAMBOO = Path(R.BAMBOO_TREE)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
-#: ``RERUN_S3_ROWS=0``: S3 settles a pass's guards by the exit it left by alone, not also by the rows it printed on
-#: the way (``Rerun._ways_printed``, KNOWN_ISSUES.md K46)
-S3_ROWS = os.environ.get("RERUN_S3_ROWS", "1") != "0"
 
 
 def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> dict[str, ast.expr]:
@@ -436,7 +437,7 @@ def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
     its prints in by the logger they are made on (``PrintStatement.log_files``; a DB proxy method's are the server's and
     JEDI's both, as the process that called it chooses).  ``{"held": True | False | None, "why": ...}``, None where the
     files are the map's reading's, not where it places the prints (``rows.own_log_files``)."""
-    if not R.OWN_FILES or R.ROWS_FROM != "graph":
+    if R.ROWS_FROM != "graph":
         return {"held": None, "why": T.Said("logs-the-maps-reading")}
     found = R._prints_of(owner, lines)
     if found is None or not found.statements:
@@ -1269,6 +1270,17 @@ def _in_caller(term: str, passed: dict[str, str]) -> str:
 _GUARD_REASONS = ("step 5:", "rule 6:")
 
 
+def _bare(owner: str) -> str:
+    """A ``file::Class.function`` owner as H2's candidates name it, ``file::function``."""
+    rel, _, qual = owner.partition("::")
+    return f"{rel}::{qual.rpartition('.')[2]}"
+
+
+def _premise_kind(p: object) -> str:
+    """The kind of a premise's record (``no-line-holds-the-key``), '' for a premise said as text."""
+    return p.said.kind if isinstance(p, Premise) and isinstance(p.said, T.Said) else ""
+
+
 def _arm_name(arm: str) -> str:
     """A ``file::function:line`` arm as :class:`Possible` names it: the file's name, not its path."""
     owner, _, line = arm.rpartition(":")
@@ -1646,6 +1658,45 @@ def _orders_texts(text: str, env: E.Env) -> bool:
 
 
 @dataclass(frozen=True)
+class Recorder:
+    """A call of an arm's pass that records the object's history row after the arm (KNOWN_ISSUES.md K67): a history
+    pair of the map's on the arm's object (``attr_time.arms``'s ``placed``) whose call runs after the arm -- the
+    function the call is in, its line, each method its ``writes`` name with the lines of its history write, and the
+    calls of the function on the way to the arm (``HistoryPair.point``: where a stand-in is read, ``_h2_candidates``)."""
+
+    caller: str  # ``file::Class.function``
+    call: int
+    methods: tuple[tuple[str, tuple[int, ...]], ...]
+    points: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ArmAt:
+    """An arm as ``attr_time.arms`` takes a reading: its ``file::function`` and its line."""
+
+    owner: str
+    lines: tuple[int, ...]
+
+
+def recorders(subject: str, owner: str, line: int) -> list[Recorder]:
+    """The calls that record the history row of *owner*'s arm at *line* after it, in its pass (:class:`Recorder`)."""
+    found: dict[tuple, list[int]] = {}
+    for a in AT.arms(mapdump.fragment(), subject, [_ArmAt(owner, (line,))]):
+        for p in a.placed:
+            if p.order != HISTORY_AFTER or not p.writes:
+                continue
+            methods: dict[str, list[int]] = {}
+            for w in p.writes:
+                method, _, at = w.rpartition(":")
+                if at.isdigit():
+                    methods.setdefault(method, []).append(int(at))
+            if methods:
+                points = found.setdefault((p.caller, p.call, tuple((m, tuple(ls)) for m, ls in methods.items())), [])
+                points += [p.point] if p.point not in points else []
+    return [Recorder(caller, call, methods, tuple(points)) for (caller, call, methods), points in found.items()]
+
+
+@dataclass(frozen=True)
 class StandIn:
     """A writer arm whose function prints nothing (KNOWN_ISSUES.md K25), read on the run of the caller a history pair
     names, at the call on the way to it (``HistoryPair.caller``, ``point``; attr-time-shape.md 5).  That call shown run
@@ -1828,6 +1879,65 @@ def mark_handed(owner: str, line: int, run: Any) -> list[tuple[str, str]]:
     return [(k.expression, v) for r in (getattr(prints, "runs", None) or [])
             if (vs := mark_values(run.token, r.mark)) is not None and len(vs) == len(r.key or [])
             for k, v in zip(r.key, vs, strict=True) if "." in k.expression]
+
+
+def mark_columns(owner: str, lines: list[int], run: Any) -> dict[str, str]:
+    """What *run*'s mark holds, by the columns the map's runs of *owner*'s function name each hole's:
+    ``insertNewJob < <JediTaskID=53004228 idPool=885 >`` holds 53004228 for ``JobSpec.jediTaskID`` (KNOWN_ISSUES.md
+    K67).  Empty where no mark of the function's reads in the token."""
+    out: dict[str, str] = {}
+    for r in getattr(R._prints_of(owner, lines), "runs", None) or []:
+        vs = mark_values(run.token, r.mark)
+        if vs is None or len(vs) != len(r.key or []):
+            continue
+        for k, v in zip(r.key, vs, strict=True):
+            for col in k.columns or []:
+                out.setdefault(col, v)
+    return out
+
+
+def _pass_marks(owner: str, line: int, values: dict[str, str]) -> list[tuple[str, tuple[str, ...]]]:
+    """``[(value, marks)]``: what *owner*'s lines carry where its run's mark holds one of *values* (by column) -- a hole
+    of the map's mark whose columns name it (``JobSpec.jediTaskID`` in runImpl's ``<jediTaskID={} datasetID={}>``), the
+    value in it (:func:`marks_holding`; KNOWN_ISSUES.md K67)."""
+    by: dict[str, set[str]] = {}
+    for run in getattr(R._prints_of(owner, [line]), "runs", None) or []:
+        for k in run.key or []:
+            for col in k.columns or []:
+                if (value := values.get(col)) is not None:
+                    by.setdefault(value, set()).update(marks_holding(owner, line, _names_column(col), value))
+    return [(v, tuple(sorted(ms))) for v, ms in sorted(by.items()) if ms]
+
+
+def prints_key_before(owner: str, lines: list[int], columns: set[str]) -> bool:
+    """Whether every run of *owner* that reaches its history writes at *lines* prints the key first (KNOWN_ISSUES.md
+    K67): before each, a print every path runs (``rows.must_rows``) with a hole naming one of *columns*, or any such
+    print where every run mark of the function holds one -- each line of its run carries the key (updateTask_JEDI's
+    ``jediTaskID={}``).  insertNewJob's "inserted {PandaID}" (3199) runs before both of its writes."""
+    rel, _, func = owner.partition("::")
+    found = R._prints_of(owner, lines)
+    if found is None or not lines:
+        return False
+    stmts = getattr(found, "statements", None) or []
+    runs = getattr(found, "runs", None) or []
+    marked = bool(runs) and all(any(columns & set(k.columns or []) for k in r.key or []) for r in runs)
+    for line in lines:
+        fn = R.function(rel, func, [line])
+        stmt = R.statement_at(fn.node, line)
+        if stmt is None:
+            return False
+        before = {s.lineno for s in R.must_rows(fn.node, stmt)[0]}
+        printed = [st for st in stmts if st.line in before]
+        named = any(columns & {c for r in st.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])] for c in h.columns or []}
+                    for st in printed)
+        if not named and not (marked and printed):
+            return False
+    return True
+
+
+def _names_column(col: str) -> Callable[[Any], bool]:
+    """Whether a mark's hole names the column *col* (:func:`marks_holding`'s *holds*)."""
+    return lambda hole: col in (hole.columns or [])
 
 
 def prints_key(owner: str, lines, columns: set[str]) -> bool:
@@ -2315,18 +2425,8 @@ class Rerun:
         self.say(f"END {what}")
 
     def files_of(self, owner: str, today: list[str], lines) -> list[str]:
-        """Where *owner*'s own rows are looked for (``R.own_log_files``); ``FILES_LOG`` gets both answers."""
-        own = R.own_log_files(owner, list(today), lines)
-        if os.environ.get("FILES_LOG"):
-            saved = R.OWN_FILES
-            R.OWN_FILES = True
-            would = R.own_log_files(owner, list(today), lines)
-            R.OWN_FILES = saved
-            found = R._prints_of(owner, lines)
-            basis = sorted({st.log_files_basis for st in found.statements}) if found is not None else None
-            with open(os.environ["FILES_LOG"], "a") as out:
-                out.write(json.dumps({"hop": self.hop, "owner": owner, "today": sorted(today), "own": would, "basis": basis}) + "\n")
-        return own
+        """Where *owner*'s own rows are looked for (``R.own_log_files``)."""
+        return R.own_log_files(owner, list(today), lines)
 
     def warn_split(self, owner: str, lines) -> None:
         if split := R.split_files(owner, lines):
@@ -2348,6 +2448,8 @@ class Rerun:
         env.written = self.args.subject if env.subject else ""
         env.elements = _element_rows(self.data, cls)
         env.keys = frozenset(c.partition(".")[2] for c in self._key_columns(self.args.subject, self.args.key))
+        # the question's column as a pass read it from the row: the statuslog's state before the pass (H2 step 2 (iii))
+        env.statuslog = list((self.data.get("statuslog") or {}).get("states") or [])
         for entity, row in rows.items():
             env.table[entity] = {k: E.Value(v["value"], v["source"]) for k, v in row.items()}
         if file_row is not None:
@@ -3122,7 +3224,7 @@ class Rerun:
         whose arm a history pair places (``attr_time.arms``), the pair's caller at the call on the way to it, read on
         the caller's run (:class:`StandIn`, kept in ``_stand_ins`` by the caller's owner and line).  Only where the map
         places the prints (``rows.own_log_files``): else the readings' logs stand, as before."""
-        silent = [r for r in readings if prints_nothing(r.owner, r.lines)] if R.OWN_FILES and R.ROWS_FROM == "graph" else []
+        silent = [r for r in readings if prints_nothing(r.owner, r.lines)] if R.ROWS_FROM == "graph" else []
         arms = {(a.owner, a.line): a for a in AT.arms(mapdump.fragment(), subject, silent)} if silent else {}
         found: dict[str, Candidate] = {}
 
@@ -3314,6 +3416,128 @@ class Rerun:
                                             branch=replace(on, chosen=arm, via=v)))
         return out
 
+    def _recorded(self, subject: str, key: str, state: dict, asking: W.Asking, left: list[Possible]) -> list[Possible]:
+        """*left*, the arms :meth:`_unshown` says may have written at the row *state* -- no line of their logs holds the
+        key -- read on the runs that recorded the row (KNOWN_ISSUES.md K67).  For each call of the arm's pass that
+        records the row after the arm (:func:`recorders`), its methods' logs are asked on the row's machine for the key
+        near the row (:meth:`_recorder_read`).  Where none of those calls' methods ran the key there, the arm's pass did
+        not write the row, and the arm goes from it; where they did, inside a call of a pass of the call's function
+        at the row, that pass is said in place of the key not being named.  Else it stays as it was.  A stand-in, read
+        at its caller's call on the way to it (``Wrote.via``), is read on that caller's recording calls only: another
+        caller's pass is not its pass."""
+        if not asking.machine or not left:
+            return left
+        out = []
+        for p in left:
+            arm = p.branch.chosen if p.branch is not None else None
+            via = cast("Verdict | None", p.branch.via) if p.branch is not None else None
+            recs = recorders(subject, f"{arm.candidate.rel}::{arm.candidate.func}", arm.line) if arm is not None else []
+            if via is not None:
+                recs = [r for r in recs if _bare(r.caller) == via.candidate.owner and via.line in r.points]
+            read = [self._recorder_read(r, subject, key, state, asking) for r in recs]
+            if read and all(kind == "none" for kind, _ in read):
+                at = f", read at {Path(via.candidate.rel).name}::{via.candidate.func}:{via.line}" if via is not None else ""
+                self.say(f"  not its row: {p.arm}{at} -- "
+                         + "; ".join(dict.fromkeys(T.text(said) for _, said in read if said is not None)))
+                continue
+            shown = next((said for kind, said in read if kind == "pass" and said is not None), None)
+            if shown is not None:
+                p = replace(p, premises=[Premise(shown, NOT_READ) if _premise_kind(x) == "no-line-holds-the-key" else x
+                                         for x in p.premises])
+            out.append(p)
+        return out
+
+    def _recorder_read(self, rec: Recorder, subject: str, key: str, state: dict,
+                       asking: W.Asking) -> tuple[str, T.Said | None]:
+        """One call of :meth:`_recorded`: ``("none", why)`` where its methods' logs on the row's machine, one there at
+        least and each read whole there, hold no run of theirs of the key within EDGE of the row -- each prints the key
+        before it records the row, so no pass through the call wrote it; ``("pass", what)`` where every such run ran
+        inside the call of a pass of the call's function at the row (``which_ran.recorded_in_pass``), its log asked on
+        the machine for the marks the object's row fills (:meth:`_pass_marks`); ``("", None)`` where the records do
+        not say.  An ask no record answers is kept for the asks file, with no stop."""
+        host = str(asking.machine)
+        at = datetime.datetime.fromisoformat(state["time"][:19])
+        lo, hi = (at - EDGE).isoformat(" "), (at + EDGE).isoformat(" ")
+        methods = [(_bare(m), list(lines)) for m, lines in rec.methods]
+        names = [m.rpartition("::")[2] for m, _ in methods]
+        files = list(dict.fromkeys(f for m, lines in methods for f in self.files_of(m, [], lines)))
+        # asked over the row less and plus EDGE, so that "read whole" (``Log.holes``) is said of all the runs read near it
+        ask = W.Asking((lo, hi), asking.machine, T.Said("for-the-rows-recorder", {
+            "methods": names, "status": state.get("status"), "time": state["time"], "machine": host}))
+        logs, unanswered = self._logs_at(key, files, ask, owners_of([m for m, _ in methods]))
+        caller = _bare(rec.caller)
+        rel, _, func = caller.partition("::")
+        pass_files = self.files_of(caller, [], [rec.call])
+
+        def passes(values: dict[str, str]) -> list[tuple[str, W.Asking]]:
+            return [(value, W.Asking(asking.window, asking.machine, T.Said("for-the-recorders-pass", {
+                "func": func, "call": rec.call, "marks": list(marks)}), marks)) for value, marks in _pass_marks(caller, rec.call, values)]
+
+        if unanswered:
+            # the pass's asks go in the same round as the methods', for the values the rows file holds now: the
+            # reading takes them from the methods' runs (``mark_columns``), at the row's time
+            for value, fask in passes(self._row_values(subject)):
+                unanswered += self._logs_at(value, pass_files, fask, owners_of([caller]))[1]
+            self._keep_unanswered(unanswered)
+            return "", None
+        there = {name: log for name, log in logs.items() if host not in log.without}
+        # the host's runs: a log the host is not listed for comes asked of every machine (K13), and another machine's
+        # run is not the host's (a run of a file handed in names no machine)
+        inner = [r for log in there.values() for r in runs_for(log, key)
+                 if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi
+                 and r.machine in (host, "")]
+        if not inner:
+            columns = set(self._key_columns(subject, key))
+            # a log so asked says nothing of a file of it on the host: not read whole there
+            if (there and not any(log.holes or host in log.unlisted for log in there.values())
+                    and all(prints_key_before(m, lines, columns) for m, lines in methods)):
+                return "none", T.Said("no-recorder-run-at-the-row", {"methods": names, "key": key, "logs": sorted(there),
+                                                                    "machine": host.split(".")[0]})
+            return "", None
+        fn = R.function(rel, func, [rec.call])
+        sites = list(dict.fromkeys(s for m, lines in methods
+                                   for s in self._called_at(fn, Candidate(m.partition("::")[0], m.rpartition("::")[2], lines))))
+        # what the methods' runs' marks hold, by column, where they all agree
+        held: dict[str, set[str]] = {}
+        for r in inner:
+            for m, lines in methods:
+                if of_mover(r, m):
+                    for col, v in mark_columns(m, lines, r).items():
+                        held.setdefault(col, set()).add(v)
+        for value, fask in passes({col: vs.pop() for col, vs in held.items() if len(vs) == 1}):
+            found, unanswered = self._logs_at(value, pass_files, fask, owners_of([caller]))
+            if unanswered:
+                self._keep_unanswered(unanswered)
+                continue
+            got = recorded_in_pass(fn, [r for log in found.values() for r in runs_for(log, value)], (state["time"], state["time"]),
+                                   inner, sites, self.mode)
+            if got is not None:
+                part, site = got
+                return "pass", T.Said("its-pass-recorded-the-row", {"run": part.said(), "methods": names, "key": key, "site": site})
+        return "", None
+
+    def _row_values(self, subject: str) -> dict[str, str]:
+        """The rows file's values of *subject*'s object, by column (``JobSpec.jediTaskID``), as read, at any time: what a
+        pass's marks are first asked for (:meth:`_recorder_read`), not what a step reads."""
+        cls = subject.partition(".")[0]
+        entity = next((e for e, c in (self.data.get("classes") or {}).items() if c == cls and e != "about"), None)
+        row = (self.data.get("rows") or {}).get(entity) or {} if entity else {}
+        return {f"{cls}.{attr}": str(v["value"]) for attr, v in row.items()
+                if isinstance(v, dict) and isinstance(v.get("value"), (str, int)) and v.get("value") != ""}
+
+    def _logs_at(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None) -> tuple[dict[str, Log], list]:
+        """``(logs, unanswered)``: *names* asked over *asking*, each whole, as :meth:`_ask` does, as the logs (what a
+        listing says the machine holds no file of is in ``Log.without``)."""
+        window = self.window(asking)
+        out: dict[str, Log] = {}
+        unanswered: list = []
+        for name in self.logs.names(names):
+            try:
+                out[name] = self.logs.log(name, key, window, machine=asking.machine, owners=owners, strings=asking.strings, whole=True)
+            except Unrecorded as e:
+                unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
+        return out, unanswered
+
     def _row_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict, asking: W.Asking,
                 named: set[str]) -> list[Possible]:
         """One row of :meth:`_scan`: the arms whose pass at the row wrote, or may have.  No run of the key there, in logs
@@ -3331,6 +3555,7 @@ class Rerun:
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
+        maybe = self._recorded(subject, key, state, asking, maybe)
         if not at and not holes and not handed:
             self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
             for p in maybe:
@@ -4526,7 +4751,7 @@ class Rerun:
             for run in runs.get(name, []):
                 if not of_mover(run, q.owner):
                     continue
-                parts, how = R.passes(fn, run, self.mode)
+                parts, how = passes_of(fn, run, self.mode)
                 self.say(f"{run.describe()}: {how}")
                 found += parts
         # the runs come machine by machine; the passes are read, and the first and the last taken, in time
@@ -4660,7 +4885,7 @@ class Rerun:
         for name in to_hand:
             for run in runs.get(name, []):
                 if of_mover(run, c.owner):
-                    parts, said = R.passes(fn, run, self.mode)
+                    parts, said = passes_of(fn, run, self.mode)
                     self.say(f"{run.describe()}: {said}")
                     found += parts
         found = sorted((p for p in found if p.last[:19] >= start and p.first[:19] <= end), key=lambda p: p.first)
@@ -4892,7 +5117,7 @@ class Rerun:
         held when it printed -- activateJob's 111, in the else of 70, says ``not (len(res) == 0 or allOK)``, though
         the exit the pass left by (153, ``return True``) is reached either way (KNOWN_ISSUES.md K46).  None of a run of
         several calls, nor where no run is handed."""
-        if not S3_ROWS or run is None or not getattr(fn, "rows", None):
+        if run is None or not getattr(fn, "rows", None):
             return []
         sn = R.claim([R.seen(fn, run, self.mode)])[0]
         if not sn.single_call():

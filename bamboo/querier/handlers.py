@@ -16,7 +16,7 @@ handler catching anything (bare, ``Exception``, ``BaseException``):
   absence from a run says nothing (TaskRefiner, JobGenerator);
 * ``SILENT`` -- it prints nothing;
 * ``OUT`` -- no such ``try``, or its handler only raises again: the exception
-  leaves the function.  With ``P_FOLLOW_OUT`` (the default) it is followed to
+  leaves the function.  It is followed to
   the callers (:mod:`bamboo.querier.callers`): ``TB``, with no handler in this function,
   when every caller prints its traceback into this function's run;
 * ``NOTEXC`` -- the path left by ``return``, a jump, or fell through.
@@ -25,16 +25,14 @@ A handler that prints only under an ``if`` and otherwise raises again
 (``if self.is_deadlock_exception(e): tmpLog.warning(...); continue`` then
 ``raise``) has two ways out, so its class is the weaker of its own and the
 next catching handler's outwards (:data:`STRENGTH`): both must print for the
-log to decide.  ``P_CONDITIONAL_HANDLERS=0`` makes it its own, LOG, whatever
-is outside.
+log to decide.
 
 The run's loggers (:func:`run_loggers`) are the receivers of the function's
 own rows that are its parameters or names it binds -- ``tmp_log =
 self.create_tagged_logger(...)``, ``tmpLog = MsgWrapper(...)`` -- the loggers
 that put the token a run is made of (:mod:`bamboo.querier.records`), and
 an instance attribute its class binds once to a wrapper that puts
-a mark (:func:`attribute_loggers`: AdderGen's and Watcher's ``self.logger``;
-``P_ATTRIBUTE_LOGGERS=0`` leaves them out).  By name, not by binding.  Of the 75 functions holding census_p's 184 arms, one binds a run
+a mark (:func:`attribute_loggers`: AdderGen's and Watcher's ``self.logger``).  By name, not by binding.  Of the 75 functions holding census_p's 184 arms, one binds a run
 logger's name twice:
 JobGenerator.runImpl, ``tmpLog = MsgWrapper(self.logger, monToken=prefix)`` (no
 token) at 601 and the tagged ``MsgWrapper(self.logger, f"<jediTaskID=...>", ...)``
@@ -51,7 +49,6 @@ from __future__ import annotations
 
 import ast
 import functools
-import os
 import re
 
 from bamboo.codemap.panda import pathcond
@@ -64,13 +61,6 @@ LEAVE = re.compile(r"(call|raise|jump|return)(?: in (\w+))? at (\d+)")
 WRAPPERS = {"LogWrapper", "MsgWrapper"}
 #: how much a class says about a path that left into it; a conditional handler takes the weaker of two
 STRENGTH = {"TB": 3, "LOG": 2, "UNTAGGED": 1, "SILENT": 0, "OUT": 0}
-#: P_ATTRIBUTE_LOGGERS=0 leaves instance attribute loggers out of
-#: run_loggers, P_CONDITIONAL_HANDLERS=0 classes a handler that prints only under an if by itself, as before
-ATTRIBUTE_LOGGERS = os.environ.get("P_ATTRIBUTE_LOGGERS", "1") != "0"
-CONDITIONAL_HANDLERS = os.environ.get("P_CONDITIONAL_HANDLERS", "1") != "0"
-#: P_FOLLOW_OUT=1 (the default) classes an exception that leaves
-#: the function TB when every caller prints its traceback into the function's run (:func:`bamboo.querier.callers.out_class`)
-FOLLOW_OUT = os.environ.get("P_FOLLOW_OUT", "1") != "0"
 
 
 def catches_all(h: ast.ExceptHandler) -> bool:
@@ -92,8 +82,7 @@ def run_loggers(func: ast.AST) -> frozenset[str]:
     for n in R.own_nodes(func):
         if R.is_print(n) and isinstance(n.value.func.value, ast.Name) and n.value.func.value.id in params | bound:
             out.add(n.value.func.value.id)
-    if ATTRIBUTE_LOGGERS:
-        out |= attribute_loggers(func)
+    out |= attribute_loggers(func)
     return frozenset(out)
 
 
@@ -212,7 +201,7 @@ def leave(func: ast.AST, left: str) -> tuple[str, int | None, ast.ExceptHandler 
                 c = handler_class(h, loggers)
                 if c == "RERAISE":
                     break  # out of this try; the next one outwards decides
-                if CONDITIONAL_HANDLERS and c in ("TB", "LOG") and conditional(h, loggers):
+                if c in ("TB", "LOG") and conditional(h, loggers):
                     held = c if held is None else min(held, c, key=STRENGTH.get)
                     break  # its other way raises again: the next one outwards decides that way
                 if held is not None and STRENGTH[held] < STRENGTH[c]:
@@ -220,11 +209,9 @@ def leave(func: ast.AST, left: str) -> tuple[str, int | None, ast.ExceptHandler 
                     # read as missing, since the conditional way does not print them
                     return held, line, None if held == "LOG" else h, stmt
                 return c, line, h, stmt
-    c = "OUT"
-    if FOLLOW_OUT:
-        from . import callers
+    from . import callers
 
-        c = callers.out_class(func)  # TB: every caller prints its traceback into this run (no handler here)
+    c = callers.out_class(func)  # TB: every caller prints its traceback into this run (no handler here)
     if held is not None and STRENGTH[held] < STRENGTH[c]:
         return held, line, None, stmt
     return c, line, None, stmt

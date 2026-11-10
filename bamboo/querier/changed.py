@@ -11,18 +11,26 @@ its own value.
   made (``which_ran.held_in_calls``).
 * **One field of one object.**  One function of the pass, the *anchor*, its rows read as one call
   (``Seen.single_call``), assigns the subject's chain itself, or methods of its class assign the same chain of
-  ``self`` -- the one object a call on ``self`` hands on.  With them go the candidates of the runs inside its calls:
-  the pass's write, which takes the chain as it is at the call.  An assignment in another class, of an object handed
-  on, is not read as the same object and is left as H2 left it.
+  ``self`` -- the one object a call on ``self`` hands on.  With them go the candidates there at a statement that runs a
+  call (R1: ``self.finalize_job_status()``, an arm by the map's reading; what the call writes is not read, only the
+  value before it, so it is never a write of another value, and what it runs before its write is not read either; a
+  ``raise`` writes through a handler, and is none), and the candidates of the runs inside its calls: the
+  pass's write, which takes the chain as it is at the call.  An assignment in another class, of an object handed on,
+  is not read as the same object and is left as H2 left it.
 * **The order** (i).  Each of them is placed at a statement of the anchor -- its own, the anchor's calls on into its
   function (the map's reach, *called_at*), or the call a run inside ran in -- and two are in order where one call can
   run the second after the first and not the first after the second (``flow.runs_after``).  With any two out of
-  order, R says nothing.
+  order, R says nothing.  A stay before a call or a write inside one, read from the rows alone, is out before the
+  order is read (R3): the order is read between the rest.
 * **The value before a write** (ii).  A printed hole of the chain at a row before it, or the constant an earlier
   assignment that ran left there, where nothing on the way binds the chain or hands what holds it to a call that can
   change it (P's reading of a call, ``printed.self_effects``).  The way is the rest of the source's function, the
   anchor's statements between the two places, and the write's own function before it.  The frames between the anchor
-  and a function it reaches through others are not read.  Before the pass's write, the value at the call it ran in.
+  and a function it reaches through others are not read.  Before the pass's write, its own frame first (R2): a hole of
+  the chain it assigns at a row every way to it prints first, printed once in its run, so by the call that ran the
+  write, carried to it past the statements the run shows did not run -- a must row of theirs missing, its absence
+  trusted, as rule 4 reads it (archiveJob's 1268 ``start status=finished`` past 1495 ``job.jobStatus = "failed"``,
+  whose 1494 the run lacks).  Else the value at the call it ran in.
 * **What keeps the value on the way.**  An assignment of the value's own constant to the chain, and a call P reads as
   able to change it that cannot bind what holds it anew -- for a chain of ``self``, ``self_effects`` binds none of
   its prefixes; else the chain is the field of the name the call is handed -- where the map's reach from that call
@@ -66,7 +74,7 @@ class Point:
 
 @dataclass
 class Change:
-    #: the pass's candidates in the order they run
+    #: the pass's candidates in the order they run, less the stays read without it
     order: list[Any]
     #: the stays and the writes of another value, each with why
     dropped: list[tuple[Any, str]] = field(default_factory=list)
@@ -126,6 +134,11 @@ def _parts(s: ast.stmt) -> list[ast.AST]:
     return [s]
 
 
+def _calls(s: ast.stmt) -> bool:
+    """Whether *s* runs a call itself, a log call aside."""
+    return any(isinstance(n, ast.Call) and not R.is_log_call(n) for part in _parts(s) for n in R.own_nodes(part))
+
+
 #: rerun's reading of a statement's calls by the map's reach: ``(fn, node, value)`` -> how many calls it closed by their
 #: name, where the calls in *node* assign the subject's field no other value than *value*, else None
 Keeps = Callable[[R.Function, ast.AST, str], "int | None"]
@@ -133,11 +146,13 @@ Keeps = Callable[[R.Function, ast.AST, str], "int | None"]
 
 @dataclass
 class Way:
-    """What kept a value on its way: assignments of its own constant, and calls the map's reach reads as keeping it."""
+    """What kept a value on its way: assignments of its own constant, calls the map's reach reads as keeping it, and
+    statements that could change it the run shows did not run."""
 
     binds: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
     closed: int = 0
+    unrun: list[str] = field(default_factory=list)
 
     def said(self, attr: str, value: str) -> str:
         out = "nothing on the way binding it"
@@ -147,7 +162,15 @@ class Way:
             closed = f", {self.closed} call(s) closed by their name" if self.closed else ""
             out += (f"; the calls at {', '.join(dict.fromkeys(self.calls))} reach no assignment of {attr} but "
                     f"{value!r} (the map's reach{closed})")
+        if self.unrun:
+            out += f"; not run: {', '.join(dict.fromkeys(self.unrun))}"
         return out
+
+    def add(self, other: Way) -> None:
+        self.binds += other.binds
+        self.calls += other.calls
+        self.closed += other.closed
+        self.unrun += other.unrun
 
 
 def _place(fn: R.Function, node: ast.AST) -> str:
@@ -218,16 +241,42 @@ def _class(fn: R.Function) -> ast.ClassDef | None:
     return next((a for a in pathcond.ancestors(fn.node) if isinstance(a, ast.ClassDef)), None)
 
 
+#: rule 4's reading of a statement in one run: the lines of its must rows the run lacks where that is evidence it did
+#: not run (:func:`unrun`), none where it may have run
+Unrun = Callable[[ast.stmt], list[int]]
+
+
+def unrun(sn: R.Seen) -> Unrun:
+    """Rule 4's reading of a statement of *sn*'s function in its run: a must row of it (``rows.must_rows``, as a
+    traceback of the run places it) missing from the run, its absence trusted at a level the run prints
+    (``Seen.would_show``).  Every run of the function is read: a row no call printed shows that no call ran it."""
+    named, raised = R.raised_in(sn.fn, sn.run)
+
+    def lacking(s: ast.stmt) -> list[int]:
+        before, after = R.must_rows(sn.fn.node, s, raised if named else set())
+        return [row.line for m in before + after
+                if (row := sn.fn.row_at(m)) is not None and not sn.present(row) and sn.would_show(row)]
+    return lacking
+
+
 def holds(q: Point, p: Point, chain: str, anchor: R.Function, value: str | None = None,
-          keeps: Keeps | None = None, once: tuple[ast.AST, ...] = ()) -> Way | None:
+          keeps: Keeps | None = None, once: tuple[ast.AST, ...] = (), skip: Unrun | None = None) -> Way | None:
     """Whether what *chain* held at *q*, *value* where it is known, still holds at *p*, a later place of the pass:
     nothing on the way can change it (:func:`breaks`), and what kept it.  Across functions only a chain of ``self`` in
     methods of the anchor's class is one object in both, and the way is the rest of *q*'s function, the anchor's
-    statements between the two, and *p*'s before it.  *once*: loops the pass went round once, read in one frame."""
+    statements between the two, and *p*'s before it.  *once*: loops the pass went round once, read in one frame;
+    *skip*: in one frame, a statement that could change it is passed where the run shows it did not run (:func:`unrun`)."""
     way = Way()
     if _same_frame(q, p, anchor):
-        broken = any(breaks(q.fn, s, chain, value, keeps, way) for s in _between(q.fn.node, q.stmt, p.stmt, q.printed, once))
-        return None if broken else way
+        for s in _between(q.fn.node, q.stmt, p.stmt, q.printed, once):
+            on = Way()
+            if not breaks(q.fn, s, chain, value, keeps, on):
+                way.add(on)
+            elif skip is not None and (lacking := skip(s)):
+                way.unrun.append(f"{_place(q.fn, s)} (must row(s) {lacking} not in the run)")
+            else:
+                return None
+        return way
     cls = _class(anchor)
     if PR.root(chain) != "self" or cls is None or _class(q.fn) is not cls or _class(p.fn) is not cls:
         return None
@@ -337,23 +386,37 @@ def last_change(
 
     def scope(anchor: R.Function) -> tuple[str, list] | None:
         """The chain the pass assigns and its writes of it: the assignments of one chain in the anchor, or of one chain
-        of self in the methods of its class, and the candidates of the runs inside its calls (the write)."""
+        of self in the methods of its class; the candidates there at a statement that runs a call (R1: what the call
+        writes is not read, only the value before it); and the candidates of the runs inside its calls (the write)."""
         cls = _class(anchor)
+
+        def ours(fn: R.Function, c: str) -> bool:
+            return fn.owner == anchor.owner or (PR.root(c) == "self" and cls is not None and _class(fn) is cls)
+
         chains: dict[int, str] = {}
         for v in in_pass:
             if inside(v) or (bound := assignment(stmts[id(v)], subject)) is None:
                 continue
-            fn = seens[v.candidate.owner].fn
-            if fn.owner == anchor.owner or (PR.root(bound[0]) == "self" and cls is not None and _class(fn) is cls):
+            if ours(seens[v.candidate.owner].fn, bound[0]):
                 chains[id(v)] = bound[0]
         if len(set(chains.values())) != 1:
             return None
-        return next(iter(chains.values())), [v for v in in_pass if id(v) in chains or inside(v)]
+        chain = next(iter(chains.values()))
+        for v in in_pass:
+            # a raise writes through the handler it leaves for, not through the call it builds its exception with
+            if not inside(v) and id(v) not in chains and assignment(stmts[id(v)], subject) is None \
+                    and not isinstance(stmts[id(v)], ast.Raise) and _calls(stmts[id(v)]) \
+                    and ours(seens[v.candidate.owner].fn, chain):
+                calls.add(id(v))
+        return chain, [v for v in in_pass if id(v) in chains or id(v) in calls or inside(v)]
 
     anchor, chain = None, ""
     members: list[Any] = []
+    #: the members at a statement that runs a call (R1), of the anchor found
+    calls: set[int] = set()
     for owner in owners:
         fn = seens[owner].fn
+        calls.clear()
         if id(seens[owner].run) in joined or not seens[owner].single_call() or (found := scope(fn)) is None:
             continue
         if len(found[1]) >= 2 and all(placed(fn, v.candidate.owner, stmts[id(v)]) for v in found[1]):
@@ -363,12 +426,6 @@ def last_change(
         return None
     points = {id(v): Point(seens[v.candidate.owner].fn, stmts[id(v)], placed(anchor, v.candidate.owner, stmts[id(v)]))
               for v in members}
-    # the pass's order: every pair read, or nothing
-    for i, a in enumerate(members):
-        for b in members[i + 1:]:
-            if precedes(points[id(a)], points[id(b)], anchor) is None:
-                return None
-    order = sorted(members, key=lambda v: sum(bool(precedes(points[id(w)], points[id(v)], anchor)) for w in members if w is not v))
 
     # what the pass's rows printed, each row printed once: (place, hole, value, where)
     printed: list[tuple[Point, str, str, str]] = []
@@ -398,10 +455,80 @@ def last_change(
                 found.append((value, where, way))
         return found[0] if len({value for value, _, _ in found}) == 1 else None
 
+    def own_frame(v: Any) -> tuple[str, str, Way] | None:
+        """R2: the value before a write inside a call, read in its own frame -- a hole of the chain it assigns at a row
+        every way to it prints first, printed once in its run (so by the call that ran the write), carried to it
+        (:func:`holds`) past the statements the run shows did not run (:func:`unrun`); every one agreeing."""
+        sn = seens[v.candidate.owner]
+        fn, stmt = sn.fn, stmts[id(v)]
+        if (own := assignment(stmt, subject)) is None:
+            return None
+        named, raised = R.raised_in(fn, sn.run)
+        skip = unrun(sn)
+        found: list[tuple[str, str, Way]] = []
+        for m in R.must_rows(fn.node, stmt, raised if named else set())[0]:
+            row = fn.row_at(m)
+            if row is None or len(sn.hits.get(row.line, [])) != 1 or len(at := sn.unambiguous.get(row.line, [])) != 1:
+                continue
+            record = sn.run.records[at[0]]
+            for expr, value in row.capture(record).items():
+                if expr == own[0] and (way := holds(Point(fn, row.stmt, [row.stmt], True), Point(fn, stmt, [stmt]), own[0], fn,
+                                                    value.strip(), keeping(own[0]), skip=skip)) is not None:
+                    found.append((value.strip(), f"row {fn.name}:{row.line} at {record.span}", way))
+        return found[0] if len({value for value, _, _ in found}) == 1 else None
+
+    def at_call(v: Any) -> Point | None:
+        """Where the pass's write inside a call takes the chain: the call, its own target not bound before it."""
+        p = points[id(v)]
+        own = assignment(stmts[id(v)], subject)
+        if len(p.at) != 1 or (own is not None and any(breaks(p.fn, s, own[0]) for s in _between(p.fn.node, None, p.stmt, False))):
+            return None
+        return Point(anchor, p.at[0], p.at)
+
+    def stay(v: Any, b: tuple[str, str, Way], own: bool) -> str:
+        if own and (target := assignment(stmts[id(v)], subject)) is not None:
+            return f"rule R: a stay, {target[0]} already held {observed!r} before it in its own frame ({b[1]}, {b[2].said(subject, observed)})"
+        frames = "" if v.candidate.owner == anchor.owner else f"; the frames between {anchor.name} and {v.candidate.func} not read"
+        if id(v) in calls:
+            # R1: the write the call stands for is in what it runs, and the way there is not read
+            frames += "; what the call runs before its write not read"
+        if inside(v):
+            sites = " or ".join(f"{Path(f).name}:{line}" for f, line in _sites(joined[id(seens[v.candidate.owner].run)]))
+            why = f"the pass writes {chain} as it is at the call at {sites}, {observed!r} there"
+        else:
+            why = f"{chain} already held {observed!r} before it"
+        return f"rule R: a stay, {why} ({b[1]}, {b[2].said(subject, observed)}{frames})"
+
+    change = Change([])
+    # R3: the stays read without the pass's order -- before a call (R1), before a write inside one (R2) -- out first;
+    # the order is read between the rest
+    owns: dict[int, tuple[str, str, Way] | None] = {}
+    for v in members:
+        if inside(v):
+            owns[id(v)] = own_frame(v)
+            if owns[id(v)] is not None:
+                b, own = owns[id(v)], True
+            else:
+                b, own = (read(p, chain, False) if (p := at_call(v)) is not None else None), False
+        elif id(v) in calls:
+            b, own = read(points[id(v)], chain, False), False
+        else:
+            continue
+        if b is not None and b[0] == observed:
+            change.dropped.append((v, stay(v, b, own)))
+    rest = [v for v in members if all(v is not d for d, _ in change.dropped)]
+    # the pass's order: every pair read, or nothing
+    for i, a in enumerate(rest):
+        for b_ in rest[i + 1:]:
+            if precedes(points[id(a)], points[id(b_)], anchor) is None:
+                return None
+    order = sorted(rest, key=lambda v: sum(bool(precedes(points[id(w)], points[id(v)], anchor)) for w in rest if w is not v))
+    change.order = order
+
     assigns: dict[int, tuple[str, str] | None] = {}
     for v in order:
         stmt = stmts[id(v)]
-        rhs = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        rhs = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and id(v) not in calls else None
         if isinstance(rhs, ast.Constant) and isinstance(rhs.value, str):
             assigns[id(v)] = (rhs.value, "its constant")
         elif isinstance(rhs, (ast.Name, ast.Attribute)) and not inside(v):
@@ -410,17 +537,16 @@ def last_change(
         else:
             assigns[id(v)] = None
 
-    change = Change(order)
     before: dict[int, tuple[str, str, Way] | None] = {}
     for n, v in enumerate(order):
         p = points[id(v)]
         if inside(v):
-            # the write: the row takes the chain as it is at the call, and its own target is not bound before it
-            own = assignment(stmts[id(v)], subject)
-            if len(p.at) != 1 or (own is not None and any(breaks(p.fn, s, own[0]) for s in _between(p.fn.node, None, p.stmt, False))):
-                before[id(v)] = None
+            # the write: read in its own frame (R2), else the row takes the chain as it is at the call, its own target
+            # not bound before it
+            before[id(v)] = owns[id(v)]
+            if before[id(v)] is not None or (call := at_call(v)) is None:
                 continue
-            p = Point(anchor, p.at[0], p.at)
+            p = call
         # said by a printed row where one holds, else by the first assignment
         held: list[tuple[str, str, Way]] = []
         if (shown := read(p, chain, False)) is not None:
@@ -432,13 +558,7 @@ def last_change(
         before[id(v)] = held[0] if len({value for value, _, _ in held}) == 1 else None
     for v in order:
         if (b := before[id(v)]) is not None and b[0] == observed:
-            frames = "" if v.candidate.owner == anchor.owner else f"; the frames between {anchor.name} and {v.candidate.func} not read"
-            if inside(v):
-                calls = " or ".join(f"{Path(f).name}:{line}" for f, line in _sites(joined[id(seens[v.candidate.owner].run)]))
-                why = f"the pass writes {chain} as it is at the call at {calls}, {observed!r} there"
-            else:
-                why = f"{chain} already held {observed!r} before it"
-            change.dropped.append((v, f"rule R: a stay, {why} ({b[1]}, {b[2].said(subject, observed)}{frames})"))
+            change.dropped.append((v, stay(v, b, False)))
         elif not inside(v) and (a := assigns[id(v)]) is not None and a[0] != observed:
             change.dropped.append((v, f"rule R: it assigns {a[0]!r} ({a[1]}), no write of {observed!r}"))
     dropped = {id(v) for v, _ in change.dropped}
