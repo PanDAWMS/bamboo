@@ -1170,6 +1170,13 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "input": Function(None, result="str"),
 }
 
+#: The builtin classes' methods called on the class that do what a builtin function does, by (class, method):
+#: ``object.__getattribute__(x, name)`` is ``getattr(x, name)`` past a class's own ``__getattribute__`` (a spec's
+#: ``addFile`` reads the job's raw ``PandaID`` so).
+BUILTIN_CLASS_FUNCTIONS: dict[tuple[str, str], Function] = {
+    ("object", "__getattribute__"): Function(ATTRIBUTE),
+}
+
 #: The builtin classes' methods called on the class whose value is keyed by the first argument's elements:
 #: ``dict.fromkeys(xs)``, what iterating it -- or ``list()`` of it -- gives one by one.  Its values are not them.
 KEYED_BY_ELEMENTS = frozenset({("dict", "fromkeys")})
@@ -1179,9 +1186,13 @@ def builtin_function(
     types: "Types", file: str, func: ast.AST, call: ast.Call
 ) -> Optional[Function]:
     """What *call* does where it calls a builtin function by its name -- one no scope binds there
-    (:meth:`calls.Types.is_builtin`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
+    (:meth:`calls.Types.is_builtin`) -- or a method of a builtin class on the class that does what one does
+    (:data:`BUILTIN_CLASS_FUNCTIONS`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
     not say."""
     called = call.func
+    if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+        found = BUILTIN_CLASS_FUNCTIONS.get((called.value.id, called.attr))
+        return found if found is not None and types.is_builtin(file, func, called.value.id) else None
     if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
         return None
     return (
@@ -1197,6 +1208,9 @@ def builtin_function_at(call: ast.Call) -> Optional[Function]:
     from bamboo.codemap.calls import is_builtin_at
 
     called = call.func
+    if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+        found = BUILTIN_CLASS_FUNCTIONS.get((called.value.id, called.attr))
+        return found if found is not None and is_builtin_at(call, called.value.id) else None
     if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
         return None
     return BUILTIN_FUNCTIONS[called.id] if is_builtin_at(call, called.id) else None
