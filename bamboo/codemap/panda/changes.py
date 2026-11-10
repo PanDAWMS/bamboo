@@ -270,6 +270,24 @@ def object_changes(
     ]
 
 
+def field_changes(
+    calls: "Calls",
+    file: str,
+    func: ast.AST,
+    holder: str,
+    bound: tuple = (),
+) -> list[ObjectChange]:
+    """Each place the object a field of *func*'s ``self`` holds -- *holder*, ``self.result`` -- may be changed in
+    place anywhere in *func* of *file*, through the field or a name bound to it there, as :func:`object_changes` reads
+    a name's, in no order with the field's reads: a reader of the field in another method cannot tell which ran
+    first.  ``self.result.set_fatal(...)`` at ``AdderAtlasPlugin.register_files`` 789 stores ``.status_code``.
+    *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
+    return [
+        change
+        for _statement, change in _reading(calls).own_changes(file, func, frozenset({holder}), frozenset(), bound)
+    ]
+
+
 def call_changes(
     calls: "Calls",
     file: str,
@@ -923,8 +941,9 @@ class _Reading:
         attributes: frozenset[str],
         bound: tuple,
     ) -> list[tuple[Optional[ast.stmt], ObjectChange]]:
-        """Each place *func*'s own body may change in place the object *names* hold there -- or, by name, what an
-        attribute named one of *attributes* holds on any object -- with the statement it is in."""
+        """Each place *func*'s own body may change in place the object *names* hold there -- a name, or a field of a
+        name spelled ``self.result`` -- or, by name, what an attribute named one of *attributes* holds on any object
+        -- with the statement it is in."""
         key = (
             file,
             id(func),
@@ -953,8 +972,11 @@ class _Reading:
         def holds(expression: ast.AST) -> bool:
             if isinstance(expression, ast.Name):
                 return expression.id in held
-            return (
-                isinstance(expression, ast.Attribute) and expression.attr in attributes
+            if not isinstance(expression, ast.Attribute):
+                return False
+            # ``self.result`` held as such (:func:`field_changes`): that field of that name, not any ``.result``.
+            return expression.attr in attributes or (
+                isinstance(expression.value, ast.Name) and f"{expression.value.id}.{expression.attr}" in held
             )
 
         held |= self._aliases(file, func, nodes, holds, bound)

@@ -47,6 +47,7 @@ changed in place, and its changes are not read.
 from __future__ import annotations
 
 import ast
+import re
 from typing import Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
@@ -54,6 +55,11 @@ from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind, own_nodes, returns
 from bamboo.codemap.models import (
     CHANGE_UNREAD,
+    FIELD_ANNOTATED,
+    FIELD_ASSIGN,
+    FIELD_AUGMENTED,
+    FIELD_CLASS,
+    FIELD_SETATTR,
     KEY_ATTRIBUTE,
     KEY_CALL,
     KEY_CONSTANT,
@@ -75,6 +81,8 @@ from bamboo.codemap.models import (
     WRITE_VALUE,
     AfterChange,
     EnteredFrom,
+    FieldBinding,
+    FieldFrom,
     GuardFrom,
     HeldChange,
     HeldSource,
@@ -176,6 +184,80 @@ def owner_of(file: str, func: ast.AST) -> str:
     return f"{file}::{getattr(func, 'name', '<module>')}"
 
 
+def _class_key(file: str, cls: ast.ClassDef) -> str:
+    """``file::Class`` -- ``Outer.Inner`` for a nested class, where the tree has parent links."""
+    try:
+        name = pathcond.qualified_name(cls)
+    except Exception:  # noqa: BLE001 -- a tree without parent links names the class alone
+        name = cls.name
+    return f"{file}::{name or cls.name}"
+
+
+def _method_class(func: ast.AST) -> Optional[ast.ClassDef]:
+    """The class whose method *func* is or is nested in -- the class its ``self`` is of -- by parent links."""
+    method = func
+    here = getattr(func, "parent", None)
+    while here is not None:
+        if isinstance(here, ast.ClassDef):
+            return here if any(one is method for one in here.body) else None
+        if isinstance(here, _FUNCTIONS):
+            method = here
+        here = getattr(here, "parent", None)
+    return None
+
+
+#: A step that is a field: ``.status_code``, not ``[0]`` nor ``.__enter__()``.
+FIELD_STEP = re.compile(r"^\.([A-Za-z_]\w*)$")
+#: How many steps past a field a way's end is read on for the FieldFroms further down (``self.a.b.c``): a way
+#: reaching itself again (``self.a = self.a.next``) would else ask for ever longer paths.
+_FIELD_REST = 6
+
+
+def end_path(source: HeldSource) -> Optional[tuple[str, ...]]:
+    """The steps from where *source* ends to the value, from its ``self`` or object: ``(".result", ".x")`` for
+    ``self.result`` with the step ``.x``; ``None`` for another end.  An end that may be only a part of the value
+    (*paths*: ``self.job`` at ``.job`` of the plugin ``AdderAtlasPlugin(self.job)`` builds) is read as the whole --
+    the record keeps no ``()`` beside a part's path to tell them apart --: a FieldFrom too many, never one short."""
+    if source.kind == KEY_SELF_FIELD:
+        parts = source.name.split(".")
+        if parts[0] != "self":
+            return None
+        return tuple(f".{part}" for part in parts[1:]) + tuple(source.steps)
+    if source.kind == KEY_OBJECT:
+        return tuple(source.steps)
+    return None
+
+
+def _first_positional(func: ast.AST) -> Optional[str]:
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return None
+    first = (arguments.posonlyargs + arguments.args)[:1]
+    return first[0].arg if first else None
+
+
+def _is_field(node: ast.AST, me: str, field: str) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == field
+        and isinstance(node.value, ast.Name)
+        and node.value.id == me
+    )
+
+
+def _with_functions(func: ast.AST) -> Iterable[tuple[ast.AST, ast.AST]]:
+    """Each node of *func* with the innermost definition it is in -- not into a nested class, whose methods have
+    their own ``self``."""
+    todo: list[tuple[ast.AST, ast.AST]] = [(child, func) for child in ast.iter_child_nodes(func)]
+    while todo:
+        node, inner = todo.pop()
+        yield node, inner
+        if isinstance(node, ast.ClassDef):
+            continue
+        onward = node if isinstance(node, _FUNCTIONS) else inner
+        todo.extend((child, onward) for child in ast.iter_child_nodes(node))
+
+
 def _parameters(func: ast.AST) -> set[str]:
     arguments = getattr(func, "args", None)
     if arguments is None:
@@ -269,6 +351,14 @@ class _Reader:
         self._hops: dict[tuple, tuple[_Change, ...]] = {}
         #: ``(parameter, file:line)`` -> the call there handing it, read once (:meth:`hop`).
         self._hop_at: dict[tuple, Optional[_Hop]] = {}
+        #: ``(class, field)`` -> its FieldFrom; what is asked of the FieldFroms and ParameterFroms with the steps past
+        #: their ends still to be read on (:meth:`_ask`), and what was asked.
+        self.fields: dict[tuple[str, str], FieldFrom] = {}
+        self._asked: dict[tuple[str, tuple, tuple[str, ...]], None] = {}
+        self._asks: list[tuple[str, tuple, tuple[str, ...]]] = []
+        self._owners: dict[int, str] = {}
+        self._classes: Optional[dict[str, tuple[str, ast.ClassDef]]] = None
+        self._stored: Optional[dict[str, list[tuple[str, str]]]] = None
 
     def filled(self, file: str, func: ast.AST):
         held = self._filled.get(id(func))
@@ -283,6 +373,16 @@ class _Reader:
             held = self._filled[id(func)] = self._sqlwrite._Filled(
                 self.reading, file, func, here
             )
+        return held
+
+    def class_owner(self, file: str, func: ast.AST) -> str:
+        """The class *func*'s ``self`` is of, ``file::Class``; empty where *func* is no method's."""
+        held = self._owners.get(id(func))
+        if held is None:
+            cls = _method_class(func)
+            if cls is None and getattr(func, "parent", None) is None and file in self.trees:
+                cls = pathcond.class_of(self.trees[file], func)
+            held = self._owners[id(func)] = _class_key(file, cls) if cls is not None else ""
         return held
 
     # -- the ends ----------------------------------------------------------
@@ -321,7 +421,9 @@ class _Reader:
                     source.kind,
                     name=source.name,
                     line=source.line,
-                    site_owner=source.site_owner,
+                    site_owner=(
+                        self.class_owner(file, func) if source.kind == KEY_SELF_FIELD else source.site_owner
+                    ),
                     site_line=source.site_line,
                     paths=paths,
                     column=source.column,
@@ -530,7 +632,7 @@ class _Reader:
         self, expr: ast.Name, at: ast.AST, file: str, func: ast.AST
     ) -> list[_Way]:
         if expr.id in ("self", "cls"):
-            return [_Way(KEY_SELF_FIELD, name=expr.id, line=expr.lineno)]
+            return [_Way(KEY_SELF_FIELD, name=expr.id, line=expr.lineno, site_owner=self.class_owner(file, func))]
         point = expr if getattr(expr, "parent", None) is not None else at
         if (
             expr.id not in _parameters(func)
@@ -823,14 +925,17 @@ class _Reader:
             found: list[_Way] = []
             for target in placed.targets:
                 if placed.thread or getattr(target.func, "name", "") == "__init__":
-                    built = (
-                        target.cls.name
-                        if target.cls is not None
-                        else owner_of(target.file, target.func)
-                    )
-                    made = _Way(KEY_OBJECT, built, call.lineno)
+                    # The class built: the one the definition was looked up for (``AdderAtlasPlugin(job)`` runs
+                    # its base's ``__init__``), else the one defining it.
                     steps = ((f"[{index!r}]",) if index is not None else ()) + ((f".{field}",) if field else ())
-                    found.append(made._replace(steps=steps))
+                    if target.bound:
+                        builds = [(name.name, _class_key(where, name)) for where, name in target.bound]
+                    elif target.cls is not None:
+                        builds = [(target.cls.name, _class_key(target.file, target.cls))]
+                    else:
+                        builds = [(owner_of(target.file, target.func), "")]
+                    for built, key in builds:
+                        found.append(_Way(KEY_OBJECT, built, call.lineno, site_owner=key, steps=steps))
                     continue
                 generator = self._is_generator(target)
                 if generator and not yielded:
@@ -838,6 +943,7 @@ class _Reader:
                     continue
                 handed = bind(call, target, placed.on_class)
                 callee = (owner_of(target.file, target.func), target.func.lineno)  # type: ignore[attr-defined]
+                receiver: Optional[list[_Way]] = None
                 if generator:
                     returned = self._of_field(self._yielded(target), field)
                 elif index is not None:
@@ -868,6 +974,27 @@ class _Reader:
                                     changes=outer.changes + inner.changes,
                                 )
                             )
+                    elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
+                        # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
+                        if receiver is None:
+                            receiver = self._receiver(call, target, placed.on_class, handed, file, func)
+                        if not receiver:
+                            found.append(_stop("receiver", owner_of(target.file, target.func), at=here))
+                            continue
+                        fields = tuple(f".{part}" for part in inner.name.split(".")[1:])
+                        for outer in receiver:
+                            found.append(
+                                outer._replace(
+                                    steps=outer.steps + fields + inner.steps,
+                                    through=tuple(
+                                        call._replace(steps=call.steps + len(outer.steps) + len(fields))
+                                        for call in inner.through
+                                    )
+                                    + outer.through,
+                                    route=(here,) + inner.route + outer.route,
+                                    changes=outer.changes + inner.changes,
+                                )
+                            )
                     else:
                         found.append(inner._replace(route=(here,) + inner.route))
             if placed.unplaced:
@@ -886,6 +1013,29 @@ class _Reader:
         else:
             ways = [_Way(KEY_CALL, ast.unparse(call.func), call.lineno, what=placed.unplaced)]
         return self._of_field(ways, field)
+
+    def _receiver(
+        self, call: ast.Call, target: Target, on_class: bool, handed: dict, file: str, func: ast.AST
+    ) -> list[_Way]:
+        """The ways of the object *call* runs *target*, a method, on: its receiver (``job`` in ``job.isCancelled()``),
+        the caller's ``self`` for ``super().m()``, the first argument of a method read off its class; none for a
+        static or class method or a call naming no object (``m = job.isCancelled; m()``)."""
+        if target.cls is None or any(
+            isinstance(one, ast.Name) and one.id in ("staticmethod", "classmethod")
+            for one in getattr(target.func, "decorator_list", ())
+        ):
+            return []
+        if on_class:
+            arguments = target.func.args  # type: ignore[attr-defined]
+            first = (arguments.posonlyargs + arguments.args)[:1]
+            given = handed.get(first[0].arg) if first else None
+            return self.read(given, call, file, func) if given is not None else []
+        if not isinstance(call.func, ast.Attribute):
+            return []
+        value = call.func.value
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "super":
+            return [_Way(KEY_SELF_FIELD, name="self", line=call.lineno, site_owner=self.class_owner(file, func))]
+        return self.read(value, call, file, func)
 
     def _through(self, call: ast.Call, file: str, func: ast.AST) -> Optional[_Through]:
         """A call outside the corpus that is handed one positional argument -- a function or a module's
@@ -1035,23 +1185,241 @@ class _Reader:
 
     # -- the parameters --------------------------------------------------------
 
-    def queue(self, sources: Iterable[HeldSource]) -> None:
-        """The parameters *sources*, a record's ways, end at: to be read."""
+    def queue(self, sources: Iterable[HeldSource], rest: tuple[str, ...] = ()) -> None:
+        """The parameters *sources*, a record's ways, end at: to be read; and the field of each ``self`` or object
+        one ends at (:class:`FieldFrom`) -- with *rest*, the steps still to be taken past the ends, read on through
+        the ParameterFroms and FieldFroms they lead to."""
         for source in sources:
             key = (source.site_owner, source.site_line or 0, source.name)
-            if source.kind == KEY_PARAMETER and key not in self.parameters:
-                self._pending.setdefault(key, self._functions[key])
+            if source.kind == KEY_PARAMETER:
+                if key not in self.parameters:
+                    self._pending.setdefault(key, self._functions[key])
+                onward = tuple(source.steps) + rest
+                if onward:
+                    self._ask("parameter", key, onward)
+            elif source.site_owner:
+                path = end_path(source)
+                if path is not None and path + rest:
+                    path += rest
+                    field = FIELD_STEP.match(path[0])
+                    if field is not None:
+                        self._ask("field", (source.site_owner, field.group(1)), path[1:])
             for change in source.changes:
                 self.queue(change.value)
 
+    def ask_field(self, owner: str, field: str) -> None:
+        """Read the FieldFrom of *owner*'s *field*: one a guard reading ``self.<field>`` off ``self`` names."""
+        if owner:
+            self._ask("field", (owner, field), ())
+
+    def _ask(self, kind: str, key: tuple, rest: tuple[str, ...]) -> None:
+        if len(rest) <= _FIELD_REST and (kind, key, rest) not in self._asked:
+            self._asked[(kind, key, rest)] = None
+            self._asks.append((kind, key, rest))
+
     def settle(self) -> None:
-        """Read every parameter a record's way ends at, and the ones those reach."""
-        while self._pending:
-            key, (file, func) = self._pending.popitem()
-            if key in self.parameters:
+        """Read every parameter a record's way ends at, and the ones those reach; and every field asked."""
+        while self._pending or self._asks:
+            while self._pending:
+                key, (file, func) = self._pending.popitem()
+                if key in self.parameters:
+                    continue
+                made = self.parameters[key] = self._parameter_from(key, file, func)
+                self.queue(made.sources)
+            if not self._asks:
                 continue
-            made = self.parameters[key] = self._parameter_from(key, file, func)
-            self.queue(made.sources)
+            kind, asked, rest = self._asks.pop(0)
+            if kind == "parameter":
+                parameter = self.parameters.get(asked)
+                if parameter is not None:
+                    self.queue(parameter.sources, rest)
+                continue
+            owner, name = asked
+            field = self.fields.get((owner, name))
+            if field is None:
+                field = self.fields[(owner, name)] = self._field_from(owner, name)
+                for binding in field.bindings:
+                    self.queue(binding.sources)
+                for change in field.changes:
+                    self.queue(change.value)
+            if rest:
+                for binding in field.bindings:
+                    self.queue(binding.sources, rest)
+
+    # -- the fields ------------------------------------------------------------
+
+    def _class_at(self, owner: str) -> Optional[tuple[str, ast.ClassDef]]:
+        if self._classes is None:
+            self._classes = {}
+            for file, tree in self.trees.items():
+                for node in walk(tree):
+                    if isinstance(node, ast.ClassDef):
+                        self._classes.setdefault(_class_key(file, node), (file, node))
+        return self._classes.get(owner)
+
+    def _family(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
+        """*cls*'s corpus bases in its order, and its corpus subclasses: the classes ``self`` may be of."""
+        found: dict[tuple[str, int], tuple[str, ast.ClassDef]] = {}
+        for one_file, one in self.calls.types.mro(file, cls):
+            found.setdefault((one_file, one.lineno), (one_file, one))
+        todo = [(file, cls)]
+        while todo:
+            here_file, here = todo.pop()
+            for one_file, one in self.calls.subclasses(here_file, here):
+                if (one_file, one.lineno) not in found:
+                    found[(one_file, one.lineno)] = (one_file, one)
+                    todo.append((one_file, one))
+        return list(found.values())
+
+    def _stores(self) -> dict[str, list[tuple[str, str]]]:
+        """``{field: [(file:line, class)]}``: each store of a field of the corpus -- ``class`` the method's whose
+        ``self`` it is stored on, empty for another object (``x.f = v``, ``setattr(x, "f", v)``)."""
+        if self._stored is None:
+            self._stored = {}
+            for file, tree in self.trees.items():
+                for node, inner in _with_functions(tree):
+                    me = _first_positional(inner) if _method_class(inner) is not None else None
+                    stored: list[tuple[ast.expr, str]] = []
+                    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        stored = [(target, "") for target, _value in pathcond.assigned_targets(node)]
+                    elif isinstance(node, ast.AugAssign):
+                        stored = [(node.target, "")]
+                    elif (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "setattr"
+                        and len(node.args) == 3
+                        and isinstance(node.args[1], ast.Constant)
+                        and isinstance(node.args[1].value, str)
+                    ):
+                        stored = [(node.args[0], node.args[1].value)]
+                    for target, named in stored:
+                        if named:
+                            holder, field = target, named
+                        elif isinstance(target, ast.Attribute):
+                            holder, field = target.value, target.attr
+                        else:
+                            continue
+                        own = isinstance(holder, ast.Name) and me is not None and holder.id == me
+                        self._stored.setdefault(field, []).append(
+                            (f"{file}:{getattr(node, 'lineno', 0)}", self.class_owner(file, inner) if own else "")
+                        )
+        return self._stored
+
+    def _field_from(self, owner: str, field: str) -> FieldFrom:
+        """What *field* of an object of *owner* may hold: each binding of it in the class's methods and body and in
+        its bases' and subclasses', read as a guard's name is; what may change the object it holds there; and why it
+        may hold more."""
+        place = self._class_at(owner)
+        if place is None:
+            return FieldFrom(
+                owner=owner, field=field, stops=[KeyStop(kind="failed", name=field, what="no class of the corpus", at=[owner])]
+            )
+        try:
+            family = self._family(*place)
+        except Exception as error:  # noqa: BLE001 -- as _safely
+            family = [place]
+            failed = [KeyStop(kind="failed", name=field, what=f"{type(error).__name__}: {error}", at=[owner])]
+        else:
+            failed = []
+        bindings: list[FieldBinding] = []
+        changes: list[_Change] = []
+        stops: list[KeyStop] = list(failed)
+        for file, cls in family:
+            for statement in cls.body:
+                if isinstance(statement, _FUNCTIONS) and statement.name == field:
+                    stops.append(KeyStop(kind="method", name=field, at=[f"{file}:{statement.lineno}"]))
+                elif isinstance(statement, (ast.Assign, ast.AnnAssign)) and getattr(statement, "value", None) is not None:
+                    for target, value in pathcond.assigned_targets(statement):
+                        if isinstance(target, ast.Name) and target.id == field and value is not None:
+                            bindings.append(
+                                self._binding(file, statement, _class_key(file, cls), FIELD_CLASS, value, cls)
+                            )
+            for method in pathcond.methods_of(cls):
+                me = _first_positional(method)
+                if me is None or any(
+                    isinstance(one, ast.Name) and one.id == "staticmethod" for one in method.decorator_list
+                ):
+                    continue
+                touched = False
+                for node, inner in _with_functions(method):
+                    if _is_field(node, me, field):
+                        touched = True
+                    if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        how = FIELD_ANNOTATED if isinstance(node, ast.AnnAssign) else FIELD_ASSIGN
+                        for target, value in pathcond.assigned_targets(node):
+                            if not _is_field(target, me, field):
+                                continue
+                            if value is None:
+                                stops.append(
+                                    KeyStop(kind="element", name=field, what="a starred unpacking", at=[f"{file}:{node.lineno}"])
+                                )
+                                continue
+                            bindings.append(self._binding(file, node, owner_of(file, method), how, value, inner))
+                    elif isinstance(node, ast.AugAssign) and _is_field(node.target, me, field):
+                        bindings.append(self._binding(file, node, owner_of(file, method), FIELD_AUGMENTED, node.value, inner))
+                    elif isinstance(node, (ast.For, ast.AsyncFor, ast.With, ast.AsyncWith)):
+                        bound = (
+                            [node.target]
+                            if isinstance(node, (ast.For, ast.AsyncFor))
+                            else [item.optional_vars for item in node.items if item.optional_vars is not None]
+                        )
+                        if any(_is_field(one, me, field) for target in bound for one in walk(target)):
+                            stops.append(
+                                KeyStop(kind="bound", name=field, what="a loop's or a with's target", at=[f"{file}:{node.lineno}"])
+                            )
+                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setattr":
+                        if len(node.args) == 3 and isinstance(node.args[0], ast.Name) and node.args[0].id == me:
+                            name = node.args[1]
+                            if isinstance(name, ast.Constant):
+                                if name.value == field:
+                                    bindings.append(
+                                        self._binding(file, node, owner_of(file, method), FIELD_SETATTR, node.args[2], inner)
+                                    )
+                            else:
+                                stops.append(
+                                    KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
+                                )
+                    elif isinstance(node, ast.Attribute) and node.attr == "__dict__" and isinstance(node.value, ast.Name) and node.value.id == me:
+                        stops.append(KeyStop(kind="computed", name=field, what=f"{me}.__dict__", at=[f"{file}:{node.lineno}"]))
+                if touched:
+                    try:
+                        raw = changes_mod.field_changes(self.calls, file, method, f"{me}.{field}")
+                    except Exception as error:  # noqa: BLE001 -- as _changed
+                        raw = [
+                            changes_mod.ObjectChange(
+                                file, method.lineno, CHANGE_UNREAD, changes_mod.EVERY, f"{type(error).__name__}: {error}"
+                            )
+                        ]
+                    changes += self._made(raw)
+        outside = sorted(at for at, stored_on in self._stores().get(field, ()) if not stored_on)
+        if outside:
+            stops.append(KeyStop(kind="outside", name=field, what="stored on another object, by the name", at=outside))
+        seen: set[tuple] = set()
+        said: list[HeldChange] = []
+        for change in changes:
+            mark = (change.at, change.kind, change.key, change.what, change.via)
+            if mark not in seen:
+                seen.add(mark)
+                said.append(_change_said(change))
+        unique_stops: dict[tuple, KeyStop] = {}
+        for stop in stops:
+            unique_stops.setdefault((stop.kind, stop.name, stop.what, tuple(stop.at)), stop)
+        return FieldFrom(
+            owner=owner,
+            field=field,
+            bindings=sorted(bindings, key=lambda one: (one.at.rsplit(":", 1)[0], int(one.at.rsplit(":", 1)[1]))),
+            changes=said,
+            stops=list(unique_stops.values()),
+        )
+
+    def _binding(
+        self, file: str, statement: ast.AST, owner: str, how: str, value: ast.expr, func: ast.AST
+    ) -> FieldBinding:
+        sources, stops = _said(self._safely(value, statement, file, func))
+        return FieldBinding(
+            at=f"{file}:{getattr(statement, 'lineno', 0)}", owner=owner, how=how, sources=sources, stops=stops
+        )
 
     def _parameter_from(
         self, key: tuple[str, int, str], file: str, func: ast.AST
@@ -1279,6 +1647,22 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
     return found
 
 
+def _self_values(test: ast.expr) -> list[str]:
+    """The fields *test* reads as values off ``self`` itself -- ``attempt_nr`` in ``self.attempt_nr is not None`` --,
+    not a method it calls (``self.isCancelled()``)."""
+    called = {id(node.func) for node in walk(test) if isinstance(node, ast.Call)}
+    return sorted(
+        {
+            node.attr
+            for node in walk(test)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and id(node) not in called
+        }
+    )
+
+
 def _self_path(node: ast.expr) -> Optional[str]:
     """``self.taskSpec`` for that expression: attributes on ``self`` or ``cls``, or ``None``."""
     here = node
@@ -1364,17 +1748,19 @@ def guard_froms(
     record,
     writes: Iterable[SetFrom] = (),
     entered: Iterable[EnteredFrom] = (),
-) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom]]:
+) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom], list[FieldFrom]]:
     """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
     :attr:`GuardFrom.calls`), and each name it reads (:func:`_names`); each of *writes*
     (:func:`sqlwrite.extract`'s) whose column a guard's way ends at -- through the ParameterFroms -- its ways read as
     the guards', and on a guard's way ending where one of its column's does, what may change the object between
     (:func:`_after_reads`); a :class:`WriteFrom` for the object each arm writes and the value each passthrough arm
-    hands on (:func:`_written`), read as the guards' names are; and a :class:`ParameterFrom` for each parameter a
-    way of any ends at, and those reach.  Nothing without *calls* or *record*: the reading places calls and reads
-    fetches by them."""
+    hands on (:func:`_written`), read as the guards' names are; a :class:`ParameterFrom` for each parameter a
+    way of any ends at, and those reach; and a :class:`FieldFrom` for each field of a ``self`` or an object a way of
+    any ends at -- its first step past the end, then the next ones past the FieldFroms' and ParameterFroms' ends --
+    and each field a test reads off ``self`` itself.  Nothing without *calls* or *record*: the reading places calls
+    and reads fetches by them."""
     if calls is None or record is None:
-        return [], [], [], []
+        return [], [], [], [], []
     junctions = list(junctions)
     reader = _Reader(
         calls, record, read_sites, {junction.owner for junction in junctions}, trees
@@ -1431,6 +1817,9 @@ def guard_froms(
                     if guard is None:
                         sources, stops = _said(reader._safely(node, node, file, func))
                         reader.queue(sources)
+                        if read == "self":
+                            for field in _self_values(test):
+                                reader.ask_field(reader.class_owner(file, func), field)
                         guard = found[key] = GuardFrom(
                             owner=junction.owner,
                             test_line=test.lineno,
@@ -1465,6 +1854,9 @@ def guard_froms(
                     if guard is None:
                         sources, stops = _said(reader._safely(node, node, file, func))
                         reader.queue(sources)
+                        if read == "self":
+                            for field in _self_values(test):
+                                reader.ask_field(reader.class_owner(file, func), field)
                         guard = found[key] = GuardFrom(
                             owner=site.owner,
                             test_line=test.lineno,
@@ -1514,6 +1906,7 @@ def guard_froms(
         ),
         sorted(sets, key=lambda one: (one.owner, one.statement, one.column, one.text)),
         sorted(written.values(), key=lambda one: (one.owner, one.line, one.subject, one.role, one.expression)),
+        sorted(reader.fields.values(), key=lambda one: (one.owner, one.field)),
     )
 
 

@@ -3231,7 +3231,14 @@ class KeySource(BaseModel):
             "as written."
         ),
     )
-    site_owner: str = Field(default="", description="``rows`` / ``sequence``: the statement's owner.")
+    site_owner: str = Field(
+        default="",
+        description=(
+            "``rows`` / ``sequence``: the statement's owner.  On a :class:`HeldSource`, ``self_field``: the class whose "
+            "method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
+            ":class:`FieldFrom` of a field of it is found; empty where the ``self`` is no method's."
+        ),
+    )
     site_line: Optional[int] = Field(
         default=None, description="``rows`` / ``sequence``: the line the statement runs on."
     )
@@ -4055,6 +4062,7 @@ class MapFragment(BaseModel):
     runnables: list["Runnable"] = Field(default_factory=list)
     entered_froms: list["EnteredFrom"] = Field(default_factory=list)
     write_froms: list["WriteFrom"] = Field(default_factory=list)
+    field_froms: list["FieldFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5873,6 +5881,9 @@ KEY_STOPS: dict[str, str] = {
     "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",
     "write_first": "{name} runs only before the read in {at}",
     "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
+    "receiver": "the call at {at} runs {name} on an object it does not name",
+    "computed": "{name} may be set at {at} by a name computed there: {what}",
+    "method": "{name} is a method or property the class defines at {at}",
 }
 
 
@@ -5978,6 +5989,67 @@ class ParameterFrom(BaseModel):
 WRITE_OBJECT = "object"
 WRITE_VALUE = "value"
 WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
+
+
+#: How a :class:`FieldBinding` binds the field: ``self.f = v`` (with a tuple target at any depth), ``self.f: T = v``,
+#: ``self.f += v``, ``setattr(self, "f", v)``, ``f = v`` in the class's body.
+FIELD_ASSIGN = "assign"
+FIELD_ANNOTATED = "annotated"
+FIELD_AUGMENTED = "augmented"
+FIELD_SETATTR = "setattr"
+FIELD_CLASS = "class"
+FIELD_BINDS = (FIELD_ASSIGN, FIELD_ANNOTATED, FIELD_AUGMENTED, FIELD_SETATTR, FIELD_CLASS)
+
+
+class FieldBinding(BaseModel):
+    """One statement of a :class:`FieldFrom`'s classes binding the field, with its value read as a
+    :class:`GuardFrom` reads a name there."""
+
+    at: str = Field(description="``file:line`` of the statement.")
+    owner: str = Field(description="The method it is in (``file::name``), or the class for its body.")
+    how: str = Field(description=f"How: one of {', '.join(FIELD_BINDS)}; ``augmented``'s ways are the operand's.")
+    sources: list[HeldSource] = Field(default_factory=list)
+    stops: list[KeyStop] = Field(default_factory=list)
+
+
+class FieldFrom(BaseModel):
+    """What a field of an object of a class may hold, read in the class: the next link of a way that ends at
+    ``self.<field>`` or at an object a corpus class builds with the field as its first step (``site_owner`` and the
+    field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
+
+    ``self.add_result.is_succeeded()`` at ``AdderGen.process_job_report`` 440 reads ``self.add_result``, bound in
+    the class at ``execute_plugin`` 265 to ``self.adder_plugin.result``: a way ending at ``self.adder_plugin``, built
+    at 256 by ``AdderAtlasPlugin``, whose ``result`` is bound at ``AdderPluginBase.__init__`` 45 to an
+    ``AdderResult``; ``AdderAtlasPlugin.register_files`` 789 calls ``self.result.set_fatal(...)``, which stores
+    ``status_code`` -- a change of the ``result``'s FieldFrom.
+
+    The classes are the class's corpus bases in its order and its corpus subclasses (``self`` may be any of them):
+    each binding says its method.  Not said: which binding or change a run took, nor whether before or after the
+    read -- they are read in every method, in no order; a store of the field from outside the classes' methods
+    (``x.f = v`` on another holder) is not read, only named (a stop ``outside``, by the attribute's name: an upper
+    bound).  :class:`SetFrom` and the changes after a read (:attr:`HeldSource.after`) read on through
+    ParameterFroms, not these.
+    """
+
+    owner: str = Field(description="The class, ``file::Class``.")
+    field: str
+    bindings: list[FieldBinding] = Field(default_factory=list)
+    changes: list[HeldChange] = Field(
+        default_factory=list,
+        description=(
+            "Each place the object the field holds may be changed in place in a method of the classes -- through "
+            "``self.<field>`` or a name bound to it there -- as :class:`HeldSource` *changes* says them (*via* from "
+            "that method); in no order."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)``, ``__dict__``); "
+            "``method``: the classes define it as a method or property; ``outside``: the places a field of its name "
+            "is stored on another object than a method's ``self``."
+        ),
+    )
 
 
 class WriteFrom(BaseModel):

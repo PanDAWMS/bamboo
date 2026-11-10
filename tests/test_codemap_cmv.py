@@ -156,7 +156,7 @@ def guards(tmp_path_factory: pytest.TempPathFactory) -> list[GuardFrom]:
     trees = {module.rel_path: module.tree for module in modules}
     with sql.across_calls(calls):
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        found, _parameters, _sets, _written = heldfrom.guard_froms(junctions, [], trees, calls, record)
+        found, _parameters, _sets, _written, _fields = heldfrom.guard_froms(junctions, [], trees, calls, record)
     return found
 
 

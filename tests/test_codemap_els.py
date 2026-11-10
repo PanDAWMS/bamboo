@@ -173,7 +173,7 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
     trees = {module.rel_path: module.tree for module in modules}
     with sql.across_calls(calls):
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        guards, parameters, _sets, written = heldfrom.guard_froms(junctions, [], trees, calls, record)
+        guards, parameters, _sets, written, _fields = heldfrom.guard_froms(junctions, [], trees, calls, record)
     return MapFragment(
         map_id="m",
         derived_from="v",

@@ -768,6 +768,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.parameter_froms,
             fragment.set_froms,
             fragment.write_froms,
+            fragment.field_froms,
         ) = heldfrom.guard_froms(
             fragment.junctions,
             fragment.read_sites,

@@ -232,7 +232,7 @@ def _build(tmp_path: Path, sources: dict[str, str], arms: tuple[tuple[str, str, 
     with sql.across_calls(calls):
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
         ways = entered.entered_froms(junctions, trees, calls, record)
-        guards, parameters, _writes, _written = heldfrom.guard_froms(junctions, [], trees, calls, record, entered=ways)
+        guards, parameters, _writes, _written, _fields = heldfrom.guard_froms(junctions, [], trees, calls, record, entered=ways)
         runs = runnable.runnables(junctions, trees, calls, record, guards, parameters, entered=ways)
     return MapFragment(
         map_id="m",

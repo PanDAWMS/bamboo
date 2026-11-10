@@ -362,6 +362,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: what the object each arm writes, and the value a passthrough arm hands "
         "on, hold, way by way -- see WriteFrom; a dump's section compare reads them"
     ),
+    "field_froms": (
+        "records beside the nodes, not nodes: what a field of an object of a class may hold, read in the class -- "
+        "see FieldFrom; a dump's section compare reads them"
+    ),
     "entered_froms": (
         "records beside the nodes, not nodes: where each function holding arms is entered from, under what tests -- "
         "see EnteredFrom; a dump's section compare reads them"
