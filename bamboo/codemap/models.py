@@ -675,6 +675,57 @@ class OffRow(BaseModel):
     )
 
 
+#: Why an arm cannot leave its value on a row made before it (:attr:`AfterMade.by`): its object has no row yet; the
+#: statement makes the row it writes; the statement's own test asks the row for the value it sets.
+AFTER_MADE_NO_ROW_YET = "no_row_yet"
+AFTER_MADE_NEW_ROW = "new_row"
+AFTER_MADE_SAME_VALUE_WHERE = "same_value_where"
+#: Why it may (:attr:`AfterMade.why`): its function writes the column by an ``UPDATE``, or by an ``INSERT`` of a row
+#: moved within its class; its object came from a row, a parameter or a copy, not a new object of its function; a
+#: key of the object is set; the object's row may be made before it; a part is not read; a key arm or a write of the
+#: class elsewhere breaks what "no row yet" rests on (:mod:`bamboo.codemap.panda.aftermade`).
+AFTER_MADE_UPDATE = "update"
+AFTER_MADE_MOVED = "moved"
+AFTER_MADE_ROW_OBJECT = "row_object"
+AFTER_MADE_KEY_SET = "key_set"
+AFTER_MADE_MADE_BEFORE = "made_before"
+AFTER_MADE_OPEN = "open"
+AFTER_MADE_KEY_ELSEWHERE = "key_elsewhere"
+
+
+class AfterMade(BaseModel):
+    """Whether an arm can leave a value other than the row's on a row made before it -- see
+    :mod:`bamboo.codemap.panda.aftermade`."""
+
+    counted: bool = Field(description="``True`` where it may: a reader comparing the row's value with the arm's counts it.")
+    by: str = Field(
+        default="",
+        description=(
+            f"Where not counted, why: ``{AFTER_MADE_NO_ROW_YET}`` / ``{AFTER_MADE_NEW_ROW}`` / "
+            f"``{AFTER_MADE_SAME_VALUE_WHERE}``."
+        ),
+    )
+    why: list[str] = Field(
+        default_factory=list,
+        description=(
+            f"Where counted, each reason, sorted: ``{AFTER_MADE_UPDATE}`` / ``{AFTER_MADE_MOVED}`` / "
+            f"``{AFTER_MADE_ROW_OBJECT}`` / ``{AFTER_MADE_KEY_SET}`` / ``{AFTER_MADE_MADE_BEFORE}`` / "
+            f"``{AFTER_MADE_OPEN}`` / ``{AFTER_MADE_KEY_ELSEWHERE}``."
+        ),
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where the reason is, sorted: the key assignments, the places that may make the row before the arm, the "
+            "writes; for ``key_elsewhere`` the lines are of the arms or writes elsewhere and *elsewhere* names them."
+        ),
+    )
+    elsewhere: list[str] = Field(
+        default_factory=list,
+        description="With ``key_elsewhere``: each arm or write breaking it, as ``owner:line``, sorted.",
+    )
+
+
 
 #: How a later write of a column is made at its level (:attr:`Rewrite.how`, :attr:`RewriteSite.how`): an assignment
 #: on the object; a call whose run assigns it on the object or writes it on the object's row; a statement writing it
@@ -1049,6 +1100,14 @@ class Branch(BaseModel):
             "A reader of a value the row holds skips the arm "
             "(:meth:`~bamboo.codemap.lookup.CodeMap.producers_of`).  ``None`` "
             "where not proven: the arm may write its row, as every arm is read."
+        ),
+    )
+    after_made: Optional[AfterMade] = Field(
+        default=None,
+        description=(
+            "Whether the arm can leave a value other than the row's on a row made before it: "
+            ":mod:`bamboo.codemap.panda.aftermade`, which says what that rests on.  ``None`` where not read: an arm "
+            "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
 
