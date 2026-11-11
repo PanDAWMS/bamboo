@@ -142,6 +142,9 @@ class _Way(NamedTuple):
     changes: tuple["_Change", ...] = ()
     #: Where the end is a container made empty: what it holds (:data:`callfacts.COLLECTION`, :data:`callfacts.MAPPING`).
     made_empty: str = ""
+    #: The *paths* are the path carry's (:attr:`KeySource.paths`): the source or a part of it sits there, which one
+    #: not known -- not where the reader placed the source itself (:func:`_at`).
+    loose: bool = False
 
 
 class _Through(NamedTuple):
@@ -181,18 +184,105 @@ _COMPREHENSIONS = {
 _ELEMENT_COMPREHENSIONS = frozenset({"<listcomp>", "<setcomp>", "<genexpr>"})
 
 
-def _step(way: _Way, step: str) -> _Way:
+#: A ``with``'s step: its ``__enter__`` mostly gives the context itself, so a way's paths stay as they are.
+_ENTER = ".__enter__()"
+
+
+def _unread_part(way: _Way, step: str) -> _Way:
+    """The part *step* of *way*'s value as a value no way reaches: an attribute's (a ``.field`` step) or an unknown
+    value, spelled as the way's end with its steps."""
+    kind = KEY_ATTRIBUTE if step.startswith(".") else KEY_UNKNOWN
+    return _Way(kind, way.name + "".join(way.steps) + step, way.line)
+
+
+def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = None) -> list[_Way]:
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
-    (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``), as a tuple literal's is
-    (:meth:`_Reader._element`); a dict's elements are its keys, not the values it is read as."""
+    (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
+    the values it is read as.
+
+    A way whose source sits at parts of the value (*paths*) is cut by the step, as the path carry takes a part: the
+    parts under it, with the rest of their steps; none where no part is under it, the source not in the part
+    (``self.adder_plugin.result`` holds none of what the plugin holds at ``.job``).  A part the step takes whole is
+    the source itself, a way of its own with no paths, where the reader placed it (``[taskSpec.site][0]`` is
+    ``taskSpec.site``); where the paths are the carry's (*loose*) it is the source or a part of it, not known which:
+    *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
+    ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too."""
     if (
         step.startswith("[")
+        and not way.paths
         and way.through
         and way.through[0].call in _ELEMENT_COMPREHENSIONS
         and way.through[0].steps == len(way.steps)
     ):
-        return way._replace(through=way.through[1:])
-    return way._replace(steps=way.steps + (step,))
+        return [way._replace(through=way.through[1:])]
+    if not way.paths or step == _ENTER:
+        return [way._replace(steps=way.steps + (step,))]
+    from bamboo.codemap.panda.recognizers.sqlwrite import paths_under
+
+    under = paths_under(step, way.paths, element)
+    parts = tuple(path for path in under if path != "()")
+    found = [way._replace(paths=parts)] if parts else []
+    if "()" in under:
+        found.insert(0, unread or _unread_part(way, step) if way.loose else way._replace(paths=()))
+    return found
+
+
+def _then(way: _Way, steps: tuple[str, ...]) -> list[_Way]:
+    """*way* with *steps* taken one after another as :func:`_step` takes each, a stop as it is; where none is left,
+    the part no way reaches (:func:`_unread_part`)."""
+    ways = [way]
+    for step in steps:
+        ways = [taken for one in ways for taken in ([one] if one.kind == _STOP else _step(one, step))]
+    return ways or [_unread_part(way, "".join(steps))]
+
+
+def _taken(ways: list[_Way], step: str, element: bool = False, unread: Optional[_Way] = None) -> list[_Way]:
+    """*ways* with *step* taken (:func:`_step`) and joined (:func:`_joined`), a stop as it is.  Where the step leaves
+    none of them -- every source sits only at other parts -- the part is a value no way reaches: *unread*, else
+    :func:`_unread_part` of the first way.  *unread* is given once where several ways land on it."""
+    found: list[_Way] = []
+    for one in ways:
+        for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread):
+            if stepped is unread and unread in found:
+                continue
+            found += [stepped] if stepped.kind == _STOP else _joined(stepped)
+    if ways and not found:
+        return [unread or _unread_part(ways[0], step)]
+    return found
+
+
+def _onto(outer: _Way, inner: _Way, fields: tuple[str, ...], route: tuple[str, ...]) -> list[_Way]:
+    """What a call gives where its callee's way *inner* ends at what the call hands the callee -- *outer*, an
+    argument, or the receiver with the *fields* of ``self`` *inner* names: *outer* with *fields* and *inner*'s steps
+    taken (:func:`_then`, which cuts a way at parts of the argument), held where *inner* says the callee holds its
+    end (*inner*'s paths, before the argument's own: ``return (self.SC_FAILED, inputChunk)`` holds the argument at
+    ``[1]``), *inner*'s calls after the steps they come after, *route* its route."""
+    steps = fields + inner.steps
+    if not outer.paths or outer.kind == _STOP:
+        ways = [outer._replace(steps=outer.steps + steps)]
+    else:
+        ways = _then(outer, steps)
+    found = []
+    for one in ways:
+        if inner.paths and one.kind != _STOP:
+            held = tuple(spot + path for spot in inner.paths for path in one.paths) or inner.paths
+            one = one._replace(paths=held, loose=inner.loose or one.loose)
+        through = tuple(
+            call._replace(steps=min(call.steps + len(fields) + len(outer.steps), len(one.steps)))
+            for call in inner.through
+        )
+        found.append(one._replace(through=through + outer.through, route=route, changes=one.changes + inner.changes))
+    return found
+
+
+def _at(spot: str, ways: list[_Way]) -> list[_Way]:
+    """*ways*, of a value a container holds at *spot* (``[0]``, ``['k']``, ``[*]``), as the container's: each source
+    at *spot*, below it where it sits at parts of the value -- placed by the reader, so a step taking *spot* takes
+    the source itself (:func:`_step`); a stop as it is."""
+    return [
+        one if one.kind == _STOP else one._replace(paths=tuple(spot + path for path in one.paths) or (spot,))
+        for one in ways
+    ]
 
 
 #: The changes of a container that may change an element it holds: carried onto the element's ways.
@@ -235,13 +325,14 @@ def _joined(way: _Way) -> list[_Way]:
         return [way]
     kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
     found = [
-        value
-        if value.kind == _STOP
-        else value._replace(
-            steps=value.steps + rest, route=way.route + one.via + value.route, changes=value.changes + kept
-        )
+        stepped
         for one in puts
         for value in one.value
+        for stepped in (
+            [value]
+            if value.kind == _STOP
+            else _then(value._replace(route=way.route + one.via + value.route, changes=value.changes + kept), rest)
+        )
     ]
     if any(_puts_unread(one) for one in way.changes) or (way.made_empty == callfacts.MAPPING and step == "[*]"):
         found.append(way)
@@ -281,6 +372,22 @@ def _empty_literal(expr: ast.expr) -> str:
     if isinstance(expr, ast.Dict) and not expr.keys:
         return callfacts.MAPPING
     return ""
+
+
+def _holds_elements(ways: list[_Way]) -> bool:
+    """Whether the carry says a value holds a source at an element (``[*]``, ``[0]``) -- a sequence, not a number or a
+    text --, no statement's rows or sequence among its ways."""
+    return any(path.startswith("[") for one in ways for path in one.paths) and not any(
+        one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in ways
+    )
+
+
+def _key_spot(key: ast.expr) -> str:
+    """Where a dict literal puts the value under *key*, as a subscript reads it: ``['k']`` or ``[0]`` under a text
+    or an integer literal, else ``[*]``."""
+    if isinstance(key, ast.Constant) and isinstance(key.value, (str, int)) and not isinstance(key.value, bool):
+        return f"[{key.value!r}]"
+    return "[*]"
 
 
 def owner_of(file: str, func: ast.AST) -> str:
@@ -509,31 +616,44 @@ class _Reader:
     ) -> list[_Way]:
         """What :class:`sqlwrite._Filled` says *expr* holds where *at* runs -- but a field the function calls the
         database on: what a loop over ``self.cur`` gives is the statement's rows, and its ``rowcount`` the
-        statement's count, not a field a run's object holds (key sources read them as the field)."""
+        statement's count, not a field a run's object holds (key sources read them as the field).
+
+        The carry's paths say where the source or a part of it sits (*loose*), but a statement's rows' and a
+        sequence's, a part of which is named by its *column*.  The field *expr* reads is the field itself: what the
+        carry says sits at its parts is parts of it, which its steps take (``self.siteSpecList`` read as itself at
+        ``[*]`` is ``self.siteSpecList[*]``)."""
         found = []
         cursors = self._cursors(file, func)
+        read = ast.unparse(expr) if isinstance(expr, ast.Attribute) else ""
         for source in self.filled(file, func).sources(expr, at):
             if source.kind == KEY_SELF_FIELD and source.name in cursors:
                 continue
-            paths = tuple(path for path in source.paths if path != "()")
-            if source.kind == KEY_PARAMETER:
-                found.append(self._parameter(file, func, source.name, paths))
-                continue
-            found.append(
-                _Way(
-                    source.kind,
-                    name=source.name,
-                    line=source.line,
-                    site_owner=(
-                        self.class_owner(file, func) if source.kind == KEY_SELF_FIELD else source.site_owner
-                    ),
-                    site_line=source.site_line,
-                    paths=paths,
-                    column=source.column,
-                    attr=source.attr,
-                    column_unread=source.column_unread,
+            parts = tuple(path for path in source.paths if path != "()")
+            if source.kind == KEY_SELF_FIELD and source.name == read:
+                parts = ()
+            loose = source.kind not in (KEY_ROWS, KEY_SEQUENCE)
+            # The value itself and parts of it too: two ways, the whole (no paths) and the parts -- a way with paths
+            # sits at those parts only.
+            for paths in ([()] if "()" in source.paths or not parts else []) + ([parts] if parts else []):
+                if source.kind == KEY_PARAMETER:
+                    found.append(self._parameter(file, func, source.name, paths)._replace(loose=bool(paths) and loose))
+                    continue
+                found.append(
+                    _Way(
+                        source.kind,
+                        name=source.name,
+                        line=source.line,
+                        site_owner=(
+                            self.class_owner(file, func) if source.kind == KEY_SELF_FIELD else source.site_owner
+                        ),
+                        site_line=source.site_line,
+                        paths=paths,
+                        column=source.column,
+                        attr=source.attr,
+                        column_unread=source.column_unread,
+                        loose=bool(paths) and loose,
+                    )
                 )
-            )
         return found
 
     def _cursors(self, file: str, func: ast.AST) -> set[str]:
@@ -626,7 +746,8 @@ class _Reader:
                 )
             else:
                 step = f".{expr.attr}"
-            return [joined for one in self.read(expr.value, at, file, func) for joined in _joined(_step(one, step))]
+            unread = _Way(KEY_ATTRIBUTE if isinstance(expr, ast.Attribute) else KEY_UNKNOWN, ast.unparse(expr), line)
+            return _taken(self.read(expr.value, at, file, func), step, unread=unread)
         if isinstance(expr, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # A new collection of the element's values: the element's ways, through the comprehension.
             element = expr.value if isinstance(expr, ast.DictComp) else expr.elt
@@ -637,7 +758,12 @@ class _Reader:
                 else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
                 for one in self.read(element, element, file, func)
             ]
+        placed = self._placed(expr, at, file, func)
+        if placed is not None:
+            return placed
         found = self._sources(expr, at, file, func)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add) and _holds_elements(found):
+            return self._concatenated((expr.left, expr.right), at, file, func)
         empty = _empty_literal(expr)
         if empty:
             found = [one._replace(made_empty=empty) if one.kind == KEY_UNKNOWN else one for one in found]
@@ -649,6 +775,66 @@ class _Reader:
                 made_empty=empty,
             )
         ]
+
+    def _placed(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST) -> Optional[list[_Way]]:
+        """The ways of a literal holding values -- a list's, a tuple's or a set's elements, a dict's values and keys,
+        no ``*`` or ``**`` among them -- or of an ``if`` expression, read here, not asked of the carry, which says
+        only where a source or a part of it sits: each element's ways at its place (:func:`_at`) -- ``[i]`` of a list
+        or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key at ``[key]`` --;
+        either branch's of an ``if`` expression.  ``[taskSpec.site]`` holds ``taskSpec.site``, not ``taskSpec``.
+        ``None`` for another expression, an empty literal too (:func:`_empty_literal`)."""
+        if isinstance(expr, ast.IfExp):
+            return self.read(expr.body, at, file, func) + self.read(expr.orelse, at, file, func)
+        if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+            if not expr.elts or any(isinstance(one, ast.Starred) for one in expr.elts):
+                return None
+            spots = [("[*]" if isinstance(expr, ast.Set) else f"[{index}]", one) for index, one in enumerate(expr.elts)]
+        elif isinstance(expr, ast.Dict):
+            if not expr.keys or any(key is None for key in expr.keys):
+                return None
+            from bamboo.codemap.panda.recognizers.sqlwrite import KEY_STEP
+
+            spots = []
+            for key, value in zip(expr.keys, expr.values, strict=True):
+                assert key is not None
+                spots += [(_key_spot(key), value), (KEY_STEP, key)]
+        else:
+            return None
+        return [placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func))]
+
+    def _concatenated(self, sides: Iterable[ast.expr], at: ast.AST, file: str, func: ast.AST) -> list[_Way]:
+        """The ways of a sequence joined of *sides* (``a + b``; the ``b`` of an ``x += b``): each side's elements at
+        ``[*]`` (:func:`_at`) -- ``jobSpec.Files + pseudoFiles`` holds ``jobSpec.Files[*]`` and what ``pseudoFiles``
+        holds, where the carry says only that it holds ``jobSpec`` or a part of it."""
+        found: list[_Way] = []
+        for side in sides:
+            unread = _Way(KEY_UNKNOWN, f"{ast.unparse(side)}[*]", getattr(side, "lineno", None))
+            found += _at("[*]", _taken(self.read(side, at, file, func), "[*]", unread=unread))
+        return found
+
+    def _accumulated(
+        self, expr: ast.Name, site: ast.AugAssign, file: str, func: ast.AST, seen: set[int]
+    ) -> list[_Way]:
+        """What ``x += b`` (*site*) leaves *expr* where the carry says it holds elements: a sequence joined of what
+        ``x`` held before and ``b`` (:meth:`_concatenated`) -- a ``+=`` reaching it adds its own ``b``, each once
+        (``scanSiteList += ...`` in a loop)."""
+        seen.add(id(site))
+        found = self._concatenated((site.value,), site, file, func)
+        for before in pathcond.held_at(func, expr.id, site).sites:  # type: ignore[arg-type]
+            if id(before) in seen:
+                continue
+            if (
+                isinstance(before, ast.AugAssign)
+                and isinstance(before.op, ast.Add)
+                and isinstance(before.target, ast.Name)
+                and before.target.id == expr.id
+            ):
+                found += self._accumulated(expr, before, file, func, seen)
+                continue
+            unread = _Way(KEY_UNKNOWN, f"{expr.id}[*]", getattr(before, "lineno", None))
+            ways = self._site_ways(expr, site, before, file, func, site)
+            found += _at("[*]", _taken(ways, "[*]", unread=unread))
+        return found
 
     def _returned_field(self, expr: ast.Attribute, at: ast.AST, file: str, func: ast.AST) -> Optional[list[_Way]]:
         """The ways of a field of what a call of the corpus returns, read in the callee at its returns as that field
@@ -809,8 +995,9 @@ class _Reader:
         ``update_jobs``' ``for job in job_list`` read ``job`` as the list whole; ``retEvS, retNewPandaID =
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
-        select item's column (``for jediTaskID, commandStr, ... in resList``).  ``+=``, ``except ... as`` and ``:=``
-        keep what the carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
+        select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` of a sequence is the sequence
+        joined (:meth:`_accumulated`); another ``+=``, ``except ... as`` and ``:=`` keep what the carry says
+        (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
         carried = self._sources(expr, point, file, func) or [
             _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
         ]
@@ -822,7 +1009,11 @@ class _Reader:
                 None,
             )
         )
-        if binding is None or binding.kind in (pathcond.BIND_AUGMENTED, pathcond.BIND_EXCEPT):
+        if binding is None or binding.kind == pathcond.BIND_EXCEPT:
+            return carried
+        if binding.kind == pathcond.BIND_AUGMENTED:
+            if isinstance(site, ast.AugAssign) and isinstance(site.op, ast.Add) and _holds_elements(carried):
+                return self._accumulated(expr, site, file, func, set())
             return carried
         if any(one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in carried):
             if binding.kind == pathcond.BIND_FOR and binding.unpacked and binding.slot is not None:
@@ -843,7 +1034,7 @@ class _Reader:
             here = site if isinstance(site, ast.stmt) else (_statement_of(site) or point)
             ways = self._entered(site.iter, here, "[*]", file, func)  # type: ignore[attr-defined]
         elif binding.kind == pathcond.BIND_WITH and binding.value is not None:
-            ways = self._entered(binding.value, site, ".__enter__()", file, func)
+            ways = self._entered(binding.value, site, _ENTER, file, func)
         else:
             return carried
         if binding.unpacked:
@@ -859,11 +1050,11 @@ class _Reader:
             placed = self.calls.callees(file, func, value)
             if placed.targets and not placed.thread and all(self._is_generator(one) for one in placed.targets):
                 return self._call(value, file, func, yielded=True)
-        return self._stepped(self.read(value, at, file, func), step)
+        return self._stepped(self.read(value, at, file, func), step, element=step == "[*]")
 
     @staticmethod
-    def _stepped(ways: list[_Way], step: str) -> list[_Way]:
-        return [joined for one in ways for joined in ([one] if one.kind == _STOP else _joined(_step(one, step)))]
+    def _stepped(ways: list[_Way], step: str, element: bool = False) -> list[_Way]:
+        return _taken(ways, step, element)
 
     @classmethod
     def _of_field(cls, ways: list[_Way], field: Optional[str]) -> list[_Way]:
@@ -1067,20 +1258,7 @@ class _Reader:
                             found.append(_stop("handed_spread", inner.name, at=here))
                             continue
                         for outer in self.read(given, call, file, func):
-                            found.append(
-                                outer._replace(
-                                    steps=outer.steps + inner.steps,
-                                    through=tuple(
-                                        call._replace(
-                                            steps=call.steps + len(outer.steps)
-                                        )
-                                        for call in inner.through
-                                    )
-                                    + outer.through,
-                                    route=(here,) + inner.route + outer.route,
-                                    changes=outer.changes + inner.changes,
-                                )
-                            )
+                            found += _onto(outer, inner, (), (here,) + inner.route + outer.route)
                     elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
                         # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
                         if receiver is None:
@@ -1090,18 +1268,7 @@ class _Reader:
                             continue
                         fields = tuple(f".{part}" for part in inner.name.split(".")[1:])
                         for outer in receiver:
-                            found.append(
-                                outer._replace(
-                                    steps=outer.steps + fields + inner.steps,
-                                    through=tuple(
-                                        call._replace(steps=call.steps + len(outer.steps) + len(fields))
-                                        for call in inner.through
-                                    )
-                                    + outer.through,
-                                    route=(here,) + inner.route + outer.route,
-                                    changes=outer.changes + inner.changes,
-                                )
-                            )
+                            found += _onto(outer, inner, fields, (here,) + inner.route + outer.route)
                     else:
                         found.append(inner._replace(route=(here,) + inner.route))
             if placed.unplaced:

@@ -415,10 +415,19 @@ def test_the_changes_after_the_read_are_of_the_object_the_write_gives_back(
         ("store", "'partChecked'", "taskParams", [ref]),
     ]
     (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkSpec")]
-    (way,) = guard.sources
-    assert (way.kind, way.name, way.paths) == (
+    # The map holds the parameters' status at its 'status' and the text 'status' as its key.
+    (key,) = [one for one in guard.sources if one.kind == "constant"]
+    assert (key.name, key.steps, key.paths, key.after) == (
+        "'status'",
+        [],
+        ["[key]"],
+        [],
+    )
+    (way,) = [one for one in guard.sources if one.kind == "parameter"]
+    assert (way.kind, way.name, way.steps, way.paths) == (
         "parameter",
         "taskParams",
+        ["['status']"],
         ["['status']"],
     )
     ref = f"{PROXY}::refineSpec:{_line('W8')}:jedi_taskparams.taskparams"

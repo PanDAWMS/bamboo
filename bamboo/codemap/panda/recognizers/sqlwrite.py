@@ -4633,6 +4633,8 @@ _DEPTH = 5
 _ALL, _KEY, _MORE, _ANY_FIELD = "[*]", "[key]", "...", ".*"
 #: The step for any field of an object: what a call filling it by name (``spec.pack(row)``) puts its value at.
 ANY_FIELD = _ANY_FIELD
+#: The step for a dict's keys: where a dict literal puts its keys.
+KEY_STEP = _KEY
 _Paths = frozenset[tuple[str, ...]]
 #: The value itself holds the rows.
 _WHOLE: _Paths = frozenset({()})
@@ -7316,6 +7318,30 @@ def _same_rows(froms: list[KeyFrom], sites: dict[str, ReadSiteNode]) -> None:
 def _spelled_paths(paths: _Paths) -> list[str]:
     """*paths* as :attr:`KeySource.paths` spells them: ``()`` for the value itself."""
     return sorted("".join(path) or "()" for path in paths)
+
+
+#: One step of a path as :func:`_spelled_paths` spells it: ``...``, ``.*``, ``.name``, ``[*]``, ``[key]``, ``[0]``,
+#: ``['K']`` (a text key may hold ``]``).
+_SPELLED_STEP = re.compile(r"\.\.\.|\.\*|\.[A-Za-z_]\w*|\[(?:'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|[^\]'\"]*)\]")
+
+
+def unspelled_path(spelled: str) -> tuple[str, ...]:
+    """A path :func:`_spelled_paths` spelled, back as its steps: ``.a[*]`` is ``(".a", "[*]")``, ``()`` the value
+    itself."""
+    if spelled == "()":
+        return ()
+    steps = tuple(_SPELLED_STEP.findall(spelled))
+    if "".join(steps) != spelled:
+        raise ValueError(f"not a spelled path: {spelled!r}")
+    return steps
+
+
+def paths_under(step: str, spelled: Iterable[str], element: bool = False) -> list[str]:
+    """Where what a value holds at *spelled* (:attr:`KeySource.paths`) sits in its part *step*, spelled so: ``()``
+    where the part is it or a part of it, none where the part holds none of it (:func:`_under`).  *element*: the
+    part is the element a loop over the value takes -- a dict's key too (:func:`_elements`)."""
+    paths = frozenset(unspelled_path(one) for one in spelled)
+    return _spelled_paths(_elements(paths) if element else _under(step, paths))
 
 
 def attach_key_sources(

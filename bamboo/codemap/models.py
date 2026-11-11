@@ -3372,8 +3372,13 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
             "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
-            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value.  "
-            "Where each call of *through* comes among them is its *after_steps*."
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value "
+            "the steps took, never ``()``: a source that is the value and sits at parts of it too is two sources, the "
+            "whole with no *paths* and the parts (``x = obj; x.child = obj``: ``x`` is ``obj``, and holds it at "
+            "``.child``).  Where the reader placed it -- a literal's element, a sequence joined -- the source itself "
+            "sits there (``[taskSpec.site]`` holds ``taskSpec`` ``['.site']`` at ``[0]``); where the path carry says "
+            "so (:attr:`KeySource.paths`), the source or a part of it.  Where each call of *through* comes among them "
+            "is its *after_steps*."
         ),
     )
     through: list[HeldThrough] = Field(

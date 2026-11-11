@@ -421,10 +421,14 @@ def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it
         (_at(GEN, "G3"), "assign"),
     }
     (alias,) = [one for one in add_result.bindings if one.at == _at(GEN, "G3")]
-    # (A part of the plugin holds self.job, handed to it: a way with paths, read as before.)
     assert ("self_field", "self.adder_plugin", GEN_CLASS, (".result",), ()) in _ends(
         alias.sources
     )
+    # The value is the plugin's .result whole -- a source with no paths, which a reader takes as the value.  What the
+    # plugin holds at .job (self.job, handed to its build) is not in its .result, so no way of self.job is here; what
+    # the carry says the plugin holds of itself at .result's parts is parts of it, which the steps take.
+    held = {(one.name, tuple(one.steps), tuple(one.paths)) for one in alias.sources}
+    assert held == {("self.adder_plugin", (".result",), ())}
     # The plugin is an object AdderAtlasPlugin builds ...
     plugin = _field(built, GEN_CLASS, "adder_plugin")
     (made,) = plugin.bindings
@@ -665,18 +669,27 @@ def test_a_container_outside_the_corpus_holds_what_its_method_puts(
     )
     (add,) = made.changes
     assert (add.at, add.kind, add.what) == (_at(QUEUE, "M2"), "method", "add")
-    assert _ends(add.value) == {
-        ("unknown", "[(1, 'finished')]", "", ("[*]",), (_at(QUEUE, "M1"),))
+    # An element of what ``list_reports`` returns, ``[(1, "finished")]``: the tuple, read where the literal holds it.
+    assert {
+        (one.kind, one.name, tuple(one.steps), tuple(one.paths), tuple(one.route))
+        for one in add.value
+    } == {
+        ("constant", "1", (), ("[0]",), (_at(QUEUE, "M1"),)),
+        ("constant", "'finished'", (), ("[1]",), (_at(QUEUE, "M1"),)),
     }
     # A step taken past the record's end reads on into what was put, through the route to the container.
     for step in ("[*]", "[0]"):
         values, stays = heldfrom.held_elements(made, step)
-        assert _ends(values) == {
+        assert {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths), tuple(one.route))
+            for one in values
+        } == {
+            ("constant", "1", (), ("[0]",), (_at(QUEUE, "M1"), _at(QUEUE, "M3"))),
             (
-                "unknown",
-                "[(1, 'finished')]",
-                "",
-                ("[*]",),
+                "constant",
+                "'finished'",
+                (),
+                ("[1]",),
                 (_at(QUEUE, "M1"), _at(QUEUE, "M3")),
             ),
         }
