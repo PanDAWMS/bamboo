@@ -3434,6 +3434,16 @@ class HeldSource(KeySource):
             "any other end."
         ),
     )
+    at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the way ends, ``file:line`` of its end, each once -- the source's own statement, where its value "
+            "is bound or made (``pandaserver/daemons/scripts/add_main.py:130`` for ``ignoreTmpError = False``); "
+            "several where ways ending at one source at several lines are this one.  The tests on the way to each "
+            "have GuardFroms (:attr:`GuardFrom.calls`).  Empty where the way ends at a parameter, or at a value "
+            "outside the function it is read in (a parameter's default)."
+        ),
+    )
 
 
 class HeldChange(BaseModel):
@@ -5981,7 +5991,9 @@ class GuardFrom(BaseModel):
             ":class:`EnteredFrom` whose caller is this one's *owner*; and of the places it is on the way to where a "
             "way's object may be changed (a :class:`HeldChange`'s first *via*, else its *at*, on a GuardFrom's, a "
             "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
-            "``self.result.set_fatal()``."
+            "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
+            "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
+            "``ignoreTmpError = False``.  Not lines of calls only, then: the lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")

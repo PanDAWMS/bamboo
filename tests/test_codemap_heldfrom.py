@@ -568,6 +568,86 @@ def test_a_view_or_a_copy_of_a_container_holds_its_values_where_callfacts_says_a
     assert held("T7", "one") == {("parameter", "jobSpec", (), ())}
 
 
+BINDINGS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.flag = None
+
+            def extractCommon(self, jediTaskID, taskSpec, jobSpec):
+                if jobSpec:  # T2
+                    modTime = taskSpec.modificationTime
+                else:
+                    modTime = 0  # B3
+                if (jediTaskID - modTime) > 24:  # T0
+                    ignore = False  # B1
+                else:
+                    ignore = True  # B2
+                self.check(ignore)
+                self.check(self.chosen(jediTaskID))
+
+            def chosen(self, value):
+                if value:  # T4
+                    return "a"  # B4
+                else:
+                    return "b"  # B5
+
+            def check(self, ignore_error, strict=False):
+                if ignore_error or strict:  # T1
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through_their_own_sources(
+    tmp_path: Path,
+) -> None:
+    """Which of the constants one call hands in a run made is told by the test on the way to its binding
+    (``add_main``'s ``if (timeNow - modTime) > ...: ignoreTmpError = False``): each source says where it ends
+    (:attr:`HeldSource.at`) and the tests on the way there have GuardFroms, its line among their *calls* -- in the
+    callee for a value a return hands back (T4), and on through those guards' own sources (T2 guards ``modTime``'s
+    ``0``).  A parameter's default, read where the call hands nothing, says no place."""
+    fragment = _build(tmp_path, BINDINGS, (("check", "R1"),))
+
+    def at(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, BINDINGS)}"
+
+    def ends(func: str, parameter: str) -> set[tuple]:
+        (record,) = [
+            one
+            for one in fragment.parameter_froms
+            if one.owner.endswith(f"::{func}") and one.parameter == parameter
+        ]
+        return {(one.kind, one.name, tuple(one.at)) for one in record.sources}
+
+    assert ends("check", "ignore_error") == {
+        ("constant", "False", (at("B1"),)),
+        ("constant", "True", (at("B2"),)),
+        ("constant", "'a'", (at("B4"),)),
+        ("constant", "'b'", (at("B5"),)),
+    }
+    assert ends("check", "strict") == {("constant", "False", ())}
+    # A parameter is bound where the function is entered, by no statement.
+    assert ends("chosen", "value") == {("parameter", "jediTaskID", ())}
+
+    def calls(func: str, marker: str) -> set[int]:
+        guards = [
+            one
+            for one in fragment.guard_froms
+            if one.owner.endswith(f"::{func}")
+            and one.test_line == _line(BASE, marker, BINDINGS)
+        ]
+        assert guards, (func, marker)
+        return {line for one in guards for line in one.calls}
+
+    def line(marker: str) -> int:
+        return _line(BASE, marker, BINDINGS)
+
+    assert calls("extractCommon", "T0") == {line("B1"), line("B2")}
+    assert calls("chosen", "T4") == {line("B4"), line("B5")}
+    assert calls("extractCommon", "T2") == {line("B3")}
+
+
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(
     built: MapFragment,
 ) -> None:

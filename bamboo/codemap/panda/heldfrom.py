@@ -145,6 +145,27 @@ class _Way(NamedTuple):
     #: The *paths* are the path carry's (:attr:`KeySource.paths`): the source or a part of it sits there, which one
     #: not known -- not where the reader placed the source itself (:func:`_at`).
     loose: bool = False
+    #: The file of the function the end was read in, its *line* among the function's (:func:`_placed_in`): the end
+    #: is at ``end_file:line`` (:attr:`HeldSource.at`).  Empty for a parameter, a stop, an end read elsewhere.
+    end_file: str = ""
+
+
+def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
+    """*ways*, each end not placed yet placed in *file* where its line is among *func*'s: the innermost read that
+    made the end places it.  Not a parameter, which no statement binds, nor a stop, nor an end whose line is outside
+    *func* (a parameter's default, read where the call hands nothing)."""
+    first, last = getattr(func, "lineno", None), getattr(func, "end_lineno", None)
+    if first is None or last is None:
+        return ways
+    return [
+        one._replace(end_file=file)
+        if not one.end_file
+        and one.kind not in (_STOP, KEY_PARAMETER)
+        and one.line is not None
+        and first <= one.line <= last
+        else one
+        for one in ways
+    ]
 
 
 class _Through(NamedTuple):
@@ -694,7 +715,10 @@ class _Reader:
 
     def read(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST) -> list[_Way]:
         """The ways of *expr*, read where *at* runs in *func*; one ending at *func*'s own parameter is kind
-        ``parameter``."""
+        ``parameter``.  Each end made here is placed in *file* (:func:`_placed_in`)."""
+        return _placed_in(self._ways_of(expr, at, file, func), file, func)
+
+    def _ways_of(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST) -> list[_Way]:
         if isinstance(expr, ast.Constant):
             return [
                 _Way(
@@ -1998,8 +2022,8 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 KeyStop(kind=one.stop, name=one.name, what=one.what, at=at),
             )
             continue
-        key = (one._replace(line=None), tuple(route))
-        sources.setdefault(
+        key = (one._replace(line=None, end_file=""), tuple(route))
+        held = sources.setdefault(
             key,
             HeldSource(
                 kind=one.kind,
@@ -2027,7 +2051,28 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 made_empty=one.made_empty,
             ),
         )
+        if one.end_file and one.line is not None and f"{one.end_file}:{one.line}" not in held.at:
+            held.at.append(f"{one.end_file}:{one.line}")
+    for held in sources.values():
+        held.at.sort(key=lambda place: (place.rpartition(":")[0], int(place.rpartition(":")[2])))
     return list(sources.values()), list(stops.values())
+
+
+def _end_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
+    """``file:line`` of each place a way ends at (:attr:`HeldSource.at`): the source's own statement, on a
+    GuardFrom's, a ParameterFrom's or a FieldFrom binding's way, as :func:`_change_sites` reads their changes."""
+    found: set[str] = set()
+    for guard in guards:
+        for source in guard.sources:
+            found.update(source.at)
+    for parameter in reader.parameters.values():
+        for source in parameter.sources:
+            found.update(source.at)
+    for field in reader.fields.values():
+        for binding in field.bindings:
+            for source in binding.sources:
+                found.update(source.at)
+    return found
 
 
 def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bool:
@@ -2380,13 +2425,14 @@ def guard_froms(
                 if site.line not in guard.calls:
                     guard.calls.append(site.line)
     # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
-    # a run made is read off them (``if is_fatal: self.result.set_fatal()``).  Their ways' changes too, until no
-    # place is new.
+    # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
+    # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``).
+    # Their ways' too, until no place is new.
     guarded: set[str] = set()
     held: dict[str, list[ast.AST]] = {}
     while True:
         reader.settle()
-        fresh = sorted(_change_sites(found.values(), reader) - guarded)
+        fresh = sorted((_change_sites(found.values(), reader) | _end_sites(found.values(), reader)) - guarded)
         if not fresh:
             break
         guarded.update(fresh)
