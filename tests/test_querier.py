@@ -12360,3 +12360,175 @@ def test_k_an_arm_in_a_handler_whose_terms_end_stops_at_the_raise_its_runs_trace
     assert got["stop, other"] == stop.format(" (add: files[1]: its run's code, not the pin's)"), got
     assert got["no raise"] == "it stops at 'self.add_result' (in 'self.add_result is None')", got
     assert got["no run"] == {}, got
+
+
+_TRUTHS = """\
+class Adder:
+    def register(self, files):
+        found = []
+        for f in files:
+            found.append(f)
+        found.sort()
+        if not found and not files:
+            return None
+        self.done = True
+"""
+
+
+def test_q6_a_test_reading_a_container_made_empty_for_its_truth_alone_reads_its_start_and_its_puts(tmp_path):
+    # case A's 737 'not dest_id_map and not zip_files and not cont_zip_map': whether a put ran is what the test reads,
+    # not what it put -- a parameter's way up its callers, a field's, a local's: the empty start and each put (an
+    # element's inner change and a reorder leave it as empty as it was); a change that takes out, or one not followed,
+    # leaves the container a way; a test reading how many it holds, or an element, is no such read
+    (_corpus(tmp_path) / "pandaserver" / "t.py").write_text(_TRUTHS)
+    lines = _TRUTHS.splitlines()
+    test, site = lines.index("        if not found and not files:") + 1, lines.index("        self.done = True") + 1
+    out = _ok(_run(tmp_path, f"""
+        import ast, json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        owner, rel = "pandaserver/t.py::Adder.register", "pandaserver/t.py"
+        found = M.HeldSource(kind="unknown", name="[]", line=3, made_empty="collection", at=[f"{{rel}}:3"], changes=[
+            M.HeldChange(at=f"{{rel}}:5", kind="method", key="*", what="append", value=[
+                M.HeldSource(kind="parameter", name="f", line=5, site_owner=owner)]),
+            M.HeldChange(at=f"{{rel}}:6", kind="method", key="*", what="sort")])
+        # case A's dest_id_map: made empty in a callee and returned (674), handed at 677; two stores of a {{}} into it,
+        # and the inner store into what one holds
+        inner = M.HeldSource(kind="unknown", name="{{}}", line=1039, made_empty="mapping", at=["p/r.py:1039"])
+        dest = M.HeldSource(kind="unknown", name="{{}}", line=1031, made_empty="mapping", route=["p/r.py:674", "p/r.py:677"],
+                            at=["p/r.py:1031"], changes=[
+                                M.HeldChange(at="p/r.py:1039", kind="store", key="tmp_dest", value=[inner]),
+                                M.HeldChange(at="p/r.py:1040", kind="inner", key="*"),
+                                M.HeldChange(at="p/r.py:1048", kind="store", key="tmp_dest", value=[inner])])
+        popped = dest.model_copy(update={{"changes": [*dest.changes, M.HeldChange(at="p/r.py:1050", kind="method", key="*", what="pop")]}})
+        gone = dest.model_copy(update={{"changes": [*dest.changes, M.HeldChange(at="p/r.py:1051", kind="escaped", key="*")]}})
+        pf = lambda name, s: N(owner="p/r.py::register", parameter=name, line=1, stops=[], sources=[s])
+        T = "p/m.py::main.T"
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=owner, test_line={test}, name="found", sources=[found], stops=[])],
+            parameter_froms=[pf("dest", dest), pf("popped", popped), pf("gone", gone)], entered_froms=[], runnables=[],
+            field_froms=[N(owner=T, field="jobs", stops=[], bindings=[
+                N(at="p/m.py:151", owner="p/m.py::run", how="assign", stops=[], sources=[
+                    M.HeldSource(kind="unknown", name="[]", line=151, made_empty="collection", at=["p/m.py:151"])])],
+                changes=[N(at="p/m.py:160", kind="method", key="*", what="append", via=["p/m.py:158"], value=[])])])]
+        SR._calls_in.cache_clear()
+        SR._field_index.cache_clear()
+        fn = R.function(rel, "register", within=[{site}])
+        stmt = R.statement_at(fn.node, {site})
+        guards = pathcond.arm_condition(stmt)
+        pairs = list(zip(guards, rerun._guard_ifs(fn, stmt, guards)))
+        t = lambda s: ast.parse(s, mode="eval").body
+        way = lambda w: [w.end, w.why, list(w.route), w.end_at]
+        end = lambda e: [e.end, e.why, e.at, list(e.route), [c.at for c in e.changes], e.truth]
+        print(json.dumps({{
+            "truth": [SR.truth_only(t(s), "d") for s in [
+                "not d", "d", "not d and not z", "x or not d", "bool(d)", "len(d)", "len(d) > 0", "0 < len(d)",
+                "len(d) == 0", "a if d else b", "len(d) > 3", "d[k]", "k in d", "d is None", "d.items()",
+                "not d or d[k]", "a if b else d", "z"]],
+            "parameter": [way(w) for w in SR.param_ways("p/r.py::register", "dest", truth=True)],
+            "whole": sorted({{w.why for w in SR.param_ways("p/r.py::register", "dest")}}),
+            "popped": [way(w) for w in SR.param_ways("p/r.py::register", "popped", truth=True)],
+            "gone": [way(w) for w in SR.param_ways("p/r.py::register", "gone", truth=True)],
+            "field": [way(w) for w in SR.field_ways(T, "jobs", truth=True)],
+            "field, whole": [[w.end, w.why, [c.at for c in w.changes]] for w in SR.field_ways(T, "jobs")],
+            "local": [end(e) for tm in SR.terms(fn, owner, pairs) if tm.term == "found" for e in tm.ends],
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["truth"] == [True] * 10 + [False] * 8, got
+    by = ["p/r.py:674", "p/r.py:677"]
+    puts = [["constant", "put", by, "p/r.py:1039"], ["constant", "put", by, "p/r.py:1048"]]
+    assert got["parameter"] == [["constant", "made-empty", by, "p/r.py:1031"], *puts], got
+    # read whole (Q1), as before: the values put, and the mapping's keys a stop
+    assert got["whole"] == ["container", "made-empty"], got
+    assert got["popped"] == [*got["parameter"], ["stop", "container", by, "p/r.py:1031"]], got
+    assert got["gone"] == got["popped"], got
+    # a field's: the binding's empty start, and the record's put placed at the put through the call it was made by
+    assert got["field"] == [["constant", "made-empty", ["p/m.py:151"], "p/m.py:151"],
+                            ["constant", "put", ["p/m.py:151", "p/m.py:158", "p/m.py:160"], "p/m.py:160"]], got
+    # read whole (Q1), as before: the record's put a change on the start, for S4c to read on the run (G4)
+    assert got["field, whole"] == [["constant", "made-empty", ["p/m.py:160"]]], got
+    assert got["local"] == [["constant", "made-empty", "pandaserver/t.py:3", [], [], False],
+                            ["constant", "put", "pandaserver/t.py:5", [], [], False]], got
+
+
+def test_q6_a_container_its_run_printed_is_its_start_or_its_puts_and_a_term_an_earlier_operand_decided_is_not_read(tmp_path):
+    # (b): what the run printed at the test (V's) chooses -- empty, the start (and the container, where a change may
+    # have taken out); not empty, the puts; no print, or none of a container, as it was.  (c): Python reads 'not files'
+    # only where 'not found' was True: where the run printed found not empty, files is not read, one end naming the
+    # operand; an operand whose value is not known stops the reading there
+    (_corpus(tmp_path) / "pandaserver" / "t.py").write_text(_TRUTHS)
+    lines = _TRUTHS.splitlines()
+    test = lines.index("        if not found and not files:") + 1
+    out = _ok(_run(tmp_path, f"""
+        import ast, json
+        from bamboo.querier import rerun, render
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        rel = "pandaserver/t.py"
+        fn = R.function(rel, "register", within=[{test}])
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        guard = "not (not found and (not files))"
+        start = SR.End("found", SR.CONSTANT, SR.MADE_EMPTY, f"{{rel}}:3")
+        put = SR.End("found", SR.CONSTANT, SR.PUT, f"{{rel}}:5")
+        taken = SR.End("found", SR.STOP, SR.CONTAINER, f"{{rel}}:3")
+        files = SR.End("files", SR.STOP, "parameter", "", param="files")
+        terms = [SR.Term(guard, "found", (start, put, taken), {test}), SR.Term(guard, "files", (files,), {test})]
+
+        def read(printed):
+            got = r._read_by_its_run(fn, terms, {{({test}, k): (v, "row x") for k, v in printed.items()}}, "  ")
+            return [[u.term, [rerun._way_text(e) for e in u.ends], u.ended] for u in got]
+
+        t = lambda s: ast.parse(s, mode="eval").body
+        unread = SR.End("files", SR.UNREAD, "short-circuit", f"{{rel}}:{test}", decided="not found")
+        said = rerun._way_said(unread)
+        print(json.dumps({{
+            "filled": read({{"found": "['a.root']"}}),
+            "empty": read({{"found": "[]"}}),
+            "no print": read({{}}),
+            "not a container": read({{"found": "None"}}),
+            "short": [rerun._short_circuit(t(s), n, {{k: (v, "row x") for k, v in p.items()}}) for s, n, p in [
+                ("not a and not b", "b", {{"a": "{{'x': 1}}"}}),
+                ("not a and not b", "b", {{"a": "{{}}"}}),
+                ("a or b", "b", {{"a": "set()"}}),
+                ("a or b", "b", {{"a": "[1]"}}),
+                ("a and b or c", "b", {{"a": "0"}}),
+                ("a and b or c", "c", {{"a": "0"}}),
+                ("not a and not b", "a", {{"a": "{{'x': 1}}"}}),
+                ("x and b", "b", {{}}),
+                ("not a and (b or c)", "c", {{"a": "1"}}),
+                ("not a and b and a", "a", {{"a": "1"}})]],
+            "empty?": [rerun._printed_empty(v) for v in
+                       ["{{}}", "[]", "()", "set()", "{{'a': 1}}", "[<x>]", "None", "3", "{{'a': datetime(1)}}"]],
+            "said": render.text(said),
+            "said, back": render.text(render.from_json(render.to_json(said))),
+            "ended": SR.Term(guard, "files", (unread,), {test}).ended,
+            "lines": r.lines,
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    at = f"pandaserver/t.py:{test}"
+    unread = [f"unread (short-circuit at {at}): 'not found' decided the test on its run"]
+    assert got["filled"] == [["found", ["constant (put at pandaserver/t.py:5)"], True], ["files", unread, True]], got
+    assert got["empty"] == [["found", ["constant (made-empty at pandaserver/t.py:3)", "stop (container at pandaserver/t.py:3)"], False],
+                            ["files", ["stop (parameter)"], False]], got
+    as_it_was = [["found", ["constant (made-empty at pandaserver/t.py:3)", "constant (put at pandaserver/t.py:5)",
+                            "stop (container at pandaserver/t.py:3)"], False], ["files", ["stop (parameter)"], False]]
+    assert got["no print"] == as_it_was, got
+    assert got["not a container"] == as_it_was, got
+    assert got["short"] == ["not a", None, None, "a", "a", None, None, None, "not a", None], got
+    assert got["empty?"] == [True, True, True, True, False, False, None, None, False], got
+    assert got["said"] == f"unread (short-circuit) at {at}: 'not found' decided the test on its run", got
+    assert got["said, back"] == got["said"], got
+    assert got["ended"] is True, got
+    assert f"  term 'files' of {'not (not found and (not files))'!r}: its run's test did not read it: 'not found' decided the test" in got["lines"], got
+    assert any(x.startswith("  term 'found' of ") and "its run printed it not empty at its test (row x)" in x for x in got["lines"]), got

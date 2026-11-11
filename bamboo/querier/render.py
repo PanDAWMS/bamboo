@@ -180,6 +180,7 @@ TEMPLATES: dict[str, str] = {
     "way-end-at": " at {at}",
     "way-end-at-handler": " at {at}, in the except handler at {handler} (S3: which exception)",
     "way-end-at-caught": " at {at}, read off the exception the except handler at {handler} caught (K: its run's traceback)",
+    "way-end-unread": " at {at}: {operand!r} decided the test on its run",
     "made-by-a-change": (
         ", changed between it and the read by {change}, {how}; read as an arm at {site}: its terms {terms:join=; }; its "
         "entry: {entry}"

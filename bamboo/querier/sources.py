@@ -68,8 +68,11 @@ ENTRY = "entry"
 CALLER = "caller"
 #: a value read off a clock: a call the map's :func:`values.clock_of` reads as one (``naive_utcnow()``)
 CLOCK = "clock"
+#: a term its run's test did not read: an earlier operand of an ``and`` or ``or`` decided the test on the run
+#: (out/gm/qk-design.md Q6's (c))
+UNREAD = "unread"
 #: the ends a term may end at; a term with any other end stops
-ENDS = (DATABASE, ROW, CONSTANT, OUTSIDE, API, ENTRY, CALLER, CLOCK)
+ENDS = (DATABASE, ROW, CONSTANT, OUTSIDE, API, ENTRY, CALLER, CLOCK, UNREAD)
 #: a way that ends at a parameter of the arm's function: read up its callers next
 PARAMETER = M.KEY_PARAMETER
 #: a term the map holds no GuardFrom for at its test's line
@@ -88,6 +91,11 @@ NO_WAY = "no-way"
 CONTAINER = "container"
 #: the empty start of a container made empty, read whole: a constant, but no literal a run prints (Q1's whole read)
 MADE_EMPTY = "made-empty"
+#: a statement putting into a container made empty that a test reads for its truth alone: what made it not empty,
+#: a constant to the test, but no literal a run prints (out/gm/qk-design.md Q6's (a))
+PUT = "put"
+#: the constants no literal a run prints is: a part of one, a container's empty start, a put into it
+NO_LITERAL = (THROUGH, MADE_EMPTY, PUT)
 
 
 def element_kept(change: Any, steps: tuple[str, ...]) -> bool:
@@ -123,6 +131,94 @@ def _elements(s: Any, rest: tuple[str, ...]) -> tuple[list[Any], bool] | None:
 def _put_read(change: Any) -> bool:
     """Whether *change* is a put whose value the map reads: Q1 reads it as a way of the container's contents."""
     return bool(getattr(change, "value", None)) and getattr(change, "kind", "") in (M.CHANGE_METHOD, M.CHANGE_STORE)
+
+
+def _puts_into(change: Any) -> bool:
+    """Q6's (a): whether *change*, of a container, puts into it -- an item's store, or a method that puts -- whether
+    or not the map reads what it puts: a container made empty is not empty after one that put something."""
+    kind = getattr(change, "kind", "")
+    if kind == M.CHANGE_STORE:
+        return not str(getattr(change, "key", "") or "").startswith(".")
+    return kind == M.CHANGE_METHOD and (getattr(change, "what", "") or "") in callfacts.PUTTING
+
+
+def _empties(change: Any) -> bool:
+    """Q6's (a): whether *change*, of a container, may leave it empty after a put, or is not read: a method that takes
+    out of it (``pop``, ``clear``), an item's delete, the container gone where it is not followed, a call not read."""
+    kind = getattr(change, "kind", "")
+    if kind in (M.CHANGE_ESCAPED, M.CHANGE_UNREAD):
+        return True
+    if kind == M.CHANGE_METHOD:
+        what = getattr(change, "what", "") or ""
+        return what in callfacts.CHANGING and what not in callfacts.PUTTING and what not in _REORDERING
+    return kind == M.CHANGE_DELETE and not str(getattr(change, "key", "") or "").startswith(".")
+
+
+#: a container's methods that change it by reordering what it holds, not by taking any out
+_REORDERING = frozenset({"sort", "reverse"})
+
+
+def _truth_ways(s: Any, route: tuple[str, ...], level: tuple[Changed, ...] = ()) -> list[Way] | None:
+    """Q6's (a): the ways of a container made empty, *s* (its source, read whole), that a test reads for its truth
+    alone (:func:`truth_only`): whether a put ran is what the test reads, not what it put.  Its empty start; each
+    statement putting into it, of the map's changes of it and *level*'s (a field record's), placed at the put and
+    through the calls it was made by, then *route*; and the container, where a change may take out of it or is not
+    read.  None for any other source.  A change of what an element holds, or a store of an attribute, leaves it as
+    empty as it was."""
+    if not getattr(s, "made_empty", "") or getattr(s, "steps", None) or getattr(s, "through", None):
+        return None
+    changes = [*(getattr(s, "changes", None) or ()), *(c.record for c in level if c.record is not None)]
+    here = next(iter(getattr(s, "at", None) or ()), "")
+    ways = [Way(CONSTANT, "", MADE_EMPTY, route, end_at=here)]
+    ways += [Way(CONSTANT, "", PUT, (*reversed(tuple(getattr(c, "via", None) or ())), *route), end_at=c.at)
+             for c in changes if _puts_into(c)]
+    if any(_empties(c) for c in changes):
+        ways.append(Way(STOP, "", CONTAINER, route, end_at=here))
+    return ways
+
+
+def truth_only(test: ast.expr, name: str) -> bool:
+    """Q6's (a): whether *test* reads the value *name* holds for its truth alone: every place it names it is the test
+    itself, an operand of ``not``, ``and`` or ``or`` read so, the test of a conditional expression, ``bool(x)`` or
+    ``len(x)`` read so, or ``len(x)`` compared with 0 by ``==``, ``!=`` or ``>`` (``0 <`` too).  ``len(x) > 3`` reads how
+    many it holds, not whether it is empty (out/gm/qk-design.md Q6, counter-case 1)."""
+    parents = _parents(test)
+
+    def truth(node: ast.AST) -> bool:
+        # a value read for its truth: up through not, and, or, to the test or a conditional expression's test
+        while True:
+            p = parents.get(id(node))
+            if p is None:
+                return True
+            if isinstance(p, ast.IfExp):
+                return p.test is node
+            if not (isinstance(p, ast.BoolOp) or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not))):
+                return False
+            node = p
+
+    def zero(n: ast.AST) -> bool:
+        return isinstance(n, ast.Constant) and n.value == 0 and not isinstance(n.value, bool)
+
+    found = False
+    for n in ast.walk(test):
+        if not isinstance(n, (ast.Name, ast.Attribute)) or ast.unparse(n) != name:
+            continue
+        found = True
+        read: ast.AST = n
+        call = parents.get(id(n))
+        if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in ("bool", "len")
+                and len(call.args) == 1 and call.args[0] is n and not call.keywords):
+            read = call
+            cmp = parents.get(id(call))
+            if call.func.id == "len" and isinstance(cmp, ast.Compare) and len(cmp.ops) == 1:
+                op, left, right = cmp.ops[0], cmp.left, cmp.comparators[0]
+                if not ((left is call and zero(right) and isinstance(op, (ast.Eq, ast.NotEq, ast.Gt)))
+                        or (right is call and zero(left) and isinstance(op, (ast.Eq, ast.NotEq, ast.Lt)))):
+                    return False
+                read = cmp
+        if not truth(read):
+            return False
+    return found
 
 
 def _guard_ends(term: str, s: Any, rel: str, keys: frozenset[str] | None, line: int, depth: int = 0,
@@ -229,6 +325,10 @@ class End:
     #: K: a way read off the name an ``except`` handler of the arm's function binds (the handler's line): a field of the
     #: exception caught, read up to the raise sites; the run's traceback names the raise (rerun)
     caught: int = 0
+    #: Q6's (a): a parameter's way the test reads for its truth alone (:func:`truth_only`), read up its callers so
+    truth: bool = False
+    #: Q6's (c): a term its run's test did not read (:data:`UNREAD`): the operand whose value on the run decided it
+    decided: str = ""
 
 
 @dataclass(frozen=True)
@@ -610,7 +710,7 @@ def _with_changes(ways: list[Way], changes: tuple[Changed, ...]) -> list[Way]:
 def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozenset = frozenset(),
                choose: Choose | None = None, at: tuple[str, int] | None = None,
                keys: frozenset[str] | None = None, of_self: bool = False,
-               handed: tuple[Changed, ...] = ()) -> list[Way]:
+               handed: tuple[Changed, ...] = (), truth: bool = False) -> list[Way]:
     """Each way the field *field* of an object of *cls* (``file::Class``) is bound, read on through the map's
     ``FieldFrom`` records (S4a, out/gm/s4-design.md): a binding's value read as a way is (a field of ``self`` or of an
     object a corpus class builds read on in its own record, *steps* the parts of it the read takes), a parameter of the
@@ -624,7 +724,9 @@ def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozense
     The record's changes are on its ways, not ways of their own (out/gm/gm5-design.md G4): each is of the object the
     field holds.  *handed* are changes of that object made through a field of an object one level out (rule 2); one
     made at the statement of one of the record's own changes (its *at*, or a call of its *via*) is that change, which
-    says what it changes and the record's choice places (rule 3); the others are this level's too."""
+    says what it changes and the record's choice places (rule 3); the others are this level's too.  *truth*: the read
+    takes the value's truth alone (Q6's (a)): a container made empty is its empty start and the puts into it, the
+    record's own among them."""
     ff = _field_froms().get((cls, field))
     if ff is None:
         return [Way(STOP, "", NO_FIELD, (f"{cls}.{field}",), changes=handed)]
@@ -649,7 +751,7 @@ def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozense
         for s in whole:
             # a source read at the binding itself is placed there already
             ways += [w if w.route[:1] == (b.at,) else replace(w, route=(b.at, *w.route))
-                     for w in _binding_ways(s, b, steps, seen, choose, at, keys, entered, level)]
+                     for w in _binding_ways(s, b, steps, seen, choose, at, keys, entered, level, truth)]
         ways += _with_changes([Way(STOP, "", st.kind, (b.at,)) for st in b.stops], level)
     # a record's stop at several sites is one, placed at all of them
     ways += _with_changes([Way(STOP, "", st.kind, (", ".join(st.at),) if st.at else ()) for st in ff.stops], level)
@@ -659,7 +761,7 @@ def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozense
 
 def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choose: Choose | None = None,
                   read_at: tuple[str, int] | None = None, keys: frozenset[str] | None = None,
-                  entered: tuple[str, ...] = (), level: tuple[Changed, ...] = ()) -> list[Way]:
+                  entered: tuple[str, ...] = (), level: tuple[Changed, ...] = (), truth: bool = False) -> list[Way]:
     """The ways of one source *s* of the binding *b*, with *steps* still to take off its value.  A way that came back
     through calls is placed at the last of them (its line is the callee's, in a file the record does not name), and
     holds them and its line (G2).  A field of ``self`` the binding reads is read at the binding; a field of an object
@@ -680,6 +782,11 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
     back = _returned(s)
     on = (*(_changed(c, before=b.at) for c in getattr(s, "changes", None) or []
             if change_counts(c, _keys_off(rest, keys) if choose is not None else None) and element_kept(c, rest)), *level)
+    truth = truth and not rest
+    if truth and (put := _truth_ways(s, (at,), level)) is not None:
+        # Q6's (a): a test reading the container's truth alone reads its empty start and its puts, each placed at the
+        # put, through the binding (the record's own changes among them)
+        return [replace(w, route=(*w.route[:-1], w.end_at)) if w.why == PUT else replace(w, **back) for w in put]
     # on the arm's run (*choose*), an element of a container made empty is read as before: its puts are changes on the
     # container's way, which S4c tells apart by the run (setupper 1098, chosen by elimination); Q1 reads the container
     # whole there, and both where no run is read
@@ -700,7 +807,7 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
         if s.kind == M.KEY_SELF_FIELD and name.startswith("self."):
             # another field of self: the same object, its changes these too
             return _with_changes(field_ways(s.site_owner, name.split(".")[1].split("[")[0], rest, seen, choose,
-                                            _line_of(b.at), keys, of_self=True), on)
+                                            _line_of(b.at), keys, of_self=True, truth=truth), on)
         if rest and rest[0].startswith("."):
             inner = [c for c in on if c.key == rest[0] and c.kind not in (M.CHANGE_STORE, M.CHANGE_DELETE)]
             handed = tuple(replace(c, key="*") for c in inner)
@@ -926,13 +1033,14 @@ def _literal(text: str) -> bool:
 
 
 def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entered: tuple[str, ...] = (),
-               steps: tuple[str, ...] = ()) -> list[Way]:
+               steps: tuple[str, ...] = (), truth: bool = False) -> list[Way]:
     """Each way *owner*'s *parameter* is handed in, read up the map's ``ParameterFrom`` records through the callers'
     own parameters to where it ends: a constant a call hands, a parameter no corpus call hands (an API's), the
     database, a clock a caller reads (``values.clock_of``), or a stop.  ``killJob``'s ``code`` comes in through ``killJobs`` (TaskBuffer 1190) from ``'60'`` at
     adder_gen 226, among others.  With *entered*, only the ways that come in by those calls (S4b's (e): the calls the
     run's path entered *owner* by).  *steps* are what the read still takes off the parameter's value (Q2's (c)): each
-    source is read with them (:func:`_param_source_ways`)."""
+    source is read with them (:func:`_param_source_ways`).  *truth*: the read takes the value's truth alone (Q6's (a),
+    :func:`truth_only`)."""
     params, _entries = _callers()
     pf = params.get((owner, parameter))
     if pf is None:
@@ -943,7 +1051,7 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
     ways: list[Way] = []
     whole, parts = _ways_of_the_value(_by_the_path(pf.sources, entered)[0])
     for s in whole:
-        ways += _param_source_ways(s, steps, seen)
+        ways += _param_source_ways(s, steps, seen, truth)
     kinds = sorted({st.kind for st in pf.stops})
     here = (f"{owner.partition('::')[0]}:{pf.line}",)
     if not whole and parts:
@@ -955,7 +1063,7 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
     return ways
 
 
-def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset) -> list[Way]:
+def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: bool = False) -> list[Way]:
     """Where one source *s* of a ``ParameterFrom`` ends, with *steps* still to take off the parameter's value (Q2's
     (c)): a caller's own parameter, read up its callers in turn; an element of a container made empty, the values its
     puts put (Q1, :func:`_elements`); a field of an object the caller holds (``self.job_output_reports`` at add_main
@@ -963,12 +1071,17 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset) -> list[
     constant -- its value the literal's only where no step is taken off it and no call outside the corpus made it --,
     the database, a clock the caller reads, or a stop.  Each way it ends at holds where (the map's *at*).  A way a
     callee's test rules out on its call's constants is none (CRO (ii), :func:`_cut`).  A value a container read whole
-    holds is a part of the value read: a literal there is not its value (:func:`as_part`)."""
+    holds is a part of the value read: a literal there is not its value (:func:`as_part`).  *truth*: the read takes the
+    value's truth alone, so a container made empty is read by its empty start and its puts (Q6's (a),
+    :func:`_truth_ways`)."""
     if _cut(s):
         return []
     route = tuple(s.route)
     rest = (*tuple(getattr(s, "steps", None) or ()), *steps)
+    truth = truth and not rest
     here = next(iter(getattr(s, "at", None) or ()), "")
+    if truth and (put := _truth_ways(s, route)) is not None:
+        return put
     elements = _elements(s, rest)
     if elements is not None:
         values, stays = elements
@@ -976,17 +1089,17 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset) -> list[
         return (_start(s, route, rest) + (held if rest else [as_part(w) for w in held])
                 + ([Way(STOP, "", CONTAINER, route, end_at=here)] if stays else []))
     if s.kind == M.KEY_PARAMETER and s.site_owner:
-        return [replace(w, route=w.route + route) for w in param_ways(s.site_owner, s.name, seen, steps=rest)]
+        return [replace(w, route=w.route + route) for w in param_ways(s.site_owner, s.name, seen, steps=rest, truth=truth)]
     if (made := _returned_row(s, _keys_off(rest, None))) is not None:
         # Q4: an object a callee filled from one row and returned
         return [Way(ROW, "", s.kind, route, changes=made, end_at=here)]
     name = s.name or ""
     if s.kind == M.KEY_SELF_FIELD and getattr(s, "site_owner", "") and name.startswith("self."):
         out: list[Way] = []
-        for w in field_ways(s.site_owner, name.split(".")[1].split("[")[0], rest, seen):
+        for w in field_ways(s.site_owner, name.split(".")[1].split("[")[0], rest, seen, truth=truth):
             if w.why == PARAMETER and w.of:
                 out += [replace(x, route=x.route + w.route + route, changes=(*w.changes, *x.changes))
-                        for x in param_ways(w.of, w.value, seen, steps=w.steps)]
+                        for x in param_ways(w.of, w.value, seen, steps=w.steps, truth=truth and not w.steps)]
             else:
                 out.append(replace(w, route=w.route + route))
         return out
@@ -1141,11 +1254,12 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                                 name = f"self.{f}" if g.name == "self" else g.name
                                 # the element the test takes off the field is a step the read takes
                                 item = item_step(one.test, name, fn.rel, one.lineno)
+                                truth = truth_only(one.test, name)
                                 fields.setdefault(name, []).extend(
-                                    _field_end(name, w) for w in field_ways(
+                                    _truth_param(_field_end(name, w), truth) for w in field_ways(
                                         s.site_owner, f, (*tuple(getattr(s, "steps", None) or ()), *((item,) if item else ())),
                                         choose=choose, at=(fn.rel, one.lineno),
-                                        keys=read_keys(one.test, name, fn.rel, one.lineno), of_self=True))
+                                        keys=read_keys(one.test, name, fn.rel, one.lineno), of_self=True, truth=truth))
                             continue
                     if (h := caught_name(fn, s)) is not None:
                         # K: a field of the exception a handler names is what the raise that made it handed -- the
@@ -1154,6 +1268,13 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                         continue
                     item = item_step(one.test, g.name, fn.rel, one.lineno)
                     taken = (item,) if item else ()
+                    if not taken and truth_only(one.test, g.name) and (put := _truth_ways(s, ())) is not None:
+                        # Q6's (a): a container made empty the test reads for its truth alone: its empty start and the
+                        # statements putting into it, each placed at the put and the calls it was made through
+                        first = _source_end(g.name, s, fn.rel, None, one.lineno)
+                        ends += [End(g.name, w.end, w.why, w.end_at, route=w.route) if w.why == PUT
+                                 else replace(first, end=w.end, why=w.why, changes=()) for w in put]
+                        continue
                     if _elements(s, taken) is not None and (choose is None or not taken):
                         # a container made empty the test reads whole, or an element of it where no run is read (Q1)
                         ends += _guard_ends(g.name, s, fn.rel, read_keys(one.test, g.name, fn.rel, one.lineno), one.lineno,
@@ -1172,7 +1293,7 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                                                                               read_keys(one.test, g.name, fn.rel, one.lineno)))) is not None:
                         # Q4: an object a callee filled from one row and returned
                         e = replace(e, end=ROW, why=s.kind, changes=(*e.changes, *made))
-                    ends.append(e)
+                    ends.append(_truth_param(e, truth_only(one.test, g.name)))
                 ends += [End(g.name, STOP, getattr(st, "kind", "stop") or "stop", "") for st in g.stops]
                 # the term's own field (``self.job``): one term with its other ways
                 ends += fields.pop(g.name, [])
@@ -1182,6 +1303,12 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                                     or (End(g.name, STOP, NO_RECORD, f"{fn.rel}:{one.lineno}"),), one.lineno))
                 out += [Term(guard, name, tuple(dict.fromkeys(fe)), one.lineno) for name, fe in fields.items()]
     return out
+
+
+def _truth_param(e: End, truth: bool) -> End:
+    """*e*, a parameter's way with no step left that a test reads for its truth alone (*truth*), marked so: it is read
+    up its callers so (Q6's (a))."""
+    return replace(e, truth=True) if truth and e.why == PARAMETER and e.param and not e.steps else e
 
 
 def _field_end(term: str, w: Way) -> End:

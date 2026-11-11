@@ -1961,11 +1961,70 @@ def _site(hop: str) -> str | None:
     return m[0] if m else None
 
 
+#: what a run prints of an empty container
+_EMPTY_PRINTS = ("{}", "[]", "()", "set()")
+
+
+def _printed_value(printed: str) -> Any:
+    """What a run printed, as Python reads its repr (Q6): a literal it parses, ``set()`` the empty set; ``E.UNKNOWN``
+    for any other print."""
+    v = printed.strip()
+    if v == "set()":
+        return set()
+    try:
+        return ast.literal_eval(v)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return E.UNKNOWN
+
+
+def _printed_empty(printed: str) -> bool | None:
+    """Q6's (b): whether a container's print says it was empty: True for ``{}``, ``[]``, ``()``, ``set()``; False for
+    another a container's repr starts as (one that does not parse holds a value no literal is); None for a print that
+    is no container's."""
+    v = printed.strip()
+    if v in _EMPTY_PRINTS:
+        return True
+    got = _printed_value(v)
+    if isinstance(got, (dict, list, tuple, set, frozenset)):
+        return not got
+    return False if v[:1] in ("{", "[", "(") or v.startswith(("set(", "frozenset(")) else None
+
+
+def _short_circuit(test: ast.expr, term: str, printed: dict[str, tuple[str, str]]) -> str | None:
+    """Q6's (c): where *test* reads *term* only in operands of an ``and`` or ``or`` after one whose value on the run
+    decided it -- False for ``and``, True for ``or``; *printed* what the run printed of each term at the test, by term
+    -- that operand's text: Python did not read the ones after it.  None where it read *term*, or the values do not
+    tell: an operand whose value is not known stops the reading there."""
+    env = E.Env()
+    for name, (value, where) in printed.items():
+        if (got := _printed_value(value)) is not E.UNKNOWN:
+            env.put(name, got, where)
+    skipped: dict[int, str] = {}
+    for n in ast.walk(test):
+        if not isinstance(n, ast.BoolOp):
+            continue
+        for i, v in enumerate(n.values[:-1]):
+            try:
+                got = E.evaluate(v, env)
+            except Exception:  # noqa: BLE001 -- an operand the evaluator cannot read does not tell
+                got = E.UNKNOWN
+            if got is E.UNKNOWN or not isinstance(got, (bool, int, float, str, dict, list, tuple, set, frozenset, type(None))):
+                break
+            if bool(got) is isinstance(n.op, ast.Or):
+                for later in n.values[i + 1:]:
+                    for x in ast.walk(later):
+                        skipped.setdefault(id(x), ast.unparse(v))
+                break
+    names = [x for x in ast.walk(test) if isinstance(x, (ast.Name, ast.Attribute)) and ast.unparse(x) == term]
+    return skipped[id(names[0])] if names and all(id(x) in skipped for x in names) else None
+
+
 def _way_text(e: SR.End) -> str:
     """One way's end for the walk's lines: its end, why, where, the calls a value came back by (out/gm/gm5-design.md
     G2), the calls it came in by, and the changes on it between there and the read, each with the calls it was made
     through (G4)."""
     return (f"{e.end} ({e.why}{' at ' + e.at if e.at else ''})"
+            + (f": {e.decided!r} decided the test on its run" if e.decided else "")
             + (f", in the except handler at {e.handler} (S3)" if e.handler else "")
             + (f", read off the exception the except handler at {e.caught} caught (K)" if e.caught else "")
             + (f" returned{f' from callee line {e.returned_line}' if e.returned_line else ''} by {' -> '.join(e.returned)}"
@@ -2005,7 +2064,8 @@ def _way_said(e: SR.End) -> T.Said:
     elif m is not None:
         changed = T.Said("made-by-a-change-unread", {"change": _a_change(m.change), "how": how, "site": m.site,
                                                      "guards": list(m.guards) or ["none"]})
-    at = (T.Said("way-end-at-caught", {"at": e.at, "handler": e.caught}) if e.caught
+    at = (T.Said("way-end-unread", {"at": e.at, "operand": e.decided}) if e.decided
+          else T.Said("way-end-at-caught", {"at": e.at, "handler": e.caught}) if e.caught
           else T.Said("way-end-at-handler", {"at": e.at, "handler": e.handler}) if e.handler
           else T.Said("way-end-at", {"at": e.at}) if e.at else "")
     s = e.split
@@ -3406,7 +3466,8 @@ class Rerun:
         on it, named: S4c reads the run."""
         base = SR.terms(fn, owner, list(zip(guards, ifs, strict=True)), choose=self._field_choice(run))
         self._say_cuts(pad)
-        terms = [self._with_callers(self._raised(t, fn, run, pad), fn, owner, run, window) for t in base]
+        terms = self._read_by_its_run(fn, [self._with_callers(self._raised(t, fn, run, pad), fn, owner, run, window)
+                                           for t in base], printed, pad)
         out: list[SR.Term] = []
         for t in terms:
             t = replace(t, ends=tuple(replace(e, handler=h) if (h := _handler_line(fn, e)) else e for e in t.ends))
@@ -3416,6 +3477,40 @@ class Rerun:
         entry = self._entry_end(fn, owner, line, run, window, out)
         self.say(f"{pad}entry of {fn.name}: {_way_text(entry)}")
         return out, entry
+
+    def _read_by_its_run(self, fn: R.Function, terms: list[SR.Term], printed: dict[tuple[int, str], tuple[str, str]],
+                         pad: str) -> list[SR.Term]:
+        """Q6 (out/gm/qk-design.md) on the terms of an arm, with what its run printed at their tests (*printed*, V's:
+        :meth:`_held_on`): (c) a term its test reads only after an operand of ``and`` or ``or`` that decided the test on
+        the run is not read by it -- one end, :data:`SR.UNREAD`, naming the operand; (b) a container made empty its test
+        reads for its truth alone (``SR.truth_only``: its ways its empty start, its puts and the container where a
+        change may take out of it) is its empty start and the container where the run printed it empty, and its puts
+        where not.  A term with no print at its test, as it was."""
+        out: list[SR.Term] = []
+        for t in terms:
+            stmt = R.statement_at(fn.node, t.line) if t.line else None
+            test = getattr(stmt, "test", None)
+            at = {term: got for (line, term), got in printed.items() if line == t.line}
+            if not isinstance(test, ast.expr) or not at:
+                out.append(t)
+                continue
+            if (decided := _short_circuit(test, t.term, at)) is not None:
+                self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run's test did not read it: {decided!r} decided the test")
+                out.append(replace(t, ends=(SR.End(t.term, SR.UNREAD, "short-circuit", f"{fn.rel}:{t.line}",
+                                                   decided=decided),)))
+                continue
+            got = at.get(t.term)
+            empty = _printed_empty(got[0]) if got is not None else None
+            truth = all((e.end == SR.CONSTANT and e.why in (SR.MADE_EMPTY, SR.PUT)) or (e.end == SR.STOP and e.why == SR.CONTAINER)
+                        for e in t.ends)
+            kept = tuple(e for e in t.ends if (e.why != SR.PUT if empty else e.why == SR.PUT))
+            if got is None or empty is None or not truth or not kept or len(kept) == len(t.ends) or not SR.truth_only(test, t.term):
+                out.append(t)
+                continue
+            self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run printed it {'empty' if empty else 'not empty'} at its "
+                     f"test ({got[1]}): " + ", ".join(_way_text(e) for e in kept))
+            out.append(replace(t, ends=kept))
+        return out
 
     def _s4c(self, t: SR.Term, fn: R.Function, printed: dict[tuple[int, str], tuple[str, str]], run: Any,
              window: tuple[str, str], seen: frozenset[str], pad: str) -> SR.Term:
@@ -3608,7 +3703,7 @@ class Rerun:
         ends = tuple(x for e in t.ends for x in (
             tuple(replace(y, via=e.via, changes=(*e.changes, *y.changes), caught=e.caught)
                   for y in self._param_end(e.term, e.of or owner, e.param, None if e.of else fn, run, window, e.entered,
-                                           e.steps, ask))
+                                           e.steps, ask, e.truth))
             if e.why == SR.PARAMETER and e.param else (e,)))
         return replace(t, ends=ends)
 
@@ -3672,7 +3767,8 @@ class Rerun:
             self.say(f"{pad}ruled out by a callee's test on its call's constants (CRO (ii)): {cut}")
 
     def _param_end(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any, window: tuple[str, str] | None,
-                   entered: tuple[str, ...] = (), steps: tuple[str, ...] = (), ask: bool = True) -> tuple[SR.End, ...]:
+                   entered: tuple[str, ...] = (), steps: tuple[str, ...] = (), ask: bool = True,
+                   truth: bool = False) -> tuple[SR.End, ...]:
         """Where the value *owner*'s *param* was handed comes from (S, gm-design.md): its ways up the map's callers
         (``SR.param_ways``; with *entered*, only those by the calls the run's path entered *owner* by, S4b's (e); with
         *steps*, the parts the read takes off the value, Q2's (c)); a constant whose ``str`` is not what the run printed
@@ -3682,10 +3778,11 @@ class Rerun:
         tells them apart is read (:meth:`_split`, out/gm/s4-design.md rule 6's (a)) and the stop holds it.  With none
         left, only API parameters (any value) or the database end it, or the one way left where it ends; where every way
         ends and none is a literal a run could tell apart (a constant's part, the database), it ends at each
-        (out/gm/qk-design.md Q2); else it stops."""
+        (out/gm/qk-design.md Q2); else it stops.  *truth*: the read takes the value's truth alone, so a container made
+        empty comes in as its empty start and its puts (Q6's (a))."""
         # the calls by the path a frame of the run's traceback stands at decide too (K)
         key = (owner, param, fn is None, entered, steps, ask,
-               frozenset(set(entered) & _traceback_frames(run)) if entered else frozenset())
+               frozenset(set(entered) & _traceback_frames(run)) if entered else frozenset(), truth)
         cache: dict[tuple, tuple[SR.End, ...]] = self.__dict__.setdefault("_param_ends", {})
         if key in cache:
             return tuple(replace(e, term=term) for e in cache[key])
@@ -3695,7 +3792,7 @@ class Rerun:
             return (SR.End(term, SR.STOP, "cycle", "", param=param),)
         busy.add(key)
         try:
-            got = self._param_end_read(term, owner, param, fn, run, window, entered, steps, ask)
+            got = self._param_end_read(term, owner, param, fn, run, window, entered, steps, ask, truth)
         finally:
             busy.discard(key)
         cache[key] = got
@@ -3703,17 +3800,17 @@ class Rerun:
 
     def _param_end_read(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any,
                         window: tuple[str, str] | None, entered: tuple[str, ...], steps: tuple[str, ...],
-                        ask: bool) -> tuple[SR.End, ...]:
+                        ask: bool, truth: bool = False) -> tuple[SR.End, ...]:
         """:meth:`_param_end`, not cached."""
-        ways = SR.param_ways(owner, param, entered=entered, steps=steps)
+        ways = SR.param_ways(owner, param, entered=entered, steps=steps, truth=truth)
         self._say_cuts("  ")
         off = SR.calls_off_the_path(owner, param, entered)
         value = self._entry_value(fn, run, param) if fn is not None else None
         # a value made of a literal (an item of range(3)) is not the literal: it is not matched to what the run printed
-        # a container's empty start (Q1) is no literal a call hands: one of the other ways
-        consts = [w for w in ways if w.end == SR.CONSTANT and w.why != SR.MADE_EMPTY
+        # a container's empty start (Q1) and a put into it (Q6) are no literal a call hands: two of the other ways
+        consts = [w for w in ways if w.end == SR.CONSTANT and w.why not in (SR.MADE_EMPTY, SR.PUT)
                   and (value is None or (w.why != SR.THROUGH and SR.same_value(w.value, value)))]
-        rest = [w for w in ways if w.end != SR.CONSTANT or w.why == SR.MADE_EMPTY]
+        rest = [w for w in ways if w.end != SR.CONSTANT or w.why in (SR.MADE_EMPTY, SR.PUT)]
         # a caller's run tells constants apart only by the calls they come by
         calls = {w.route[0] for w in consts if w.route}
         one_call = len(consts) > 1 and len(calls) == 1
@@ -3728,7 +3825,7 @@ class Rerun:
         # a call the caller's run shows tells a constant apart only where every way it comes by that the print leaves
         # ends there (a call handing a container whose puts are ways hands each of them, adder_atlas_plugin 677's
         # cont_zip_map; a call handing True or False, job_api 556's prodManager, is told apart by the print first)
-        possible = [x for x in ways if value is None or x.end != SR.CONSTANT or x.why in (SR.THROUGH, SR.MADE_EMPTY)
+        possible = [x for x in ways if value is None or x.end != SR.CONSTANT or x.why in SR.NO_LITERAL
                     or SR.same_value(x.value, value)]
         alone = [w for w in consts if w.route and all(
             (x.end, x.value, x.why) == (w.end, w.value, w.why) for x in possible if x.route[:1] == w.route[:1])]
@@ -3749,7 +3846,7 @@ class Rerun:
         if not consts and len(rest) == 1:
             # the one way left is where it ends
             return (SR.End(term, rest[0].end, rest[0].why, rest[0].route[0] if rest[0].route else "", route=rest[0].route),)
-        if ways and not any(w.end == SR.CONSTANT and w.why not in (SR.THROUGH, SR.MADE_EMPTY) for w in ways):
+        if ways and not any(w.end == SR.CONSTANT and w.why not in SR.NO_LITERAL for w in ways):
             # no literal a run could tell apart is left (modTime: a statement's rows, a part of the None 2371 binds,
             # the + at 2406 not read): each way where it ends or stops, the term ending where every one ends
             # (out/gm/qk-design.md Q2); a place reached by several routes is said once, by the first
