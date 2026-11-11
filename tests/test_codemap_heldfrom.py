@@ -502,6 +502,72 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
     assert held("T9", "spec") == {("self_field", "self.specs", ("['a']",), ())}
 
 
+VIEWS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.specs = {}
+
+            def extractCommon(self, jediTaskID, taskSpec, jobSpec):
+                for spec in self.specs.values():
+                    if spec.site == "a":  # T1
+                        self.a = 1  # R1
+                chosen = list(self.specs.values())
+                if chosen[0] == "b":  # T2
+                    self.b = 1  # R2
+                for key, value in taskSpec.params.items():
+                    if key == "c" and value == "d":  # T3
+                        self.c = 1  # R3
+                kept = jobSpec.Files.copy()
+                if kept[0].lfn == "e":  # T4
+                    self.e = 1  # R4
+                pair = taskSpec.params.popitem()
+                if pair[1] == "f":  # T5
+                    self.f = 1  # R5
+                names = list(self.specs.keys())
+                if names[0] == "g":  # T6
+                    self.g = 1  # R6
+                local = {"k": jobSpec}
+                for one in local.values():
+                    if one.PandaID == 1:  # T7
+                        self.h = 1  # R7
+        """,
+}
+
+
+def test_a_view_or_a_copy_of_a_container_holds_its_values_where_callfacts_says_and_none_of_its_keys(
+    tmp_path: Path,
+) -> None:
+    """``d.values()`` and ``xs.copy()`` hold the container's values at ``[*]``, ``d.items()`` at each pair's
+    second, ``d.popitem()`` at its second (callfacts.Give, as the path carry reads them): a loop over a view takes
+    the container's value.  A key is not read -- what is put records its spelling, not its ways --: a pair's first is
+    a value not read, a view of the keys a call not read, and a dict literal's key is not one of its values (T7)."""
+    arms = tuple(("extractCommon", f"R{n}") for n in range(1, 8))
+    fragment = _build(tmp_path, VIEWS, arms)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, VIEWS) and one.name == name
+        ]
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths))
+            for one in guard.sources
+        }
+
+    assert held("T1", "spec") == {("self_field", "self.specs", ("[*]",), ())}
+    assert held("T2", "chosen") == {("self_field", "self.specs", ("[*]",), ("[*]",))}
+    assert held("T3", "key") == {("unknown", "taskSpec.params[*][0]", (), ())}
+    assert held("T3", "value") == {("parameter", "taskSpec", (".params", "[*]"), ())}
+    assert held("T4", "kept") == {("parameter", "jobSpec", (".Files", "[*]"), ("[*]",))}
+    assert held("T5", "pair") == {
+        ("parameter", "taskSpec", (".params", "[*]"), ("[1]",))
+    }
+    assert {kind for kind, *_rest in held("T6", "names")} == {"call"}
+    assert held("T7", "one") == {("parameter", "jobSpec", (), ())}
+
+
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(
     built: MapFragment,
 ) -> None:

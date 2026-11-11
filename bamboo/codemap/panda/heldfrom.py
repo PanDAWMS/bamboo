@@ -289,6 +289,16 @@ def _at(spot: str, ways: list[_Way]) -> list[_Way]:
 _ELEMENT_CHANGES = frozenset({CHANGE_INNER, CHANGE_ESCAPED, CHANGE_UNREAD})
 #: What :func:`callfacts.meaning` reads a call as where a container's method takes out of it.
 _TAKING = frozenset({callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED})
+#: Where what a container's method hands back holds what the container holds (:class:`callfacts.Give`): a view of
+#: its values and a copy at each of theirs, a view of its (key, value) pairs at each pair's second, one such pair at
+#: its second -- each a value the container holds, none its key.  A view of the keys is not here: what is put into
+#: a container is read with its key's spelling (:attr:`HeldChange.key`), not the key's ways.
+_HOLDS_ELEMENTS_AT = {
+    callfacts.VALUES: "[*]",
+    callfacts.SELF: "[*]",
+    callfacts.ITEMS: "[*][1]",
+    callfacts.ITEM: "[1]",
+}
 
 
 def _puts_at(change, step: str) -> bool:
@@ -1302,16 +1312,26 @@ class _Reader:
         return self._of_field(ways, field)
 
     def _taken(self, call: ast.Call, placed, file: str, func: ast.AST) -> Optional[list[_Way]]:
-        """The ways of what a container's method outside the corpus takes out of its receiver, as callfacts says
-        (:data:`callfacts.AT`): the receiver's, with the step of the constant key the call names, ``[*]`` where it
-        names none or computes it; and the default's, or ``None``, where the value may be either instead
-        (``d.get(k, default)``, ``d.get(k)``, a ``WeightedLists``' ``pop()``).  ``None`` for another call."""
+        """The ways of what a container's method outside the corpus hands back of its receiver, as callfacts says
+        (:class:`callfacts.Give`).  One of what it holds (:data:`callfacts.AT`): the receiver's, with the step of the
+        constant key the call names, ``[*]`` where it names none or computes it; and the default's, or ``None``,
+        where the value may be either instead (``d.get(k, default)``, ``d.get(k)``, a ``WeightedLists``' ``pop()``).
+        A view or a copy holding what the receiver holds (:data:`_HOLDS_ELEMENTS_AT`): the receiver's ``[*]``, placed
+        where the value holds it -- ``d.values()``' ``[*]``, ``d.items()``' ``[*][1]``.  ``None`` for another call,
+        a view of the keys among them."""
         called = call.func
         if not isinstance(called, ast.Attribute) or any(isinstance(one, ast.Starred) for one in call.args):
             return None
         meant = callfacts.meaning(self.calls, file, func, call, placed)
         gives = meant.method.gives if meant.kind in _TAKING and meant.method is not None else None
-        if gives is None or gives.part != callfacts.AT:
+        if gives is None:
+            return None
+        spot = _HOLDS_ELEMENTS_AT.get(gives.part)
+        if spot is not None:
+            if call.args or call.keywords:
+                return None
+            return _at(spot, self._stepped(self.read(called.value, call, file, func), "[*]"))
+        if gives.part != callfacts.AT:
             return None
         key = call.args[gives.key] if gives.key is not None and gives.key < len(call.args) else None
         step = f"[{key.value!r}]" if isinstance(key, ast.Constant) else "[*]"
