@@ -11018,10 +11018,13 @@ def test_s4c_reads_the_change_a_runs_print_and_must_rows_choose_as_an_arm(tmp_pa
                            ["stop", "no-entered-from"]], [x for x in one["lines"] if "g8.py:" in x]
     assert one["stop"] == (f"it stops at 'is_fatal' (in 'is_fatal'), in the arm that made the change at {at['reg_fatal']}, "
                            f"bound in the except handler at {ln['except']} (S3: which exception)")
+    # Q7's (b): what the way's end held of .code at its start is not read (a call's end: no class), so the change is
+    # not the end of .code, and the way says so
     assert one["said"] == (
         f"stop (call) at {at['pres']}, through the field bindings at {at['out']} -> {at['plugin']}, changed between it and "
         f"the read by {at['fatal']} made by {at['reg_fatal']}, left by elimination (it stores what the run printed, its "
-        f"function's rows are in the run, and every other change is shown not to have run or to store another value); "
+        f"function's rows are in the run, and every other change is shown not to have run or to store another value), "
+        f"but what the object held of .code at its start is not read; "
         f"read as an arm at {at['reg_fatal']}: its "
         f"terms is_fatal -> constant (False) at {at['init_fatal']}, stop (attribute) at {at['in_handler']}, in the except "
         f"handler at {ln['except']} (S3: which exception); its entry: stop (no-entered-from)")
@@ -12532,3 +12535,215 @@ def test_q6_a_container_its_run_printed_is_its_start_or_its_puts_and_a_term_an_e
     assert got["ended"] is True, got
     assert f"  term 'files' of {'not (not found and (not files))'!r}: its run's test did not read it: 'not found' decided the test" in got["lines"], got
     assert any(x.startswith("  term 'found' of ") and "its run printed it not empty at its test (row x)" in x for x in got["lines"]), got
+
+
+def test_q7_a_part_the_test_takes_ends_at_the_change_left_where_the_objects_start_held_another_value(tmp_path):
+    # Q7 (out/gm/qk-design.md) on S4c's case A shape: the test takes .code off self.out, a Res() made at Plugin's
+    # __init__; the run printed 2; register's set_fatal is left by elimination.  (b): where the map's FieldFrom of
+    # Res.code says __init__ binds None, the start is not what the run printed, so .code ends at the 2 set_fatal
+    # stores, read as an arm as before (its term is_fatal stops, so the term does not end); where __init__ binds 2, the
+    # run does not tell the change from the start; where the map holds no FieldFrom of Res.code, the start is not read.
+    # Both stop where they did and say why.
+    (_corpus(tmp_path) / "pandaserver" / "g8.py").write_text(_GEN8)
+    lines = _GEN8.splitlines()
+    ln = {k: lines.index(t) + 1 for k, t in {
+        "fatal": "        self.code = self.fatal", "temp": "        self.code = self.temporary",
+        "rfatal": "    fatal = 2", "rtemp": "    temporary = 1", "pres": "        self.result = Res()",
+        "init_code": "        self.code = None", "if_fatal": "        if is_fatal:",
+        "init_fatal": "        is_fatal = False", "except": "        except Exception as e:", "in_handler": "            is_fatal = e.fatal",
+        "reg_fatal": "            self.result.set_fatal()", "reg_temp": "            self.result.set_temporary()",
+        "sub_fatal": "        self.result.set_fatal()", "plugin": "        self.plugin = Plugin(self.logger)",
+        "out": "        self.out = self.plugin.result", "fail": "            fail()"}.items()}
+    ln["test"] = ln["fail"] - 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    (tmp_path / "one.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(["register", "plugin done with 2"])))
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import render as T
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g8.py"
+        LN = {ln!r}
+        RES = f"{{g}}::Res"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=[], site_owner=kw.pop("site_owner", ""),
+                                               site_line=None, paths=[], steps=[], through=[], route=[], **kw)
+        run = runs_for(read_log("one.log"), "1")[0]
+        printing = {{f"{{g}}::{{f}}": N(statements=[N(log_files=[run.log.name], log_files_basis="logger")])
+                     for f in ("register", "subscribe")}}
+        R._prints_of = lambda owner, lines=(): printing.get(owner)
+        klass = lambda field, line, value: N(owner=RES, field=field, changes=[], stops=[], bindings=[N(
+            at=f"{{g}}:{{LN[line]}}", owner=RES, how="class", stops=[], sources=[src("constant", value, LN[line])])])
+        init = lambda value: N(owner=RES, field="code", changes=[], stops=[], bindings=[N(
+            at=f"{{g}}:{{LN['init_code']}}", owner=f"{{g}}::__init__", how="assign", stops=[],
+            sources=[src("constant", value, LN["init_code"])])])
+        store = lambda at, field, via: SR.Changed(
+            f"{{g}}:{{LN[at]}}", "store", ".code", (f"{{g}}:{{LN[via]}}",),
+            N(kind="store", value=[src("self_field", f"self.{{field}}", LN[at], site_owner=RES)], value_stops=[]),
+            f"{{g}}:{{LN['out']}}")
+        way = SR.End("self.out", "stop", "object", f"{{g}}:{{LN['pres']}}", via=(f"{{g}}:{{LN['out']}}", f"{{g}}:{{LN['plugin']}}"),
+                     changes=(store("fatal", "fatal", "reg_fatal"), store("temp", "temporary", "reg_temp"),
+                              store("fatal", "fatal", "sub_fatal")), made_of=RES)
+        fn = R.function(g, "finalize", within=[LN["fail"]])
+        site = R.statement_at(fn.node, LN["fail"])
+        guards = pathcond.arm_condition(site)
+        term = SR.Term(guards[0], "self.out", (way,), LN["test"])
+        got = {{}}
+        for name, code in (("start None", [init("None")]), ("start 2", [init("2")]), ("no record", [])):
+            mapdump._FRAGMENT[:] = [N(
+                guard_froms=[N(owner=f"{{g}}::register", test_line=LN["if_fatal"], name="is_fatal",
+                               stops=[], sources=[src("constant", "False", LN["init_fatal"]),
+                                                  src("attribute", "e.fatal", LN["in_handler"])])],
+                runnables=[N(owner=f"{{g}}::ok", line=0, bound=[RES], asked=["condition"], asked_at=[f"{{g}}:{{LN['test']}}"],
+                             runnable=True, reads=["self.code"], stops=[])],
+                field_froms=[klass("fatal", "rfatal", "2"), klass("temporary", "rtemp", "1"), *code], function_prints=[])]
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.mode, r.decide = [], "outside", "positive"
+            printed = {{}}
+            r._held_on(fn, site, guards, run, printed)
+            t = r._s4c(term, fn, printed, run, (run.first[:19], run.last[:19]), frozenset(), "  ")
+            e = t.ends[0]
+            m = e.made
+            said = rerun._way_said(e)
+            got[name] = {{
+                "end": [e.end, e.why, e.at, e.part, e.made_at, [c.at for c in e.changes]],
+                "made": None if m is None else [m.how, m.part, list(m.start), m.printed_start, m.no_record],
+                "ended": t.ended, "stop": T.text(rerun._first_stop(t)), "said": T.text(said),
+                "back": T.text(T.from_json(T.to_json(said))) == T.text(said),
+                "q7": [x for x in r.lines if x.strip().startswith("Q7:")]}}
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    at = {k: f"pandaserver/g8.py:{v}" for k, v in ln.items()}
+    elim = ("left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
+            "change is shown not to have run or to store another value)")
+    arm = (f"read as an arm at {at['reg_fatal']}: its terms is_fatal -> constant (False) at {at['init_fatal']}, stop "
+           f"(attribute) at {at['in_handler']}, in the except handler at {ln['except']} (S3: which exception); its entry: "
+           f"stop (no-entered-from)")
+    stop = (f"it stops at 'is_fatal' (in 'is_fatal'), in the arm that made the change at {at['reg_fatal']}, bound in the "
+            f"except handler at {ln['except']} (S3: which exception)")
+    one = got["start None"]
+    assert one["end"] == ["constant", "2", at["fatal"], ".code", at["pres"], []], one
+    assert one["made"] == ["left", ".code", ["None"], False, ""], one
+    # the arm's term stops, so the term does not end: the walk goes down into the arm as before
+    assert one["ended"] is False and one["stop"] == stop, one
+    assert one["said"] == (
+        f"constant (2) at {at['fatal']}: its .code as written there, of the object made at {at['pres']}, through the "
+        f"field bindings at {at['out']} -> {at['plugin']}, changed between it and the read by {at['fatal']} made by "
+        f"{at['reg_fatal']}, {elim}, and what the object held of .code at its start (None) is not what the run printed; "
+        f"{arm}"), one["said"]
+    assert one["back"] is True, one
+    assert one["q7"] == [f"    Q7: self.out.code last written by {at['fatal']} made by {at['reg_fatal']}: 2 (its start "
+                         f"held None, not the printed '2')"], one
+    two = got["start 2"]
+    assert two["end"] == ["stop", "object", at["pres"], "", "", [at["fatal"]]], two
+    assert two["made"] == ["left", ".code", ["2"], True, ""] and two["ended"] is False and two["stop"] == stop, two
+    assert (f", {elim}, but what the object held of .code at its start (2) is what the run printed too: the run does "
+            f"not tell the change from the start; {arm}") in two["said"], two["said"]
+    none = got["no record"]
+    assert none["end"] == ["stop", "object", at["pres"], "", "", [at["fatal"]]], none
+    assert none["made"] == ["left", ".code", [], False, "pandaserver/g8.py::Res.code"], none
+    assert (f", {elim}, but what the object held of .code at its start is not read (the map holds no FieldFrom of "
+            f"pandaserver/g8.py::Res.code); {arm}") in none["said"], none["said"]
+    assert none["back"] is True and two["back"] is True, got
+
+
+def test_q7_an_object_filled_from_a_row_ends_at_the_row_where_its_held_test_rules_every_later_write_out(tmp_path):
+    # Q7's (a) and (f) on killJob's shape: job = JobSpec() at 13 and job.pack(res[0]) at 14 fill job.jobStatus from the
+    # row; 17 writes "closed" after it, so the fill is not the only write (the row-fill reading alone says no), and the
+    # test at 18 reads job.jobStatus != "closed", which the arm at 19 says its run held.  The fill is the start, 17 the
+    # change on it; "closed" would turn the held test false, so 17 is not the last writer, and the term ends at the
+    # row.  (f) on literals (K75's premise 3): parse_result < 2 held, so not 2; a test another unknown name can decide
+    # does not tell.  (d): a way at a change ends where its arm's terms and entry end and no raise is shown.
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "proxy.py").write_text(_ROW_PROXY)
+    lines = _ROW_PROXY.splitlines()
+    assert [lines[i - 1].strip() for i in (13, 14, 17, 18, 19)] == [
+        "job = JobSpec()", "job.pack(res[0])", 'job.jobStatus = "closed"', 'if job.jobStatus != "closed":',
+        'job.jobStatus = "cancelled"']
+    out = _ok(_run(tmp_path, """
+        import json
+        from dataclasses import replace
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        rel = "pandaserver/proxy.py"
+        owner = f"{rel}::killJob"
+        s = lambda kind, name, line, changes=(): N(kind=kind, name=name, line=line, changes=list(changes), site_owner="",
+                                                   site_line=None, paths=[], steps=[], through=[], route=[])
+        fill = N(at="pandaserver/spec.py:10", kind="method", key="*", via=[f"{rel}:14"])
+        closed = N(at=f"{rel}:17", kind="store", key=".jobStatus", via=[], value=[s("constant", '"closed"', 17)], value_stops=[])
+        mapdump._FRAGMENT[:] = [N(guard_froms=[N(owner=owner, test_line=18, name="job", stops=[], sources=[
+            s("object", "JobSpec()", 13, [fill, closed])])], runnables=[], field_froms=[], function_prints=[])]
+        SR._index.cache_clear()
+        fn = R.function(rel, "killJob", within=[19])
+        stmt = R.statement_at(fn.node, 19)
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, owner, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        t = next(u for u in terms if u.term == "job" and u.line == 18)
+        e = t.ends[0]
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        u = r._s4c(t, fn, {}, None, ("", ""), frozenset(), "  ")
+        held = rerun._held_test
+        c = lambda v, at: SR.End("parse_result", SR.CONSTANT, v, f"x.py:{at}")
+        two = (c("0", 1), c("2", 2))
+        drops = lambda guard, ends=two, term="parse_result": [x.why for x in r._held_drops(SR.Term(guard, term, ends, 5), "  ").ends]
+        ch = SR.Changed("a.py:5", "store", ".code")
+        done = SR.Term("x", "x", (SR.End("x", SR.CONSTANT, "1", "a.py:1"),), 1)
+        stopped = SR.Term("x", "y", (SR.End("y", SR.STOP, "call", "a.py:2"),), 1)
+        entry = SR.End("f", SR.CALLER, "entered-by", "a.py:9")
+        made = lambda **kw: SR.Made(ch, "a.py:7", "a.py::f", "left", **kw)
+        way = lambda m: SR.Term("g", "o", (SR.End("o", SR.CONSTANT, "2", "a.py:5", made=m, part=".code", made_at="a.py:3"),), 1)
+        print(json.dumps({
+            "guard": t.guard,
+            "way": [e.end, e.why, list(e.filled), [x.at for x in e.changes], t.ended],
+            "s4c": [[x.end, x.why, x.at, [y.at for y in x.changes]] for x in u.ends], "ended": u.ended,
+            "said": [x for x in r.lines if x.strip().startswith("Q7:")],
+            "rules out": [rerun._held_rules_out(held(g), n, v) for g, n, v in [
+                ("job.jobStatus != 'closed'", "job.jobStatus", ('"closed"',)),
+                ("job.jobStatus != 'closed'", "job.jobStatus", ('"cancelled"',)),
+                ("job.jobStatus != 'closed' or code", "job.jobStatus", ('"closed"',)),
+                ("code and job.jobStatus != 'closed'", "job.jobStatus", ('"closed"',)),
+                ("not (job is None)  [at 387]", "job", ("None",)),
+                ("x.f()", "x", ("1",)),
+                ("a < 2", "a", ("2", "0")),
+                ("a < 2", "a", ("f(1)",))]],
+            "drops": [drops("parse_result < 2"), drops("parse_result < 2 or other"), drops("parse_result < 5"),
+                      drops("parse_result > 5"), drops("not status", (c("True", 1), c("False", 2)), "status"),
+                      drops("parse_result < 2", (*two, SR.End("parse_result", SR.CONSTANT, SR.THROUGH, "x.py:3")))],
+            "arm": {
+                "ends": way(made(terms=(done,), entry=entry)).ended,
+                "a term stops": way(made(terms=(done, stopped), entry=entry)).ended,
+                "its entry stops": way(made(terms=(done,), entry=SR.End("f", SR.STOP, "entry-unchosen", ""))).ended,
+                "its entry not read": way(made(terms=(done,))).ended,
+                "a raise": way(made(terms=(done,), entry=entry, raised_at="a.py:8")).ended,
+                "none": SR.Term("g", "o", (SR.End("o", SR.CONSTANT, "2", "a.py:5"),), 1).ended},
+            "lines": r.lines,
+        }))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["guard"] == "job.jobStatus != 'closed'", got
+    # the fill is the start, 17 the change after it
+    assert got["way"] == ["stop", "object", ["pandaserver/proxy.py:14"], ["pandaserver/proxy.py:17"], False], got
+    assert got["s4c"] == [["row", "object", "pandaserver/proxy.py:13", []]] and got["ended"] is True, got
+    assert any("F: pandaserver/proxy.py:17 stores \"closed\": job.jobStatus so would turn \"job.jobStatus != 'closed'\", "
+               "which its run held, the other way (Q7's (f))" in x for x in got["lines"]), got["lines"]
+    assert got["said"] == ["    Q7: every change ruled out: what the test takes is the row pandaserver/proxy.py:14 put"], got
+    assert got["rules out"] == [True, False, False, True, True, False, False, False], got
+    assert got["drops"] == [["0"], ["0", "2"], ["0", "2"], ["0", "2"], ["False"], ["0", "constant-through"]], got
+    assert any("term 'parse_result' of 'parse_result < 2': its run held the test, so not 2 at x.py:2 (Q7's (f))" in x
+               for x in got["lines"]), got["lines"]
+    assert got["arm"] == {"ends": True, "a term stops": False, "its entry stops": False, "its entry not read": False,
+                          "a raise": False, "none": True}, got

@@ -329,6 +329,16 @@ class End:
     truth: bool = False
     #: Q6's (c): a term its run's test did not read (:data:`UNREAD`): the operand whose value on the run decided it
     decided: str = ""
+    #: Q7 (out/gm/qk-design.md): a way ending at an object a class's constructor made: that class (``file::Class``),
+    #: whose ``__init__`` binds what the object holds of each part at its start
+    made_of: str = ""
+    #: Q7's (a): a way ending at an object filled from one fetched row, with other writes of what the test takes after
+    #: the fill: the fill's statements (``file:line``) -- the row is the start, the other writes its changes
+    filled: tuple[str, ...] = ()
+    #: Q7's (c): a way ending at the statement that last wrote the part the test takes (*part*, ``.status_code``) on the
+    #: run -- the change S4c chose (*made*), or the object's start -- of the object made at *made_at*
+    part: str = ""
+    made_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -353,6 +363,15 @@ class Made:
     #: where the pin does not hold the raising frame's source at *raised_at* (the run's code was another version): its
     #: function and the source the traceback printed
     raised_other: str = ""
+    #: Q7's (b), a change left by elimination: the part it writes (``.status_code``) and what the object held of it at
+    #: its start (:func:`part_start`'s literals), which the run's print differs from where the change wrote what the
+    #: read reads (*printed_start*: one of them is what the run printed, so the run does not tell the change from the
+    #: start); *start* empty where not read, and then *no_record* the field the map holds no FieldFrom of
+    #: (``file::Class.field``; empty where the way's end is no object a class made)
+    part: str = ""
+    start: tuple[str, ...] = ()
+    printed_start: bool = False
+    no_record: str = ""
 
 
 @dataclass(frozen=True)
@@ -395,6 +414,14 @@ class Way:
     steps: tuple[str, ...] = ()
     #: where the way ends, ``file:line`` (the map's *at* of its source; SBG), where the map says it
     end_at: str = ""
+    #: as :attr:`End.made_of` (Q7)
+    made_of: str = ""
+
+
+def _made_of(s: Any) -> str:
+    """Q7: the class (``file::Class``) of the object the map's source *s* says a constructor made; empty for any other
+    source."""
+    return str(getattr(s, "site_owner", "") or "") if s.kind == M.KEY_OBJECT else ""
 
 
 def _returned(s: Any) -> dict[str, Any]:
@@ -416,7 +443,14 @@ class Term:
 
     @property
     def ended(self) -> bool:
-        return bool(self.ends) and all(e.end in ENDS and not e.changes for e in self.ends)
+        return bool(self.ends) and all(e.end in ENDS and not e.changes and arm_ends(e.made) for e in self.ends)
+
+
+def arm_ends(m: Made | None) -> bool:
+    """Q7's (d): whether the arm of the change a way ends at (S4c's *made*) ends -- its terms and its entry ending, and
+    no raise its run's traceback shows the handler took (K's form: the raise has terms of its own) -- or there is none."""
+    return m is None or (not m.raised_at and m.entry is not None and all(u.ended for u in m.terms)
+                         and m.entry.end in ENDS and not m.entry.changes)
 
 
 @functools.cache
@@ -512,7 +546,7 @@ def _source_end(term: str, s: Any, rel: str, keys: frozenset[str] | None = None,
     if s.kind == M.KEY_CALL and _clock_at(at, s.name or ""):
         # a call the map reads as a clock (timeNow = naive_utcnow()), as a field's way ends (S2's (b))
         return End(term, CLOCK, s.name, at, **back)
-    return End(term, STOP, s.kind, at, **back)
+    return End(term, STOP, s.kind, at, made_of=_made_of(s), **back)
 
 
 def caught_name(fn: R.Function, s: Any) -> ast.ExceptHandler | None:
@@ -813,7 +847,7 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
             handed = tuple(replace(c, key="*") for c in inner)
             return _with_changes(field_ways(s.site_owner, rest[0][1:], rest[1:], seen, choose, read_at, keys,
                                             handed=handed), tuple(c for c in on if c not in inner))
-        return [Way(STOP, "", s.kind, (at,), changes=on, **back)]
+        return [Way(STOP, "", s.kind, (at,), changes=on, made_of=_made_of(s), **back)]
     if s.kind == M.KEY_PARAMETER:
         return [Way(STOP, s.name, PARAMETER, (at,), of=getattr(s, "site_owner", "") or b.owner,
                     entered=() if route else entered, changes=on, steps=rest, **back)]
@@ -1170,11 +1204,32 @@ def _supplied_by_the_database(fn: R.Function, name: str, line: int) -> bool:
     return bool(answer.steps) and all(s.terminal == M.STOP_UPSTREAM for s in answer.steps)
 
 
-def _row_fills(fn: R.Function, name: str, line: int) -> frozenset[str] | None:
+def part_start(cls: str, part: str) -> tuple[tuple[str, str], ...] | None:
+    """Q7's (a): what an object of *cls* (``file::Class``) holds of *part* (one step, ``.status_code``) when its
+    constructor made it -- each literal the class's ``__init__`` binds the field to, with the binding's ``file:line``,
+    by the map's FieldFrom of the class (the class body's own binding where no ``__init__`` binds it); None where the
+    map holds no FieldFrom of the field, or a binding there is no literal (a parameter, a call)."""
+    if not cls or not part.startswith(".") or not part[1:].isidentifier():
+        return None
+    ff = _field_froms().get((cls, part[1:]))
+    if ff is None:
+        return None
+    init = [b for b in ff.bindings if str(getattr(b, "owner", "")).endswith("::__init__")]
+    out: list[tuple[str, str]] = []
+    for b in init or [b for b in ff.bindings if getattr(b, "how", "") == "class"]:
+        for s in b.sources:
+            if s.kind != M.KEY_CONSTANT or any(getattr(s, k, None) for k in ("steps", "through", "paths", "changes")):
+                return None
+            out.append((s.name, b.at))
+    return tuple(dict.fromkeys(out)) or None
+
+
+def _row_fills(fn: R.Function, name: str, line: int, others: bool = False) -> frozenset[str] | None:
     """The statements (``file:line``) that fill what the test at *line* reads of *name* from one fetched row -- the
     field it takes off it (``job.jobStatus``, filled by ``job.pack(res[0])``), or the name itself where it reads it
     whole -- where every write of it is such a fill, with no in-place change on the way (the map's
-    ``fills.row_fills``, as :func:`which_ran.row_state` reads it); None where any is not."""
+    ``fills.row_fills``, as :func:`which_ran.row_state` reads it); None where any is not.  With *others*, the fills
+    where other writes follow them too (Q7's (a): the row is the start, the other writes its changes)."""
     try:
         types = asked._types()
         tree = types.tree(fn.rel)
@@ -1203,7 +1258,7 @@ def _row_fills(fn: R.Function, name: str, line: int) -> frozenset[str] | None:
     sites: set[str] = set()
     for read in reads:
         held = WR._row_held(calls, fn.rel, func, read, bound)
-        if held is None or held.others or not held.fills or not all(
+        if held is None or (held.others and not others) or not held.fills or not all(
                 fill.pick in (fills.PICK_ONE, fills.PICK_AT) and not fill.changes and fill.reads for fill in held.fills):
             return None
         sites |= {f"{fill.file or fn.rel}:{fill.site.lineno}" for fill in held.fills}
@@ -1289,6 +1344,12 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                         # a fill's statement (killJob's job.pack(res[0]) at 998) is that fill (G4)
                         e = replace(e, end=ROW, why=s.kind,
                                     changes=tuple(c for c in e.changes if not ({c.at, *c.made_by} & filled)))
+                    elif (e.end == STOP and s.kind == M.KEY_OBJECT and e.changes
+                          and (filled := _row_fills(fn, g.name, one.lineno, others=True)) is not None):
+                        # Q7's (a): other writes follow the fill (killJob's job.jobStatus = "closed" at 1028 ...): the
+                        # row is what the test takes at its start, the others the changes after it, S4c's to read
+                        e = replace(e, filled=tuple(sorted(filled)),
+                                    changes=tuple(c for c in e.changes if not ({c.at, *c.made_by} & filled)))
                     elif e.end == STOP and (made := _returned_row(s, _keys_off(tuple(getattr(s, "steps", None) or ()),
                                                                               read_keys(one.test, g.name, fn.rel, one.lineno)))) is not None:
                         # Q4: an object a callee filled from one row and returned
@@ -1317,4 +1378,4 @@ def _field_end(term: str, w: Way) -> End:
     why = w.value if w.end == CONSTANT and w.value else w.why
     return End(term, w.end, why, w.route[-1] if w.route else "", param=w.value if w.why == PARAMETER else "", of=w.of,
                via=w.route[:-1], entered=w.entered, changes=w.changes, returned=w.returned,
-               returned_line=w.returned_line, steps=w.steps)
+               returned_line=w.returned_line, steps=w.steps, made_of=w.made_of)

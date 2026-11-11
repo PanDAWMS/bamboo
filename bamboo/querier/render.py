@@ -181,6 +181,7 @@ TEMPLATES: dict[str, str] = {
     "way-end-at-handler": " at {at}, in the except handler at {handler} (S3: which exception)",
     "way-end-at-caught": " at {at}, read off the exception the except handler at {handler} caught (K: its run's traceback)",
     "way-end-unread": " at {at}: {operand!r} decided the test on its run",
+    "way-end-written": " at {at}: its {part} as written there, of the object made at {made}",
     "made-by-a-change": (
         ", changed between it and the read by {change}, {how}; read as an arm at {site}: its terms {terms:join=; }; its "
         "entry: {entry}"
@@ -191,6 +192,22 @@ TEMPLATES: dict[str, str] = {
         "left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
         "change is shown not to have run or to store another value)"
     ),
+    "change-left-start-other": (
+        "left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
+        "change is shown not to have run or to store another value), and what the object held of {part} at its start "
+        "({start:join= or }) is not what the run printed"
+    ),
+    "change-left-start-same": (
+        "left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
+        "change is shown not to have run or to store another value), but what the object held of {part} at its start "
+        "({start:join= or }) is what the run printed too: the run does not tell the change from the start"
+    ),
+    "change-left-start-unread": (
+        "left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
+        "change is shown not to have run or to store another value), but what the object held of {part} at its start "
+        "is not read{why}"
+    ),
+    "no-field-from": " (the map holds no FieldFrom of {field})",
     "changed-between": ", changed between it and the read: {changes:join=; }",
     "a-change": "{at}{made}",
     "made-by": " made by {via:join= -> }",

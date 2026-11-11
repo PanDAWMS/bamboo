@@ -2019,12 +2019,44 @@ def _short_circuit(test: ast.expr, term: str, printed: dict[str, tuple[str, str]
     return skipped[id(names[0])] if names and all(id(x) in skipped for x in names) else None
 
 
+def _held_test(guard: str) -> ast.expr | None:
+    """Q7's (f): a guard as its run held it -- its text (``not (...)`` for an else), the ``[at N]`` of a test read at
+    another line dropped -- parsed; None where it does not parse."""
+    try:
+        return ast.parse(re.sub(r"\s+\[at \d+\]$", "", guard), mode="eval").body
+    except SyntaxError:
+        return None
+
+
+def _held_rules_out(test: ast.expr | None, name: str, values: tuple[str, ...]) -> bool:
+    """Q7's (f): whether *name* (a term, or a part of one: ``job.jobStatus``) holding each of *values* (literals as
+    written) would turn *test*, which its run held, false -- read by the evaluator, the test's other names unknown;
+    False where a value or the test does not tell."""
+    if test is None or not values:
+        return False
+    for v in values:
+        try:
+            literal = ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            return False
+        env = E.Env()
+        env.put(name, literal, "Q7's (f)")
+        try:
+            got = E.evaluate(test, env)
+        except Exception:  # noqa: BLE001 -- a test the evaluator cannot read does not tell
+            return False
+        if got is E.UNKNOWN or not isinstance(got, (bool, int, float, str, type(None))) or bool(got):
+            return False
+    return True
+
+
 def _way_text(e: SR.End) -> str:
     """One way's end for the walk's lines: its end, why, where, the calls a value came back by (out/gm/gm5-design.md
     G2), the calls it came in by, and the changes on it between there and the read, each with the calls it was made
     through (G4)."""
     return (f"{e.end} ({e.why}{' at ' + e.at if e.at else ''})"
             + (f": {e.decided!r} decided the test on its run" if e.decided else "")
+            + (f": its {e.part} as written there, of the object made at {e.made_at}" if e.part else "")
             + (f", in the except handler at {e.handler} (S3)" if e.handler else "")
             + (f", read off the exception the except handler at {e.caught} caught (K)" if e.caught else "")
             + (f" returned{f' from callee line {e.returned_line}' if e.returned_line else ''} by {' -> '.join(e.returned)}"
@@ -2055,7 +2087,13 @@ def _way_said(e: SR.End) -> T.Said:
     changes = [_a_change(c) for c in e.changes]
     m = e.made
     changed: T.Said | str = T.Said("changed-between", {"changes": changes}) if changes else ""
-    how = T.Said("change-shown-by-its-run" if m is not None and m.how == "shown" else "change-left-by-elimination")
+    how = (T.Said("change-shown-by-its-run") if m is not None and m.how == "shown"
+           else T.Said("change-left-start-same" if m.printed_start else "change-left-start-other",
+                       {"part": m.part, "start": list(m.start)}) if m is not None and m.start
+           else T.Said("change-left-start-unread", {
+               "part": m.part, "why": T.Said("no-field-from", {"field": m.no_record}) if m.no_record else ""})
+           if m is not None and m.part
+           else T.Said("change-left-by-elimination"))
     if m is not None and m.entry is not None:
         changed = T.Said("made-by-a-change", {
             "change": _a_change(m.change), "how": how, "site": m.site,
@@ -2065,6 +2103,7 @@ def _way_said(e: SR.End) -> T.Said:
         changed = T.Said("made-by-a-change-unread", {"change": _a_change(m.change), "how": how, "site": m.site,
                                                      "guards": list(m.guards) or ["none"]})
     at = (T.Said("way-end-unread", {"at": e.at, "operand": e.decided}) if e.decided
+          else T.Said("way-end-written", {"at": e.at, "part": e.part, "made": e.made_at}) if e.part
           else T.Said("way-end-at-caught", {"at": e.at, "handler": e.caught}) if e.caught
           else T.Said("way-end-at-handler", {"at": e.at, "handler": e.handler}) if e.handler
           else T.Said("way-end-at", {"at": e.at}) if e.at else "")
@@ -3472,7 +3511,7 @@ class Rerun:
         for t in terms:
             t = replace(t, ends=tuple(replace(e, handler=h) if (h := _handler_line(fn, e)) else e for e in t.ends))
             self.say(f"{pad}term {t.term!r} of {t.guard!r}: " + ", ".join(_way_text(e) for e in t.ends))
-            out.append(self._s4c(t, fn, printed, run, window, seen | {f"{fn.rel}:{line}"}, pad)
+            out.append(self._held_drops(self._s4c(t, fn, printed, run, window, seen | {f"{fn.rel}:{line}"}, pad), pad)
                        if run is not None and window is not None else t)
         entry = self._entry_end(fn, owner, line, run, window, out)
         self.say(f"{pad}entry of {fn.name}: {_way_text(entry)}")
@@ -3512,15 +3551,28 @@ class Rerun:
             out.append(replace(t, ends=kept))
         return out
 
+    def _held_drops(self, t: SR.Term, pad: str) -> SR.Term:
+        """Q7's (f) on a term whose ways end at literals of different values (K75's premise 3: a local two arms bind,
+        ``parse_result``'s 0 and 2): a literal that, the term holding it, would turn the test its run held false is not
+        what the term held there -- that way goes; where every literal would, none does (the test does not tell)."""
+        lits = [e for e in t.ends if e.end == SR.CONSTANT and e.why not in SR.NO_LITERAL and not e.part and not e.changes]
+        if len({e.why for e in lits}) < 2 or (held := _held_test(t.guard)) is None:
+            return t
+        out = tuple(e for e in t.ends if e not in lits or not _held_rules_out(held, t.term, (e.why,)))
+        if len(out) == len(t.ends) or not any(e in lits for e in out):
+            return t
+        self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run held the test, so not "
+                 + ", ".join(f"{e.why} at {e.at}" for e in t.ends if e not in out) + " (Q7's (f))")
+        return replace(t, ends=out)
+
     def _s4c(self, t: SR.Term, fn: R.Function, printed: dict[tuple[int, str], tuple[str, str]], run: Any,
              window: tuple[str, str], seen: frozenset[str], pad: str) -> SR.Term:
         """*t* with the changes on each of its ways read (S4c, out/gm/gm5-design.md): a change that stores a value other
         than what the run printed of the part it changes is not what the read reads (V); of those left, one the run
         shows did not run is dropped (H2), and the one left, where its run shows it ran, or where its function's rows
         are in the run and it stores what the run printed (by elimination, as H2 leaves an arm), is read as an arm
-        (:meth:`_change_arm`).  Where none is chosen, those left stay on the way, named.  Elimination does not read what
-        the way's own end holds of the part: that the printed value was made by a change, not the end, is its premise
-        (case A's ``AdderResult()`` leaves ``status_code`` None)."""
+        (:meth:`_change_arm`).  Where none is chosen, those left stay on the way, named.  Q7 (out/gm/qk-design.md)
+        reads what the chosen change made as the end of the part the test takes (:meth:`_made`)."""
         if not any(e.changes for e in t.ends):
             return t
         stmt = R.statement_at(fn.node, t.line) if t.line else None
@@ -3532,7 +3584,14 @@ class Rerun:
     def _made(self, e: SR.End, t: SR.Term, taken: frozenset[str] | None, fn: R.Function,
               printed: dict[tuple[int, str], tuple[str, str]], run: Any, window: tuple[str, str], seen: frozenset[str],
               pad: str) -> SR.End:
-        """S4c on the way *e* of *t* (:meth:`_s4c`); *taken* the parts *t*'s test takes off its value."""
+        """S4c on the way *e* of *t* (:meth:`_s4c`); *taken* the parts *t*'s test takes off its value.
+
+        Q7 (out/gm/qk-design.md): what the test takes ends at the statement that last wrote it on the run.  A change
+        whose value would turn the test its run held the other way is not that one ((f), :func:`_held_rules_out`).  The
+        change chosen ends the way at the literal it stores, where it writes the one part the test takes by name and its
+        run shows it ran, or, left by elimination, the object's start held another value of it than the run printed
+        (:func:`SR.part_start`; K75's premise 2); its site is read as an arm as before (the term ends where the arm does,
+        :func:`SR.arm_ends`).  Where every change is ruled out, the start ends it (:meth:`_start_end`)."""
 
         def part(c: SR.Changed) -> str:
             # the part of the value a change makes: its attribute, or, where it does not say, the one part the test takes
@@ -3541,15 +3600,20 @@ class Rerun:
             return next(iter(taken)) if c.key == "*" and taken is not None and len(taken) == 1 else ""
 
         shown = self._parts_printed(e, t, {p for c in e.changes if (p := part(c))}, fn, printed, run)
+        held = _held_test(t.guard)
         left: list[SR.Changed] = []
         # the changes V read as storing what the run printed of the part they change
         printed_as: set[SR.Changed] = set()
         for c in e.changes:
             got = shown.get(part(c))
-            values = SR.stored(c.record) if got is not None else None
+            values = SR.stored(c.record)
             if got is not None and values is not None and not any(SR.same_value(v, got[0]) for v in values):
                 self.say(f"{pad}  V: {_change_text(c)} stores {' or '.join(values)}, not the {got[0]!r} printed of "
                          f"{t.term}{part(c)} ({got[1]})")
+                continue
+            if values is not None and part(c) and _held_rules_out(held, t.term + part(c), values):
+                self.say(f"{pad}  F: {_change_text(c)} stores {' or '.join(values)}: {t.term}{part(c)} so would turn "
+                         f"{t.guard!r}, which its run held, the other way (Q7's (f))")
                 continue
             if got is not None and values is not None:
                 printed_as.add(c)
@@ -3558,11 +3622,50 @@ class Rerun:
         kept = tuple(c for c in left if ran[c][0] != "not-run")
         self.say(f"{pad}  S4c on {e.end} ({e.why}): {len(e.changes)} change(s), {len(left)} left by V; H2: "
                  + (", ".join(f"{_change_text(c)} {ran[c][0]}{f' ({ran[c][1]})' if ran[c][1] else ''}" for c in left) or "none"))
+        if not kept and (at_start := self._start_end(e, taken, pad)) is not None:
+            return at_start
         if len(kept) != 1 or not (ran[kept[0]][0] == "shown" or (ran[kept[0]][0] == "kept" and kept[0] in printed_as)):
             return replace(e, changes=kept)
-        how = "shown" if ran[kept[0]][0] == "shown" else "left"
-        return replace(e, changes=kept,
-                       made=self._change_arm(kept[0], ran[kept[0]][1], how, run, window, seen, pad + "    "))
+        c = kept[0]
+        how = "shown" if ran[c][0] == "shown" else "left"
+        made = self._change_arm(c, ran[c][1], how, run, window, seen, pad + "    ")
+        p = part(c)
+        got = shown.get(p)
+        printed_part = got[0] if got is not None else None
+        # the start a class's __init__ binds is an object's that a constructor made and nothing filled (a row's object,
+        # filled or returned, starts at the row)
+        made_only = e.end == SR.STOP and not e.filled and bool(e.made_of)
+        start = SR.part_start(e.made_of, p) if how == "left" and p and made_only else None
+        same = start is not None and printed_part is not None and any(SR.same_value(v, printed_part) for v, _ in start)
+        if how == "left" and p:
+            unread = start is None and made_only and SR._field_froms().get((e.made_of, p[1:])) is None
+            made = replace(made, part=p, start=tuple(v for v, _ in start or ()), printed_start=same,
+                           no_record=f"{e.made_of}{p}" if unread else "")
+        values = SR.stored(c.record)
+        known = how == "shown" or (start is not None and printed_part is not None and not same)
+        if values is None or len(values) != 1 or not p or c.key != p or taken != frozenset({p}) or not known:
+            return replace(e, changes=kept, made=made)
+        self.say(f"{pad}  Q7: {t.term}{p} last written by {_change_text(c)}: {values[0]}"
+                 + ("" if start is None else f" (its start held {' or '.join(v for v, _ in start)}, not the printed {printed_part!r})"))
+        return replace(e, end=SR.CONSTANT, why=values[0], at=c.at, changes=(), made=made, part=p, made_at=e.at)
+
+    def _start_end(self, e: SR.End, taken: frozenset[str] | None, pad: str) -> SR.End | None:
+        """Q7's (a), every change on the way *e* ruled out: what the test takes is what the object held at its start --
+        the row a fill put (*e.filled*), or the one literal its class's ``__init__`` binds the one part the test takes
+        to (:func:`SR.part_start`); None where neither is read, or the way ends at no object a constructor made (a row's
+        object, filled or returned, ends at the row as it is)."""
+        if e.end != SR.STOP:
+            return None
+        if e.filled:
+            self.say(f"{pad}  Q7: every change ruled out: what the test takes is the row {', '.join(e.filled)} put")
+            return replace(e, end=SR.ROW, changes=())
+        p = next(iter(taken)) if taken is not None and len(taken) == 1 else ""
+        start = SR.part_start(e.made_of, p) if p else None
+        if start is None or len(start) != 1:
+            return None
+        value, at = start[0]
+        self.say(f"{pad}  Q7: every change ruled out: {p} is {value}, as the object's start at {at} binds it")
+        return replace(e, end=SR.CONSTANT, why=value, at=at, changes=(), part=p, made_at=e.at)
 
     def _parts_printed(self, e: SR.End, t: SR.Term, wanted: set[str], fn: R.Function,
                        printed: dict[tuple[int, str], tuple[str, str]], run: Any) -> dict[str, tuple[str, str]]:

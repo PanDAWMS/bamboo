@@ -2229,11 +2229,17 @@ adder_atlas_plugin 789 and stops at `is_fatal`, bound in the handlers at 756 and
   `JobSpec.isScoutJob` and 7 more through `check_special_handling`) read `[]` today, so a test calling one on a term
   takes nothing off it and every change of the term is dropped as not read.  No live walk reads a term through one of
   the 38 (gm4p's 273 files).
-- *A change chosen by elimination made the printed value*, not the way's end: what the end itself holds of the part is
-  not read (case A's `AdderResult()` leaves `status_code` None, read by eye).  A change only kept is chosen only where
-  V matched its stored literal to a print.
-- *A local bound to two constants in two arms ends* where its ways do (register_files' `is_failed`: False at 743, True
-  at 759); which arm bound it is not read.
+- *A change chosen by elimination made the printed value*, not the way's end.  Since Q7 (out/gm/qk-design.md) what an
+  object a class made held of the part at its start is read where the map holds the field's FieldFrom
+  (`sources.part_start`: the class's `__init__` binding's literal), and the change ends the part only where that start
+  differs from the print; elsewhere the way stops naming it.  Case A's `AdderResult.status_code` has no FieldFrom in
+  x13fgtBm (only the class constants rc_*): the map makes one only for a field step after an object's or self's end,
+  and the test reads status_code through `is_succeeded()` (asked of the map, 2026-11-11).  A change only kept is chosen
+  only where V matched its stored literal to a print.
+- *A local bound to two constants in two arms ends* where its ways do.  Since Q7's (f), a literal that would turn the
+  test its run held false is dropped (`parse_result < 2` held: not 2; `not status`; ktn: 4 terms in 22 lines), which
+  tells them apart where the test is the term's alone; where the test does not tell (another name unknown), both stay.
+  register_files' `is_failed` (False at 743, True at 759) is K's to tell (its handler), no longer this premise's.
 - *The if that tells apart the constants one call hands a parameter* (S2's (a), `Rerun._split`) is read by the map's
   GuardFrom at its test, and the map makes none for a test that guards only a binding: add_main 127, which tells
   `ignoreTmpError`'s False (130) from its True (134), stops at no-record.
@@ -2241,8 +2247,9 @@ adder_atlas_plugin 789 and stops at `is_fatal`, bound in the handlers at 756 and
 An arm read on no run (an attribute's, with no window) is not read by S4c: its changes stay on the way, named.
 *Shows:* where one of the first three fails, a change dropped or chosen, or a term ended, wrongly; where the last
 does, a stop at the if's test (no-record).
-*Revisit:* the first on the map's RTC (callees' reads carried); the last on its SBG (a GuardFrom for a test on the way
-to a source's binding); the other two when a walk meets them.
+*Revisit:* the first on the map's RTC (callees' reads carried); the second when the map answers the FieldFrom ask (a
+field a method the test calls on an end reads); the third where a test that does not tell meets a walk; the last on
+its SBG (a GuardFrom for a test on the way to a source's binding).
 
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
