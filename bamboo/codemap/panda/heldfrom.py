@@ -84,6 +84,7 @@ from bamboo.codemap.models import (
     KEY_SELF_FIELD,
     KEY_SEQUENCE,
     KEY_UNKNOWN,
+    THROUGH_ADDED,
     THROUGH_COMPUTED,
     THROUGH_CONVERTED,
     THROUGH_COPY,
@@ -203,6 +204,8 @@ _COMPREHENSIONS = {
     ast.GeneratorExp: "<genexpr>",
 }
 _ELEMENT_COMPREHENSIONS = frozenset({"<listcomp>", "<setcomp>", "<genexpr>"})
+#: What a ``+``'s value's ``through`` is called by (:data:`THROUGH_ADDED`).
+_ADD = "+"
 
 
 #: A ``with``'s step: its ``__enter__`` mostly gives the context itself, so a way's paths stay as they are.
@@ -219,7 +222,8 @@ def _unread_part(way: _Way, step: str) -> _Way:
 def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = None) -> list[_Way]:
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
     (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
-    the values it is read as.
+    the values it is read as.  An element of a ``+``'s value is an element of one of its sides, the ``+`` left
+    (:func:`_through_added`): ``(ret_head + ret_tail)[0]`` is ``ret_head``'s or ``ret_tail``'s ``[0]``.
 
     A way whose source sits at parts of the value (*paths*) is cut by the step, as the path carry takes a part: the
     parts under it, with the rest of their steps; none where no part is under it, the source not in the part
@@ -228,6 +232,13 @@ def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = 
     ``taskSpec.site``); where the paths are the carry's (*loose*) it is the source or a part of it, not known which:
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too."""
+    while (
+        step.startswith("[")
+        and way.through
+        and way.through[0].call == _ADD
+        and way.through[0].steps == len(way.steps)
+    ):
+        way = way._replace(through=way.through[1:])
     if (
         step.startswith("[")
         and not way.paths
@@ -405,12 +416,21 @@ def _empty_literal(expr: ast.expr) -> str:
     return ""
 
 
-def _holds_elements(ways: list[_Way]) -> bool:
-    """Whether the carry says a value holds a source at an element (``[*]``, ``[0]``) -- a sequence, not a number or a
-    text --, no statement's rows or sequence among its ways."""
-    return any(path.startswith("[") for one in ways for path in one.paths) and not any(
-        one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in ways
-    )
+def _added_sides(expr: ast.expr) -> list[ast.expr]:
+    """The operands of *expr*'s ``+`` -- ``a + b + c``'s three --, *expr* itself where it is no ``+``."""
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+        return _added_sides(expr.left) + _added_sides(expr.right)
+    return [expr]
+
+
+def _through_added(ways: list[_Way], place: str) -> list[_Way]:
+    """*ways*, of a side of the ``+`` at *place*, as the ``+``'s value's: each through the ``+``
+    (:data:`THROUGH_ADDED`) after its own steps, a stop as it is."""
+    made = _Through(_ADD, place, THROUGH_ADDED)
+    return [
+        one if one.kind == _STOP else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
+        for one in ways
+    ]
 
 
 def _key_spot(key: ast.expr) -> str:
@@ -761,6 +781,9 @@ class _Reader:
             return rows
         if isinstance(expr, ast.Call):
             return self._call(expr, file, func)
+        if isinstance(expr, ast.Subscript) and isinstance(expr.slice, ast.Slice):
+            # A slice of a list or a text is one of its kind holding what it holds, not an element: the value itself.
+            return self.read(expr.value, at, file, func)
         if isinstance(expr, (ast.Subscript, ast.Attribute)) and not (
             isinstance(expr.value, ast.Name) and expr.value.id in ("self", "cls")
         ):
@@ -795,9 +818,9 @@ class _Reader:
         placed = self._placed(expr, at, file, func)
         if placed is not None:
             return placed
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            return self._added(_added_sides(expr), at, f"{file}:{line}", file, func)
         found = self._sources(expr, at, file, func)
-        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add) and _holds_elements(found):
-            return self._concatenated((expr.left, expr.right), at, file, func)
         empty = _empty_literal(expr)
         if empty:
             found = [one._replace(made_empty=empty) if one.kind == KEY_UNKNOWN else one for one in found]
@@ -836,24 +859,21 @@ class _Reader:
             return None
         return [placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func))]
 
-    def _concatenated(self, sides: Iterable[ast.expr], at: ast.AST, file: str, func: ast.AST) -> list[_Way]:
-        """The ways of a sequence joined of *sides* (``a + b``; the ``b`` of an ``x += b``): each side's elements at
-        ``[*]`` (:func:`_at`) -- ``jobSpec.Files + pseudoFiles`` holds ``jobSpec.Files[*]`` and what ``pseudoFiles``
-        holds, where the carry says only that it holds ``jobSpec`` or a part of it."""
-        found: list[_Way] = []
-        for side in sides:
-            unread = _Way(KEY_UNKNOWN, f"{ast.unparse(side)}[*]", getattr(side, "lineno", None))
-            found += _at("[*]", _taken(self.read(side, at, file, func), "[*]", unread=unread))
-        return found
+    def _added(self, sides: Iterable[ast.expr], at: ast.AST, place: str, file: str, func: ast.AST) -> list[_Way]:
+        """The ways of the ``+`` at *place* of *sides* (``a + b``; the ``b`` of an ``x += b``), read here, not asked
+        of the carry: each side's, through the ``+`` (:func:`_through_added`) -- a number or a text computed from
+        them, or a sequence joined of them, whose element is a side's (:func:`_step`).  ``ret_head + ret_tail`` holds
+        the rows both hold; ``job.attemptNr + 1`` is computed from ``job.attemptNr`` and ``1``."""
+        return _through_added([one for side in sides for one in self.read(side, at, file, func)], place)
 
     def _accumulated(
         self, expr: ast.Name, site: ast.AugAssign, file: str, func: ast.AST, seen: set[int]
     ) -> list[_Way]:
-        """What ``x += b`` (*site*) leaves *expr* where the carry says it holds elements: a sequence joined of what
-        ``x`` held before and ``b`` (:meth:`_concatenated`) -- a ``+=`` reaching it adds its own ``b``, each once
-        (``scanSiteList += ...`` in a loop)."""
+        """What ``x += b`` (*site*) leaves *expr*: a ``+`` (:meth:`_added`) of what ``x`` held before and ``b`` -- a
+        ``+=`` reaching it adds its own ``b``, each once (``scanSiteList += ...`` in a loop)."""
         seen.add(id(site))
-        found = self._concatenated((site.value,), site, file, func)
+        place = f"{file}:{site.lineno}"
+        found = self._added((site.value,), site, place, file, func)
         for before in pathcond.held_at(func, expr.id, site).sites:  # type: ignore[arg-type]
             if id(before) in seen:
                 continue
@@ -865,9 +885,7 @@ class _Reader:
             ):
                 found += self._accumulated(expr, before, file, func, seen)
                 continue
-            unread = _Way(KEY_UNKNOWN, f"{expr.id}[*]", getattr(before, "lineno", None))
-            ways = self._site_ways(expr, site, before, file, func, site)
-            found += _at("[*]", _taken(ways, "[*]", unread=unread))
+            found += _through_added(self._site_ways(expr, site, before, file, func, site), place)
         return found
 
     def _returned_field(self, expr: ast.Attribute, at: ast.AST, file: str, func: ast.AST) -> Optional[list[_Way]]:
@@ -1029,9 +1047,9 @@ class _Reader:
         ``update_jobs``' ``for job in job_list`` read ``job`` as the list whole; ``retEvS, retNewPandaID =
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
-        select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` of a sequence is the sequence
-        joined (:meth:`_accumulated`); another ``+=``, ``except ... as`` and ``:=`` keep what the carry says
-        (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
+        select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` is a ``+`` of what the name
+        held and its value (:meth:`_accumulated`); another augmented assignment, ``except ... as`` and ``:=`` keep
+        what the carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
         carried = self._sources(expr, point, file, func) or [
             _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
         ]
@@ -1046,7 +1064,7 @@ class _Reader:
         if binding is None or binding.kind == pathcond.BIND_EXCEPT:
             return carried
         if binding.kind == pathcond.BIND_AUGMENTED:
-            if isinstance(site, ast.AugAssign) and isinstance(site.op, ast.Add) and _holds_elements(carried):
+            if isinstance(site, ast.AugAssign) and isinstance(site.op, ast.Add):
                 return self._accumulated(expr, site, file, func, set())
             return carried
         if any(one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in carried):

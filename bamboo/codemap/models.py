@@ -3160,7 +3160,8 @@ HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE
 #: (``json.dumps``), a value computed from it that holds none of it (``len``, ``math.ceil``), one of its elements
 #: (``max``), what tells only its class or identity (``type``), not said (``random.choice``).  A builtin
 #: :class:`~bamboo.codemap.callfacts.Function` says another word of is said with that word (``enumerate``'s
-#: ``numbered``).
+#: ``numbered``).  A ``+`` (or ``+=``) of the value and others is said ``added``: a number or a text computed from
+#: them, or a sequence joined of them -- an element of its value is one of a side's, read without the ``+``.
 THROUGH_DECODED = "decoded"
 THROUGH_COPY = "copy"
 THROUGH_CONVERTED = "converted"
@@ -3169,6 +3170,7 @@ THROUGH_COMPUTED = "computed"
 THROUGH_ONE = "one"
 THROUGH_TELLS = "tells"
 THROUGH_UNKNOWN = "unknown"
+THROUGH_ADDED = "added"
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -3336,14 +3338,16 @@ class HeldThrough(BaseModel):
     call: str = Field(
         description=(
             "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
-            "as js`` too), else as the call names it (``int``)."
+            "as js`` too), else as the call names it (``int``); ``+`` for a ``+`` or ``+=`` "
+            f"({THROUGH_ADDED}): ``job.attemptNr + 1``."
         )
     )
     at: str = Field(description="``file:line`` of the call.")
     gives: str = Field(
         description=(
             f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
-            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, a builtin's other word, {THROUGH_UNKNOWN}."
+            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, {THROUGH_ADDED}, a builtin's other word, "
+            f"{THROUGH_UNKNOWN}."
         )
     )
     hooks: list[str] = Field(
