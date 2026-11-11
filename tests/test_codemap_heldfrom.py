@@ -1565,3 +1565,100 @@ def test_a_field_of_what_a_call_returns_is_read_in_the_callee_at_its_returns(
     assert returned["built"] == {
         ("object", "JediTaskSpec", (".splitRule",), "", (at("BUILT") - 1,))
     }
+
+
+_FACTORY = """\
+    from typing import Generic, TypeVar
+
+    T = TypeVar("T")
+
+
+    class FactoryBase(Generic[T]):
+        def __init__(self) -> None:
+            self.implMap: dict[str, T] = {}
+
+        def getImpl(self, vo: str) -> T:
+            tmpImpl = self.implMap[vo]
+            tmpImpl.refresh()
+            return tmpImpl
+
+        def requireImpl(self, vo: str) -> T:
+            impl = self.getImpl(vo)
+            return impl
+"""
+
+_PLUGINS = """\
+    class BrokerBase:
+        def refresh(self) -> None:
+            self.siteMapper = 1  # B
+
+
+    class DogBase:
+        def refresh(self) -> None:
+            self.lastRun = 2  # D
+"""
+
+_KNIGHTS = """\
+    from pkg.factory import FactoryBase
+    from pkg.plugins import BrokerBase, DogBase
+
+
+    class Broker(FactoryBase[BrokerBase]):
+        pass
+
+
+    class WatchDog(FactoryBase[DogBase]):
+        pass
+
+
+    def run(broker: Broker, dog: WatchDog) -> None:
+        brokered = broker.requireImpl("atlas")
+        watched = dog.requireImpl("atlas")
+        if brokered and watched:
+            pass
+"""
+
+
+def test_a_way_through_a_factory_reads_the_changes_of_the_family_the_factory_hands(
+    tmp_path: Path,
+) -> None:
+    """``jobBroker.requireImpl(...)`` on a ``JobBroker(FactoryBase[JobBrokerBase])``: ``FactoryBase.getImpl`` runs
+    ``tmpImpl.refresh()`` before it returns the plugin, and that is ``JobBrokerBase.refresh`` -- read with ``self`` a
+    ``JobBroker`` there, the way's changes are that family's stores, not every family's (FGT)."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    for name, text in (("factory", _FACTORY), ("plugins", _PLUGINS), ("m", _KNIGHTS)):
+        (root / f"{name}.py").write_text(textwrap.dedent(text))
+    calls = calls_mod.Calls(calls_mod.Types({"pkg": root}, {}))
+    trees = {
+        f"pkg/{name}.py": calls.types.tree(f"pkg/{name}.py")
+        for name in ("factory", "plugins", "m")
+    }
+    run = next(
+        n
+        for n in ast.walk(trees["pkg/m.py"])
+        if isinstance(n, ast.FunctionDef) and n.name == "run"
+    )
+    test = next(n for n in ast.walk(run) if isinstance(n, ast.If))
+
+    class _Record:
+        def is_database(self, file: str, node: ast.AST) -> bool:
+            return False
+
+    def changed(name: str) -> set[str]:
+        node = next(
+            n for n in ast.walk(test.test) if isinstance(n, ast.Name) and n.id == name
+        )
+        with sql.across_calls(calls):
+            reader = heldfrom._Reader(calls, _Record(), [], set(), trees)
+            ways = reader.read(node, test, "pkg/m.py", run)
+        return {change.at for way in ways for change in way.changes}
+
+    plugins = textwrap.dedent(_PLUGINS).splitlines()
+    store = {
+        mark: f"pkg/plugins.py:{plugins.index(next(t for t in plugins if t.endswith(mark))) + 1}"
+        for mark in ("# B", "# D")
+    }
+    assert changed("brokered") == {store["# B"]}
+    assert changed("watched") == {store["# D"]}
