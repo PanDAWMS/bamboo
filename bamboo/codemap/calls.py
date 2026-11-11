@@ -679,6 +679,8 @@ class Calls:
         self.types = types
         #: By the call, and by the classes ``self`` is bound to where the call reads it.
         self._placed: dict[object, Placed] = {}
+        #: :meth:`_generic_self` per function.
+        self._generic: dict[int, bool] = {}
         self._by_name: Optional[dict[str, list[CallSite]]] = None
         self._callers: dict[tuple[str, int], list[CallSite]] = {}
         self._missed: dict[tuple[str, int], list[str]] = {}
@@ -712,12 +714,24 @@ class Calls:
         a reader entered *func* with.  Without it, every class ``self`` can be
         there (:meth:`objects_of`).  Only a call that reads ``self`` -- on
         ``self`` or ``cls``, through ``super()``, or handing ``self`` to a
-        method read off its class -- is placed differently for it.
+        method read off its class -- is placed differently for it, and any
+        call in a method of a generic class, whose receiver can be declared a
+        type parameter ``self``'s class binds (``tmpImpl.refresh()`` in
+        ``FactoryBase.getImpl``).
         """
-        key: object = (id(call), _bound_key(bound)) if bound and _reads_self(call) else id(call)
+        reads = bool(bound) and (_reads_self(call) or self._generic_self(file, func))
+        key: object = (id(call), _bound_key(bound)) if reads else id(call)
         if key not in self._placed:
-            self._placed[key] = self._place(file, func, call, bound if bound and _reads_self(call) else ())
+            self._placed[key] = self._place(file, func, call, bound if reads else ())
         return self._placed[key]
+
+    def _generic_self(self, file: str, func: ast.AST) -> bool:
+        """Whether *func* is a method of a class taking type parameters (:meth:`Types.type_parameters`)."""
+        held = self._generic.get(id(func))
+        if held is None:
+            owner = self.types.method_class(file, func)
+            held = self._generic[id(func)] = owner is not None and bool(self.types.type_parameters(*owner))
+        return held
 
     def stored(self, store: ast.Attribute | ast.Call, name: ast.expr, value: Optional[ast.expr]) -> ast.Call:
         """The call Python makes for an attribute store -- ``x.a = value``, or ``setattr(x, name, value)``, the call
@@ -798,7 +812,7 @@ class Calls:
         named = self.types.class_named(file, receiver)
         if named is not None:
             return tuple(one._replace(bound=()) for one in self._method_of(named, value.attr).targets)
-        declared = self.types.declared(file, func, receiver)
+        declared = self.types.declared(file, func, receiver, bound=bound)
         if declared is not None:
             classes = list(dict.fromkeys(one for each in sorted(declared, key=_class_key) for one in self.objects_of(each)))
             return self._method_of_any(classes, value.attr).targets
@@ -861,7 +875,8 @@ class Calls:
         forwarded = self._handed_on(file, func, call)
         if forwarded is not None:
             return forwarded
-        declared = self.types.declared(file, func, receiver)
+        # ``tmpImpl.refresh()`` in ``FactoryBase.getImpl``: ``tmpImpl`` is declared ``T``, read by ``self``'s classes.
+        declared = self.types.declared(file, func, receiver, bound=bound)
         if declared is not None:
             # ``self.conn: WrappedOracleConn | WrappedPostgresConn`` -- each
             # class it is declared as, as for the values below, and each
@@ -2568,8 +2583,12 @@ class Types:
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
         #: :meth:`bound` per function.
         self._bound: dict[int, dict[str, list[ast.expr]]] = {}
-        # (file, id(func), name, depth) -> (func, classes): see ``declared``.
+        # (file, id(func), name, depth, bound) -> (func, classes): see ``declared``.
         self._names: dict[tuple, tuple[ast.AST, Optional[Classes]]] = {}
+        #: :meth:`_parameters_of` per file.
+        self._file_parameters: dict[str, dict[str, ast.ClassDef]] = {}
+        #: :meth:`parameter_classes`, read once: (``id`` of the class taking it, its name) -> the classes.
+        self._parameter_binds: Optional[dict[tuple[int, str], Classes]] = None
         self._files: dict[int, str] = {}
         self._mro: dict[int, tuple[ast.ClassDef, list[tuple[str, ast.ClassDef]]]] = {}
         #: :meth:`annotated_libraries`, once a tree.
@@ -2870,12 +2889,18 @@ class Types:
         """The class an annotation states, where it states exactly one -- :meth:`annotated_all`."""
         return _one(self.annotated_all(file, annotation))
 
-    def annotated_all(self, file: str, annotation: Optional[ast.expr]) -> Optional[Classes]:
+    def annotated_all(self, file: str, annotation: Optional[ast.expr], binds: Optional[Bound] = None) -> Optional[Classes]:
         """Every corpus class an annotation states, through quotes, ``Optional`` and unions.
 
         ``WrappedOracleConn | WrappedPostgresConn`` is both; ``Foo | None`` and
         ``Foo | str`` are ``Foo`` -- a member naming no class of the corpus
         says nothing this reading can follow.  ``None`` where it states none.
+
+        A type parameter of a generic class of *file* is what *binds* binds it
+        to: ``getImpl(...) -> T | None`` in ``FactoryBase``, on a
+        ``FactoryBase[PostProcessorBase]``, is a ``PostProcessorBase``.  Where
+        they bind it to nothing, it is each class the corpus binds it to
+        (:meth:`parameter_classes`).
         """
         if annotation is None:
             return None
@@ -2886,7 +2911,7 @@ class Types:
             for member in members:
                 if isinstance(member, ast.Constant) and member.value is None:
                     continue
-                found |= self.annotated_all(file, member) or frozenset()
+                found |= self.annotated_all(file, member, binds) or frozenset()
             return frozenset(found) or None
         if isinstance(annotation, ast.Subscript):
             # ``FactoryBase[PostProcessorBase]``: a class of the corpus taking
@@ -2896,7 +2921,17 @@ class Types:
             named = self.class_named(file, head) if isinstance(head, (ast.Name, ast.Attribute)) else None
             return frozenset({named}) if named is not None and self.type_parameters(*named) else None
         named = self.class_named(file, annotation)
-        return frozenset({named}) if named is not None else None
+        if named is not None:
+            return frozenset({named})
+        if not isinstance(annotation, ast.Name):
+            return None
+        holder = self._parameters_of(file).get(annotation.id)
+        if holder is None:
+            return None
+        key = (id(holder), annotation.id)
+        if binds and key in binds:
+            return self.annotated_all(*binds[key])
+        return self.parameter_classes(holder, annotation.id)
 
     def type_parameters(self, file: str, cls: ast.ClassDef) -> tuple[str, ...]:
         """The type parameters *cls* takes, as its ``Generic[...]`` base names them: ``("T",)`` for ``FactoryBase``.
@@ -2942,29 +2977,81 @@ class Types:
                     bound.setdefault(key, value)
         return bound
 
-    def _annotated_bound(
-        self, file: str, annotation: Optional[ast.expr], holder: ast.ClassDef, bound: Bound
-    ) -> Optional[Classes]:
-        """:meth:`annotated_all` of an annotation written in *holder*, each of its type parameters read as *bound* binds it.
+    def _parameters_of(self, file: str) -> dict[str, ast.ClassDef]:
+        """``{type parameter: the class of *file* taking it}``: ``{"T": FactoryBase}`` for ``FactoryBase.py``.
 
-        ``instantiateImpl(...) -> T | None`` in ``FactoryBase``, on a
-        ``FactoryBase[PostProcessorBase]``, is a ``PostProcessorBase``.  A
-        parameter nothing binds names no class, as before.
+        A name two classes of the file take is neither's here, and is left out.
         """
-        if annotation is None:
-            return None
-        annotation = _unquoted(annotation)
-        members = _union_members(annotation)
-        if members is not None:
-            found: set[tuple[str, ast.ClassDef]] = set()
-            for member in members:
-                if isinstance(member, ast.Constant) and member.value is None:
-                    continue
-                found |= self._annotated_bound(file, member, holder, bound) or frozenset()
-            return frozenset(found) or None
-        if isinstance(annotation, ast.Name) and (id(holder), annotation.id) in bound:
-            return self.annotated_all(*bound[(id(holder), annotation.id)])
-        return self.annotated_all(file, annotation)
+        if file not in self._file_parameters:
+            found: dict[str, ast.ClassDef] = {}
+            twice: set[str] = set()
+            tree = self.tree(file)
+            for node in walk(tree) if tree is not None else ():
+                if isinstance(node, ast.ClassDef):
+                    for name in self.type_parameters(file, node):
+                        if name in found:
+                            twice.add(name)
+                        found[name] = node
+            self._file_parameters[file] = {name: cls for name, cls in found.items() if name not in twice}
+        return self._file_parameters[file]
+
+    def parameter_classes(self, cls: ast.ClassDef, name: str) -> Optional[Classes]:
+        """Each corpus class the corpus binds *cls*'s type parameter *name* to, in a base or an annotation.
+
+        ``FactoryBase``'s ``T``: ``WatchDogBase`` in ``class WatchDog(JediKnight,
+        FactoryBase[WatchDogBase])``, ``TaskBrokerBase`` in ``implFactory:
+        FactoryBase[TaskBrokerBase]``, and so on -- what ``T`` is where nothing
+        says which: in ``FactoryBase.getImpl`` with ``self`` read as no
+        subclass, the plugin is one of the families, not any class with the
+        method (``_Plugin``'s stub, ``DataCarousel``'s decorator ``refresh``).
+        ``None`` where the corpus binds it to no class of its own.
+        """
+        if self._parameter_binds is None:
+            # Empty while it is read: an argument that is a type parameter itself binds nothing here.
+            self._parameter_binds = {}
+            found: dict[tuple[int, str], set[tuple[str, ast.ClassDef]]] = {}
+            files = self.corpus_files()
+            generic = {holder.name for where in files for holder in self._parameters_of(where).values()}
+            for where in files:
+                tree = self.tree(where)
+                for node in walk(tree) if tree is not None else ():
+                    if isinstance(node, ast.Subscript) and _head_name(node.value) in generic:
+                        for key, argument in self._binds(where, node).items():
+                            found.setdefault(key, set()).update(self.annotated_all(*argument) or ())
+            self._parameter_binds = {key: frozenset(classes) for key, classes in found.items() if classes}
+        return self._parameter_binds.get((id(cls), name))
+
+    def _annotated_in(
+        self,
+        file: str,
+        func: ast.AST,
+        bound: tuple[tuple[str, ast.ClassDef], ...],
+        where: str,
+        annotation: Optional[ast.expr],
+    ) -> Optional[Classes]:
+        """:meth:`annotated_all` of *annotation*, written in *where* and read in *func* of *file*: a type parameter
+        in it is what each class ``self`` can be there binds it to -- each of *bound*, or the class *func* is a
+        method of.
+
+        ``tmpImpl`` in ``FactoryBase.getImpl``, an element of ``self.implMap: dict[str, dict[str, dict[str,
+        T]]]``, is a ``JobBrokerBase`` where ``self`` is a ``JobBroker(FactoryBase[JobBrokerBase])``; where ``self``
+        is a ``FactoryBase`` binding nothing, each class the corpus binds ``T`` to.
+        """
+        parameters = self._parameters_of(where)
+        if (
+            annotation is None
+            or not parameters
+            or not any(isinstance(node, ast.Name) and node.id in parameters for node in ast.walk(_unquoted(annotation)))
+        ):
+            return self.annotated_all(where, annotation)
+        held = self.method_class(file, func)
+        selves = bound or ((held,) if held is not None else ())
+        if not selves:
+            return self.annotated_all(where, annotation)
+        found: set[tuple[str, ast.ClassDef]] = set()
+        for one in selves:
+            found |= self.annotated_all(where, annotation, self._binds_of_class(*one)) or frozenset()
+        return frozenset(found) or None
 
     def _receiver_binds(
         self, file: str, func: ast.AST, receiver: ast.expr, owner: tuple[str, ast.ClassDef]
@@ -3027,7 +3114,7 @@ class Types:
             if getter is None:
                 found.add((where, cls))
                 continue
-            got = self._annotated_bound(getter[0], getter[2].returns, getter[1], self._binds(file, annotation))
+            got = self.annotated_all(getter[0], getter[2].returns, self._binds(file, annotation))
             found |= got or frozenset()
         return frozenset(found) or None
 
@@ -3333,7 +3420,15 @@ class Types:
     ) -> Optional[tuple[str, ast.expr]]:
         """The annotation *expression* was declared with: a field's -- of ``self``, or of an object declared a class of
         the corpus where each class it may be declares the field alike (``site.setokens_output``) --, a parameter's
-        or a local's."""
+        or a local's, or the element type such a container's states (``voImplMap[sourceLabel]``)."""
+        if isinstance(expression, ast.Subscript):
+            # ``voImplMap = self.implMap[vo]`` and ``srcImplMap = voImplMap[sourceLabel]`` in
+            # ``FactoryBase.getImpl``: an alias of an element is declared as the element.
+            container = self._annotation_of(file, func, expression.value, seen)
+            if container is None:
+                return None
+            element = _element_annotation(container[1])
+            return (container[0], element) if element is not None else None
         if (
             isinstance(expression, ast.Attribute)
             and isinstance(expression.value, ast.Name)
@@ -3453,38 +3548,40 @@ class Types:
             return None
         return self._outside_instance(target, held[1], depth + 1)
 
-    def _of_name(self, file: str, func: ast.AST, name: str, depth: int) -> Optional[Classes]:
-        """:meth:`declared` for a bare name, read in *func*."""
+    def _of_name(
+        self, file: str, func: ast.AST, name: str, depth: int, bound: tuple[tuple[str, ast.ClassDef], ...] = ()
+    ) -> Optional[Classes]:
+        """:meth:`declared` for a bare name, read in *func* with ``self`` one of *bound*."""
         args = getattr(func, "args", None)
         for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
             if argument.arg == name:
                 if self.handed_to is not None and self.states_any(file, argument.annotation):
                     return self.handed_to(file, func, name, depth)
-                return self.annotated_all(file, argument.annotation)
+                return self._annotated_in(file, func, bound, file, argument.annotation)
         for node in walk(func):
             if (
                 isinstance(node, ast.AnnAssign)
                 and isinstance(node.target, ast.Name)
                 and node.target.id == name
             ):
-                return self.annotated_all(file, node.annotation)
+                return self._annotated_in(file, func, bound, file, node.annotation)
         # Every assignment, less the ``None`` a name is cleared with:
         # ``siteMapper = SiteMapper(taskBuffer)`` and, at the end of the
         # daemon, ``siteMapper = None``.  The evidence for a local is all in
         # this function, so it is read rather than asked for; the answer
         # is classes only where every assignment says the same ones.  So
         # are the bindings an assignment is not (:meth:`_other_bindings`).
-        bound = self._assigned_here(func, name)
+        assigned = self._assigned_here(func, name)
         others = self._other_bindings(file, func, name, depth)
         held = self._with_held(file, func, name, depth)
-        if not bound and held is None and not others:
+        if not assigned and held is None and not others:
             # A name a module's own body reads and does not bind is one it
             # imports: ``initializer.init()`` and ``taskBuffer.init(...)`` at
             # the top of ``panda.py``, a module's caller (:class:`CallSite`).
             if isinstance(func, ast.Module):
                 return self._imported_instance(file, name, depth)
             return self._outside_instance(file, name, depth)
-        found = {self.declared(file, func, value, depth + 1) for value in bound}
+        found = {self.declared(file, func, value, depth + 1, bound) for value in assigned}
         found.update(one for one in others if one is not None)
         if held is not None:
             found.add(held)
@@ -3686,7 +3783,14 @@ class Types:
         """
         return _one(self.declared(file, func, expression, depth))
 
-    def declared(self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0) -> Optional[Classes]:
+    def declared(
+        self,
+        file: str,
+        func: ast.AST,
+        expression: ast.expr,
+        depth: int = 0,
+        bound: tuple[tuple[str, ast.ClassDef], ...] = (),
+    ) -> Optional[Classes]:
         """The classes *expression*, read in *func* of *file*, is declared to be.
 
         One, or each member of a union.  A union is read wherever a single
@@ -3694,6 +3798,11 @@ class Types:
         module's instance, what a ``with`` yields, a container's element, a
         return annotation -- and where every assignment of a name or field
         must say the same, it must say the same classes.
+
+        *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`).
+        A type parameter of its class, in a local's or a parameter's
+        annotation, a container's element or what a method of ``self``
+        returns, is what they bind it to (:meth:`_annotated_in`).
         """
         if depth > self.DEPTH:
             return None
@@ -3707,11 +3816,11 @@ class Types:
             # rebound too, and reading each afresh cost the product of their
             # assignment counts: a census stopped in that one file for hours.
             # The function is kept with the answer, so its id is not reused.
-            key = (file, id(func), expression.id, depth)
+            key = (file, id(func), expression.id, depth, tuple(id(one[1]) for one in bound))
             hit = self._names.get(key)
             if hit is not None and hit[0] is func:
                 return hit[1]
-            answer = self._of_name(file, func, expression.id, depth)
+            answer = self._of_name(file, func, expression.id, depth, bound)
             self._names[key] = (func, answer)
             return answer
         if (
@@ -3728,7 +3837,7 @@ class Types:
                 where, annotation = container
                 element = _element_annotation(annotation)
                 if element is not None:
-                    return self.annotated_all(where, element)
+                    return self._annotated_in(file, func, bound, where, element)
             return None
         if isinstance(expression, ast.Call):
             called = expression.func
@@ -3738,7 +3847,7 @@ class Types:
             hook = self._copy_hook(file, called)
             if hook is not None:
                 # ``jobSpec = copy.copy(job)``: what ``job`` is declared to be.
-                copied = self.declared(file, func, expression.args[0], depth + 1) if expression.args else None
+                copied = self.declared(file, func, expression.args[0], depth + 1, bound) if expression.args else None
                 return self._copied(copied, hook)
             if isinstance(called, ast.Name):
                 # ``get_task_utils_module(self)``, declared ``-> TaskUtilsModule``.
@@ -3761,8 +3870,10 @@ class Types:
                 where, holder, method = held
                 if not self.type_parameters(where, holder):
                     return self.annotated_all(where, method.returns)
-                bound = self._receiver_binds(file, func, receiver, owner)
-                return self._annotated_bound(where, method.returns, holder, bound)
+                if isinstance(receiver, ast.Name) and receiver.id == "self":
+                    # ``impl = self.getImpl(...)`` in ``FactoryBase.requireImpl``: what ``self``'s classes bind.
+                    return self._annotated_in(file, func, bound, where, method.returns)
+                return self.annotated_all(where, method.returns, self._receiver_binds(file, func, receiver, owner))
         return None
 
     # -- what a value can be, where nothing declares it --------------------
