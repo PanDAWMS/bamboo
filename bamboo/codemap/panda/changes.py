@@ -61,9 +61,11 @@ name between; in a definition the object is handed to, every statement.  A chang
   whose elements this reading does not follow --: a change inside that part, as of a part handed -- save a part
   declared a value no change in place can touch (``jediTaskID: int | None``, :func:`callfacts.immutable_annotation`),
   on the premise that a declaration holds;
-- an object put into another object's attribute: what the corpus does through an attribute of that name, on any
-  object, as :func:`may_change` reads a lost object by the attribute's name -- ``self.updatedTaskParams =
-  taskParamMap`` is changed by nothing, since the one function reading the attribute only encodes it;
+- an object put into another object's attribute (``x.attr = obj``, ``x.__setattr__("attr", obj)``): what the
+  corpus does through that field of an object of a class ``x`` is -- ``self`` in a method of the class, of a base or
+  of a subclass of it, or an expression declared one of them (:meth:`Types.declared`) -- ``self.updatedTaskParams =
+  taskParamMap`` is changed by nothing, since the one method reading the field only encodes it; where the class of
+  ``x`` is not known, the object escapes: a field's name says no object;
 - the object put where this reading loses it -- a container, a closure, a value yielded -- or handed where it
   cannot be followed (a ``*args``, a thread): a change of any key (:data:`EVERY`).
 
@@ -140,6 +142,9 @@ _SETATTR_METHODS = frozenset({"__setattr__", "__delattr__"})
 _CLASS, _DICT = "__class__", "__dict__"
 #: A builtin handing back what holds every attribute of what it is handed.
 _VARS = "vars"
+#: A field of objects of some classes: the attribute's name, and each class, by ``(file, line)``, an object holding
+#: it may be (:meth:`_Reading.family`).
+_Field = tuple[str, frozenset[tuple[str, int]]]
 #: What a builtin function's value holds of what it is handed where it holds none of it (:class:`callfacts.Function`).
 _KEEPS_NONE = frozenset(
     {
@@ -266,7 +271,7 @@ def object_changes(
     return [
         change
         for statement, change in reading.own_changes(
-            file, func, frozenset({name}), frozenset(), bound
+            file, func, frozenset({name}), None, bound
         )
         if reading.between(name, first, statement, last, killers)
     ]
@@ -286,7 +291,7 @@ def field_changes(
     *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
     return [
         change
-        for _statement, change in _reading(calls).own_changes(file, func, frozenset({holder}), frozenset(), bound)
+        for _statement, change in _reading(calls).own_changes(file, func, frozenset({holder}), None, bound)
     ]
 
 
@@ -394,7 +399,7 @@ class _Reading:
             tuple, tuple[ast.AST, list[tuple[Optional[ast.stmt], ObjectChange]]]
         ] = {}
         self.handed_to: dict[tuple, tuple[ast.AST, list[ObjectChange]]] = {}
-        self.named: dict[str, list[ObjectChange]] = {}
+        self.named: dict[_Field, list[ObjectChange]] = {}
         self.runs_between: dict[tuple, bool] = {}
         self._attributes: Optional[dict[str, list[Target]]] = None
         self.holders: dict[tuple, tuple[ast.AST, bool]] = {}
@@ -940,23 +945,24 @@ class _Reading:
         file: str,
         func: ast.AST,
         names: frozenset[str],
-        attributes: frozenset[str],
+        field: Optional[_Field],
         bound: tuple,
     ) -> list[tuple[Optional[ast.stmt], ObjectChange]]:
         """Each place *func*'s own body may change in place the object *names* hold there -- a name, or a field of a
-        name spelled ``self.result`` -- or, by name, what an attribute named one of *attributes* holds on any object
-        -- with the statement it is in."""
+        name spelled ``self.result`` -- or what *field* holds on an object of one of its classes: ``self``, where it
+        is one there, or an expression declared one (:meth:`_Reading.holder_classes`) -- with the statement it is
+        in."""
         key = (
             file,
             id(func),
             names,
-            attributes,
+            field,
             tuple((where, id(cls)) for where, cls in bound),
         )
         if key not in self.owned:
             self.owned[key] = (
                 func,
-                self._own_changes(file, func, names, attributes, bound),
+                self._own_changes(file, func, names, field, bound),
             )
         return self.owned[key][1]
 
@@ -965,11 +971,13 @@ class _Reading:
         file: str,
         func: ast.AST,
         names: frozenset[str],
-        attributes: frozenset[str],
+        field: Optional[_Field],
         bound: tuple,
     ) -> list[tuple[Optional[ast.stmt], ObjectChange]]:
         nodes = list(own_nodes(func))
         held = set(names)
+        # Keyed by the ids of *func*'s nodes, which it holds while this reading runs.
+        of_field: dict[int, bool] = {}
 
         def holds(expression: ast.AST) -> bool:
             if isinstance(expression, ast.Name):
@@ -977,9 +985,14 @@ class _Reading:
             if not isinstance(expression, ast.Attribute):
                 return False
             # ``self.result`` held as such (:func:`field_changes`): that field of that name, not any ``.result``.
-            return expression.attr in attributes or (
-                isinstance(expression.value, ast.Name) and f"{expression.value.id}.{expression.attr}" in held
-            )
+            if isinstance(expression.value, ast.Name) and f"{expression.value.id}.{expression.attr}" in held:
+                return True
+            if field is None or expression.attr != field[0]:
+                return False
+            if id(expression) not in of_field:
+                classes = self.holder_classes(file, func, expression.value, bound)
+                of_field[id(expression)] = any((where, cls.lineno) in field[1] for where, cls in classes)
+            return of_field[id(expression)]
 
         held |= self._aliases(file, func, nodes, holds, bound)
         found: list[tuple[Optional[ast.stmt], ObjectChange]] = []
@@ -1020,9 +1033,10 @@ class _Reading:
                             # A name bound to it, an attribute it is read by, a part of it: read as the object.
                             continue
                         if isinstance(target, ast.Attribute):
-                            here = f"{file}:{line}"
-                            for change in self.by_name(target.attr):
-                                add(node, change._replace(via=(here,) + change.via))
+                            for change in self._stored(
+                                file, func, line, target.value, target.attr, bound, ast.unparse(target)
+                            ):
+                                add(node, change)
                         elif not self._holds_only(
                             file, func, nodes, _root_name(target)
                         ):
@@ -1201,6 +1215,7 @@ class _Reading:
                 holds,
                 call.args[0] if off_class and call.args else called.value,
                 int(off_class),
+                bound,
             )
         try:
             placed = self.calls.callees(file, func, call, bound)
@@ -1359,9 +1374,10 @@ class _Reading:
         holds,
         obj: Optional[ast.expr],
         position: int,
+        bound: tuple,
     ) -> list[ObjectChange]:
         """``setattr``'s method, ``obj.__setattr__(name, v)``: a store or delete of the attribute named on the
-        object; the object, set on another, put in that attribute."""
+        object; the object, set on another, put in that attribute (:meth:`_stored`)."""
         line, method = call.lineno, call.func.attr  # type: ignore[attr-defined]
         named = call.args[position] if len(call.args) > position else None
         attribute = (
@@ -1384,11 +1400,7 @@ class _Reading:
                 return [
                     ObjectChange(file, line, CHANGE_ESCAPED, EVERY, method, func=func)
                 ]
-            here = f"{file}:{line}"
-            return [
-                change._replace(via=(here,) + change.via)
-                for change in self.by_name(attribute)
-            ]
+            return self._stored(file, func, line, obj, attribute, bound, method)
         return []
 
     def _holds_only(
@@ -1518,30 +1530,79 @@ class _Reading:
             found = [
                 change
                 for _statement, change in self.own_changes(
-                    target.file, target.func, names, frozenset(), target.bound
+                    target.file, target.func, names, None, target.bound
                 )
             ]
             self.handed_to[key] = (target.func, _once(found))
         return self.handed_to[key][1]
 
-    def by_name(self, attribute: str) -> list[ObjectChange]:
-        """Each place the corpus may change in place what an attribute named *attribute* holds, on any object."""
-        if attribute not in self.named:
-            self.named[attribute] = []
+    def _stored(
+        self,
+        file: str,
+        func: ast.AST,
+        line: int,
+        holder: Optional[ast.expr],
+        attribute: str,
+        bound: tuple,
+        what: str,
+    ) -> list[ObjectChange]:
+        """The object, put at *line* of *func* into the attribute *attribute* of what *holder* is there: each place
+        the corpus may change in place what that field holds on an object of *holder*'s classes (:meth:`by_field`),
+        the store on the way; where those classes are not known, the object escapes -- the attribute's name says no
+        object.  *bound*: the classes ``self`` can be in *func*."""
+        classes = self.holder_classes(file, func, holder, bound) if holder is not None else ()
+        if not classes:
+            return [ObjectChange(file, line, CHANGE_ESCAPED, EVERY, what, func=func)]
+        here = f"{file}:{line}"
+        return [
+            change._replace(via=(here,) + change.via)
+            for change in self.by_field((attribute, self.family(classes)))
+        ]
+
+    def holder_classes(
+        self, file: str, func: ast.AST, holder: ast.expr, bound: tuple
+    ) -> tuple[tuple[str, ast.ClassDef], ...]:
+        """The classes *holder*, read in *func* of *file*, can be an object of: ``self``'s -- *bound*, else the
+        class of the method (:meth:`Types.method_class`) --, or what it is declared (:meth:`Types.declared`); none
+        where it is not known."""
+        if isinstance(holder, ast.Name) and holder.id == "self":
+            if bound:
+                return tuple(bound)
+            owner = self.types.method_class(file, func)
+            return (owner,) if owner is not None else ()
+        return tuple(self.types.declared(file, func, holder, bound=bound) or ())
+
+    def family(
+        self, classes: tuple[tuple[str, ast.ClassDef], ...]
+    ) -> frozenset[tuple[str, int]]:
+        """Each class, by ``(file, line)``, whose methods and declared objects may reach an object of one of
+        *classes*: each, its bases (:meth:`Types.lineage`) and its subclasses (:meth:`Calls.subclasses`)."""
+        return frozenset(
+            (where, one.lineno)
+            for file, cls in classes
+            for where, one in (*self.types.lineage(file, cls), *self.calls.subclasses(file, cls))
+        )
+
+    def by_field(self, field: _Field) -> list[ObjectChange]:
+        """Each place the corpus may change in place what *field* holds -- its attribute on an object of its classes:
+        ``self`` in a method of one, or an expression declared one -- in every definition reading an attribute of
+        that name.  An object of another class, or one whose class is not said, is not taken for it."""
+        if field not in self.named:
+            self.named[field] = []
             found: list[ObjectChange] = []
-            for target in self.attributes().get(attribute, ()):
+            for target in self.attributes().get(field[0], ()):
                 found += [
                     change
                     for _statement, change in self.own_changes(
                         target.file,
                         target.func,
                         frozenset(),
-                        frozenset({attribute}),
+                        field,
                         target.bound,
                     )
                 ]
-            self.named[attribute] = _once(found)
-        return self.named[attribute]
+            self.named[field] = _once(found)
+        return self.named[field]
 
     def attributes(self) -> dict[str, list[Target]]:
         """Every definition of the corpus by the attribute names its own body reads or writes."""

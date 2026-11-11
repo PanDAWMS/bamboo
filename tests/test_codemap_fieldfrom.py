@@ -10,7 +10,11 @@ import pytest
 
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import reach
-from bamboo.codemap.gates import guard_fields_are_read, guard_parameters_are_read
+from bamboo.codemap.gates import (
+    guard_fields_are_read,
+    guard_parameters_are_read,
+    runnable_fields_are_read,
+)
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
@@ -23,7 +27,7 @@ from bamboo.codemap.models import (
     ParameterFrom,
     SourceModule,
 )
-from bamboo.codemap.panda import attribution, heldfrom, sql
+from bamboo.codemap.panda import attribution, heldfrom, runnable, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
@@ -48,7 +52,7 @@ SOURCES = {
             rc_fatal = 2  # RC
 
             def __init__(self):
-                self.status_code = None
+                self.status_code = None  # SI
 
             def set_temporary(self):
                 self.status_code = self.rc_temporary  # ST
@@ -298,9 +302,8 @@ ARMS = (
 )
 
 
-@pytest.fixture(scope="module")
-def built(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
-    tmp_path: Path = tmp_path_factory.mktemp("fieldfrom")
+def _corpus(tmp_path: Path) -> tuple[list[SourceModule], calls_mod.Calls]:
+    """:data:`SOURCES` written under *tmp_path*, as modules, and the corpus's calls."""
     modules = []
     for rel, text in SOURCES.items():
         path = tmp_path / rel
@@ -320,6 +323,12 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
         )
     calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
     assert calls is not None
+    return modules, calls
+
+
+@pytest.fixture(scope="module")
+def built(tmp_path_factory: pytest.TempPathFactory) -> MapFragment:
+    modules, calls = _corpus(tmp_path_factory.mktemp("fieldfrom"))
     junctions = [
         JunctionNode(
             name=f"m:{owner}:{marker}",
@@ -751,3 +760,75 @@ def test_a_setattr_over_a_parameter_s_keywords_binds_the_fields_its_callers_name
     assert ("computed", (_at(SETUP_BASE, "S5"),)) in {
         (one.kind, tuple(one.at)) for one in jobs.stops
     }
+
+
+RESULT_CLASS = f"{RESULT}::AdderResult"
+
+
+@pytest.fixture(scope="module")
+def conditioned(tmp_path_factory: pytest.TempPathFactory) -> tuple[MapFragment, list[tuple[str, str]]]:
+    """ARM's junction with A1's test its path condition, read with the fields of self the definitions the condition
+    calls read (:func:`runnable.condition_fields`) handed to the guards' reading; and those fields."""
+    modules, calls = _corpus(tmp_path_factory.mktemp("conditioned"))
+    test = textwrap.dedent(SOURCES[GEN]).splitlines()[_line(GEN, "A1") - 1].strip()[3:].split(":  #")[0]
+    junction = JunctionNode(
+        name="m:ARM",
+        map_id="m",
+        derived_from="v",
+        subject="JobSpec.jobStatus",
+        owner=f"{GEN}::process_job_report",
+        anchor=Anchor(package="pandaserver", file=GEN, line_start=_line(GEN, "ARM")),
+        branches=[Branch(outcome="ARM", line=_line(GEN, "ARM"), path_condition=[test])],
+    )
+    trees = {module.rel_path: module.tree for module in modules}
+    with sql.across_calls(calls):
+        record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        fields = runnable.condition_fields([junction], trees, calls, record)
+        guards, parameters, _sets, written, field_froms = heldfrom.guard_froms(
+            [junction], [], trees, calls, record, fields=fields
+        )
+        runnables = runnable.runnables([junction], trees, calls, record, guards, parameters)
+    fragment = MapFragment(
+        map_id="m",
+        derived_from="v",
+        junctions=[junction],
+        guard_froms=guards,
+        parameter_froms=parameters,
+        write_froms=written,
+        field_froms=field_froms,
+        runnables=runnables,
+    )
+    return fragment, fields
+
+
+def test_a_field_a_condition_reads_through_a_method_of_its_object_is_read_as_a_field_of_the_class(
+    built: MapFragment, conditioned: tuple[MapFragment, list[tuple[str, str]]]
+) -> None:
+    """``not self.add_result.is_succeeded()`` runs ``AdderResult.is_succeeded``, which reads ``self.status_code``:
+    no step of a way names the field, so the guards alone read no record of it.  Asked as a field the condition's
+    runnable reads, it is read as a way ending there is -- ``None`` in ``__init__``, the class's constants in
+    ``set_temporary`` and ``set_fatal``."""
+    assert not [one for one in built.field_froms if (one.owner, one.field) == (RESULT_CLASS, "status_code")]
+    fragment, fields = conditioned
+    assert fields == [(RESULT_CLASS, "status_code")]
+    status = _field(fragment, RESULT_CLASS, "status_code")
+    assert {one.at for one in status.bindings} == {_at(RESULT, "SI"), _at(RESULT, "ST"), _at(RESULT, "SF")}
+    (initial,) = [one for one in status.bindings if one.at == _at(RESULT, "SI")]
+    assert [(one.kind, one.name) for one in initial.sources] == [("constant", "None")]
+
+
+def test_the_gate_finds_a_record_for_each_field_a_conditions_runnable_reads(
+    conditioned: tuple[MapFragment, list[tuple[str, str]]],
+) -> None:
+    """Each field of self a condition's runnable reads, by each class it is bound to, has its FieldFrom; one
+    missing is named."""
+    fragment, _fields = conditioned
+    found = runnable_fields_are_read(fragment)
+    assert found.passed, found.failures
+    assert found.checked == 1
+    missing = fragment.model_copy(
+        update={"field_froms": [one for one in fragment.field_froms if one.field != "status_code"]}
+    )
+    lost = runnable_fields_are_read(missing)
+    assert not lost.passed
+    assert [one.rpartition(": ")[2] for one in lost.failures] == [f"{RESULT_CLASS}.status_code"]
