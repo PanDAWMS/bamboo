@@ -866,6 +866,57 @@ def test_a_name_a_handler_binds_is_an_object_of_the_class_caught_whose_field_is_
     assert "object" not in {one.kind for one in other.sources}
 
 
+WALRUS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, ds_list_dict, f):
+                if pseudo := ds_list_dict["pseudo"]:  # T1
+                    self.a = 1  # R1
+                if (n := f.count()) is not None and n == 0:  # T2
+                    self.a = 2  # R2
+                if m := f.other():  # T3
+                    if m > 3:  # T4
+                        self.a = 3  # R3
+        """,
+}
+
+
+def test_a_walrus_is_its_value_where_its_own_test_reads_it_and_after(
+    tmp_path: Path,
+) -> None:
+    """``if pseudo_coll_list := ds_list_dict["pseudo_coll_list"]:`` in ``TaskRefiner.runImpl``: the guard reads the
+    name the test binds -- at the walrus itself, or after it in the same test (``nStaging == 0``) -- as its value;
+    bindings are read by statements, which once left it unbound there.  A later statement reads it the same."""
+    fragment = _build(
+        tmp_path,
+        WALRUS,
+        (("extractCommon", "R1"), ("extractCommon", "R2"), ("extractCommon", "R3")),
+    )
+
+    def ways(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, WALRUS) and one.name == name
+        ]
+        assert guard.stops == []
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.at))
+            for one in guard.sources
+        }
+
+    def at(marker: str) -> tuple[str]:
+        return (f"{BASE}:{_line(BASE, marker, WALRUS)}",)
+
+    assert ways("T1", "pseudo") == {("parameter", "ds_list_dict", ("['pseudo']",), ())}
+    assert ways("T2", "n") == {("call", "f.count", (), at("T2"))}
+    assert ways("T3", "m") == {("call", "f.other", (), at("T3"))}
+    assert ways("T4", "m") == {("call", "f.other", (), at("T3"))}
+
+
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(
     built: MapFragment,
 ) -> None:

@@ -1000,6 +1000,10 @@ class _Reader:
         ):
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         last = _statement_of(point)
+        if any(one.kind == pathcond.BIND_WALRUS and not one.nested for one in pathcond.bindings(func, expr.id)):
+            walrus = _walrus_before(expr.id, point, last)
+            if walrus is not None:
+                return self._site_ways(expr, point, walrus, file, func, last)
         found: list[_Way] = []
         for site in pathcond.held_at(func, expr.id, point).sites:  # type: ignore[arg-type]
             found += self._site_ways(expr, point, site, file, func, last)
@@ -1079,9 +1083,10 @@ class _Reader:
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
         select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` is a ``+`` of what the name
-        held and its value (:meth:`_accumulated`).  An ``except X as e`` is an object of X where the corpus has the
-        class (:meth:`_caught`); another augmented assignment, another ``except ... as`` and ``:=`` keep what the
-        carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
+        held and its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an ``=``'s is -- also where the
+        read is in its own statement (:func:`_walrus_before`).  An ``except X as e`` is an object of X where the
+        corpus has the class (:meth:`_caught`); another augmented assignment and another ``except ... as`` keep what
+        the carry says."""
         binding = (
             pathcond.clause_binding(site, expr.id)
             if isinstance(site, ast.comprehension)
@@ -1094,6 +1099,8 @@ class _Reader:
             caught = self._caught(site, file)  # type: ignore[arg-type]
             if caught:
                 return caught
+        if binding is not None and binding.kind == pathcond.BIND_WALRUS and binding.value is not None:
+            return self.read(binding.value, site, file, func)
         carried = self._sources(expr, point, file, func) or [
             _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
         ]
@@ -2221,6 +2228,36 @@ def _statement_of(node: ast.AST) -> Optional[ast.stmt]:
     while here is not None and not isinstance(here, ast.stmt):
         here = getattr(here, "parent", None)
     return here
+
+
+def _walrus_before(name: str, point: ast.AST, statement: Optional[ast.stmt]) -> Optional[ast.NamedExpr]:
+    """The ``:=`` binding *name* in *statement*'s own expressions -- not its body's statements, not a lambda's --
+    whose target *point* is, else the last one *point* comes after: the binding of a read in the statement that
+    binds it.  :func:`pathcond.held_at` reads bindings by statements, so a ``:=`` reaches no read in its own
+    statement: ``if pseudo_coll_list := ds_list_dict["pseudo_coll_list"]:`` and ``nStaging == 0`` in ``if (nStaging
+    := ...) is not None and nStaging == 0:`` read it.  After is by place in the text, the order Python runs an
+    expression in."""
+    if statement is None:
+        return None
+    here = (getattr(point, "lineno", 0), getattr(point, "col_offset", 0))
+    found: Optional[ast.NamedExpr] = None
+    stack = [
+        child
+        for child in ast.iter_child_nodes(statement)
+        if not isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case))
+    ]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name) and node.target.id == name:
+            if node.target is point:
+                return node
+            end = (node.end_lineno or 0, node.end_col_offset or 0)
+            if end <= here and (found is None or end > (found.end_lineno or 0, found.end_col_offset or 0)):
+                found = node
+        stack.extend(ast.iter_child_nodes(node))
+    return found
 
 
 def _function_at(tree: ast.AST, name: str, line: int) -> Optional[ast.AST]:
