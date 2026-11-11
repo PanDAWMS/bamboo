@@ -2518,6 +2518,7 @@ def guard_froms(
     record,
     writes: Iterable[SetFrom] = (),
     entered: Iterable[EnteredFrom] = (),
+    fields: Iterable[tuple[str, str]] = (),
 ) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom], list[FieldFrom]]:
     """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
     :attr:`GuardFrom.calls`), and each name it reads (:func:`_names`); each of *writes*
@@ -2527,8 +2528,9 @@ def guard_froms(
     hands on (:func:`_written`), read as the guards' names are; a :class:`ParameterFrom` for each parameter a
     way of any ends at, and those reach; and a :class:`FieldFrom` for each field of a ``self`` or an object a way of
     any ends at -- its first step past the end, then the next ones past the FieldFroms' and ParameterFroms' ends --
-    and each field a test reads off ``self`` itself.  Nothing without *calls* or *record*: the reading places calls
-    and reads fetches by them."""
+    each field a test reads off ``self`` itself, and each of *fields*, ``(file::Class, field)``: the fields of
+    ``self`` the definitions the arms' conditions call read (:func:`runnable.condition_fields`).  Nothing without
+    *calls* or *record*: the reading places calls and reads fetches by them."""
     if calls is None or record is None:
         return [], [], [], [], []
     junctions = list(junctions)
@@ -2628,6 +2630,8 @@ def guard_froms(
             for guard in guards_on(site.owner, file, func, stmt):
                 if site.line not in guard.calls:
                     guard.calls.append(site.line)
+    for owner, field in fields:
+        reader.ask_field(owner, field)
     # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
     # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
     # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``).
