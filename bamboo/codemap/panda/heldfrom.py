@@ -1048,6 +1048,23 @@ class _Reader:
             return self.read(value, site, file, func)
         return self._carried(expr, point, site, file, func)
 
+    def _caught(self, handler: ast.ExceptHandler, file: str) -> list[_Way]:
+        """The ways of the name an ``except X as e`` binds: an object of X, as a call building X is
+        (:meth:`_call`) -- of each class a tuple names --, so a field of it is read where the class sets it
+        (``e.fatal`` from FileRegistrationError's ``self.fatal = fatal``, from each raise's ``fatal=``).  Placed at
+        the handler: the raise is not the handler's to name.  Empty where a class caught is not the corpus's
+        (``except Exception as e``): what the carry says then.  A subclass's object caught is X's too: X's
+        :class:`~bamboo.codemap.models.FieldFrom` reads its corpus subclasses' bindings."""
+        caught = handler.type
+        named = caught.elts if isinstance(caught, ast.Tuple) else [caught] if caught is not None else []
+        found: list[_Way] = []
+        for one in named:
+            cls = self.calls.types.class_named(file, one)
+            if cls is None:
+                return []
+            found.append(_Way(KEY_OBJECT, cls[1].name, handler.lineno, site_owner=_class_key(*cls)))
+        return found
+
     def _carried(
         self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST
     ) -> list[_Way]:
@@ -1062,11 +1079,9 @@ class _Reader:
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
         select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` is a ``+`` of what the name
-        held and its value (:meth:`_accumulated`); another augmented assignment, ``except ... as`` and ``:=`` keep
-        what the carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
-        carried = self._sources(expr, point, file, func) or [
-            _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
-        ]
+        held and its value (:meth:`_accumulated`).  An ``except X as e`` is an object of X where the corpus has the
+        class (:meth:`_caught`); another augmented assignment, another ``except ... as`` and ``:=`` keep what the
+        carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
         binding = (
             pathcond.clause_binding(site, expr.id)
             if isinstance(site, ast.comprehension)
@@ -1075,6 +1090,13 @@ class _Reader:
                 None,
             )
         )
+        if binding is not None and binding.kind == pathcond.BIND_EXCEPT:
+            caught = self._caught(site, file)  # type: ignore[arg-type]
+            if caught:
+                return caught
+        carried = self._sources(expr, point, file, func) or [
+            _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
+        ]
         if binding is None or binding.kind == pathcond.BIND_EXCEPT:
             return carried
         if binding.kind == pathcond.BIND_AUGMENTED:

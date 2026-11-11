@@ -188,7 +188,7 @@ def _build(
             sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
         )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        guards, parameters, _writes, _written, _fields = heldfrom.guard_froms(
+        guards, parameters, _writes, _written, fields = heldfrom.guard_froms(
             junctions,
             sites,
             {module.rel_path: module.tree for module in modules},
@@ -202,6 +202,7 @@ def _build(
         read_sites=sites,
         guard_froms=guards,
         parameter_froms=parameters,
+        field_froms=fields,
     )
 
 
@@ -762,6 +763,107 @@ def test_a_parameter_s_default_is_placed_where_it_is_written_not_in_the_caller_s
         ("constant", "False", (f"{CHECKER}:5",)),
         ("constant", "True", (f"{BASE}:{_line(BASE, 'C1', DEFAULTED)}",)),
     }
+
+
+EXCEPTIONS = "pandaserver/srvcore/exceptions.py"
+DDM = "pandaserver/dataservice/ddm.py"
+PLUGIN = "pandaserver/dataservice/adder_atlas_plugin.py"
+CAUGHT = {
+    EXCEPTIONS: """\
+        class FileRegistrationError(Exception):
+            def __init__(self, message: str = "", fatal: bool = False):  # E1
+                super().__init__(message)
+                self.fatal = fatal
+        """,
+    DDM: """\
+        from pandaserver.srvcore.exceptions import FileRegistrationError
+
+
+        class RucioAPI:
+            def register(self, files):
+                if not files:
+                    raise FileRegistrationError("no files", fatal=True)  # F1
+                raise FileRegistrationError("failed")  # F2
+        """,
+    PLUGIN: """\
+        from pandaserver.dataservice.ddm import RucioAPI
+        from pandaserver.srvcore.exceptions import FileRegistrationError
+
+
+        class AdderAtlasPlugin:
+            def __init__(self):
+                self.result = None
+
+            def register_files(self, files):
+                try:
+                    RucioAPI().register(files)
+                except FileRegistrationError as e:  # H1
+                    is_fatal = e.fatal
+                    if is_fatal:  # T1
+                        self.result = 1  # R1
+                except Exception as e:
+                    if e.args:  # T2
+                        self.result = 2  # R2
+        """,
+}
+
+
+def test_a_name_a_handler_binds_is_an_object_of_the_class_caught_whose_field_is_read_from_the_raises(
+    tmp_path: Path,
+) -> None:
+    """``AdderAtlasPlugin.register_files``' ``except FileRegistrationError as e: is_fatal = e.fatal``: ``e`` is an
+    object of the class, placed at the handler, so ``fatal`` is read where the class sets it -- the ``__init__``'s
+    parameter, handed ``True`` by one raise and left to its default by the other.  ``except Exception as e`` names
+    no class of the corpus: no object."""
+    fragment = _build(
+        tmp_path,
+        CAUGHT,
+        (("register_files", "R1"), ("register_files", "R2")),
+        base=PLUGIN,
+    )
+    (fatal,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(PLUGIN, "T1", CAUGHT)
+    ]
+    assert fatal.name == "is_fatal"
+    assert {
+        (one.kind, one.name, tuple(one.steps), one.site_owner, tuple(one.at))
+        for one in fatal.sources
+    } == {
+        (
+            "object",
+            "FileRegistrationError",
+            (".fatal",),
+            f"{EXCEPTIONS}::FileRegistrationError",
+            (f"{PLUGIN}:{_line(PLUGIN, 'H1', CAUGHT)}",),
+        )
+    }
+    (field,) = [
+        one
+        for one in fragment.field_froms
+        if one.owner == f"{EXCEPTIONS}::FileRegistrationError" and one.field == "fatal"
+    ]
+    assert {
+        (source.kind, source.name)
+        for binding in field.bindings
+        for source in binding.sources
+    } == {("parameter", "fatal")}
+    (handed,) = [
+        one
+        for one in fragment.parameter_froms
+        if one.owner == f"{EXCEPTIONS}::__init__" and one.parameter == "fatal"
+    ]
+    assert {(one.kind, one.name, tuple(one.at)) for one in handed.sources} == {
+        ("constant", "True", (f"{DDM}:{_line(DDM, 'F1', CAUGHT)}",)),
+        ("constant", "False", (f"{EXCEPTIONS}:{_line(EXCEPTIONS, 'E1', CAUGHT)}",)),
+    }
+    (other,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(PLUGIN, "T2", CAUGHT)
+    ]
+    assert "object" not in {one.kind for one in other.sources}
 
 
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(

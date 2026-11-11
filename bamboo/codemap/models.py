@@ -3137,8 +3137,8 @@ KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
 #: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
-#: a call builds of a corpus class (``JobSpec()``), a module's name, a call neither placed nor gone through, a fetch
-#: whose rows no statement of the function reads.
+#: a call builds of a corpus class (``JobSpec()``) or a handler catches (``except FileRegistrationError as e``), a
+#: module's name, a call neither placed nor gone through, a fetch whose rows no statement of the function reads.
 KEY_OBJECT = "object"
 KEY_GLOBAL = "global"
 KEY_CALL = "call"
@@ -6059,8 +6059,8 @@ class FieldBinding(BaseModel):
 
 class FieldFrom(BaseModel):
     """What a field of an object of a class may hold, read in the class: the next link of a way that ends at
-    ``self.<field>`` or at an object a corpus class builds with the field as its first step (``site_owner`` and the
-    field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
+    ``self.<field>`` or at an object a corpus class builds -- or a handler catches -- with the field as its first step
+    (``site_owner`` and the field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
 
     ``self.add_result.is_succeeded()`` at ``AdderGen.process_job_report`` 440 reads ``self.add_result``, bound in
     the class at ``execute_plugin`` 265 to ``self.adder_plugin.result``: a way ending at ``self.adder_plugin``, built
