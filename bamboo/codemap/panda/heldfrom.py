@@ -483,8 +483,10 @@ def _method_class(func: ast.AST) -> Optional[ast.ClassDef]:
 
 #: A step that is a field: ``.status_code``, not ``[0]`` nor ``.__enter__()``.
 FIELD_STEP = re.compile(r"^\.([A-Za-z_]\w*)$")
-#: How many steps past a field a way's end is read on for the FieldFroms further down (``self.a.b.c``): a way
-#: reaching itself again (``self.a = self.a.next``) would else ask for ever longer paths.
+#: How many steps past a field a way's end is read on for the FieldFroms further down (``self.a.b.c``).  A record is
+#: made once a key; the steps only choose the key asked next.  The asks still need a cap: some grow with no period
+#: (``storeJobs``' ``jobs`` takes ``[0][0].PandaID``, ``[0][0].jobsetID``, ... one more each round).  Raised to 24,
+#: with a repeated round stopped, the corpus's records came out the same as at 6.
 _FIELD_REST = 6
 
 
