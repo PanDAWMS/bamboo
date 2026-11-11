@@ -12157,3 +12157,206 @@ def test_a_call_tells_a_constant_apart_only_where_every_way_it_comes_by_ends_the
     assert got["d"] == [[["constant", "'x'", "pandaserver/a.py:20"]], ["pandaserver/a.py:20"]], got
     assert got["e"] == [[["constant", "constant-through", "pandaserver/a.py:40"]], ["pandaserver/a.py:40"]], got
     assert got["f"] == [[["constant", "True", "pandaserver/a.py:60"]], ["pandaserver/a.py:60"]], got
+
+
+_K_ADDER = """\
+from pandaserver.exc import RegistrationError
+
+
+class AdderPlugin:
+    def register(self, files):
+        for attempt in range(3):
+            is_fatal = False
+            try:
+                out = self.api.add(files)
+            except RegistrationError as e:
+                is_fatal = e.fatal
+            except Exception as e:
+                is_fatal = "too large" in str(e)
+            if is_fatal:
+                self.logger.error("failed")
+                return 1
+        return 0
+"""
+_K_DDM = """\
+from pandaserver.exc import RegistrationError
+
+
+def add(files):
+    try:
+        files[0]
+    except KeyError as exc:
+        raise RegistrationError("no file", fatal=True) from exc
+
+
+def check(files):
+    raise RegistrationError("not verified")
+"""
+_K_EXC = """\
+class RegistrationError(Exception):
+    def __init__(self, message="", fatal=False):
+        super().__init__(message)
+        self.fatal = fatal
+"""
+
+
+def test_k_a_field_of_the_exception_a_handler_names_is_read_up_the_raise_its_runs_traceback_shows(tmp_path):
+    # case A's is_fatal = e.fatal (adder_atlas_plugin 758): the map's object of the class caught at the handler (EXF)
+    # read by its field up to the raises that hand it; the run's traceback (the last chain of a raise ... from) names
+    # the exception, the handler it entered and the raise; a way that cannot reach the guard through that handler goes
+    # (one in the other handler; the False bound before the try, which the handler binds again)
+    corpus = _corpus(tmp_path) / "pandaserver"
+    for name, text in (("a.py", _K_ADDER), ("ddm.py", _K_DDM), ("exc.py", _K_EXC)):
+        (corpus / name).write_text(text)
+    lines = _K_ADDER.splitlines()
+    at = {k: lines.index(v) + 1 for k, v in {
+        "false": "            is_fatal = False", "body": "                out = self.api.add(files)",
+        "handler": "            except RegistrationError as e:", "other": '                is_fatal = "too large" in str(e)',
+        "test": "            if is_fatal:", "site": '                self.logger.error("failed")'}.items()}
+    pkg = "/opt/panda/lib/python3.11/site-packages/pandaserver"
+    tb = (f'Traceback (most recent call last):\n  File "{pkg}/ddm.py", line 6, in add\n    files[0]\nKeyError: 0\n\n'
+          "The above exception was the direct cause of the following exception:\n\n"
+          f'Traceback (most recent call last):\n  File "{pkg}/a.py", line {at["body"]}, in register\n'
+          "    out = self.api.add(files)\n"
+          f'  File "{pkg}/ddm.py", line 8, in add\n    raise RegistrationError("no file", fatal=True) from exc\n'
+          "pandaserver.exc.RegistrationError: no file")
+    value = (f'Traceback (most recent call last):\n  File "{pkg}/a.py", line {at["body"]}, in register\n'
+             "    out = self.api.add(files)\nValueError: too large")
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import records as REC
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        owner, rel = "pandaserver/a.py::AdderPlugin.register", "pandaserver/a.py"
+        cls, init = "pandaserver/exc.py::RegistrationError", "pandaserver/exc.py::__init__"
+        src = lambda **k: M.HeldSource(**k)
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=owner, test_line={at["test"]}, name="is_fatal", stops=[], sources=[
+                src(kind="constant", name="False", line={at["false"]}, at=[f"{{rel}}:{at["false"]}"]),
+                src(kind="object", name="RegistrationError", line={at["handler"]}, site_owner=cls, steps=[".fatal"],
+                    at=[f"{{rel}}:{at["handler"]}"]),
+                src(kind="unknown", name="'too large' in str(e)", line={at["other"]}, at=[f"{{rel}}:{at["other"]}"])])],
+            parameter_froms=[N(owner=init, parameter="fatal", line=2, stops=[], sources=[
+                src(kind="constant", name="True", line=8, route=["pandaserver/ddm.py:8"], at=["pandaserver/ddm.py:8"]),
+                src(kind="constant", name="False", line=2, route=["pandaserver/ddm.py:12"], at=["pandaserver/exc.py:2"])])],
+            entered_froms=[], runnables=[],
+            field_froms=[N(owner=cls, field="fatal", stops=[], changes=[], bindings=[
+                N(at="pandaserver/exc.py:4", owner=init, how="assign", stops=[], sources=[
+                    src(kind="parameter", name="fatal", line=2, site_owner=init, site_line=2)])])])]
+        SR._calls_in.cache_clear()
+        SR._field_index.cache_clear()
+        fn = R.function(rel, "register", within=[{at["site"]}])
+        stmt = R.statement_at(fn.node, {at["site"]})
+        guards = pathcond.arm_condition(stmt)
+        pairs = list(zip(guards, rerun._guard_ifs(fn, stmt, guards)))
+        choose = lambda ff, *a: N(bindings=ff.bindings, changes=ff.changes, entered_by=lambda at: ())
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        r._call_shown = lambda *a, **k: False
+        r._entry_value = lambda fn, run, param: None
+        end = lambda e: [e.end, e.why, e.at, e.caught, list(e.entered)]
+        term = next(t for t in SR.terms(fn, owner, pairs, choose=choose) if t.term == "is_fatal")
+        record = lambda tb: REC.Record("adder.log", 1, "2026-09-28 10:25:08,110", "panda.log.adder", "ERROR", "1",
+                                       "failed", tb.splitlines())
+        run = N(records=[record(json.loads({json.dumps(tb)!r}))])
+        k = r._raised(term, fn, run, "")
+        said = list(r.lines)
+        print(json.dumps({{
+            "terms": [end(e) for e in term.ends],
+            "raised": [end(e) for e in k.ends],
+            "said": said,
+            "ended": [end(e) for e in r._with_callers(k, fn, owner, run, None).ends],
+            "not traced": [end(e) for e in r._with_callers(r._raised(term, fn, run, ""), fn, owner, N(records=[]),
+                                                           None).ends],
+            "no run": [end(e) for e in r._raised(term, fn, None, "  ").ends],
+            "a ValueError": [end(e) for e in r._raised(term, fn, N(records=[record(json.loads({json.dumps(value)!r}))]),
+                                                      "  ").ends],
+            "handler line": rerun._handler_line(fn, SR.End("is_fatal", "stop", "object", f"{{rel}}:{at["handler"]}")),
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+
+    def a(line: int) -> str:
+        return f"pandaserver/a.py:{line}"
+
+    caught = ["stop", "parameter", "pandaserver/exc.py:2", at["handler"]]
+    assert got["terms"] == [["constant", "False", a(at["false"]), 0, []], [*caught, []],
+                            ["stop", "unknown", a(at["other"]), 0, []]], got
+    assert got["raised"] == [[*caught, ["pandaserver/ddm.py:8"]]], got
+    assert got["said"] == [f"  K: term 'is_fatal' of 'is_fatal': its run's traceback: pandaserver.exc.RegistrationError "
+                           f"raised at pandaserver/ddm.py:8, "
+                           f"caught by the except handler at {a(at['handler'])}; a way that cannot reach the guard "
+                           f"through it goes: {a(at['false'])}, {a(at['other'])}"], got
+    assert got["ended"] == [["constant", "True", "pandaserver/ddm.py:8", at["handler"], []]], got
+    # the call by the path, no frame of the run read standing at it: its caller's run is asked, as before
+    assert got["not traced"] == [["stop", "parameter-unchosen", "", at["handler"], []]], got
+    assert got["no run"] == got["terms"], got
+    assert got["a ValueError"] == [["stop", "unknown", a(at["other"]), 0, []]], got
+    assert got["handler line"] == at["handler"], got
+
+
+def test_k_an_arm_in_a_handler_whose_terms_end_stops_at_the_raise_its_runs_traceback_shows(tmp_path):
+    # K 7339032371's set_fatal at adder_atlas_plugin 170, in 'except Exception' at 165 with no guard: its run's
+    # traceback (KeyError raised in decompose_id_map) names the raise the handler took; the arm stops there, no end
+    corpus = _corpus(tmp_path) / "pandaserver"
+    for name, text in (("a.py", _K_ADDER), ("ddm.py", _K_DDM), ("exc.py", _K_EXC)):
+        (corpus / name).write_text(text)
+    lines = _K_ADDER.splitlines()
+    body = lines.index("                out = self.api.add(files)") + 1
+    arm = lines.index('                is_fatal = "too large" in str(e)') + 1
+    pkg = "/opt/panda/lib/python3.11/site-packages/pandaserver"
+    value = (f'Traceback (most recent call last):\n  File "{pkg}/a.py", line {body}, in register\n'
+             "    out = self.api.add(files)\n"
+             f'  File "{pkg}/ddm.py", line 6, in add\n    files[0]\nKeyError: 0')
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun, render
+        from bamboo.querier import records as REC
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        fn = R.function("pandaserver/a.py", "register", within=[{arm}])
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        record = REC.Record("adder.log", 1, "2026-09-28 10:25:08,110", "panda.log.adder", "DEBUG", "1", "execute()",
+                            json.loads({json.dumps(value)!r}).splitlines())
+        raised = r._raise_into(fn, {arm}, N(records=[record]), "")
+        said = list(r.lines)
+        # the run's code another version at the raising frame: the pin holds other text at ddm.py:6
+        old = REC.Record("adder.log", 1, "2026-09-28 10:25:08,110", "panda.log.adder", "DEBUG", "1", "execute()",
+                         json.loads({json.dumps(value)!r}).replace("files[0]", "files[1]").splitlines())
+        other = r._raise_into(fn, {arm}, N(records=[old]), "")
+        change = SR.Changed("pandaserver/r.py:55", "method", "*")
+        term = lambda made: SR.Term("self.add_result is None", "self.add_result", (SR.End(
+            "self.add_result", "stop", "object", "pandaserver/b.py:45", changes=(change,), made=made),))
+        made = lambda raised: SR.Made(change, "pandaserver/a.py:{arm}", "pandaserver/a.py::register", **raised)
+        print(json.dumps({{
+            "raised": raised, "said": said, "other": other,
+            "stop": render.text(rerun._first_stop(term(made(raised)))),
+            "stop, other": render.text(rerun._first_stop(term(made(other)))),
+            "no raise": render.text(rerun._first_stop(term(SR.Made(change, "pandaserver/a.py:{arm}", "x")))),
+            "no run": r._raise_into(fn, {arm}, None, "  "),
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    handler = lines.index("            except Exception as e:") + 1
+    caught = {"raised_type": "KeyError", "raised_at": "pandaserver/ddm.py:6", "caught_at": f"pandaserver/a.py:{handler}"}
+    assert got["raised"] == {**caught, "raised_other": ""}, got
+    assert got["other"] == {**caught, "raised_other": "add: files[1]"}, got
+    assert got["said"] == [f"  K: its run's traceback: KeyError raised at pandaserver/ddm.py:6, caught by the except "
+                           f"handler at pandaserver/a.py:{handler}"], got
+    stop = (f"it stops at 'self.add_result' (in 'self.add_result is None'), in the arm that made the change at "
+            f"pandaserver/a.py:{arm}, at the KeyError its run raised at pandaserver/ddm.py:6{{}}, caught by the except "
+            f"handler at pandaserver/a.py:{handler} (K: its run's traceback)")
+    assert got["stop"] == stop.format(""), got
+    assert got["stop, other"] == stop.format(" (add: files[1]: its run's code, not the pin's)"), got
+    assert got["no raise"] == "it stops at 'self.add_result' (in 'self.add_result is None')", got
+    assert got["no run"] == {}, got

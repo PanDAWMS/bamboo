@@ -226,6 +226,9 @@ class End:
     #: a parameter's way: the steps the read still takes off the parameter's value (``[*]``, ``[3]``), read on up its
     #: callers (out/gm/qk-design.md Q2's (c))
     steps: tuple[str, ...] = ()
+    #: K: a way read off the name an ``except`` handler of the arm's function binds (the handler's line): a field of the
+    #: exception caught, read up to the raise sites; the run's traceback names the raise (rerun)
+    caught: int = 0
 
 
 @dataclass(frozen=True)
@@ -242,6 +245,14 @@ class Made:
     guards: tuple[str, ...] = ()
     terms: tuple[Term, ...] = ()
     entry: End | None = None
+    #: K's form, the arm in an ``except`` handler: the exception its run's traceback shows the handler took (its type
+    #: as Python prints it), where it was raised and the handler (``file:line`` each); empty where not shown
+    raised_type: str = ""
+    raised_at: str = ""
+    caught_at: str = ""
+    #: where the pin does not hold the raising frame's source at *raised_at* (the run's code was another version): its
+    #: function and the source the traceback printed
+    raised_other: str = ""
 
 
 @dataclass(frozen=True)
@@ -402,6 +413,56 @@ def _source_end(term: str, s: Any, rel: str, keys: frozenset[str] | None = None,
         # a call the map reads as a clock (timeNow = naive_utcnow()), as a field's way ends (S2's (b))
         return End(term, CLOCK, s.name, at, **back)
     return End(term, STOP, s.kind, at, **back)
+
+
+def caught_name(fn: R.Function, s: Any) -> ast.ExceptHandler | None:
+    """K: the ``except`` handler of *fn* whose name the guard's source *s* is, read with a field step (``e.fatal``):
+    the map's object of the class caught (its *site_owner*) placed at the handler's own line (EXF); None for any other
+    source.  The handler is told by where the map places the object, not by its name's spelling."""
+    steps = tuple(getattr(s, "steps", None) or ())
+    if s.kind != M.KEY_OBJECT or not getattr(s, "site_owner", "") or not steps or not steps[0].startswith("."):
+        return None
+    rel, _, ln = next(iter(getattr(s, "at", None) or ()), "").rpartition(":")
+    if rel != fn.rel or not ln.isdigit():
+        return None
+    return next((h for h in ast.walk(fn.node) if isinstance(h, ast.ExceptHandler) and h.name and h.lineno == int(ln)),
+                None)
+
+
+@functools.cache
+def _objects_placed(fragment_id: int) -> dict[tuple[str, int], str]:
+    fragment = mapdump.fragment()
+    out: dict[tuple[str, int], str] = {}
+    for g in getattr(fragment, "guard_froms", None) or ():
+        for s in g.sources:
+            if s.kind == M.KEY_OBJECT and getattr(s, "site_owner", ""):
+                for at in getattr(s, "at", None) or ():
+                    rel, _, ln = at.rpartition(":")
+                    if ln.isdigit():
+                        out.setdefault((rel, int(ln)), s.site_owner)
+    return out
+
+
+def handler_classes(fn: R.Function) -> dict[int, str]:
+    """K: the class each ``except`` handler of *fn* catches (``file::Class``) by the handler's line, where the map holds
+    an object of it placed at the handler (EXF: the handler's name some guard reads) -- the handler's fact, whichever
+    guard's record holds it."""
+    fragment = mapdump.fragment()
+    placed = _objects_placed(id(fragment)) if fragment is not None else {}
+    return {h.lineno: placed[(fn.rel, h.lineno)] for h in ast.walk(fn.node)
+            if isinstance(h, ast.ExceptHandler) and (fn.rel, h.lineno) in placed}
+
+
+def caught_ends(term: str, s: Any, h: ast.ExceptHandler, fn: R.Function, one: Any, choose: Choose | None) -> list[End]:
+    """K: the ends of a field of the exception the handler *h* names (*s*, :func:`caught_name`): the field's ways
+    (:func:`field_ways`), up to its class's ``__init__``'s parameter and the raises that hand it, each marked with the
+    handler and the class caught (the run's traceback picks the raise, rerun); the changes the map says may be made to
+    the object before the read on each."""
+    steps = tuple(s.steps)
+    keys = read_keys(one.test, term, fn.rel, one.lineno)
+    on = _source_end(term, s, fn.rel, keys, one.lineno).changes
+    return [replace(_field_end(term, w), caught=h.lineno, changes=(*w.changes, *on))
+            for w in field_ways(s.site_owner, steps[0][1:], steps[1:], choose=choose, at=(fn.rel, one.lineno), keys=keys)]
 
 
 @functools.cache
@@ -1086,6 +1147,11 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                                         choose=choose, at=(fn.rel, one.lineno),
                                         keys=read_keys(one.test, name, fn.rel, one.lineno), of_self=True))
                             continue
+                    if (h := caught_name(fn, s)) is not None:
+                        # K: a field of the exception a handler names is what the raise that made it handed -- the
+                        # field's ways up to the raise sites, the run's traceback choosing among them (rerun)
+                        ends += caught_ends(g.name, s, h, fn, one, choose)
+                        continue
                     item = item_step(one.test, g.name, fn.rel, one.lineno)
                     taken = (item,) if item else ()
                     if _elements(s, taken) is not None and (choose is None or not taken):

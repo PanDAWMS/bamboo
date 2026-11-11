@@ -74,6 +74,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import builtins
 import copy
 import datetime
 import functools
@@ -88,7 +89,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types, call_statements
@@ -1966,6 +1967,7 @@ def _way_text(e: SR.End) -> str:
     through (G4)."""
     return (f"{e.end} ({e.why}{' at ' + e.at if e.at else ''})"
             + (f", in the except handler at {e.handler} (S3)" if e.handler else "")
+            + (f", read off the exception the except handler at {e.caught} caught (K)" if e.caught else "")
             + (f" returned{f' from callee line {e.returned_line}' if e.returned_line else ''} by {' -> '.join(e.returned)}"
                if e.returned else "")
             + (f" by {' -> '.join(e.route)}" if len(e.route) > 1 else "")
@@ -2003,7 +2005,8 @@ def _way_said(e: SR.End) -> T.Said:
     elif m is not None:
         changed = T.Said("made-by-a-change-unread", {"change": _a_change(m.change), "how": how, "site": m.site,
                                                      "guards": list(m.guards) or ["none"]})
-    at = (T.Said("way-end-at-handler", {"at": e.at, "handler": e.handler}) if e.handler
+    at = (T.Said("way-end-at-caught", {"at": e.at, "handler": e.caught}) if e.caught
+          else T.Said("way-end-at-handler", {"at": e.at, "handler": e.handler}) if e.handler
           else T.Said("way-end-at", {"at": e.at}) if e.at else "")
     s = e.split
     split = T.Said("told-apart-by-an-if", {
@@ -2025,6 +2028,9 @@ def _handler_line(fn: R.Function, e: SR.End) -> int:
     rel, _, ln = e.at.rpartition(":")
     if e.end in SR.ENDS or rel != fn.rel or not ln.isdigit():
         return 0
+    # the handler's own line: the name it binds (the map's object of the class caught, EXF)
+    if any(isinstance(h, ast.ExceptHandler) and h.lineno == int(ln) for h in ast.walk(fn.node)):
+        return int(ln)
     stmt = R.statement_at(fn.node, int(ln))
     if stmt is None:
         return 0
@@ -2034,6 +2040,119 @@ def _handler_line(fn: R.Function, e: SR.End) -> int:
         if isinstance(anc, ast.ExceptHandler):
             return anc.lineno
     return 0
+
+
+def _handler_around(fn: R.Function, line: int) -> tuple[ast.Try, ast.ExceptHandler] | None:
+    """K: the ``try`` of *fn* and its ``except`` handler whose lines (its own and its body's) hold *line*, the innermost
+    where handlers nest."""
+    held = [(tr, h) for tr in ast.walk(fn.node) if isinstance(tr, ast.Try)
+            for h in tr.handlers if h.lineno <= line <= (h.end_lineno or h.lineno)]
+    return max(held, key=lambda th: th[1].lineno) if held else None
+
+
+class _Raise(TypedDict, total=False):
+    """K's form: the raise an arm in an ``except`` handler stops at, as :class:`SR.Made`'s keywords (empty where its
+    run's tracebacks do not show one)."""
+
+    raised_type: str
+    raised_at: str
+    caught_at: str
+    raised_other: str
+
+
+def _raised_through(fn: R.Function, tr: ast.Try, run: Any) -> tuple[str, str, str] | None:
+    """K: ``(type, file:line, other)`` of the exception *run*'s tracebacks show leaving *tr*'s body -- in each record,
+    the last chain with a frame of *fn* in the body (in a ``raise ... from`` series, the one caught; the ones before are
+    its causes) -- and where it was raised, the chain's last frame; *other* empty where the pin holds that frame's
+    source there, else the frame's function and printed source (the run's code was another version, or outside the
+    corpus).  None where no record shows one, or two show different ones."""
+    lo, hi = tr.body[0].lineno, max(s.end_lineno or s.lineno for s in tr.body)
+    got: set[tuple[str, str, str]] = set()
+    for record in getattr(run, "records", None) or ():
+        for ch in reversed(record.chains()):
+            if ch.frames and any(f.in_corpus and f.same_source and f.rel == fn.rel and lo <= f.line <= hi for f in ch.frames):
+                last = ch.frames[-1]
+                held = last.in_corpus and last.same_source
+                got.add((ch.exc_type, f"{last.rel or last.path}:{last.line}",
+                         "" if held else f"{last.func}: {last.source.strip()}"))
+                break
+    return next(iter(got)) if len(got) == 1 else None
+
+
+def _traceback_frames(run: Any) -> set[str]:
+    """K: ``file:line`` of every corpus frame of *run*'s tracebacks, at the pin's lines: a call standing there ran."""
+    return {f"{f.rel}:{f.line}" for record in getattr(run, "records", None) or () for ch in record.chains()
+            for f in ch.frames if f.in_corpus and f.same_source}
+
+
+def _printed_type(cls: str) -> str:
+    """``file::Class`` as Python prints the type of its exceptions: ``pandaserver.srvcore.exceptions.FileRegistrationError``."""
+    rel, _, name = cls.partition("::")
+    module = rel.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+    return f"{module}.{name}"
+
+
+@functools.cache
+def _binds_at_module(rel: str, name: str) -> bool:
+    """Whether the module *rel* binds *name* itself (an import, def, class or assignment): ``Exception`` then is not
+    the builtin."""
+    for n in ast.walk(R.tree(rel)):
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return True
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name.split(".")[0]) == name for a in n.names):
+            return True
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store):
+            return True
+    return False
+
+
+def _in_corpus(exc_type: str) -> bool:
+    """Whether the module of *exc_type* (as Python prints it) is the corpus's: a class outside it (a builtin, rucio's)
+    has no corpus class among its bases."""
+    module = exc_type.rpartition(".")[0].replace(".", "/")
+    return bool(module) and ((R.CORPUS / f"{module}.py").exists() or (R.CORPUS / module / "__init__.py").exists())
+
+
+def _catches(fn: R.Function, n: ast.expr, exc_type: str, cls: str) -> bool | None:
+    """K: whether an ``except`` naming *n* catches an exception of *exc_type* (as Python prints it): a builtin class
+    by ``issubclass`` where the raised one is a builtin too, else ``Exception`` and ``BaseException`` catch it; the
+    map's class of the handler (*cls*, ``file::Class``) where it is *exc_type*, not where *exc_type* is outside the
+    corpus; None where not told (another corpus class may be its base)."""
+    caught = getattr(builtins, n.id, None) if isinstance(n, ast.Name) and not _binds_at_module(fn.rel, n.id) else None
+    raised = getattr(builtins, exc_type, None) if "." not in exc_type else None
+    raised = raised if isinstance(raised, type) and issubclass(raised, BaseException) else None
+    if isinstance(caught, type) and issubclass(caught, BaseException):
+        if raised is not None:
+            return issubclass(raised, caught)
+        return True if caught in (Exception, BaseException) else None
+    if raised is not None:
+        # a builtin exception's bases are builtins: a class of the corpus or another package is none of them
+        return False
+    if cls:
+        return True if _printed_type(cls) == exc_type else None if _in_corpus(exc_type) else False
+    return None
+
+
+def _entered_handler(fn: R.Function, tr: ast.Try, exc_type: str, known: dict[int, str]) -> int:
+    """K: the line of the handler of *tr* an exception of *exc_type* (as Python prints it) enters: the first one a bare
+    ``except`` or a class it names catches (:func:`_catches`; *known*: the class a handler catches, ``file::Class``,
+    the map's object of it); 0 where one before it may catch it, not told."""
+    for h in tr.handlers:
+        if h.type is None:
+            return h.lineno
+        names = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
+        verdicts = [_catches(fn, n, exc_type, known.get(h.lineno, "") if len(names) == 1 else "") for n in names]
+        if True in verdicts:
+            return h.lineno
+        if None in verdicts:
+            return 0
+    return 0
+
+
+def _binds_on_every_path(h: ast.ExceptHandler, name: str) -> bool:
+    """K: whether the handler *h*'s body binds *name* at its top level, so on every path through it."""
+    return any(isinstance(s, (ast.Assign, ast.AnnAssign)) and any(ast.unparse(t) == name for t in
+               (s.targets if isinstance(s, ast.Assign) else [s.target])) for s in h.body)
 
 
 def _first_stop(t: SR.Term) -> T.Said:
@@ -2053,6 +2172,16 @@ def _first_stop(t: SR.Term) -> T.Said:
         else:
             break
         t = nxt
+    # K's form: the arm of the change is in an except handler and its own terms end -- it stops at the raise its run's
+    # traceback shows the handler took (not an end: the raise has terms of its own)
+    m = next((e.made for e in t.ends if e.made is not None), None)
+    if m is not None and m.raised_at and all(u.ended for u in m.terms):
+        return T.Said("first-term-stops-at-a-raise", {
+            "term": t.term, "guard": t.guard,
+            "made": T.Said("reached-down", {"steps": [*steps, T.Said("the-arm-of-a-change", {"site": m.site})]}),
+            "type": m.raised_type, "handler": m.caught_at,
+            "at": T.Said("raised-at-other", {"at": m.raised_at, "other": m.raised_other}) if m.raised_other
+            else m.raised_at})
     handlers = sorted({e.handler for e in t.ends if e.handler})
     if not steps and not handlers:
         return T.Said("first-term-stops", {"term": t.term, "guard": t.guard})
@@ -3277,7 +3406,7 @@ class Rerun:
         on it, named: S4c reads the run."""
         base = SR.terms(fn, owner, list(zip(guards, ifs, strict=True)), choose=self._field_choice(run))
         self._say_cuts(pad)
-        terms = [self._with_callers(t, fn, owner, run, window) for t in base]
+        terms = [self._with_callers(self._raised(t, fn, run, pad), fn, owner, run, window) for t in base]
         out: list[SR.Term] = []
         for t in terms:
             t = replace(t, ends=tuple(replace(e, handler=h) if (h := _handler_line(fn, e)) else e for e in t.ends))
@@ -3438,15 +3567,36 @@ class Rerun:
         guards = pathcond.arm_condition(stmt)
         self.say(f"{pad}made at {site} ({node.name}), {'its run showing it' if how == 'shown' else 'left by elimination'}: "
                  f"guards {guards}")
+        raised = self._raise_into(fn, int(ln), run, pad)
         if site in seen:
-            return SR.Made(c, site, owner, how, tuple(guards))
+            return SR.Made(c, site, owner, how, tuple(guards), **raised)
         printed: dict[tuple[int, str], tuple[str, str]] = {}
         _held, false = self._held_on(fn, stmt, guards, run, printed)
         ifs = _guard_ifs(fn, stmt, guards) if false is None else None
         if ifs is None:
-            return SR.Made(c, site, owner, how, tuple(guards))
+            return SR.Made(c, site, owner, how, tuple(guards), **raised)
         terms, entry = self._arm_terms(fn, owner, int(ln), guards, ifs, printed, run, window, seen, pad)
-        return SR.Made(c, site, owner, how, tuple(guards), tuple(terms), entry)
+        return SR.Made(c, site, owner, how, tuple(guards), tuple(terms), entry, **raised)
+
+    def _raise_into(self, fn: R.Function, line: int, run: Any, pad: str) -> _Raise:
+        """K's form (out/gm/qk-design.md), an arm at *line* in an ``except`` handler of *fn* (S3): the exception its
+        run's tracebacks show leaving the try's body into that handler (:func:`_raised_through`,
+        :func:`_entered_handler`), where it was raised and the handler -- where the arm's own terms end, its stop (not
+        an end: the raise has terms of its own); none where they do not show it."""
+        if run is None or (got := _handler_around(fn, line)) is None:
+            return {}
+        tr, h = got
+        if (shown := _raised_through(fn, tr, run)) is None:
+            return {}
+        exc_type, raised, other = shown
+        where = raised + (f" ({other}: its run's code, not the pin's)" if other else "")
+        if _entered_handler(fn, tr, exc_type, SR.handler_classes(fn)) != h.lineno:
+            self.say(f"{pad}  K: its run's traceback shows {exc_type} raised at {where} leaving the try at "
+                     f"{fn.rel}:{tr.lineno}; the except handler at {fn.rel}:{h.lineno} is not told to have taken it")
+            return {}
+        self.say(f"{pad}  K: its run's traceback: {exc_type} raised at {where}, caught by the except handler at "
+                 f"{fn.rel}:{h.lineno}")
+        return {"raised_type": exc_type, "raised_at": raised, "caught_at": f"{fn.rel}:{h.lineno}", "raised_other": other}
 
     def _with_callers(self, t: SR.Term, fn: R.Function | None, owner: str, run: Any, window: tuple[str, str] | None,
                       ask: bool = True) -> SR.Term:
@@ -3456,11 +3606,65 @@ class Rerun:
         (c)), keeping the bindings the way went through and the changes on it after the binding (out/gm/gm5-design.md
         G4).  *ask* False reads the map's records alone, no caller's run asked (a split's terms, Q2's (b))."""
         ends = tuple(x for e in t.ends for x in (
-            tuple(replace(y, via=e.via, changes=(*e.changes, *y.changes))
+            tuple(replace(y, via=e.via, changes=(*e.changes, *y.changes), caught=e.caught)
                   for y in self._param_end(e.term, e.of or owner, e.param, None if e.of else fn, run, window, e.entered,
                                            e.steps, ask))
             if e.why == SR.PARAMETER and e.param else (e,)))
         return replace(t, ends=ends)
+
+    def _raised(self, t: SR.Term, fn: R.Function, run: Any, pad: str) -> SR.Term:
+        """K (out/gm/qk-design.md): *t* with what its run's tracebacks say of each ``try`` of *fn* a way of it leaves by
+        a handler of -- bound in one, or read off the exception one names (*caught*).  Where they show the exception
+        that left the try's body (:func:`_raised_through`) and the handler it entered (:func:`_entered_handler`), a way
+        that cannot reach the guard through that handler goes: one bound in another handler of the try, or, the guard
+        after the try, one bound before the handler where its body binds the term again on every path; a field of the
+        exception it names is read up the raise the traceback ends at (*entered*).  Where they do not tell, *t* as it
+        was."""
+        if run is None:
+            return t
+
+        def line_of(e: SR.End) -> int:
+            rel, _, ln = e.at.rpartition(":")
+            return e.caught or (int(ln) if rel == fn.rel and ln.isdigit() else 0)
+
+        tries: dict[int, ast.Try] = {}
+        for e in t.ends:
+            if (line := line_of(e)) and (got := _handler_around(fn, line)) is not None:
+                tries.setdefault(id(got[0]), got[0])
+        if not tries:
+            return t
+        known = SR.handler_classes(fn)
+        ends = list(t.ends)
+        for tr in tries.values():
+            if (shown := _raised_through(fn, tr, run)) is None:
+                continue
+            exc_type, raised, other = shown
+            where = raised + (f" ({other}: its run's code, not the pin's)" if other else "")
+            if not (entered := _entered_handler(fn, tr, exc_type, known)):
+                self.say(f"{pad}  K: term {t.term!r} of {t.guard!r}: its run's traceback shows {exc_type} raised at "
+                         f"{where} leaving the try at {fn.rel}:{tr.lineno}; which handler took it, not told")
+                continue
+            h = next(x for x in tr.handlers if x.lineno == entered)
+            rebinds = t.line > (tr.end_lineno or tr.lineno) and _binds_on_every_path(h, t.term)
+            kept: list[SR.End] = []
+            gone: list[str] = []
+            for e in ends:
+                line = line_of(e)
+                around = _handler_around(fn, line) if line else None
+                if around is not None and around[0] is tr and around[1].lineno != entered:
+                    gone.append(e.at or f"{fn.rel}:{line}")
+                elif e.caught == entered:
+                    # the raise read up only where the pin holds its source there
+                    kept.append(replace(e, entered=(raised,)) if e.param and not other else e)
+                elif rebinds and line and line < entered and (around is None or around[0] is not tr):
+                    gone.append(e.at)
+                else:
+                    kept.append(e)
+            self.say(f"{pad}  K: term {t.term!r} of {t.guard!r}: its run's traceback: {exc_type} raised at {where}, "
+                     f"caught by the except handler at {fn.rel}:{entered}"
+                     + (f"; a way that cannot reach the guard through it goes: {', '.join(gone)}" if gone else ""))
+            ends = kept
+        return replace(t, ends=tuple(ends))
 
     def _say_cuts(self, pad: str) -> None:
         """The ways a callee's test ruled out on its call's constants since last said (CRO (ii), ``SR.take_cuts``)."""
@@ -3479,7 +3683,9 @@ class Rerun:
         left, only API parameters (any value) or the database end it, or the one way left where it ends; where every way
         ends and none is a literal a run could tell apart (a constant's part, the database), it ends at each
         (out/gm/qk-design.md Q2); else it stops."""
-        key = (owner, param, fn is None, entered, steps, ask)
+        # the calls by the path a frame of the run's traceback stands at decide too (K)
+        key = (owner, param, fn is None, entered, steps, ask,
+               frozenset(set(entered) & _traceback_frames(run)) if entered else frozenset())
         cache: dict[tuple, tuple[SR.End, ...]] = self.__dict__.setdefault("_param_ends", {})
         if key in cache:
             return tuple(replace(e, term=term) for e in cache[key])
@@ -3526,8 +3732,13 @@ class Rerun:
                     or SR.same_value(x.value, value)]
         alone = [w for w in consts if w.route and all(
             (x.end, x.value, x.why) == (w.end, w.value, w.why) for x in possible if x.route[:1] == w.route[:1])]
-        shown = [] if one_call or not ask else [
-            w for w in alone if self._call_shown(w.route[0], window, getattr(run, "machine", None))]
+        # K: a call the run's path entered by (*entered*) that a frame of its run's traceback stands at ran -- the raise
+        # that made the exception a handler took; no caller's run asked
+        traced = [w for w in alone if w.route[0] in entered and w.route[0] in _traceback_frames(run)]
+        if traced:
+            self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
+        shown = traced or ([] if one_call or not ask else [
+            w for w in alone if self._call_shown(w.route[0], window, getattr(run, "machine", None))])
         if len(shown) == 1:
             # a constant-through keeps its why: its value is not the literal's
             return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)

@@ -179,6 +179,7 @@ TEMPLATES: dict[str, str] = {
     ),
     "way-end-at": " at {at}",
     "way-end-at-handler": " at {at}, in the except handler at {handler} (S3: which exception)",
+    "way-end-at-caught": " at {at}, read off the exception the except handler at {handler} caught (K: its run's traceback)",
     "made-by-a-change": (
         ", changed between it and the read by {change}, {how}; read as an arm at {site}: its terms {terms:join=; }; its "
         "entry: {entry}"
@@ -198,6 +199,11 @@ TEMPLATES: dict[str, str] = {
     "bound-via": ", through the field bindings at {via:join= -> }",
     "first-term-stops": "it stops at {term!r} (in {guard!r})",
     "first-term-stops-further": "it stops at {term!r} (in {guard!r}){made}{s3}",
+    "first-term-stops-at-a-raise": (
+        "it stops at {term!r} (in {guard!r}){made}, at the {type} its run raised at {at}, caught by the except handler"
+        " at {handler} (K: its run's traceback)"
+    ),
+    "raised-at-other": "{at} ({other}: its run's code, not the pin's)",
     "reached-down": ", in {steps:join=, then }",
     "the-arm-of-a-change": "the arm that made the change at {site}",
     "the-if-telling-constants-apart": "the if at {at} that tells apart the constants {call} hands",
