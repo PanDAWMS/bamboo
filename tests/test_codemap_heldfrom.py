@@ -917,6 +917,87 @@ def test_a_walrus_is_its_value_where_its_own_test_reads_it_and_after(
     assert ways("T4", "m") == {("call", "f.other", (), at("T3"))}
 
 
+UNBOUND = {
+    BASE: """\
+        SETTING = None
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, rows, flag):
+                global SETTING
+                try:
+                    retVal: list | None = None  # B1
+                    retVal = rows.fetch()
+                except Exception:
+                    if retVal:  # T1
+                        self.a = 1  # R1
+                if flag:
+                    mode = "x"  # B3
+                if mode == "x":  # T2
+                    self.a = 2  # R2
+                if SETTING:  # T3
+                    self.a = 3  # R3
+                SETTING = 1  # B5
+                if SETTING:  # T5
+                    self.a = 5  # R5
+                if flag:
+                    import json as codec
+                else:
+                    codec = None  # B4
+                if codec:  # T4
+                    self.a = 4  # R4
+                from os import sep as separator
+                if separator:  # T6
+                    self.a = 6  # R6
+        """,
+}
+
+
+def test_the_entry_reaching_a_local_gives_no_way_but_a_binding_not_read_is_a_stop(
+    tmp_path: Path,
+) -> None:
+    """A local read where no binding of it may have run -- ``return retVal`` in the handler of a ``try`` whose first
+    statement binds it (``listJobOutputReport``), ``mode`` bound under one test and read under another -- gets no
+    value by that way: the read raises, or the way is not taken.  A name declared ``global`` is the module's by
+    that way, and its binding's where the binding reaches the read.  A name an import may bind is the function's
+    own, an import its only binding too; it is read as far as the bindings read, and a stop says the import."""
+    fragment = _build(
+        tmp_path, UNBOUND, tuple(("extractCommon", f"R{n}") for n in range(1, 7))
+    )
+
+    def guard(marker: str) -> GuardFrom:
+        (found,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, UNBOUND) and one.name != "flag"
+        ]
+        return found
+
+    def at(marker: str) -> tuple[str]:
+        return (f"{BASE}:{_line(BASE, marker, UNBOUND)}",)
+
+    def ways(marker: str) -> set[tuple]:
+        return {(one.kind, one.name, tuple(one.at)) for one in guard(marker).sources}
+
+    assert ways("T1") == {("constant", "None", at("B1"))}
+    assert ways("T2") == {("constant", "'x'", at("B3"))}
+    assert ways("T3") == {("global", "SETTING", at("T3"))}
+    assert ways("T4") == {("constant", "None", at("B4"))}
+    assert ways("T5") == {("constant", "1", at("B5"))}
+    assert ways("T6") == set()
+    for marker in ("T1", "T2", "T3", "T5"):
+        assert guard(marker).stops == []
+    assert [(one.kind, one.name, one.what, one.at) for one in guard("T4").stops] == [
+        ("unread_binding", "codec", "an import", list(at("T4")))
+    ]
+    assert [(one.kind, one.name, one.what, one.at) for one in guard("T6").stops] == [
+        ("unread_binding", "separator", "an import", list(at("T6")))
+    ]
+
+
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(
     built: MapFragment,
 ) -> None:

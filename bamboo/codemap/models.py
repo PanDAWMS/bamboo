@@ -5907,6 +5907,7 @@ KEY_STOPS: dict[str, str] = {
     "not_found": "{name} is not spelled in the statement at {at}",
     "missed": "a call of {name} may not be placed: {what}",
     "unbound": "{name} is read at {at} before a binding of it",
+    "unread_binding": "{name} is read at {at} where {what} may bind it, which is not read",
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
     "generator": "the call at {at} makes a generator of {name}, not what {name} returns",

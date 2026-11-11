@@ -549,6 +549,49 @@ def _bound_here(func: ast.AST, name: str) -> bool:
     return any(not binding.nested for binding in pathcond.bindings(func, name))
 
 
+#: A binding :func:`pathcond.bindings` does not list, by what makes it.
+_UNREAD_FORMS = {ast.alias: "an import", ast.FunctionDef: "a def", ast.AsyncFunctionDef: "a def", ast.ClassDef: "a class"}
+
+
+def _declared_or_unread(func: ast.AST) -> tuple[frozenset[str], dict[str, str]]:
+    """The names *func* declares ``global`` or ``nonlocal``, and those it binds by a form
+    :func:`pathcond.bindings` does not list -- an import, a nested ``def`` or ``class``, a ``match`` capture --, each
+    with its form; *func*'s own statements only, not a nested scope's.  Read once per function and kept on it."""
+    kept: Optional[tuple[frozenset[str], dict[str, str]]] = getattr(func, "_heldfrom_declared_or_unread", None)
+    if kept is not None:
+        return kept
+    declared: set[str] = set()
+    unread: dict[str, str] = {}
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+        elif isinstance(node, ast.alias):
+            unread.setdefault(node.asname or node.name.split(".")[0], _UNREAD_FORMS[ast.alias])
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            unread.setdefault(node.name, "a match capture")
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            unread.setdefault(node.rest, "a match capture")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            unread.setdefault(node.name, _UNREAD_FORMS[type(node)])
+            stack.extend([*node.decorator_list, *getattr(node, "bases", ()), *getattr(node, "keywords", ())])
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    held = (frozenset(declared), unread)
+    func._heldfrom_declared_or_unread = held  # type: ignore[attr-defined]
+    return held
+
+
+def _binds(func: ast.AST, name: str) -> bool:
+    """Whether *func*'s own statements bind *name* by any form -- an import, a ``def``, a ``match`` capture too --,
+    which makes it *func*'s own by Python's rule, or, declared ``global`` or ``nonlocal``, read by those bindings
+    (:meth:`_Reader._bound`).  A name it binds by none is a module's."""
+    return _bound_here(func, name) or name in _declared_or_unread(func)[1]
+
+
 def _index(expr: ast.expr) -> Optional[int]:
     """A subscript's constant integer index, else ``None``."""
     if isinstance(expr, ast.Subscript) and isinstance(expr.slice, ast.Constant):
@@ -995,7 +1038,7 @@ class _Reader:
         point = expr if getattr(expr, "parent", None) is not None else at
         if (
             expr.id not in _parameters(func)
-            and not _bound_here(func, expr.id)
+            and not _binds(func, expr.id)
             and pathcond.comprehension_clause(func, expr.id, point) is None
         ):
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
@@ -1026,11 +1069,24 @@ class _Reader:
     def _bound(
         self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST
     ) -> list[_Way]:
-        """The ways of what *site*, a binding reaching the read, gives *expr*."""
+        """The ways of what *site*, a binding reaching the read, gives *expr*.  The function's entry, reaching the
+        read of a local not a parameter, gives none: that way raises ``UnboundLocalError`` or is never taken (a
+        test the binding's own test rules out, a statement before it that cannot raise) -- no value comes by it
+        (``return retVal`` in the handler of a ``try`` whose first statement binds ``retVal``).  A name the
+        function declares ``global`` or ``nonlocal`` is the module's by that way, and a binding of the function that
+        reaches the read gives its own value, no other writer being read between (``global_task_buffer =
+        task_buffer`` read on the next statement).  Where the function binds the name by a form not read
+        (:func:`_declared_or_unread`), a stop ``unread_binding``."""
         if site is func.args:  # type: ignore[attr-defined]
             if expr.id in _parameters(func):
                 return [self._parameter(file, func, expr.id)]
-            return [_stop("unbound", expr.id, at=f"{file}:{expr.lineno}")]
+            declared, unread = _declared_or_unread(func)
+            if expr.id in declared:
+                return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
+            form = unread.get(expr.id)
+            if form is not None:
+                return [_stop("unread_binding", expr.id, what=form, at=f"{file}:{expr.lineno}")]
+            return []
         targets = pathcond.targets_of(site)
         value = getattr(site, "value", None)
         if (
@@ -2303,7 +2359,7 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
             and node.id not in ("self", "cls")
             and node.id not in inner
         ):
-            if node.id in own or _bound_here(func, node.id):
+            if node.id in own or _binds(func, node.id):
                 found.setdefault(node.id, node)
     return found
 
