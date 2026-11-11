@@ -11758,3 +11758,402 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
     assert got["one left"] == ["stop", "call", "pandaserver/a.py:20", [at["bind"]]]
     assert got["same call"][:2] == ["stop", "parameter-unchosen"]
     assert "all come by pandaserver/a.py:30: its caller's run not asked" in got["same call"][2][0]
+
+
+def test_q1_reads_a_container_made_empty_through_its_puts_and_q2_carries_the_reads_steps_up_fields_and_callers(tmp_path):
+    # case A's attempt_nr: AdderGen.__init__'s parameter is handed self.reports[*][2] at 136; the field is bound at 88
+    # from T.__init__'s parameter and popped at 108; that one is handed a WeightedLists made empty and filled by add
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        G, T, TI = "p/g.py::__init__", "p/m.py::main.T", "p/m.py::__init__"
+        put = M.HeldChange(at="p/m.py:206", kind="method", key="*", what="add", value=[
+            M.HeldSource(kind="rows", name="panda:p/j.py::list@2399", line=2432, steps=["[*]"],
+                         route=["p/t.py:2578", "p/m.py:199"], at=["p/j.py:2432"]),
+            M.HeldSource(kind="constant", name="None", line=2371, steps=["[*]"], route=["p/t.py:2578", "p/m.py:199"],
+                         at=["p/j.py:2371"])])
+        lists = M.HeldSource(kind="call", name="WeightedLists", line=196, route=["p/m.py:231"], made_empty="collection",
+                             changes=[put], at=["p/m.py:196"])
+        # a put the map does not follow: the container stays a way
+        unread = lists.model_copy(update={"changes": [put, M.HeldChange(at="p/m.py:210", kind="escaped", key="*")]})
+        # case A's zip_files: a {} filled by a store of another {}, read whole
+        inner = M.HeldSource(kind="unknown", name="{}", line=316, made_empty="mapping", at=["p/r.py:316"])
+        zips = M.HeldSource(kind="unknown", name="{}", line=272, made_empty="mapping", route=["p/r.py:677"],
+                            at=["p/r.py:272"], changes=[M.HeldChange(at="p/r.py:316", kind="store", key="*", value=[inner])])
+        empty = M.HeldSource(kind="unknown", name="[]", line=5, made_empty="collection", route=["p/r.py:9"], at=["p/r.py:5"])
+        # case A's cont_zip_map: a None put in it is an element, not the value
+        nones = M.HeldSource(kind="unknown", name="{}", line=274, made_empty="mapping", route=["p/r.py:677"], at=["p/r.py:274"],
+                             changes=[M.HeldChange(at="p/r.py:334", kind="store", key="*", value=[
+                                 M.HeldSource(kind="constant", name="None", line=334, at=["p/r.py:334"])])])
+        pf = lambda owner, name, *sources: N(owner=owner, parameter=name, line=1, stops=[], sources=list(sources))
+        mapdump._FRAGMENT[:] = [N(
+            parameter_froms=[
+                pf(G, "attempt_nr", M.HeldSource(kind="self_field", name="self.reports", line=108, site_owner=T,
+                                                 steps=["[*]", "[2]"], route=["p/m.py:136"])),
+                pf(TI, "reports", lists),
+                pf("p/u.py::f", "reports", unread),
+                pf("p/r.py::register", "zip_files", zips),
+                pf("p/r.py::register", "nothing", empty),
+                pf("p/r.py::register", "nones", nones),
+            ],
+            field_froms=[N(owner=T, field="reports", stops=[],
+                           changes=[N(at="p/m.py:108", kind="method", key="*", what="pop", via=[])],
+                           bindings=[N(at="p/m.py:88", owner=TI, how="assign", stops=[], sources=[
+                               M.HeldSource(kind="parameter", name="reports", line=84, site_owner=TI)])])],
+            entered_froms=[])]
+        SR._calls_in.cache_clear()
+        SR._field_index.cache_clear()
+        way = lambda w: [w.end, w.value, w.why, list(w.route), w.end_at]
+        print(json.dumps({
+            "attempt_nr": [way(w) for w in SR.param_ways(G, "attempt_nr")],
+            "element": [way(w) for w in SR.param_ways(TI, "reports", steps=("[*]", "[3]"))],
+            "unread": [way(w) for w in SR.param_ways("p/u.py::f", "reports", steps=("[*]",))],
+            "whole": [way(w) for w in SR.param_ways("p/r.py::register", "zip_files")],
+            "nothing put": [way(w) for w in SR.param_ways("p/r.py::register", "nothing")],
+            "a None put": [way(w) for w in SR.param_ways("p/r.py::register", "nones")],
+            "field, element": [[w.why, list(w.steps), [c.at for c in w.changes]] for w in SR.field_ways(T, "reports", ("[*]", "[2]"))],
+            "field, whole": [[w.why, list(w.steps), [c.at for c in w.changes]] for w in SR.field_ways(T, "reports")],
+        }))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    back = ["p/t.py:2578", "p/m.py:199", "p/m.py:231"]
+    # Q2 (a) and (c): the field read on with [*][2], its binding's parameter up T.__init__'s callers; Q1: the element is
+    # what add put -- a row's part, and a part of the None (no literal's value) -- each placed where it ends
+    assert got["attempt_nr"] == [["database", "", "rows", [*back, "p/m.py:88", "p/m.py:84", "p/m.py:136"], "p/j.py:2432"],
+                                 ["constant", "", "constant-through", [*back, "p/m.py:88", "p/m.py:84", "p/m.py:136"], "p/j.py:2371"]]
+    assert got["element"] == [["database", "", "rows", back, "p/j.py:2432"], ["constant", "", "constant-through", back, "p/j.py:2371"]]
+    assert got["unread"] == [*got["element"], ["stop", "", "container", ["p/m.py:231"], "p/m.py:196"]]
+    # read whole: the empty start, each value put read whole in turn; a mapping stays (no put's value holds its keys),
+    # a container nothing is done to holds only its start
+    assert got["whole"] == [["constant", "", "made-empty", ["p/r.py:677"], "p/r.py:272"],
+                            ["constant", "", "made-empty", ["p/r.py:677"], "p/r.py:316"],
+                            ["stop", "", "container", ["p/r.py:677"], "p/r.py:272"]]
+    assert got["nothing put"] == [["constant", "", "made-empty", ["p/r.py:9"], "p/r.py:5"]]
+    assert got["a None put"] == [["constant", "", "made-empty", ["p/r.py:677"], "p/r.py:274"],
+                                 ["constant", "", "constant-through", ["p/r.py:677"], "p/r.py:334"],
+                                 ["stop", "", "container", ["p/r.py:677"], "p/r.py:274"]]
+    # an element read is not changed by the pop that takes it out; the whole value is
+    assert got["field, element"] == [["parameter", ["[*]", "[2]"], []]]
+    assert got["field, whole"] == [["parameter", [], ["p/m.py:108"]]]
+
+
+def test_q2_a_parameter_with_no_literal_left_lists_each_way_and_a_splits_reading_asks_no_run(tmp_path):
+    # modTime's ways: a statement's rows by two calls, a part of a None, a + not read -- no literal a run could tell
+    # apart: each way where it ends or stops, a place reached by two routes said once; a literal left keeps the stop
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import sources as SR
+
+        INIT = "pandaserver/g.py::__init__"
+        src = lambda kind, name, route, **kw: N(kind=kind, name=name, route=list(route), site_owner="", paths=[], **kw)
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner=INIT, parameter="t", line=5, stops=[], sources=[
+                src("rows", "panda:p/j.py::l@9", ["p/t.py:1", "pandaserver/a.py:10"], at=["p/j.py:9"]),
+                src("rows", "panda:p/j.py::l@9", ["p/t.py:1", "pandaserver/a.py:20"], at=["p/j.py:9"]),
+                src("constant", "None", ["p/t.py:1", "pandaserver/a.py:10"], at=["p/j.py:3"], steps=["[*]"]),
+                src("unknown", "a + b", ["p/t.py:1", "pandaserver/a.py:10"], at=["p/j.py:7"])]),
+            N(owner=INIT, parameter="u", line=5, stops=[], sources=[
+                src("rows", "panda:p/j.py::l@9", ["pandaserver/a.py:10"], at=["p/j.py:9"]),
+                src("constant", "'x'", ["pandaserver/a.py:20"], at=["pandaserver/a.py:20"])]),
+        ], entered_froms=[])]
+        SR._calls_in.cache_clear()
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+
+        def shown(*a, **k):
+            raise AssertionError("a caller's run asked")
+
+        r._call_shown = shown
+        end = lambda e: [e.end, e.why, e.at, list(e.route), list(e.via)]
+        t = SR.Term("g", "self.t", (SR.End("self.t", SR.STOP, SR.PARAMETER, "pandaserver/g.py:7", param="t", of=INIT,
+                                           via=("pandaserver/g.py:30",)),))
+        u = SR.Term("g", "self.u", (SR.End("self.u", SR.STOP, SR.PARAMETER, "pandaserver/g.py:8", param="u", of=INIT),))
+        print(json.dumps({
+            "t": [end(e) for e in r._with_callers(t, None, "pandaserver/g.py::report", None, None, ask=False).ends],
+            "u": [end(e) for e in r._with_callers(u, None, "pandaserver/g.py::report", None, None, ask=False).ends],
+            "lines": r.lines}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    by = ["p/t.py:1", "pandaserver/a.py:10"]
+    assert got["t"] == [["database", "rows", "p/j.py:9", by, ["pandaserver/g.py:30"]],
+                        ["constant", "constant-through", "p/j.py:3", by, ["pandaserver/g.py:30"]],
+                        ["stop", "unknown", "p/j.py:7", by, ["pandaserver/g.py:30"]]]
+    assert any("t: 4 way(s) end at 3 place(s)" in line for line in got["lines"])
+    # 'x' is a literal a caller's run could choose: not asked here (a split's terms), so it stops as before
+    assert got["u"] == [["stop", "parameter-unchosen", "", [], []]]
+
+
+_LISTER = """
+class Proxy:
+    def list_reports(self, only_unlocked=False):
+        if only_unlocked:
+            ret = self.cur.fetchall()
+        else:
+            ret = self.cur.fetchall()
+        return ret
+"""
+
+
+def test_cro_a_callees_test_false_on_its_calls_constant_rules_a_way_out(tmp_path):
+    # listJobOutputReport's else branch (2420): both of add_main's calls hand only_unlocked=True through the task
+    # buffer, so its way is none of theirs; another caller's default False keeps it, and a value not one constant too
+    (_corpus(tmp_path) / "pandaserver" / "j.py").write_text(_LISTER)
+    lines = _LISTER.splitlines()
+    test, locked, unlocked = (lines.index(t) + 1 for t in (
+        "        if only_unlocked:", "            ret = self.cur.fetchall()", "        else:"))
+    unlocked += 1
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        P, TB = "pandaserver/j.py::list_reports", "pandaserver/t.py::list_reports"
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=P, test_line={test}, name="only_unlocked", test="only_unlocked", arms=[], stops=[],
+                           calls=[{locked}, {unlocked}],
+                           sources=[M.HeldSource(kind="parameter", name="only_unlocked", line={test}, site_owner=P)])],
+            runnables=[],
+            parameter_froms=[
+                N(owner=P, parameter="only_unlocked", line=3, stops=[], sources=[
+                    M.HeldSource(kind="parameter", name="only_unlocked", line=20, site_owner=TB, route=["pandaserver/t.py:20"])]),
+                N(owner=TB, parameter="only_unlocked", line=18, stops=[], sources=[
+                    M.HeldSource(kind="constant", name="True", line=200, route=["pandaserver/m.py:199"]),
+                    M.HeldSource(kind="constant", name="True", line=208, route=["pandaserver/m.py:207"]),
+                    # a default, placed by the call it is the default of
+                    M.HeldSource(kind="constant", name="False", line=18, route=["pandaserver/c.py:369"]),
+                    M.HeldSource(kind="parameter", name="flag", line=40, site_owner="pandaserver/x.py::f",
+                                 route=["pandaserver/x.py:41"])]),
+                N(owner="pandaserver/x.py::f", parameter="flag", line=39, stops=[], sources=[
+                    M.HeldSource(kind="constant", name="True", line=1, route=["pandaserver/y.py:1"]),
+                    M.HeldSource(kind="constant", name="False", line=2, route=["pandaserver/y.py:2"])]),
+            ],
+            entered_froms=[])]
+        SR._calls_in.cache_clear()
+        way = lambda line, *route: M.HeldSource(kind="database", name="self.cur.fetchall", line=line, route=list(route),
+                                                at=[f"pandaserver/j.py:{{line}}"])
+        got = {{
+            "else by 199": SR._cut(way({unlocked}, "pandaserver/t.py:20", "pandaserver/m.py:199")),
+            "if by 199": SR._cut(way({locked}, "pandaserver/t.py:20", "pandaserver/m.py:199")),
+            "else by the default": SR._cut(way({unlocked}, "pandaserver/t.py:20", "pandaserver/c.py:369")),
+            "else by two values": SR._cut(way({unlocked}, "pandaserver/t.py:20", "pandaserver/x.py:41")),
+            "else by a call not read": SR._cut(way({unlocked}, "pandaserver/t.py:20", "pandaserver/z.py:9")),
+            "no route": SR._cut(way({unlocked})),
+        }}
+        got["said"] = SR.take_cuts()
+        got["said again"] = SR.take_cuts()
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["else by 199"] == f"'not (only_unlocked)' false at pandaserver/j.py:{unlocked} (only_unlocked=True by pandaserver/t.py:20)"
+    for kept in ("if by 199", "else by the default", "else by two values", "else by a call not read", "no route"):
+        assert got[kept] == "", kept
+    assert got["said"] == [f"pandaserver/j.py:{unlocked} by pandaserver/t.py:20 -> pandaserver/m.py:199: {got['else by 199']}"]
+    assert got["said again"] == []
+
+
+_PEEK = """\
+from pandaserver.spec import JobSpec
+
+
+class Proxy:
+    def peekJob(self, pandaID):
+        sql = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+        res = self.cur.fetchall()
+        if len(res) != 0:
+            job = JobSpec()
+            job.pack(res[0])
+            return job
+        return None
+
+    def peekChanged(self, pandaID):
+        sql = f"SELECT {JobSpec.columnNames()} FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID"
+        varMap = {}
+        varMap[":PandaID"] = pandaID
+        self.cur.execute(sql, varMap)
+        res = self.cur.fetchall()
+        job = JobSpec()
+        job.pack(res[0])
+        job.jobStatus = "closed"
+        return job
+"""
+
+
+def test_q4_an_object_a_callee_filled_from_one_row_and_returned_ends_at_the_row(tmp_path):
+    # AdderGen's self.job = peekJobs(...)[0]: peekJob builds a JobSpec at 518, packs res[0] into it and returns it; a
+    # test reading a field of it, or which object it is (its table's identity), ends at the row; a field the callee
+    # writes after the fill does not
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "peek.py").write_text(_PEEK)
+    lines = _PEEK.splitlines()
+    built, changed = (i + 1 for i, t in enumerate(lines) if t.strip() == "job = JobSpec()")
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])],
+                                  guard_froms=[], parameter_froms=[], field_froms=[], runnables=[], entered_froms=[])]
+        src = lambda line, route=("pandaserver/tb.py:5", "pandaserver/g.py:9"): M.HeldSource(
+            kind="object", name="JobSpec", line=line, site_owner="pandaserver/spec.py::JobSpec", route=list(route),
+            at=[f"pandaserver/peek.py:{{line}}"])
+        said = lambda got: None if got is None else [c.at for c in got]
+        print(json.dumps({{
+            "a field": said(SR._returned_row(src({built}), frozenset({{"jobStatus"}}))),
+            "which object": said(SR._returned_row(src({built}), frozenset())),
+            "whole": said(SR._returned_row(src({built}), None)),
+            "not returned through a call": said(SR._returned_row(src({built}, ()), frozenset({{"jobStatus"}}))),
+            "a field written after": said(SR._returned_row(src({changed}), frozenset({{"jobStatus"}}))),
+            "its identity, not written after": said(SR._returned_row(src({changed}), frozenset())),
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"a field": [], "which object": [], "whole": None, "not returned through a call": None,
+                   "a field written after": None, "its identity, not written after": []}, got
+
+
+_DISPS = """\
+class Setupper:
+    def subscribe(self, disps):
+        disp_error = {}
+        for disp in disps:
+            disp_error[disp] = ""
+            if self.bad(disp):
+                disp_error[disp] = "could not register"
+        disp_error.pop(None, None)
+        out = []
+        for disp in disps:
+            if disp_error[disp] != "":
+                out.append(disp)
+        return out
+"""
+
+
+def test_q1_an_element_the_test_takes_is_read_by_s4c_on_the_arms_run_and_by_its_puts_where_no_run_is(tmp_path):
+    # MF-7398155528's disp_error[disp]: on the arm's run the puts stay changes on the container's way, for S4c to tell
+    # apart by the run (it chose setupper 1098 by elimination); where no run is read (a split's terms) the element is a
+    # value a put put; the pop that takes an element out is on neither; a field read by element the same way
+    (_corpus(tmp_path) / "pandaserver" / "s.py").write_text(_DISPS)
+    lines = _DISPS.splitlines()
+    test, site = lines.index('            if disp_error[disp] != "":') + 1, lines.index("                out.append(disp)") + 1
+    out = _ok(_run(tmp_path, f"""
+        import ast, json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        owner, rel = "pandaserver/s.py::Setupper.subscribe", "pandaserver/s.py"
+        put = lambda line, text: M.HeldChange(at=f"{{rel}}:{{line}}", kind="store", key="*", value=[
+            M.HeldSource(kind="constant", name=text, line=line, at=[f"{{rel}}:{{line}}"])])
+        errors = M.HeldSource(kind="unknown", name="{{}}", line=3, made_empty="mapping", at=[f"{{rel}}:3"], changes=[
+            put(5, '""'), put(7, "'could not register'"), M.HeldChange(at=f"{{rel}}:8", kind="method", key="*", what="pop")])
+        T = "p/m.py::main.T"
+        jobs = M.HeldSource(kind="unknown", name="[]", line=147, made_empty="collection", at=["p/m.py:147"], changes=[
+            M.HeldChange(at="p/m.py:149", kind="method", key="*", what="append", value=[
+                M.HeldSource(kind="parameter", name="job", line=149, site_owner="p/m.py::run")])])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=owner, test_line={test}, name="disp_error", sources=[errors], stops=[])],
+            parameter_froms=[], entered_froms=[], runnables=[],
+            field_froms=[N(owner=T, field="jobs", stops=[], changes=[], bindings=[
+                N(at="p/m.py:151", owner="p/m.py::run", how="assign", stops=[], sources=[jobs])])])]
+        SR._calls_in.cache_clear()
+        SR._field_index.cache_clear()
+        fn = R.function(rel, "subscribe", within=[{site}])
+        stmt = R.statement_at(fn.node, {site})
+        guards = pathcond.arm_condition(stmt)
+        pairs = list(zip(guards, rerun._guard_ifs(fn, stmt, guards)))
+        choose = lambda ff, *a: N(bindings=ff.bindings, changes=ff.changes, entered_by=lambda at: ())
+        end = lambda e: [e.end, e.why, e.at, [c.at for c in e.changes]]
+        ends = lambda ts: [end(e) for t in ts if t.term == "disp_error" for e in t.ends]
+        way = lambda w: [w.end, w.why, [c.at for c in w.changes]]
+        t = lambda s: ast.parse(s, mode="eval").body
+        print(json.dumps({{
+            "on the run": ends(SR.terms(fn, owner, pairs, choose=choose)),
+            "no run": ends(SR.terms(fn, owner, pairs)),
+            "field, on the run": [way(w) for w in SR.field_ways(T, "jobs", ("[*]",), choose=choose, at=("p/m.py", 160))],
+            "field, no run": [way(w) for w in SR.field_ways(T, "jobs", ("[*]",))],
+            "steps": [SR.item_step(t(s), n) for s, n in [("d[k] != ''", "d"), ("d['total'] > 0", "d"), ("d['a'] or d['b']", "d"),
+                                                         ("not d", "d"), ("d.x", "d"), ("self.m[0]", "self.m")]],
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+
+    def at(line: int) -> str:
+        return f"pandaserver/s.py:{line}"
+
+    assert got["on the run"] == [["stop", "unknown", at(3), [at(5), at(7)]]], got
+    assert got["no run"] == [["constant", '""', at(5), []], ["constant", "'could not register'", at(7), []],
+                             ["stop", "container", at(3), []]], got
+    assert got["field, on the run"] == [["stop", "unknown", ["p/m.py:149"]]], got
+    assert got["field, no run"] == [["stop", "parameter", []]], got
+    assert got["steps"] == ["[*]", "['total']", "[*]", None, None, "[0]"], got
+
+
+def test_a_call_tells_a_constant_apart_only_where_every_way_it_comes_by_ends_there(tmp_path):
+    # adder_atlas_plugin 677 hands cont_zip_map, a {} whose put is read as a part: the call carries the container's
+    # start and stop too, so its run showing it ran chooses none of them; a literal alone on its call is chosen as
+    # before; a constant-through alone on its call keeps its why; a call handing True or False, the run printing True
+    # (job_api 556's prodManager), is asked: the print leaves the True alone on it
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import sources as SR
+
+        F = "pandaserver/f.py::f"
+        nones = M.HeldSource(kind="unknown", name="{}", line=274, made_empty="mapping", route=["pandaserver/a.py:10"],
+                             at=["pandaserver/r.py:274"], changes=[M.HeldChange(at="pandaserver/r.py:334", kind="store", key="*",
+                             value=[M.HeldSource(kind="constant", name="None", line=334, at=["pandaserver/r.py:334"])])])
+        src = lambda kind, name, route, **kw: M.HeldSource(kind=kind, name=name, line=1, route=[route], at=[route], **kw)
+        pf = lambda name, *sources: N(owner=F, parameter=name, line=1, stops=[], sources=list(sources))
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            pf("c", nones),
+            pf("d", src("constant", "'x'", "pandaserver/a.py:20"), src("unknown", "g()", "pandaserver/a.py:30")),
+            pf("e", src("constant", "'y'", "pandaserver/a.py:40", steps=["[*]"]), src("unknown", "g()", "pandaserver/a.py:50")),
+            pf("f", src("constant", "True", "pandaserver/a.py:60"), src("constant", "False", "pandaserver/a.py:60"),
+               src("unknown", "g()", "pandaserver/a.py:70")),
+        ], entered_froms=[], guard_froms=[])]
+        SR._calls_in.cache_clear()
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        asked = []
+
+        def shown(site, *a, **k):
+            asked.append(site)
+            return True
+
+        r._call_shown = shown
+        r._entry_value = lambda fn, run, param: "True"
+        end = lambda e: [e.end, e.why, e.at]
+        got = {}
+        for p in "cdef":
+            asked.clear()
+            got[p] = [[end(e) for e in r._param_end(p, F, p, N() if p == "f" else None, None, None)], list(asked)]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["c"] == [[["constant", "made-empty", "pandaserver/r.py:274"],
+                         ["constant", "constant-through", "pandaserver/r.py:334"],
+                         ["stop", "container", "pandaserver/r.py:274"]], []], got
+    assert got["d"] == [[["constant", "'x'", "pandaserver/a.py:20"]], ["pandaserver/a.py:20"]], got
+    assert got["e"] == [[["constant", "constant-through", "pandaserver/a.py:40"]], ["pandaserver/a.py:40"]], got
+    assert got["f"] == [[["constant", "True", "pandaserver/a.py:60"]], ["pandaserver/a.py:60"]], got

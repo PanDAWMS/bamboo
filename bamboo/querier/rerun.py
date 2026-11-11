@@ -1815,9 +1815,8 @@ L3_LOOKBACK = datetime.timedelta(days=8)
 
 
 def _identity_attrs(cls: str) -> list[str]:
-    """The ``Class.attr`` the dump's tables name *cls*'s identity by; none where no table of it names one."""
-    fragment = mapdump.fragment()
-    return next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
+    """The ``Class.attr`` the dump's tables name *cls*'s identity by (``SR.identity_attrs``)."""
+    return SR.identity_attrs(cls)
 
 
 def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
@@ -3276,8 +3275,9 @@ class Rerun:
         arm's entry.  *printed*: what its run printed at its tests (:meth:`_held_on`); *seen*: the arms read on the way
         here, each read once.  With no run or no window (an attribute's arm read on no run), the changes on a way stay
         on it, named: S4c reads the run."""
-        terms = [self._with_callers(t, fn, owner, run, window)
-                 for t in SR.terms(fn, owner, list(zip(guards, ifs, strict=True)), choose=self._field_choice(run))]
+        base = SR.terms(fn, owner, list(zip(guards, ifs, strict=True)), choose=self._field_choice(run))
+        self._say_cuts(pad)
+        terms = [self._with_callers(t, fn, owner, run, window) for t in base]
         out: list[SR.Term] = []
         for t in terms:
             t = replace(t, ends=tuple(replace(e, handler=h) if (h := _handler_line(fn, e)) else e for e in t.ends))
@@ -3448,35 +3448,66 @@ class Rerun:
         terms, entry = self._arm_terms(fn, owner, int(ln), guards, ifs, printed, run, window, seen, pad)
         return SR.Made(c, site, owner, how, tuple(guards), tuple(terms), entry)
 
-    def _with_callers(self, t: SR.Term, fn: R.Function, owner: str, run: Any, window: tuple[str, str] | None) -> SR.Term:
+    def _with_callers(self, t: SR.Term, fn: R.Function | None, owner: str, run: Any, window: tuple[str, str] | None,
+                      ask: bool = True) -> SR.Term:
         """*t* with each way that ends at a parameter read up its callers (:meth:`_param_end`): a parameter of the arm's
         function, or of the method a field's binding is in (*of*, S4a; the run's prints at the arm's entry say nothing of
-        it; read up the calls the run's path entered it by, S4b's (e)), keeping the bindings the way went through and the
-        changes on it after the binding (out/gm/gm5-design.md G4)."""
-        ends = tuple(replace(self._param_end(e.term, e.of or owner, e.param, None if e.of else fn, run, window, e.entered),
-                             via=e.via, changes=e.changes)
-                     if e.why == SR.PARAMETER and e.param else e for e in t.ends)
+        it; read up the calls the run's path entered it by, S4b's (e)), with the steps the read still takes off it (Q2's
+        (c)), keeping the bindings the way went through and the changes on it after the binding (out/gm/gm5-design.md
+        G4).  *ask* False reads the map's records alone, no caller's run asked (a split's terms, Q2's (b))."""
+        ends = tuple(x for e in t.ends for x in (
+            tuple(replace(y, via=e.via, changes=(*e.changes, *y.changes))
+                  for y in self._param_end(e.term, e.of or owner, e.param, None if e.of else fn, run, window, e.entered,
+                                           e.steps, ask))
+            if e.why == SR.PARAMETER and e.param else (e,)))
         return replace(t, ends=ends)
 
+    def _say_cuts(self, pad: str) -> None:
+        """The ways a callee's test ruled out on its call's constants since last said (CRO (ii), ``SR.take_cuts``)."""
+        for cut in SR.take_cuts():
+            self.say(f"{pad}ruled out by a callee's test on its call's constants (CRO (ii)): {cut}")
+
     def _param_end(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any, window: tuple[str, str] | None,
-                   entered: tuple[str, ...] = ()) -> SR.End:
+                   entered: tuple[str, ...] = (), steps: tuple[str, ...] = (), ask: bool = True) -> tuple[SR.End, ...]:
         """Where the value *owner*'s *param* was handed comes from (S, gm-design.md): its ways up the map's callers
-        (``SR.param_ways``; with *entered*, only those by the calls the run's path entered *owner* by, S4b's (e)); a
-        constant whose ``str`` is not what the run printed of the parameter at its entry (*fn*'s; none read where *fn*
-        is None) is not the one; of those left, the call a caller's run shows (:meth:`_call_shown`) is -- not asked
-        where two or more are left and all come by one call, whose run cannot tell them apart: where they are every way
-        left, the ``if`` that tells them apart is read (:meth:`_split`, out/gm/s4-design.md rule 6's (a)) and the stop
-        holds it.  With none left, only API parameters (any value) or the database end it, or the one way left where it
-        ends; else it stops."""
-        cache: dict[tuple[str, str, bool, tuple[str, ...]], SR.End] = self.__dict__.setdefault("_param_ends", {})
-        if (owner, param, fn is None, entered) in cache:
-            return replace(cache[(owner, param, fn is None, entered)], term=term)
-        ways = SR.param_ways(owner, param, entered=entered)
+        (``SR.param_ways``; with *entered*, only those by the calls the run's path entered *owner* by, S4b's (e); with
+        *steps*, the parts the read takes off the value, Q2's (c)); a constant whose ``str`` is not what the run printed
+        of the parameter at its entry (*fn*'s; none read where *fn* is None) is not the one; of those left, the call a
+        caller's run shows (:meth:`_call_shown`; none asked where *ask* is False) is -- not asked where two or more are
+        left and all come by one call, whose run cannot tell them apart: where they are every way left, the ``if`` that
+        tells them apart is read (:meth:`_split`, out/gm/s4-design.md rule 6's (a)) and the stop holds it.  With none
+        left, only API parameters (any value) or the database end it, or the one way left where it ends; where every way
+        ends and none is a literal a run could tell apart (a constant's part, the database), it ends at each
+        (out/gm/qk-design.md Q2); else it stops."""
+        key = (owner, param, fn is None, entered, steps, ask)
+        cache: dict[tuple, tuple[SR.End, ...]] = self.__dict__.setdefault("_param_ends", {})
+        if key in cache:
+            return tuple(replace(e, term=term) for e in cache[key])
+        busy: set[tuple] = self.__dict__.setdefault("_param_busy", set())
+        if key in busy:
+            # a split's term reading the parameter whose split it is
+            return (SR.End(term, SR.STOP, "cycle", "", param=param),)
+        busy.add(key)
+        try:
+            got = self._param_end_read(term, owner, param, fn, run, window, entered, steps, ask)
+        finally:
+            busy.discard(key)
+        cache[key] = got
+        return got
+
+    def _param_end_read(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any,
+                        window: tuple[str, str] | None, entered: tuple[str, ...], steps: tuple[str, ...],
+                        ask: bool) -> tuple[SR.End, ...]:
+        """:meth:`_param_end`, not cached."""
+        ways = SR.param_ways(owner, param, entered=entered, steps=steps)
+        self._say_cuts("  ")
         off = SR.calls_off_the_path(owner, param, entered)
         value = self._entry_value(fn, run, param) if fn is not None else None
         # a value made of a literal (an item of range(3)) is not the literal: it is not matched to what the run printed
-        consts = [w for w in ways if w.end == SR.CONSTANT and (value is None or (w.why != SR.THROUGH and SR.same_value(w.value, value)))]
-        rest = [w for w in ways if w.end != SR.CONSTANT]
+        # a container's empty start (Q1) is no literal a call hands: one of the other ways
+        consts = [w for w in ways if w.end == SR.CONSTANT and w.why != SR.MADE_EMPTY
+                  and (value is None or (w.why != SR.THROUGH and SR.same_value(w.value, value)))]
+        rest = [w for w in ways if w.end != SR.CONSTANT or w.why == SR.MADE_EMPTY]
         # a caller's run tells constants apart only by the calls they come by
         calls = {w.route[0] for w in consts if w.route}
         one_call = len(consts) > 1 and len(calls) == 1
@@ -3486,24 +3517,43 @@ class Rerun:
                  + ("; other ways: " + ", ".join(sorted({f"{w.end} ({w.why})" for w in rest})) if rest else "")
                  + (f"; read by the call(s) the run's path entered it by ({', '.join(entered)}), left out: "
                     + ", ".join(f"{n} by {c}" for c, n in sorted(Counter(off).items())) if off else "")
-                 + (f"; all come by {next(iter(calls))}: its caller's run not asked" if one_call else ""))
-        shown = [] if one_call else [
-            w for w in consts if w.route and self._call_shown(w.route[0], window, getattr(run, "machine", None))]
+                 + (f"; all come by {next(iter(calls))}: its caller's run not asked" if one_call else "")
+                 + (f"; the read takes {''.join(steps)} off it" if steps else ""))
+        # a call the caller's run shows tells a constant apart only where every way it comes by that the print leaves
+        # ends there (a call handing a container whose puts are ways hands each of them, adder_atlas_plugin 677's
+        # cont_zip_map; a call handing True or False, job_api 556's prodManager, is told apart by the print first)
+        possible = [x for x in ways if value is None or x.end != SR.CONSTANT or x.why in (SR.THROUGH, SR.MADE_EMPTY)
+                    or SR.same_value(x.value, value)]
+        alone = [w for w in consts if w.route and all(
+            (x.end, x.value, x.why) == (w.end, w.value, w.why) for x in possible if x.route[:1] == w.route[:1])]
+        shown = [] if one_call or not ask else [
+            w for w in alone if self._call_shown(w.route[0], window, getattr(run, "machine", None))]
         if len(shown) == 1:
-            got = SR.End(term, SR.CONSTANT, shown[0].value, shown[0].route[0], route=shown[0].route)
-        elif not consts and rest and all(r.end == SR.API for r in rest):
-            got = SR.End(term, SR.API, "no_caller", ", ".join(r.route[0] for r in rest if r.route))
-        elif not consts and rest and all(r.end == SR.DATABASE for r in rest):
-            got = SR.End(term, SR.DATABASE, SR.PARAMETER, "")
-        elif not consts and len(rest) == 1:
-            # the one way left is where it ends (attempt_nr: the pop add_main hands at 136)
-            got = SR.End(term, rest[0].end, rest[0].why, rest[0].route[0] if rest[0].route else "", route=rest[0].route)
-        else:
-            # S2's (a): every way left a constant the one call hands -- the if their bindings sit apart in
-            split = self._split(consts) if one_call and not rest else None
-            got = SR.End(term, SR.STOP, "parameter-unchosen" if consts else SR.PARAMETER, "", param=param, split=split)
-        cache[(owner, param, fn is None, entered)] = got
-        return got
+            # a constant-through keeps its why: its value is not the literal's
+            return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)
+        if not consts and rest and all(r.end == SR.API for r in rest):
+            return (SR.End(term, SR.API, "no_caller", ", ".join(r.route[0] for r in rest if r.route)),)
+        if not consts and rest and all(r.end == SR.DATABASE for r in rest):
+            return (SR.End(term, SR.DATABASE, SR.PARAMETER, ""),)
+        if not consts and len(rest) == 1:
+            # the one way left is where it ends
+            return (SR.End(term, rest[0].end, rest[0].why, rest[0].route[0] if rest[0].route else "", route=rest[0].route),)
+        if ways and not any(w.end == SR.CONSTANT and w.why not in (SR.THROUGH, SR.MADE_EMPTY) for w in ways):
+            # no literal a run could tell apart is left (modTime: a statement's rows, a part of the None 2371 binds,
+            # the + at 2406 not read): each way where it ends or stops, the term ending where every one ends
+            # (out/gm/qk-design.md Q2); a place reached by several routes is said once, by the first
+            each: dict[tuple, SR.End] = {}
+            for w in ways:
+                at = w.end_at or (w.route[0] if w.route else "")
+                each.setdefault((w.end, w.value or w.why, at, w.changes), SR.End(
+                    term, w.end, w.value or w.why, at, route=w.route, changes=w.changes, returned=w.returned,
+                    returned_line=w.returned_line))
+            if len(each) < len(ways):
+                self.say(f"    {param}: {len(ways)} way(s) end at {len(each)} place(s), each said by its first route")
+            return tuple(each.values())
+        # S2's (a): every way left a constant the one call hands -- the if their bindings sit apart in
+        split = self._split(consts) if one_call and not rest else None
+        return (SR.End(term, SR.STOP, "parameter-unchosen" if consts else SR.PARAMETER, "", param=param, split=split),)
 
     def _split(self, consts: list[SR.Way]) -> SR.Split | None:
         """S2's (a) (out/gm/s4-design.md rule 6): the constants *consts*, all handed by one call, told apart by the
@@ -3545,8 +3595,11 @@ class Rerun:
         ifs_at = tuple(dict.fromkeys(f"{rel}:{n}" for lines in apart for n in lines))
         self.say(f"    told apart by the if at {', '.join(ifs_at)} ({node.name}; the bindings at "
                  + ", ".join(f"{rel}:{w.bound_at}" for w in consts) + "), read by the map's records: its run not asked")
+        # a way ending at a parameter is read up its callers by the map's records too, no run asked (Q2's (b))
+        base = SR.terms(fn, owner, pairs)
+        self._say_cuts("    ")
         terms = [replace(t, ends=tuple(replace(x, handler=h) if (h := _handler_line(fn, x)) else x for x in t.ends))
-                 for t in SR.terms(fn, owner, pairs)]
+                 for t in (self._with_callers(u, None, owner, None, None, ask=False) for u in base)]
         for t in terms:
             self.say(f"      term {t.term!r} of {t.guard!r}: " + ", ".join(_way_text(x) for x in t.ends))
         return SR.Split(call, owner, ifs_at, tuple(g for g, _ in pairs), tuple(terms))
@@ -3603,9 +3656,10 @@ class Rerun:
             for p in params:
                 if self._entry_value(fn, run, p) is None:
                     continue
-                e = self._param_end(p, owner, p, fn, run, window)
-                if (e.route and e.route[-1] in into) or e.end == SR.API:
-                    chosen.append(e)
+                got = self._param_end(p, owner, p, fn, run, window)
+                # one way chosen, not every way of several
+                if len(got) == 1 and ((got[0].route and got[0].route[-1] in into) or got[0].end == SR.API):
+                    chosen.append(got[0])
                     break
         if chosen:
             e = chosen[0]

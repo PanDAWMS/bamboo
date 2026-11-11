@@ -50,9 +50,9 @@ from dataclasses import dataclass, replace
 from dataclasses import field as dc_field
 from typing import Any
 
+from bamboo.codemap import callfacts, trace
 from bamboo.codemap import models as M
-from bamboo.codemap import trace
-from bamboo.codemap.panda import fills
+from bamboo.codemap.panda import fills, heldfrom
 
 from . import asked, mapdump
 from . import printed as PR
@@ -82,6 +82,82 @@ THROUGH = "constant-through"
 NO_FIELD = "no-field-from"
 #: a field whose FieldFrom gives no way: no binding, change or stop, or none S4b's choice took
 NO_WAY = "no-way"
+#: a container made empty (the map's ``made_empty``) a read takes an element of, where a put of it is not read (gone
+#: where the map does not follow it, a call not read, a put with no value) or the step may take a mapping's key: the
+#: values the puts the map reads put are ways, and the container stays one (out/gm/qk-design.md Q1)
+CONTAINER = "container"
+#: the empty start of a container made empty, read whole: a constant, but no literal a run prints (Q1's whole read)
+MADE_EMPTY = "made-empty"
+
+
+def element_kept(change: Any, steps: tuple[str, ...]) -> bool:
+    """Whether *change* is on the way of a read taking *steps* off the value: a read of an element (its first step
+    ``[...]``) reads a value some put put, which a change taking elements out or reordering them (``pop``, ``remove``,
+    ``sort``, ``del x[k]``) does not make (out/gm/qk-design.md Q1); every change counts for any other read."""
+    if not steps or not steps[0].startswith("["):
+        return True
+    kind, what = getattr(change, "kind", ""), getattr(change, "what", "") or ""
+    if kind == M.CHANGE_METHOD and what in callfacts.CHANGING and what not in callfacts.PUTTING:
+        return False
+    return not (kind == M.CHANGE_DELETE and not str(getattr(change, "key", "") or "").startswith("."))
+
+
+def _elements(s: Any, rest: tuple[str, ...]) -> tuple[list[Any], bool] | None:
+    """Q1: where the source *s* ends at a container made empty, whole, and the read takes an element of it (*rest*'s
+    first step) or the container whole (no step), the ways of the values its puts put that the step may take -- every
+    value, for the whole -- (the map's ``heldfrom.held_elements``: each with the calls to its put and *s*'s route after
+    its own, the changes that may change an element on it) and whether *s* stays a way too (a put not read; a mapping
+    read by ``[*]`` or whole, whose keys no put's value holds); None where it does not, which reads *s* as before.  A
+    whole read also has the container's empty start (:func:`_start`)."""
+    if not getattr(s, "made_empty", "") or getattr(s, "steps", None) or getattr(s, "through", None):
+        return None
+    if not rest:
+        values, stays = heldfrom.held_elements(s, "[*]")
+        # nothing done to it: the empty start is all it holds
+        return values, stays and bool(getattr(s, "changes", None))
+    if not rest[0].startswith("["):
+        return None
+    return heldfrom.held_elements(s, rest[0])
+
+
+def _put_read(change: Any) -> bool:
+    """Whether *change* is a put whose value the map reads: Q1 reads it as a way of the container's contents."""
+    return bool(getattr(change, "value", None)) and getattr(change, "kind", "") in (M.CHANGE_METHOD, M.CHANGE_STORE)
+
+
+def _guard_ends(term: str, s: Any, rel: str, keys: frozenset[str] | None, line: int, depth: int = 0,
+                rest: tuple[str, ...] = ()) -> list[End]:
+    """The ends of a guard's source *s* (:func:`_source_end`), *rest* the steps the test takes past it (an element,
+    :func:`item_step`).  For a container made empty (Q1): read whole, its empty start and the ends of each value its
+    puts put, read in turn as parts of it; an element of it, the ends of each value a put put that the step may take,
+    read with the steps after it -- and the container where a put is not read or it is a mapping, the changes left on
+    them those that are no put read."""
+    got = _elements(s, rest) if depth < 4 else None
+    first = _source_end(term, s, rel, keys, line, read=rest)
+    if got is None:
+        return [first]
+    values, stays = got
+    left = tuple(c for c in first.changes if c.record is None or not _put_read(c.record))
+    ends = [] if rest else [End(term, CONSTANT, MADE_EMPTY, first.at, changes=left)]
+    for v in values:
+        if not _cut(v):
+            held = _guard_ends(term, v, rel, keys, line, depth + 1, rest[1:])
+            ends += held if rest else [as_part(e) for e in held]
+    return ends + ([replace(first, end=STOP, why=CONTAINER, changes=left)] if stays else [])
+
+
+def as_part(w: Any) -> Any:
+    """A :class:`Way` or :class:`End` reached through a value a container read whole holds: a part of the value read,
+    so a literal there ends it as a constant whose value is not the literal's (:data:`THROUGH`), as an item of
+    ``range(3)`` does (Q1's whole read)."""
+    if w.end != CONSTANT or w.why in (THROUGH, MADE_EMPTY):
+        return w
+    return replace(w, value="", why=THROUGH) if isinstance(w, Way) else replace(w, why=THROUGH)
+
+
+def _start(s: Any, route: tuple[str, ...], rest: tuple[str, ...]) -> list[Way]:
+    """A container made empty read whole (no step, *rest* empty): its empty start, a constant no run prints (Q1)."""
+    return [] if rest else [Way(CONSTANT, "", MADE_EMPTY, route, end_at=next(iter(getattr(s, "at", None) or ()), ""))]
 
 
 def _ways_of_the_value(sources: list[Any]) -> tuple[list[Any], bool]:
@@ -147,6 +223,9 @@ class End:
     handler: int = 0
     #: S2's (a): a parameter's constants one call hands, told apart by the ``if`` their bindings sit in
     split: Split | None = None
+    #: a parameter's way: the steps the read still takes off the parameter's value (``[*]``, ``[3]``), read on up its
+    #: callers (out/gm/qk-design.md Q2's (c))
+    steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,6 +280,10 @@ class Way:
     #: a parameter's way ending at a constant bound in the function the first call of *route* is in: the line of that
     #: binding (S2's (a) reads the ``if`` it sits in); 0 where the map's line is in a callee the value came back from
     bound_at: int = 0
+    #: a way ending at a parameter: the steps the read still takes off its value (Q2's (c))
+    steps: tuple[str, ...] = ()
+    #: where the way ends, ``file:line`` (the map's *at* of its source; SBG), where the map says it
+    end_at: str = ""
 
 
 def _returned(s: Any) -> dict[str, Any]:
@@ -290,25 +373,31 @@ def _receiver_only(test: ast.expr, name: str, ended: dict[int, End]) -> End | No
     return got[0] if got and all(e.end in (DATABASE, OUTSIDE) for e in got) else None
 
 
-def _source_end(term: str, s: Any, rel: str, keys: frozenset[str] | None = None, line: int = 0) -> End:
-    """Where the way of a guard's source *s* ends, in *rel*.  One that came back through calls is placed at the last of
-    them, the call in *rel* (its own line is the callee's, in a file the record does not name), and holds them (G2).
-    The changes the map says may be made to it before the read (at *line*) are on its way, its own end kept (G4): those
-    that change what the read takes off the value, *keys* (S4c's rule 1)."""
+def _source_end(term: str, s: Any, rel: str, keys: frozenset[str] | None = None, line: int = 0,
+                read: tuple[str, ...] = ()) -> End:
+    """Where the way of a guard's source *s* ends, in *rel*, *read* the steps the test takes past it (an element,
+    :func:`item_step`).  One that came back through calls is placed at the last of them, the call in *rel* (its own
+    line is the callee's, in a file the record does not name), and holds them (G2).  The changes the map says may be
+    made to it before the read (at *line*) are on its way, its own end kept (G4): those that change what the read takes
+    off the value, *keys* (S4c's rule 1), and, for an element, none that only takes elements out or reorders them
+    (:func:`element_kept`)."""
     back: dict[str, Any] = _returned(s)
     route = back.get("returned", ())
     at = (f"{s.site_owner.partition('::')[0]}:{s.site_line}" if getattr(s, "site_owner", "") and getattr(s, "site_line", None)
           else route[-1] if route else f"{rel}:{s.line}" if getattr(s, "line", None) else "")
-    off = _keys_off(tuple(getattr(s, "steps", None) or ()), keys)
+    taken = tuple(getattr(s, "steps", None) or ())
+    off = _keys_off(taken, keys)
     back["changes"] = tuple(_changed(c, before=f"{rel}:{line}" if line else "")
-                            for c in getattr(s, "changes", None) or () if change_counts(c, off))
+                            for c in getattr(s, "changes", None) or ()
+                            if change_counts(c, off) and element_kept(c, (*taken, *read)))
     if s.kind in (M.KEY_ROWS, M.KEY_SEQUENCE, M.KEY_DATABASE):
         return End(term, DATABASE, s.kind, at, **back)
     if s.kind == M.KEY_CONSTANT:
         # an item of range(3) ends at the literal, its value not the literal's (as a parameter's and a field's way)
-        return End(term, CONSTANT, THROUGH if getattr(s, "steps", None) or getattr(s, "through", None) else s.name, at, **back)
+        return End(term, CONSTANT, THROUGH if taken or read or getattr(s, "through", None) else s.name, at, **back)
     if s.kind == M.KEY_PARAMETER:
-        return End(term, STOP, s.kind, at, param=s.name, **back)
+        # read up the callers with what the read takes off it (Q2's (c))
+        return End(term, STOP, s.kind, at, param=s.name, steps=(*taken, *read), **back)
     if s.kind == M.KEY_CALL and _clock_at(at, s.name or ""):
         # a call the map reads as a clock (timeNow = naive_utcnow()), as a field's way ends (S2's (b))
         return End(term, CLOCK, s.name, at, **back)
@@ -409,6 +498,18 @@ def parts_taken(test: ast.expr, name: str, rel: str = "", line: int = 0) -> froz
     return frozenset(parts)
 
 
+def item_step(test: ast.expr, name: str, rel: str = "", line: int = 0) -> str | None:
+    """The step an element read takes where *test* takes only items off the value *name* holds (``disp_error[disp]``),
+    spelled as the map spells a key: a literal as written (``['total']``), ``[*]`` for any other key or several; None
+    where it takes anything else, or nothing (:func:`parts_taken`)."""
+    parts = parts_taken(test, name, rel, line)
+    if not parts or any(not p.startswith("[") for p in parts):
+        return None
+    keys = {ast.unparse(n.slice) if isinstance(n.slice, ast.Constant) else "*" for n in ast.walk(test)
+            if isinstance(n, ast.Subscript) and ast.unparse(n.value) == name}
+    return f"[{keys.pop()}]" if len(keys) == 1 else "[*]"
+
+
 def read_keys(test: ast.expr, name: str, rel: str = "", line: int = 0) -> frozenset[str] | None:
     """The attributes *test* takes off the value *name* holds (:func:`parts_taken`); None where it reads the whole value
     or an item of it."""
@@ -474,7 +575,8 @@ def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozense
     if choose is not None and at is not None:
         chosen = choose(ff, at[0], at[1], _keys_off(steps, keys), of_self)
         bindings, changes = list(chosen.bindings), list(chosen.changes)
-    made_here = {c.at for c in ff.changes} | {v for c in ff.changes for v in getattr(c, "via", None) or ()}
+    changes = [c for c in changes if element_kept(c, steps)]
+    made_here ={c.at for c in ff.changes} | {v for c in ff.changes for v in getattr(c, "via", None) or ()}
     level = (tuple(_changed(c, before=f"{at[0]}:{at[1]}" if at is not None else "") for c in changes)
              + tuple(h for h in handed if h.at not in made_here))
     ways: list[Way] = []
@@ -506,14 +608,32 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
     On each way are the changes of the value: *level*, the field record's, and those the map says may be made to the
     source before it is bound, where the read reads what they change (S4b; without a choice, every one) -- G4.  Where
     the way reads a field ``.f`` of the value on in that field's own record, a change of what ``.f`` holds (any but a
-    store or delete of ``.f``, which binds the field) is that object's: handed there, its key not said (rule 2)."""
+    store or delete of ``.f``, which binds the field) is that object's: handed there, its key not said (rule 2).  A way
+    a callee's test rules out on its call's constants is none (CRO (ii), :func:`_cut`)."""
+    if _cut(s):
+        return []
     route = tuple(getattr(s, "route", None) or ())
     at = route[-1] if route else f"{b.at.rpartition(':')[0]}:{s.line}" if getattr(s, "line", None) else b.at
     rest = (*tuple(getattr(s, "steps", None) or ()), *steps)
     # what a way that came back through calls holds of them (G2)
     back = _returned(s)
     on = (*(_changed(c, before=b.at) for c in getattr(s, "changes", None) or []
-            if change_counts(c, _keys_off(rest, keys) if choose is not None else None)), *level)
+            if change_counts(c, _keys_off(rest, keys) if choose is not None else None) and element_kept(c, rest)), *level)
+    # on the arm's run (*choose*), an element of a container made empty is read as before: its puts are changes on the
+    # container's way, which S4c tells apart by the run (setupper 1098, chosen by elimination); Q1 reads the container
+    # whole there, and both where no run is read
+    elements = _elements(s, rest) if choose is None or not rest else None
+    if elements is not None:
+        # Q1: an element of a container made empty is a value one of its puts put; the container whole, its start too.
+        # A put whose value is read is a way, not a change on one
+        values, stays = elements
+        left = tuple(c for c in on if c.record is None or not _put_read(c.record))
+        ways = [w for v in values for w in _binding_ways(v, b, rest[1:], seen, choose, read_at, keys, entered, level)]
+        return (_with_changes(_start(s, (at,), rest), left) + (ways if rest else [as_part(w) for w in ways])
+                + ([Way(STOP, "", CONTAINER, (at,), changes=left, **back)] if stays else []))
+    if (made := _returned_row(s, _keys_off(rest, keys))) is not None:
+        # Q4: an object a callee filled from one row and returned
+        return [Way(ROW, "", s.kind, (at,), changes=(*on, *made), **back)]
     if s.kind in (M.KEY_SELF_FIELD, M.KEY_OBJECT) and getattr(s, "site_owner", None):
         name = s.name or ""
         if s.kind == M.KEY_SELF_FIELD and name.startswith("self."):
@@ -528,7 +648,7 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
         return [Way(STOP, "", s.kind, (at,), changes=on, **back)]
     if s.kind == M.KEY_PARAMETER:
         return [Way(STOP, s.name, PARAMETER, (at,), of=getattr(s, "site_owner", "") or b.owner,
-                    entered=() if route else entered, changes=on, **back)]
+                    entered=() if route else entered, changes=on, steps=rest, **back)]
     if s.kind == M.KEY_CONSTANT:
         return [Way(CONSTANT, "" if rest or getattr(s, "through", None) else s.name, THROUGH if rest else s.kind, (at,),
                     changes=on, **back)]
@@ -571,12 +691,187 @@ def calls_off_the_path(owner: str, parameter: str, entered: tuple[str, ...]) -> 
     return _by_the_path(pf.sources, entered)[1] if pf is not None else []
 
 
-def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entered: tuple[str, ...] = ()) -> list[Way]:
+#: CRO (ii): each way a callee's test ruled out on its call's constants since rerun last said them (:func:`take_cuts`)
+_CUTS: list[str] = []
+
+
+def take_cuts() -> list[str]:
+    """The ways :func:`_cut` ruled out since the last call, each once; forgotten once said."""
+    got = list(dict.fromkeys(_CUTS))
+    _CUTS.clear()
+    return got
+
+
+@functools.cache
+def _guarded(fragment_id: int) -> dict[tuple[str, int], list]:
+    """The map's GuardFroms by each line on the way to which their test is (``(file, line)``, from their *calls*)."""
+    by: dict[tuple[str, int], list] = {}
+    for (owner, _line), gs in _index(fragment_id)[0].items():
+        for g in gs:
+            for line in getattr(g, "calls", None) or ():
+                by.setdefault((owner.partition("::")[0], line), []).append(g)
+    return by
+
+
+def _handed(owner: str, name: str, calls: tuple[str, ...], depth: int = 0) -> tuple[bool, Any]:
+    """The one constant the call *calls[0]* hands *owner*'s parameter *name* -- a literal it hands, the parameter's
+    default the map places by that call (its *route*, not its *at*), or what the next call (*calls[1:]*) hands the
+    caller's own parameter it passes on -- as ``(True, value)``; ``(False, None)`` where it is not one constant."""
+    pf = _callers()[0].get((owner, name))
+    if pf is None or not calls or depth > 8:
+        return False, None
+    values: list[Any] = []
+    for x in pf.sources:
+        if list(getattr(x, "route", None) or ())[-1:] != [calls[0]]:
+            continue
+        if getattr(x, "paths", None) or getattr(x, "steps", None) or getattr(x, "through", None):
+            return False, None
+        if x.kind == M.KEY_CONSTANT:
+            try:
+                values.append(ast.literal_eval(x.name))
+            except (ValueError, SyntaxError):
+                return False, None
+        elif x.kind == M.KEY_PARAMETER and getattr(x, "site_owner", ""):
+            ok, value = _handed(x.site_owner, x.name, calls[1:], depth + 1)
+            if not ok:
+                return False, None
+            values.append(value)
+        else:
+            return False, None
+    if not values or any(repr(v) != repr(values[0]) for v in values):
+        return False, None
+    return True, values[0]
+
+
+def _cut(s: Any) -> str:
+    """CRO (ii) (the map's design, tmaeno "OK" 2026-11-11): where the way of the source *s* came back through calls (its
+    *route*, the innermost first), the line it leaves each callee by -- its own line (*at*), then each call's -- and
+    the tests on the way to it there (the map's GuardFroms whose *calls* hold that line; SBG), read with what the
+    route's calls hand the parameters they read (:func:`_handed`): an arm condition of that line false there rules the
+    way out, said (:func:`take_cuts`) and returned; '' where none is (a value not one constant keeps the way)."""
+    route = tuple(getattr(s, "route", None) or ())
+    at = next(iter(getattr(s, "at", None) or ()), "")
+    fragment = mapdump.fragment()
+    if not route or not at or fragment is None:
+        return ""
+    from bamboo.codemap.panda import evaluate as EV
+    from bamboo.codemap.panda import pathcond
+
+    guarded = _guarded(id(fragment))
+    for k, place in enumerate((at, *route[:-1])):
+        rel, _, ln = place.rpartition(":")
+        if not ln.isdigit() or (rel, int(ln)) not in guarded:
+            continue
+        try:
+            node = R.def_holding(rel, int(ln))
+        except (OSError, SyntaxError):
+            continue
+        owner = f"{rel}::{node.name}" if node is not None else ""
+        on = [g for g in guarded[(rel, int(ln))] if g.owner == owner]
+        if not on or node is None:
+            continue
+        env = EV.Env()
+        for g in on:
+            whole, _parts = _ways_of_the_value(g.sources)
+            got = [(True, ast.literal_eval(x.name)) if x.kind == M.KEY_CONSTANT and not getattr(x, "steps", None)
+                   and not getattr(x, "through", None) and _literal(x.name)
+                   else _handed(owner, x.name, route[k:]) if x.kind == M.KEY_PARAMETER else (False, None)
+                   for x in whole]
+            if got and all(ok for ok, _v in got) and all(repr(v) == repr(got[0][1]) for _ok, v in got):
+                env.put(g.name, got[0][1], route[k])
+        if not env.values:
+            continue
+        stmt = R.statement_at(node, int(ln))
+        for guard in pathcond.arm_condition(stmt) if stmt is not None else []:
+            text = re.sub(r"\s+\[at \d+\]$", "", guard)
+            try:
+                test = ast.parse(text, mode="eval").body
+            except SyntaxError:
+                continue
+            if EV.truth(test, {}, env) is False:
+                held = ", ".join(f"{n}={v.value!r}" for n, v in env.values.items())
+                why = f"{text!r} false at {place} ({held} by {route[k]})"
+                _CUTS.append(f"{at} by {' -> '.join(route)}: {why}")
+                return why
+    return ""
+
+
+def identity_attrs(cls: str) -> list[str]:
+    """The ``Class.attr`` the dump's tables name *cls*'s identity by; none where no table of it names one."""
+    fragment = mapdump.fragment()
+    return next((t.identity_attrs for t in (getattr(fragment, "tables", None) or []) if t.spec_class == cls and t.identity_attrs), [])
+
+
+def _returned_row(s: Any, keys: frozenset[str] | None) -> tuple[Changed, ...] | None:
+    """Q4 (out/gm/qk-design.md): where the source *s* is an object a callee built and returned (its *route*; the map's
+    *at* the statement building it there, ``job = JobSpec()`` at job_standalone_module 518), whether the callee fills
+    it from one fetched row for what the read takes off it -- each field in *keys*, or, read for which object it is
+    (no key), the fields its class's table names its identity by (``JobSpec.PandaID``) -- at every return of the name
+    it builds it in, by the map's ``fills.row_fills`` (as :func:`_row_fills` reads a fill in the arm's own function):
+    then the changes the fills say are on the way after them (G4), else None.  None too where the read takes the
+    value whole (*keys* None)."""
+    route = getattr(s, "route", None)
+    at = next(iter(getattr(s, "at", None) or ()), "")
+    rel, _, ln = at.rpartition(":")
+    if s.kind != M.KEY_OBJECT or not route or keys is None or not ln.isdigit():
+        return None
+    attrs = sorted(keys) or [a.partition(".")[2] for a in identity_attrs((getattr(s, "site_owner", "") or "").rpartition("::")[2])]
+    if not attrs:
+        return None
+    from bamboo.codemap.panda import pathcond
+
+    try:
+        types = asked._types()
+        tree = types.tree(rel)
+        if tree is None:
+            return None
+        holding = [f for f, _ in pathcond.functions_with_owner(tree) if f.lineno <= int(ln) <= (f.end_lineno or f.lineno)]
+        func = min(holding, key=lambda f: (f.end_lineno or f.lineno) - f.lineno)
+        stmt = R.statement_at(func, int(ln))
+        calls = PR._calls_index(types)
+    except (OSError, SyntaxError, ValueError, LookupError):
+        return None
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+        return None
+    name = stmt.targets[0].id
+    returns = [(n, n.value) for n in ast.walk(func) if isinstance(n, ast.Return) and isinstance(n.value, ast.Name)
+               and n.value.id == name]
+    if not returns:
+        return None
+    made: list[Changed] = []
+    for attr in attrs:
+        for ret, value in returns:
+            # the field read where the callee hands the object back
+            read = ast.Attribute(value=value, attr=attr, ctx=ast.Load())
+            ast.copy_location(read, value)
+            read.end_lineno, read.end_col_offset = value.end_lineno, value.end_col_offset
+            read.parent = ret  # type: ignore[attr-defined]
+            try:
+                held = fills.row_fills(calls, rel, func, read, ())
+            except ValueError:
+                return None
+            if held.others or not held.fills or not all(f.pick in (fills.PICK_ONE, fills.PICK_AT) and f.reads for f in held.fills):
+                return None
+            made += [Changed(f"{c.file}:{c.line}", c.kind, str(c.key), tuple(c.via)) for f in held.fills for c in f.changes]
+    return tuple(dict.fromkeys(made))
+
+
+def _literal(text: str) -> bool:
+    try:
+        ast.literal_eval(text)
+    except (ValueError, SyntaxError):
+        return False
+    return True
+
+
+def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entered: tuple[str, ...] = (),
+               steps: tuple[str, ...] = ()) -> list[Way]:
     """Each way *owner*'s *parameter* is handed in, read up the map's ``ParameterFrom`` records through the callers'
     own parameters to where it ends: a constant a call hands, a parameter no corpus call hands (an API's), the
     database, a clock a caller reads (``values.clock_of``), or a stop.  ``killJob``'s ``code`` comes in through ``killJobs`` (TaskBuffer 1190) from ``'60'`` at
     adder_gen 226, among others.  With *entered*, only the ways that come in by those calls (S4b's (e): the calls the
-    run's path entered *owner* by)."""
+    run's path entered *owner* by).  *steps* are what the read still takes off the parameter's value (Q2's (c)): each
+    source is read with them (:func:`_param_source_ways`)."""
     params, _entries = _callers()
     pf = params.get((owner, parameter))
     if pf is None:
@@ -587,26 +882,7 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
     ways: list[Way] = []
     whole, parts = _ways_of_the_value(_by_the_path(pf.sources, entered)[0])
     for s in whole:
-        route = tuple(s.route)
-        if s.kind == M.KEY_PARAMETER and s.site_owner:
-            ways += [replace(w, route=w.route + route) for w in param_ways(s.site_owner, s.name, seen)]
-        elif s.kind == M.KEY_CONSTANT and (getattr(s, "through", None) or getattr(s, "steps", None)):
-            # a part of the literal, or what a call outside the corpus makes of it (an item of range(3)): it ends at
-            # the constant, but its value is not the literal's
-            ways.append(Way(CONSTANT, "", THROUGH, route))
-        elif s.kind == M.KEY_CONSTANT:
-            # bound in the caller where the call handing it is its only call (else in the callee it came back from)
-            ways.append(Way(CONSTANT, s.name, s.kind, route,
-                            bound_at=(getattr(s, "line", None) or 0) if len(route) == 1 else 0))
-        elif s.kind in (M.KEY_ROWS, M.KEY_SEQUENCE, M.KEY_DATABASE):
-            ways.append(Way(DATABASE, "", s.kind, route))
-        elif (s.kind == M.KEY_CALL and len(route) == 1 and getattr(s, "line", None)
-              and _clock_at(f"{route[0].rpartition(':')[0]}:{s.line}", s.name or "")):
-            # a call in the caller the map reads as a clock (S2's (b)); one in a callee the value came back from is in
-            # a file the record does not name, and stops as before
-            ways.append(Way(CLOCK, "", s.name, route))
-        else:
-            ways.append(Way(STOP, "", s.kind, route))
+        ways += _param_source_ways(s, steps, seen)
     kinds = sorted({st.kind for st in pf.stops})
     here = (f"{owner.partition('::')[0]}:{pf.line}",)
     if not whole and parts:
@@ -616,6 +892,59 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
     elif kinds:
         ways.append(Way(STOP, "", ",".join(kinds), here))
     return ways
+
+
+def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset) -> list[Way]:
+    """Where one source *s* of a ``ParameterFrom`` ends, with *steps* still to take off the parameter's value (Q2's
+    (c)): a caller's own parameter, read up its callers in turn; an element of a container made empty, the values its
+    puts put (Q1, :func:`_elements`); a field of an object the caller holds (``self.job_output_reports`` at add_main
+    136), read on in the map's FieldFrom, and a parameter its binding takes up that method's callers (Q2's (a)); a
+    constant -- its value the literal's only where no step is taken off it and no call outside the corpus made it --,
+    the database, a clock the caller reads, or a stop.  Each way it ends at holds where (the map's *at*).  A way a
+    callee's test rules out on its call's constants is none (CRO (ii), :func:`_cut`).  A value a container read whole
+    holds is a part of the value read: a literal there is not its value (:func:`as_part`)."""
+    if _cut(s):
+        return []
+    route = tuple(s.route)
+    rest = (*tuple(getattr(s, "steps", None) or ()), *steps)
+    here = next(iter(getattr(s, "at", None) or ()), "")
+    elements = _elements(s, rest)
+    if elements is not None:
+        values, stays = elements
+        held = [w for v in values for w in _param_source_ways(v, rest[1:], seen)]
+        return (_start(s, route, rest) + (held if rest else [as_part(w) for w in held])
+                + ([Way(STOP, "", CONTAINER, route, end_at=here)] if stays else []))
+    if s.kind == M.KEY_PARAMETER and s.site_owner:
+        return [replace(w, route=w.route + route) for w in param_ways(s.site_owner, s.name, seen, steps=rest)]
+    if (made := _returned_row(s, _keys_off(rest, None))) is not None:
+        # Q4: an object a callee filled from one row and returned
+        return [Way(ROW, "", s.kind, route, changes=made, end_at=here)]
+    name = s.name or ""
+    if s.kind == M.KEY_SELF_FIELD and getattr(s, "site_owner", "") and name.startswith("self."):
+        out: list[Way] = []
+        for w in field_ways(s.site_owner, name.split(".")[1].split("[")[0], rest, seen):
+            if w.why == PARAMETER and w.of:
+                out += [replace(x, route=x.route + w.route + route, changes=(*w.changes, *x.changes))
+                        for x in param_ways(w.of, w.value, seen, steps=w.steps)]
+            else:
+                out.append(replace(w, route=w.route + route))
+        return out
+    if s.kind == M.KEY_CONSTANT and (getattr(s, "through", None) or rest):
+        # a part of the literal, or what a call outside the corpus makes of it (an item of range(3)): it ends at the
+        # constant, but its value is not the literal's
+        return [Way(CONSTANT, "", THROUGH, route, end_at=here)]
+    if s.kind == M.KEY_CONSTANT:
+        # bound in the caller where the call handing it is its only call (else in the callee it came back from)
+        return [Way(CONSTANT, s.name, s.kind, route, bound_at=(getattr(s, "line", None) or 0) if len(route) == 1 else 0,
+                    end_at=here)]
+    if s.kind in (M.KEY_ROWS, M.KEY_SEQUENCE, M.KEY_DATABASE):
+        return [Way(DATABASE, "", s.kind, route, end_at=here)]
+    if (s.kind == M.KEY_CALL and len(route) == 1 and getattr(s, "line", None)
+            and _clock_at(f"{route[0].rpartition(':')[0]}:{s.line}", s.name or "")):
+        # a call in the caller the map reads as a clock (S2's (b)); one in a callee the value came back from is in a
+        # file the record does not name, and stops as before
+        return [Way(CLOCK, "", s.name, route, end_at=here)]
+    return [Way(STOP, "", s.kind, route, end_at=here)]
 
 
 def same_value(literal: str, printed: str) -> bool:
@@ -710,7 +1039,9 @@ def _row_fills(fn: R.Function, name: str, line: int) -> frozenset[str] | None:
 def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], choose: Choose | None = None) -> list[Term]:
     """Each term of each guard (its text and the ``if`` statements it is read at) of an arm of *fn* (*owner* as the
     map spells the arm's function), with where each way of it ends.  A field of ``self`` is read on in the map's
-    FieldFrom, by *choose*'s bindings where it is given (S4b)."""
+    FieldFrom, by *choose*'s bindings where it is given (S4b).  *choose* is given where the terms are read on the arm's
+    run: there an element the test takes off a container made empty keeps its puts as changes on the container's way,
+    for S4c to tell apart by the run; Q1 reads it where no run is read, and the container whole everywhere."""
     index, _runs = _maps()
     out: list[Term] = []
     for guard, ifs in guards:
@@ -738,19 +1069,32 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                 if not whole and parts:
                     ends.append(End(g.name, STOP, PARTS_ONLY, f"{fn.rel}:{one.lineno}"))
                 for s in whole:
+                    if _cut(s):
+                        # a callee's test rules the way out on its call's constants (CRO (ii))
+                        continue
                     if s.kind == M.KEY_SELF_FIELD and getattr(s, "site_owner", "") and not getattr(s, "changes", None) and _field_froms():
                         read = fields_read(one.test, s, own)
                         if read or g.name == "self":
                             read_on = True
                             for f in read:
                                 name = f"self.{f}" if g.name == "self" else g.name
+                                # the element the test takes off the field is a step the read takes
+                                item = item_step(one.test, name, fn.rel, one.lineno)
                                 fields.setdefault(name, []).extend(
                                     _field_end(name, w) for w in field_ways(
-                                        s.site_owner, f, tuple(getattr(s, "steps", None) or ()), choose=choose,
-                                        at=(fn.rel, one.lineno), keys=read_keys(one.test, name, fn.rel, one.lineno),
-                                        of_self=True))
+                                        s.site_owner, f, (*tuple(getattr(s, "steps", None) or ()), *((item,) if item else ())),
+                                        choose=choose, at=(fn.rel, one.lineno),
+                                        keys=read_keys(one.test, name, fn.rel, one.lineno), of_self=True))
                             continue
-                    e = _source_end(g.name, s, fn.rel, read_keys(one.test, g.name, fn.rel, one.lineno), one.lineno)
+                    item = item_step(one.test, g.name, fn.rel, one.lineno)
+                    taken = (item,) if item else ()
+                    if _elements(s, taken) is not None and (choose is None or not taken):
+                        # a container made empty the test reads whole, or an element of it where no run is read (Q1)
+                        ends += _guard_ends(g.name, s, fn.rel, read_keys(one.test, g.name, fn.rel, one.lineno), one.lineno,
+                                            rest=taken)
+                        continue
+                    e = _source_end(g.name, s, fn.rel, read_keys(one.test, g.name, fn.rel, one.lineno), one.lineno,
+                                    read=taken)
                     if e.end == STOP and s.kind == M.KEY_ATTRIBUTE and _supplied_by_the_database(fn, g.name, one.lineno):
                         e = replace(e, end=DATABASE, why=s.kind)
                     elif e.end == STOP and s.kind == M.KEY_OBJECT and (filled := _row_fills(fn, g.name, one.lineno)) is not None:
@@ -758,6 +1102,10 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                         # a fill's statement (killJob's job.pack(res[0]) at 998) is that fill (G4)
                         e = replace(e, end=ROW, why=s.kind,
                                     changes=tuple(c for c in e.changes if not ({c.at, *c.made_by} & filled)))
+                    elif e.end == STOP and (made := _returned_row(s, _keys_off(tuple(getattr(s, "steps", None) or ()),
+                                                                              read_keys(one.test, g.name, fn.rel, one.lineno)))) is not None:
+                        # Q4: an object a callee filled from one row and returned
+                        e = replace(e, end=ROW, why=s.kind, changes=(*e.changes, *made))
                     ends.append(e)
                 ends += [End(g.name, STOP, getattr(st, "kind", "stop") or "stop", "") for st in g.stops]
                 # the term's own field (``self.job``): one term with its other ways
@@ -776,4 +1124,4 @@ def _field_end(term: str, w: Way) -> End:
     why = w.value if w.end == CONSTANT and w.value else w.why
     return End(term, w.end, why, w.route[-1] if w.route else "", param=w.value if w.why == PARAMETER else "", of=w.of,
                via=w.route[:-1], entered=w.entered, changes=w.changes, returned=w.returned,
-               returned_line=w.returned_line)
+               returned_line=w.returned_line, steps=w.steps)
