@@ -154,7 +154,8 @@ class _Way(NamedTuple):
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
     """*ways*, each end not placed yet placed in *file* where its line is among *func*'s: the innermost read that
     made the end places it.  Not a parameter, which no statement binds, nor a stop, nor an end whose line is outside
-    *func* (a parameter's default, read where the call hands nothing)."""
+    *func*.  An end read in another file is placed by the read there: a parameter's default is read in its own
+    function (:func:`_where_read`)."""
     first, last = getattr(func, "lineno", None), getattr(func, "end_lineno", None)
     if first is None or last is None:
         return ways
@@ -414,6 +415,19 @@ def _empty_literal(expr: ast.expr) -> str:
     if isinstance(expr, ast.Dict) and not expr.keys:
         return callfacts.MAPPING
     return ""
+
+
+def _where_read(
+    given: ast.expr, call: ast.AST, file: str, func: ast.AST, target_file: str, target: ast.AST
+) -> tuple[ast.AST, str, ast.AST]:
+    """Where to read *given*, what *call* in *func* of *file* binds a parameter of *target* (of *target_file*) to
+    (:func:`calls.bind`), as (at, file, function): at the call, else -- one of *target*'s defaults, the call handing
+    the parameter nothing -- where it is written, in *target*, its line there (``use_json: bool = False`` at
+    ``TaskBuffer.py:1015``, not a line of the caller's file)."""
+    args = getattr(target, "args", None)
+    if args is not None and any(given is one for one in [*args.defaults, *args.kw_defaults]):
+        return given, target_file, target
+    return call, file, func
 
 
 def _added_sides(expr: ast.expr) -> list[ast.expr]:
@@ -1309,7 +1323,7 @@ class _Reader:
                         if given is None:
                             found.append(_stop("handed_spread", inner.name, at=here))
                             continue
-                        for outer in self.read(given, call, file, func):
+                        for outer in self.read(given, *_where_read(given, call, file, func, target.file, target.func)):
                             found += _onto(outer, inner, (), (here,) + inner.route + outer.route)
                     elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
                         # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
@@ -1902,6 +1916,9 @@ class _Reader:
                 given = bind(site.call, target, placed.on_class).get(name)
             except Exception:  # noqa: BLE001 -- as _safely
                 return None
+            if given is None:
+                return None
+            at, read_file, read_func = _where_read(given, site.call, site.file, site.func, file, func)
             if isinstance(given, ast.Dict) and all(
                 isinstance(key, ast.Constant) and isinstance(key.value, str) for key in given.keys
             ):
@@ -1909,10 +1926,11 @@ class _Reader:
                     if isinstance(key, ast.Constant) and key.value == field:
                         ways += [
                             one._replace(route=(here,) + one.route)
-                            for one in self._safely(value, site.call, site.file, site.func)
+                            for one in self._safely(value, at, read_file, read_func)
                         ]
             elif (
-                isinstance(given, ast.Name)
+                read_func is site.func
+                and isinstance(given, ast.Name)
                 and given.id in _parameters(site.func)
                 and not _rebinds(site.func, given.id)
                 and level < _KEYWORD_LEVELS
@@ -1964,7 +1982,7 @@ class _Reader:
                 continue
             ways += [
                 one._replace(route=(here,) + one.route)
-                for one in self._safely(given, site.call, site.file, site.func)
+                for one in self._safely(given, *_where_read(given, site.call, site.file, site.func, file, func))
             ]
         if not sites:
             ways.append(_stop("no_caller", name, at=f"{owner}:{line}"))

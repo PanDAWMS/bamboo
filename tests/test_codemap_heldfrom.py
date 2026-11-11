@@ -664,7 +664,7 @@ BINDINGS = {
                 else:
                     return "b"  # B5
 
-            def check(self, ignore_error, strict=False):
+            def check(self, ignore_error, strict=False):  # B6
                 if ignore_error or strict:  # T1
                     self.a = 1  # R1
         """,
@@ -678,7 +678,7 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
     (``add_main``'s ``if (timeNow - modTime) > ...: ignoreTmpError = False``): each source says where it ends
     (:attr:`HeldSource.at`) and the tests on the way there have GuardFroms, its line among their *calls* -- in the
     callee for a value a return hands back (T4), and on through those guards' own sources (T2 guards ``modTime``'s
-    ``0``).  A parameter's default, read where the call hands nothing, says no place."""
+    ``0``).  A parameter's default the call leaves it to is where it is written, in the callee."""
     fragment = _build(tmp_path, BINDINGS, (("check", "R1"),))
 
     def at(marker: str) -> str:
@@ -698,7 +698,7 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
         ("constant", "'a'", (at("B4"),)),
         ("constant", "'b'", (at("B5"),)),
     }
-    assert ends("check", "strict") == {("constant", "False", ())}
+    assert ends("check", "strict") == {("constant", "False", (at("B6"),))}
     # A parameter is bound where the function is entered, by no statement.
     assert ends("chosen", "value") == {("parameter", "jediTaskID", ())}
 
@@ -718,6 +718,50 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
     assert calls("extractCommon", "T0") == {line("B1"), line("B2")}
     assert calls("chosen", "T4") == {line("B4"), line("B5")}
     assert calls("extractCommon", "T2") == {line("B3")}
+
+
+CHECKER = "pandajedi/jedicore/Checker.py"
+DEFAULTED = {
+    BASE: """\
+        from pandajedi.jedicore.Checker import Checker
+
+
+        class TaskRefinerBase:
+            def extractCommon(self, jediTaskID):
+                checker = Checker()
+                checker.look(jediTaskID)
+                checker.look(jediTaskID, use_json=True)  # C1
+        """,
+    CHECKER: """\
+        class Checker:
+            def __init__(self):
+                self.a = None
+
+            def look(self, jobs, use_json=False):  # D1
+                if use_json:  # T1
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_a_parameter_s_default_is_placed_where_it_is_written_not_in_the_caller_s_file(
+    tmp_path: Path,
+) -> None:
+    """``peekJobs``' ``use_json: bool = False``, which a call in ``copyArchive.main`` leaves to its default: the
+    default ends at its line in the callee's file, though the caller's function spans the same line number in its
+    own file."""
+    fragment = _build(tmp_path, DEFAULTED, (("look", "R1"),), base=CHECKER)
+    (record,) = [
+        one
+        for one in fragment.parameter_froms
+        if one.owner.endswith("::look") and one.parameter == "use_json"
+    ]
+    assert _line(CHECKER, "D1", DEFAULTED) == 5
+    assert 5 in range(5, _line(BASE, "C1", DEFAULTED) + 1)
+    assert {(one.kind, one.name, tuple(one.at)) for one in record.sources} == {
+        ("constant", "False", (f"{CHECKER}:5",)),
+        ("constant", "True", (f"{BASE}:{_line(BASE, 'C1', DEFAULTED)}",)),
+    }
 
 
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(

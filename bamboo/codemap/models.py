@@ -3444,8 +3444,9 @@ class HeldSource(KeySource):
             "Where the way ends, ``file:line`` of its end, each once -- the source's own statement, where its value "
             "is bound or made (``pandaserver/daemons/scripts/add_main.py:130`` for ``ignoreTmpError = False``); "
             "several where ways ending at one source at several lines are this one.  The tests on the way to each "
-            "have GuardFroms (:attr:`GuardFrom.calls`).  Empty where the way ends at a parameter, or at a value "
-            "outside the function it is read in (a parameter's default)."
+            "have GuardFroms (:attr:`GuardFrom.calls`).  A parameter's default a call leaves it to is where it is "
+            "written, in the callee (``pandaserver/taskbuffer/TaskBuffer.py:1015`` for ``use_json: bool = False``).  "
+            "Empty where the way ends at a parameter."
         ),
     )
 
