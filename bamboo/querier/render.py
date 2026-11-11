@@ -160,10 +160,51 @@ TEMPLATES: dict[str, str] = {
     "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}",
     "by-elimination": "by elimination: ",
     "not-searched-there": "; not searched there: {holes:join=; }",
-    "a-method-the-guard-reads-through": "a method the guard reads through{conditions}",
     "its-conditions": " (its conditions: {unread:join=, })",
     "values-the-guard-reads": "the values its guard reads at its run{conditions}",
     "values-held-on": "where the values its guards held on come from, its run showing it ran ({held:join=; })",
+    "values-held-on-from": (
+        "where the values its guards held on come from, its run showing it ran ({held:join=; }); where each term's ways "
+        "end: {terms:join=; }; its entry: {entry}; {left}"
+    ),
+    "ran-where-every-value-ends": (
+        "{fn}:{line} ran, its run showing it, and every value its guards held on ends ({held:join=; }): "
+        "{terms:join=; }; its entry: {entry}"
+    ),
+    "term-ends": "{term} -> {ends:join=, }",
+    "way-end": "{end} ({why}){at}{returned}{route}{via}{changes}{split}",
+    "told-apart-by-an-if": (
+        ", the constants {call} hands told apart by the if at {ifs:join=, } ({guards:rjoin=, }), read by the map's "
+        "records (its run not asked): its terms {terms:join=; }"
+    ),
+    "way-end-at": " at {at}",
+    "way-end-at-handler": " at {at}, in the except handler at {handler} (S3: which exception)",
+    "made-by-a-change": (
+        ", changed between it and the read by {change}, {how}; read as an arm at {site}: its terms {terms:join=; }; its "
+        "entry: {entry}"
+    ),
+    "made-by-a-change-unread": ", changed between it and the read by {change}, {how}; at {site}, its guards ({guards:join=, }) not read",
+    "change-shown-by-its-run": "its run showing it",
+    "change-left-by-elimination": (
+        "left by elimination (it stores what the run printed, its function's rows are in the run, and every other "
+        "change is shown not to have run or to store another value)"
+    ),
+    "changed-between": ", changed between it and the read: {changes:join=; }",
+    "a-change": "{at}{made}",
+    "made-by": " made by {via:join= -> }",
+    "returned-by": ", returned{line} by {route:join= -> }",
+    "returned-from": " from callee line {line}",
+    "came-in-by": ", in by {route:join= -> }",
+    "bound-via": ", through the field bindings at {via:join= -> }",
+    "first-term-stops": "it stops at {term!r} (in {guard!r})",
+    "first-term-stops-further": "it stops at {term!r} (in {guard!r}){made}{s3}",
+    "reached-down": ", in {steps:join=, then }",
+    "the-arm-of-a-change": "the arm that made the change at {site}",
+    "the-if-telling-constants-apart": "the if at {at} that tells apart the constants {call} hands",
+    "bound-in-a-handler": ", bound in the except handler at {lines:join=, } (S3: which exception)",
+    "terms-end-entry-stops": "every term ends; its entry does not",
+    "for-a-call-handing-a-value": "for the call at {site} that may have handed the value",
+    "for-a-call-that-may-have-entered-it": "for the call at {site} that may have entered it",
     "guard-held-on": "{guard!r} held{on}",
     "held-on-values": " on {values:join=, }",
     "term-printed": "{term} = {value!r} ({where})",
@@ -300,8 +341,6 @@ TEMPLATES: dict[str, str] = {
     "stays": "{n} stays: the first {first}, the last {last}, the longest that ended {longest}",
     "stay-on": "{begins} (on)",
     "stay-lasted": "{begins} ({hours:.2f} h)",
-    # census's stop (census.py)
-    "classes-define": "{n} classes define {method}: {owners!r}",
     # a run's line (records.Run.said)
     "run-line": "{where} token={token} {n} record(s) {first} .. {last} (key on {found}{cut}{asked})",
     "log-at-machine": "{log}@{machine}",
@@ -346,9 +385,8 @@ TEMPLATES: dict[str, str] = {
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     # U3: which call ran an arm with no guard of its own (KNOWN_ISSUES.md K56)
-    "the-arm-s-run-mark": "what {fn}'s call handed it: no mark the map records for {fn} reads in its run {token!r} (KNOWN_ISSUES.md K56)",
-    "the-map-s-call-bindings": "what a call hands: the dump has no reach_graph, whose call_bindings say it (KNOWN_ISSUES.md K56)",
-    "a-call-handing-the-mark-on": "a call of {fn}'s that hands its run's mark a name a run of the caller is marked by: none of {sites:join=, } does (KNOWN_ISSUES.md K56)",
+    "the-arm-s-run-mark": "which row {fn}'s call handed it: no mark the map records for {fn} reads a row's identity in its run {token!r} (KNOWN_ISSUES.md K56)",
+    "a-call-handing-the-mark-on": "a call of {fn}'s whose caller's run marks hold the row its run's mark holds: none of {sites:join=, } does (KNOWN_ISSUES.md K56)",
     "over-the-arm-s-run": "over the arm's run, {start} .. {end}, for {marks:rjoin=, }",
     "a-caller-s-run-holding-the-arm-s": "a run of {callers:join=, } holding {fn}'s run whole ({start} .. {end}, on its machine): {n} run(s) found, none holds it (KNOWN_ISSUES.md K56)",
     "which-call-of-the-caller": "which of {caller}'s calls at {lines} ran {fn}: one run of {caller} holds {fn}'s, and which call it was is not read (KNOWN_ISSUES.md K56)",
@@ -458,7 +496,6 @@ TEMPLATES: dict[str, str] = {
     "what-arm-wrote-yet-the-value-stayed": "what arm {arm_line} wrote, yet the value stayed {observed!r}: one value known at run time (it writes {arm_outcomes})",
     "what-is-computed-from-in-the-walk": "what {expr} is computed from, in the walk",
     "when-the-row-was-made-for-the": "when the row was made, for the birth {names} (its creation column, attr_time.creation_of)",
-    "which-call-set-it": "which call set it",
     "which-candidate-ran": "which candidate ran",
     "which-way-it-went": "which way it went",
     "which-way-pass-went": "which way pass {n} went",

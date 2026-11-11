@@ -597,13 +597,13 @@ def _chains(test: ast.expr) -> list[ast.Attribute]:
     return out
 
 
-#: :func:`_row_held`'s answers, by the read's place
-_HELD: dict[tuple[str, int, int], Any] = {}
+#: :func:`_row_held`'s answers, by the read's place, its start and its end: ``job`` and ``job.jobStatus`` start alike
+_HELD: dict[tuple[str, int, int, int, int], Any] = {}
 
 
 def _row_held(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tuple) -> Any:
     """The writes of *read* reaching it (``fills.row_fills``), or None where the map cannot read them."""
-    key = (rel, read.lineno, read.col_offset)
+    key = (rel, read.lineno, read.col_offset, read.end_lineno or 0, read.end_col_offset or 0)
     if key not in _HELD:
         try:
             _HELD[key] = fills.row_fills(calls, rel, func, read, bound)  # type: ignore[arg-type]

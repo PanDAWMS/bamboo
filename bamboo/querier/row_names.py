@@ -71,9 +71,12 @@ def _index(_fragment: int) -> tuple[dict, dict, dict]:
 
 
 def _end(s: Any) -> tuple:
-    """Where a way ends, as both sides' ends are compared: a field of ``self`` wherever the function reads it."""
+    """Where a way ends, as both sides' ends are compared: a field of ``self`` wherever the function reads it, an object
+    at the line it is built.  *site_owner* is the statement or function a way ends at, but on a field of ``self`` or
+    an object the map gives the class there (SFF): ``JediDatasetSpec()`` built at 549 and at 788 of one function are
+    two objects."""
     column = getattr(s, "column", "") or ""
-    if s.site_owner:
+    if s.site_owner and s.kind not in ("self_field", "object"):
         return (s.kind, s.name, s.site_owner, s.site_line, column)
     if s.kind == "self_field":
         return (s.kind, s.name, None, column)

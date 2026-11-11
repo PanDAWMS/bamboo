@@ -20,7 +20,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = [
-    "asked", "attr_time", "callers", "census", "census_p", "changed", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
+    "asked", "attr_time", "callers", "census_p", "changed", "evaluate", "false_guard", "handlers", "held", "heldcol", "mapdump", "outbound", "parts",
     "printed", "raised", "recorded", "records", "reproduce", "rerun", "rows", "same_object", "value_diff", "which_ran",
     "windows",
 ]
@@ -1773,7 +1773,7 @@ def test_a_stop_is_kept_as_a_record_taken_when_said_and_result_json_reads_back_a
             unread = ["'a' not read", "'b' read false"]
             conditions = T.Said("its-conditions", {"unread": unread})
             unread.append("'c' not read")
-            stop = rerun.Stop(T.at("H3", T.Said("a-method-the-guard-reads-through", {"conditions": conditions})), "K1")
+            stop = rerun.Stop(T.at("H3", T.Said("values-the-guard-reads", {"conditions": conditions})), "K1")
             odd = T.Said("in-parens", {"what": ("x", 1)})
             kept = rerun._records_json({"kind": "stop", "record": stop.said,
                                         "branches": [{"label": "l", "record": T.Said("stop-line", {"stop": stop.said})}]})
@@ -1786,12 +1786,12 @@ def test_a_stop_is_kept_as_a_record_taken_when_said_and_result_json_reads_back_a
     )
     said, arg, odd, back, kept, stop_line, end_lines, no_end = json.loads(out)
     # the list is taken when the sentence is said, as the f-string it replaces took it
-    assert said == arg == "H3: a method the guard reads through (its conditions: 'a' not read, 'b' read false)"
+    assert said == arg == "H3: the values its guard reads at its run (its conditions: 'a' not read, 'b' read false)"
     # a value JSON does not hold keeps its repr and str
     assert odd == " (('x', 1))" and back is True
     # result.json keeps the records, nested, no sentence
     assert kept["record"] == {"kind": "at-step", "facts": {"step": "H3", "what": {"said": {
-        "kind": "a-method-the-guard-reads-through", "facts": {"conditions": {"said": {
+        "kind": "values-the-guard-reads", "facts": {"conditions": {"said": {
             "kind": "its-conditions", "facts": {"unread": ["'a' not read", "'b' read false"]}}}}}}}}
     assert kept["branches"][0]["record"]["kind"] == "stop-line" and kept["branches"][0]["label"] == "l"
     # and they read back as the run's last lines said them
@@ -7362,7 +7362,7 @@ def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(
                 "a newer row may have": answer_of([P("r.py::extract:5", newer, False, ["x"], None, "o.py::runImpl:211"), shown]),
                 "two arms": answer_of([P("r.py::extract:7", row, False, ["x"]), shown]),
                 "no run to read": answer_of([P("r.py::extract:5", row, True, [], None)]),
-                "guard at the call": [at[0].name, at[1]], "guard at the arm": [own[0].name, own[1]], "single": singles,
+                "guard at the call": at.name, "guard at the arm": own.name, "single": singles,
             }))
             """,
         )
@@ -7390,8 +7390,8 @@ def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(
     assert got["two arms"] == [None, []]
     assert got["no run to read"] == [None, []]
     # H3 reads the stand-in's run up to the record past its call (211 -> 212), not past the arm's own line (5 -> 6)
-    assert got["guard at the call"] == ["runImpl", 3]
-    assert got["guard at the arm"] == ["extract", 9]
+    assert got["guard at the call"] == "runImpl"
+    assert got["guard at the arm"] == "extract"
     # a single window's pick: kept as it is unless it stands in; a stand-in's arm shown to write answers on the call's
     # run, one not shown stops naming it
     assert got["single"] == {"not a stand-in": ["answer", True, 212, None], "shown": ["answer", False, 5, True], "not shown": ["one-of", [[5, True]]],
@@ -8064,19 +8064,22 @@ def test_u3_reads_the_call_that_ran_an_arm_with_no_guard_by_what_it_handed_the_a
             from bamboo.querier import rerun
             from bamboo.querier import render as T
 
+            from bamboo.querier import mapdump
+
             M = "pandaserver/m.py"
-            # each function's run mark, the expression its hole prints and its rows' printed prefix; c3's prints a name
-            # it does not hand the arm (getEventRanges's pandaID beside the tmpJobSpec it hands)
+            mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])])]
+            # each function's run mark, the expression its hole prints and its rows' printed prefix; c3's prints its own
+            # parameter, not the name it hands the arm (getEventRanges's pandaID beside the tmpJobSpec it hands): the same
+            # row by the hole's column, whatever the hole spells
             MARKS = {"arm": ("job.PandaID", "arm < PandaID=.*? >"), "c1": ("job.PandaID", "c1 < PandaID=.*? >"),
                      "c2": ("jobSpec.PandaID", "c2 < PandaID=.*? >"), "c3": ("pandaID", "c3 < PandaID=.*? >")}
+            identity = [["JobSpec.PandaID"]]
             rerun.R._prints_of = lambda owner, lines: N(
-                runs=[N(mark="PandaID={}", key=[N(expression=MARKS[owner.split("::")[-1]][0], columns=["JobSpec.PandaID"])])],
+                runs=[N(mark="PandaID={}", key=[N(expression=MARKS[owner.split("::")[-1]][0],
+                                                  columns=["JobSpec.PandaID"] if owner.endswith("::arm") else identity[0])])],
                 statements=[N(log_files=["a.log"], rows=[N(prefix=MARKS[owner.split("::")[-1]][1])])])
             functions = rerun.R.functions
             rerun.R.function = lambda rel, func, lines: N(node=functions(rel, func)[0], owner=f"{rel}::{func}", name=func, rel=rel)
-            bindings = [N(owner=f"{M}::K.c1", call_bindings=[N(line=8, to=f"{M}::K.arm", parameter="job", path="job")]),
-                        N(owner=f"{M}::K.c2", call_bindings=[N(line=12, to=f"{M}::K.arm", parameter="job", path="jobSpec")]),
-                        N(owner=f"{M}::K.c3", call_bindings=[N(line=15, to=f"{M}::K.arm", parameter="job", path="other")])]
 
             def run(token, first, last, machine="m1"):
                 return N(token=token, first=f"2026-11-02 {first},000", last=f"2026-11-02 {last},000", machine=machine,
@@ -8085,14 +8088,13 @@ def test_u3_reads_the_call_that_ran_an_arm_with_no_guard_by_what_it_handed_the_a
             arm = run("arm < PandaID=9 >", "13:43:27", "13:43:29")
             got = {}
 
-            def u3(name, runs, token=None, missed=(), graph=bindings):
+            def u3(name, runs, token=None, missed=()):
                 r = object.__new__(rerun.Rerun)
                 r.lines, r.hop, r.hand, r.hand_used, r.unanswered = [], "U3", {}, [], []
                 r.opened, r.ends, r.branches = [], [], []
                 r.mode, r.decide, r.data, r.args = "map", "positive", {}, N(asks="asks.jsonl")
                 r.logs = N(needs_window=True, names=lambda files: list(files))
                 r.files_of = lambda owner, today, lines: today
-                r._graph = lambda: (None, None, graph)
 
                 async def writers_of(subject):
                     return [N(owner=f"{M}::arm", called_from=[f"{M}:8", f"x.py:1 -> {M}:12", f"{M}:15", "… 2 more"])]
@@ -8121,31 +8123,35 @@ def test_u3_reads_the_call_that_ran_an_arm_with_no_guard_by_what_it_handed_the_a
             # a caller's run on another machine, or one the window cut, holds nothing
             u3("none holds it", [run("c1 < PandaID=9 >", "13:43:20", "13:43:40", "m2"), run("c2 < PandaID=9 >", "13:43:28", "13:43:35")])
             u3("asks", [], missed=[(N(key="c1 < PandaID=9 >"), "why")])
-            u3("no name handed", [], graph=[N(owner=b.owner, call_bindings=[]) for b in bindings])
             u3("no mark read", [], token="arm < vo=atlas >")
+            # the callers' marks hold no row's identity (a hole of another column)
+            identity[0] = ["JobSpec.jobsetID"]
+            u3("no identity", [])
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # the callers' marks by the name each call hands the arm's job, filled with its run's value, over its run on its
-    # machine; c3 hands a name its marks do not print, and is not asked
-    asked = [["9", ["a.log"], ["2026-11-02 13:43:27", "2026-11-02 13:43:29"], "m1", ["c1 < PandaID=9 >", "c2 < PandaID=9 >"],
-              "over the arm's run, 2026-11-02 13:43:27 .. 2026-11-02 13:43:29, for 'c1 < PandaID=9 >', 'c2 < PandaID=9 >'"]]
+    # the callers' marks holding the row the arm's mark holds (the job's identity column), filled with its run's value,
+    # over its run on its machine; c3's mark prints its own pandaID, not the name it hands, and holds the same row
+    asked = [["9", ["a.log"], ["2026-11-02 13:43:27", "2026-11-02 13:43:29"], "m1",
+              ["c1 < PandaID=9 >", "c2 < PandaID=9 >", "c3 < PandaID=9 >"],
+              "over the arm's run, 2026-11-02 13:43:27 .. 2026-11-02 13:43:29, for 'c1 < PandaID=9 >', 'c2 < PandaID=9 >', "
+              "'c3 < PandaID=9 >'"]]
     assert got["innermost: asked"] == asked
     assert got["innermost"] == ["U3: arm:4 ran inside c2's call at 12, which ran under its guards: where the values its guards "
                                 "held on come from, its run showing it ran ('len(done) > 0' held (printed)) (KNOWN_ISSUES.md K56)", "K56"]
     assert got["innermost: held"] == [["c2", 12, ["len(done) > 0"], "c2 < PandaID=9 >"]]
     assert got["the one holding it"][0].startswith("U3: arm:4 ran inside c1's call at 8, which ran under its guards")
     assert got["the one holding it: held"] == [["c1", 8, ["job.jobStatus == 'finished'"], "c1 < PandaID=9 >"]]
-    assert got["none holds it"] == ["U3: a run of c1, c2 holding arm's run whole (2026-11-02 13:43:27,000 .. 2026-11-02 "
+    assert got["none holds it"] == ["U3: a run of c1, c2, c3 holding arm's run whole (2026-11-02 13:43:27,000 .. 2026-11-02 "
                                     "13:43:29,000, on its machine): 2 run(s) found, none holds it (KNOWN_ISSUES.md K56)", "K56"]
     assert got["asks"] == ["U3: 1 ask(s) of the logs not in the records (written to asks.jsonl)", "asks"]
-    assert got["no name handed"] == ["U3: a call of arm's that hands its run's mark a name a run of the caller is marked by: none "
-                                     "of pandaserver/m.py:8, pandaserver/m.py:12, pandaserver/m.py:15 does (KNOWN_ISSUES.md K56)", "K56"]
-    assert got["no name handed: asked"] == []
-    assert got["no mark read"] == ["U3: what arm's call handed it: no mark the map records for arm reads in its run "
-                                   "'arm < vo=atlas >' (KNOWN_ISSUES.md K56)", "K56"]
+    assert got["no identity"] == ["U3: a call of arm's whose caller's run marks hold the row its run's mark holds: none "
+                                  "of pandaserver/m.py:8, pandaserver/m.py:12, pandaserver/m.py:15 does (KNOWN_ISSUES.md K56)", "K56"]
+    assert got["no identity: asked"] == []
+    assert got["no mark read"] == ["U3: which row arm's call handed it: no mark the map records for arm reads a row's identity "
+                                   "in its run 'arm < vo=atlas >' (KNOWN_ISSUES.md K56)", "K56"]
 
 
 def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_those_not_read(tmp_path):
@@ -8184,7 +8190,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
                 try:
                     got = r.asked(rerun.Asked(subject, "A", "7"))
                     said = (None if got is None else [type(got).__name__, got.owner, got.line] if isinstance(got, rerun.ArmCaller)
-                            else ["SetBy", got.method])
+                            else [type(got).__name__])
                 except rerun.Stop as e:
                     said = ["STOP", str(e)]
                 return {"said": said, "ends": [f"END {said}" for _, said in r.ends], "wrote": r.result.get("wrote")}
@@ -8196,7 +8202,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
             held = E.Env({"task.x": E.Value(True, "hole")})
             # a run whose mark the map's runs of the function read, and one marked by a logger the caller handed in
             marked = [False]
-            rerun.mark_handed = lambda owner, line, run: [("task.jediTaskID", "7")] if marked[0] else []
+            rerun.mark_identities = lambda owner, line, run: [("JediTaskSpec", "7")] if marked[0] else []
             no_mark = asked("JediTaskSpec.status", [], row)
             marked[0] = True
             print(json.dumps({
@@ -8277,8 +8283,11 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
     # ... not a stand-in's, whose run is its caller's
     assert got["a stand-in, a guard not read"]["said"] == [
         "STOP", "H3: the values its guard reads at its run (its conditions: 'task.y' not read)"]
-    # a guard read through a method goes on to H4 as for a status
-    assert got["through a method"]["said"] == ["SetBy", "useScout"]
+    # a guard read through a call is read as any other: it held where the run shows the arm ran (K74)
+    assert got["through a method"]["said"] is None
+    assert got["through a method"]["ends"] == [
+        "END JediTaskSpec.transUses='A' written last by extract:5 (shown in its run; its guards hold as its run shows it ran "
+        "('task.useScout()')), in the pass of the statuslog row 'defined' at 2026-10-29 04:10:00.123456: the run"]
     # a status: no wrote; with no guard, what made the arm run is its callers': U3 reads the call that ran it, where its
     # run shows it ran and the map reads the run's mark -- one a handed-in logger marks, or a stand-in's run, its
     # caller's, H3 stops on; through no method, its guards held, and what H3 lacks is where the values they held on
@@ -8311,7 +8320,7 @@ def test_a_status_arm_whose_value_a_called_method_returns_reads_the_maps_ways_to
             E.PURE.setdefault("<no pure function is read here>", None)
             rerun.pathcond = N(arm_condition=lambda site: [], path_condition=lambda site: [],
                                exits_above_at=lambda site: [], ancestors=lambda node: iter(()))
-            rerun.mark_handed = lambda owner, line, run: []
+            rerun.mark_identities = lambda owner, line, run: []
             run = N(log=N(name="panda-PostProcessor.log"), machine="aipanda086.cern.ch", token="<jediTaskID=7>", records=[0, 1],
                     first="2026-11-02 15:38:55,463", last="2026-11-02 15:38:55,831", describe=lambda: "the run", said=lambda: "the run")
             readings = [N(file="pandajedi/p.py", owner="pandajedi/p.py::post")]
@@ -8988,6 +8997,13 @@ def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_
                         for file in self.taskSpec.Files:
                             if file.type == "input":
                                 self.taskSpec.status = "z"
+
+                def objs(self):
+                    a = JobSpec()
+                    b = JobSpec()
+                    c = a
+                    if b.x and c.y:
+                        a.jobStatus = "z"
             ''')
             TB = "pandaserver/tb.py"
             def src(kind, name, site_owner="", site_line=None, line=None, steps=(), through=(), column=""):
@@ -9005,6 +9021,8 @@ def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_
                     w("setup", 15, "JobSpec.jobStatus", "job", par("setup", "jobs", "[*]")),
                     w("two", 21, "JobSpec.jobStatus", "job", par("two", "jobs", "[0]")),
                     w("refine", 28, "JediTaskSpec.status", "self.taskSpec", src("self_field", "self.taskSpec", line=28)),
+                    # the map gives an object's way the class it builds as site_owner (SFF), with no site_line
+                    w("objs", 35, "JobSpec.jobStatus", "a", src("object", "JobSpec", "pandaserver/JobSpec.py::JobSpec", line=31)),
                 ],
                 guard_froms=[
                     g("kill", 4, "job", [9], par("kill", "job")),
@@ -9019,6 +9037,8 @@ def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_
                     g("sql", 41, "status", [43], src("rows", "panda:select@40", f"{TB}::sql", 40, column="jobsDefined4.jobStatus")),
                     g("sql2", 51, "job", [53], SEL),
                     g("sql3", 61, "job", [63], par("sql3", "job")),
+                    g("objs", 34, "b", [35], src("object", "JobSpec", "pandaserver/JobSpec.py::JobSpec", line=32)),
+                    g("objs", 34, "c", [35], src("object", "JobSpec", "pandaserver/JobSpec.py::JobSpec", line=31)),
                 ],
                 key_froms=[
                     N(owner=f"{TB}::sql", writes={"JobSpec.jobStatus": [43]},
@@ -9061,6 +9081,7 @@ def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_
                 "sql2": names("sql2", 53),
                 "sql3": names("sql3", 63),
                 "nothing written": names("plugin", 92),
+                "objects": names("objs", 35),
                 "read kill": read("job.PandaID == 7", "kill", 9, {"PandaID": 7}),
                 "read setup": read("job.jobStatus == 'defined'", "setup", 15, {"jobStatus": "defined"}),
                 "read nothing written": read("self.job.jobStatus == 'defined'", "plugin", 92, {"jobStatus": "defined"}),
@@ -9086,6 +9107,9 @@ def test_an_arms_guard_reads_as_the_row_only_the_names_the_maps_records_bind_to_
     assert got["sql3"] == {"job": "job"}
     # an arm the map records nothing written for (a call on another object): no record to narrow by
     assert got["nothing written"] is None
+    # objects of one class are told apart by the line they are built at, though the map names the class on both (SFF):
+    # c holds a, the object the arm writes; b is another JobSpec
+    assert got["objects"] == {"a": "job", "c": "job"}
     assert got["read nothing written"] == ["True", [["file", "file"], ["job", "job"], ["self.job", "job"]]]
     # the print's names are read as the printing function spells them
     assert got["printer's names"] == ["True", [[["dJob"], ["job"]]]]
@@ -10264,3 +10288,1473 @@ def test_a_kept_arm_is_positive_where_its_call_ran_the_head_if_entered_no_handle
     # with code 2 the store of 'closed' runs: the arm of 'closed' is read, 'cancelled' is not
     assert got[f"two {closed} True"].startswith(ran("two", closed) + "\"code in ['2', '4']\" True"), got
     assert got[f"two {cancelled} True"] == "", got
+
+
+def test_s_reads_a_parameter_up_its_callers_to_constants_and_an_apis_argument(tmp_path):
+    # killJob's code: '' from one caller, and through killJobs' own code '60' from another and whatever an API hands
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        src = lambda kind, name="", route=(), site_owner="", paths=(): N(kind=kind, name=name, route=list(route),
+                                                                           site_owner=site_owner, paths=list(paths))
+        # where a part of the rows sits in the value: no way of the value itself
+        part = src("rows", "panda:p/r.py::ids@9", ["p/r.py:9"], paths=["[*]"])
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner="p/k.py::killJob", parameter="code", line=812, stops=[],
+              sources=[src("constant", "''", ["p/t.py:697"]), src("parameter", "code", ["p/t.py:1190"], "p/t.py::killJobs")]),
+            N(owner="p/t.py::killJobs", parameter="code", line=1138, stops=[],
+              sources=[src("constant", "'60'", ["p/a.py:226"]), part, src("parameter", "code", ["p/api.py:572"], "p/api.py::kill")]),
+            N(owner="p/api.py::kill", parameter="code", line=513, sources=[], stops=[N(kind="no_caller")]),
+            # a parameter handed back to itself is read once
+            N(owner="p/c.py::loop", parameter="x", line=1, stops=[], sources=[src("parameter", "x", ["p/c.py:9"], "p/c.py::loop")]),
+            N(owner="p/q.py::parts", parameter="ids", line=5, stops=[], sources=[part]),
+        ], entered_froms=[])]
+        ways = [[w.end, w.value, w.why, list(w.route)] for w in SR.param_ways("p/k.py::killJob", "code")]
+        print(json.dumps({"ways": ways, "loop": [[w.end, w.why] for w in SR.param_ways("p/c.py::loop", "x")],
+                          "none": [[w.end, w.why] for w in SR.param_ways("p/k.py::other", "code")],
+                          "parts": [[w.end, w.why, list(w.route)] for w in SR.param_ways("p/q.py::parts", "ids")],
+                          "same": [SR.same_value("'60'", "60"), SR.same_value("None", "None"), SR.same_value("2", "2"),
+                                   SR.same_value("'2'", "3")]}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["ways"] == [
+        ["constant", "''", "constant", ["p/t.py:697"]],
+        # the outermost call first: the constant's own, then each caller's call into the next
+        ["constant", "'60'", "constant", ["p/a.py:226", "p/t.py:1190"]],
+        ["api", "", "no_caller", ["p/api.py:513", "p/api.py:572", "p/t.py:1190"]],
+    ]
+    assert got["loop"] == [["stop", "cycle"]]
+    assert got["none"] == [["stop", "no-parameter-from"]]
+    # killJobs' part of the rows is not among killJob's ways above; a parameter with only parts stops, named
+    assert got["parts"] == [["stop", "parts-only", ["p/q.py:5"]]]
+    # a print shows a value's str: '60' printed is 60, None is None
+    assert got["same"] == [True, True, True, False]
+
+
+_KILLER = """
+class Killer:
+    def kill(self, job, code):
+        if not self._commit():
+            raise RuntimeError("commit")
+        res = self.cur.fetchone()
+        if res is None:
+            return
+        if code == "60":
+            job.jobStatus = "closed"
+"""
+
+
+def test_s_ends_each_guard_term_where_the_maps_ways_end_and_a_call_by_its_runnable_record(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "k.py").write_text(_KILLER)
+    lines = _KILLER.splitlines()
+    site = lines.index('            job.jobStatus = "closed"') + 1
+    commit, res, code = (lines.index(f"        if {t}:") + 1 for t in ("not self._commit()", "res is None", 'code == "60"'))
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        owner = "pandaserver/k.py::kill"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=kw.pop("changes", []), site_owner="",
+                                               site_line=None, **kw)
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[
+                N(owner=owner, test_line={commit}, name="self", sources=[src("self_field", "self", {commit})], stops=[]),
+                # a part of other rows sitting in res is no way of res
+                N(owner=owner, test_line={res}, name="res", sources=[src("rows", "panda:" + owner + "@{res - 2}", {res - 2}),
+                                                                   src("rows", "panda:other@1", 1, paths=["[0]"])],
+                  stops=[]),
+                N(owner=owner, test_line={code}, name="code", sources=[src("parameter", "code", 3)], stops=[]),
+                # a name the map holds only parts for stops, named
+                N(owner=owner, test_line={code}, name="cpart", sources=[src("self_field", "self.jobs", 1, paths=["[0]", "[1]"])],
+                  stops=[]),
+            ],
+            runnables=[
+                # the commit reaches the database: its answer ends the term its receiver is
+                N(owner="pandaserver/b.py::_commit", runnable=False, asked_at=["pandaserver/k.py:{commit}"],
+                  stops=[N(kind="database", at="pandaserver/b.py:194")]),
+            ])]
+        fn = R.function("pandaserver/k.py", "kill", within=[{site}])
+        stmt = R.statement_at(fn.node, {site})
+        guards = pathcond.arm_condition(stmt)
+        ifs = rerun._guard_ifs(fn, stmt, guards)
+        terms = SR.terms(fn, owner, list(zip(guards, ifs)))
+        print(json.dumps([[t.term, t.ended, [[e.end, e.why, e.at, e.param] for e in t.ends]] for t in terms]))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == [
+        ["code", False, [["stop", "parameter", "pandaserver/k.py:3", "code"]]],
+        ["cpart", False, [["stop", "parts-only", f"pandaserver/k.py:{code}", ""]]],
+        ["self", True, [["database", "database", "pandaserver/b.py:194", ""]]],
+        ["res", True, [["database", "rows", f"pandaserver/k.py:{res - 2}", ""]]],
+    ], got
+
+
+def test_a_row_fill_is_not_a_change_on_the_way_it_ends(tmp_path):
+    # killJob's job, built at 997 and filled by job.pack(res[0]) at 998 from the key's row: the map records pack's
+    # setattr (JobSpec 423) as a change made by 998; the fills reading has read that fill, so the term ends at the row.
+    # A change at another statement stays on the way, and the term does not end (G4).
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "__init__.py").write_text("")
+    (corpus / "pandaserver" / "spec.py").write_text(_ROW_SPEC)
+    (corpus / "pandaserver" / "proxy.py").write_text(_ROW_PROXY)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        import ast
+        from bamboo.querier import asked
+        from bamboo.querier import printed as PR
+        from bamboo.querier import which_ran as WR
+
+        R.ROWS_FROM = "walk"
+        owner = "pandaserver/proxy.py::killJob"
+        fill = N(at="pandaserver/spec.py:10", kind="method", key="*", via=["pandaserver/proxy.py:14"])
+        other = N(at="pandaserver/proxy.py:99", kind="store", key=".jobStatus", via=[])
+        got = {}
+        # the name job and the field job.jobStatus start at one place: each its own answer, whichever is read first
+        fn = R.function("pandaserver/proxy.py", "killJob", within=[17])
+        test = R.statement_at(fn.node, 15).test
+        calls = PR._calls_index(asked._types())
+        name = next(n for n in ast.walk(test) if isinstance(n, ast.Name) and n.id == "job")
+        field = next(n for n in ast.walk(test) if isinstance(n, ast.Attribute))
+        held = [WR._row_held(calls, fn.rel, fn.node, x, ()) for x in (name, field)]
+        got["held"] = [[[f.site.lineno for f in h.fills], [o.kind for o in h.others]] for h in held]
+        for name, changes in (("the fill", [fill]), ("another", [fill, other])):
+            mapdump._FRAGMENT[:] = [N(guard_froms=[
+                N(owner=owner, test_line=15, name="job", stops=[], sources=[
+                    N(kind="object", name="JobSpec()", line=13, changes=changes, site_owner="", site_line=None, paths=[],
+                      steps=[], through=[], route=[])]),
+                N(owner=owner, test_line=16, name="code", stops=[], sources=[
+                    N(kind="constant", name="'2'", line=1, changes=[], site_owner="", site_line=None, paths=[], steps=[],
+                      through=[], route=[])])], runnables=[], field_froms=[])]
+            SR._index.cache_clear()
+            fn = R.function("pandaserver/proxy.py", "killJob", within=[17])
+            stmt = R.statement_at(fn.node, 17)
+            guards = pathcond.arm_condition(stmt)
+            terms = SR.terms(fn, owner, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+            got[name] = [[t.term, t.ended, [[e.end, e.why, [c.at for c in e.changes]] for e in t.ends]] for t in terms]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["held"] == [[[], ["binding"]], [[14], []]], got
+    assert got["the fill"][0] == ["job", True, [["row", "object", []]]], got
+    assert got["another"][0] == ["job", False, [["row", "object", ["pandaserver/proxy.py:99"]]]], got
+
+
+def test_f1_reads_the_entry_by_the_call_a_callers_run_shows_where_no_printed_argument_chose_it(tmp_path):
+    # killUnusedEventServiceConsumers < PandaID=7398538282 >: the job archiveJob archives, which it hands the consumer
+    # killer at three calls of one run; another caller hands a name its marks do not print
+    src = textwrap.dedent(
+        """\
+        class K:
+            def arm(self, job):
+                job.jobStatus = "closed"
+
+            def c1(self, job):
+                self.arm(job)
+                if job.x:
+                    self.arm(job)
+                self.arm(job)
+
+            def c2(self, other):
+                self.arm(other)
+        """
+    )
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(src)
+    lines = src.splitlines()
+    c1_calls = [i + 1 for i, t in enumerate(lines) if t.strip() == "self.arm(job)"]
+    c2_call = lines.index("        self.arm(other)") + 1
+    out = _ok(_run(tmp_path, f"""
+        import ast
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import sources as SR
+
+        from bamboo.querier import mapdump
+
+        M = "pandaserver/m.py"
+        mapdump._FRAGMENT[:] = [N(tables=[N(spec_class="JobSpec", identity_attrs=["JobSpec.PandaID"])])]
+        # c2's mark prints its own pandaID, not the name it hands: the same row by the hole's column
+        MARKS = {{"arm": ("job.PandaID", "arm < PandaID=.*? >"), "c1": ("job.PandaID", "c1 < PandaID=.*? >"),
+                 "c2": ("pandaID", "c2 < PandaID=.*? >")}}
+        identity = [True]
+
+        def prints(owner, lines):
+            name = owner.split("::")[-1].split(".")[-1]
+            expr, prefix = MARKS[name]
+            columns = ["JobSpec.PandaID"] if name != "arm" or identity[0] else ["JobSpec.jobsetID"]
+            return N(runs=[N(mark="PandaID={{}}", key=[N(expression=expr, columns=columns)])],
+                     statements=[N(log_files=["a.log"], rows=[N(prefix=prefix)])])
+
+        rerun.R._prints_of = prints
+        rerun.owners_of = lambda ids: {{}}
+        rec =N(sites=[N(owner=f"{{M}}::K.c1", line=ln) for ln in {c1_calls}] + [N(owner=f"{{M}}::K.c2", line={c2_call})], open=[])
+        SR.entered = lambda owner, line: rec
+        picked = [{c1_calls[1]}]
+        rerun.judge = lambda cands, logs, **kw: N(verdicts=[
+            N(line=c.lines[0], kind="positive" if c.lines[0] in picked else "excluded", describe=lambda c=c: f"judged {{c.lines[0]}}")
+            for c in cands])
+
+        def run(token, first, last, machine="m1"):
+            return N(token=token, first=f"2026-11-02 {{first}},000", last=f"2026-11-02 {{last}},000", machine=machine,
+                     describe=lambda: f"the run {{token!r}}")
+
+        arm = run("arm < PandaID=9 >", "13:43:27", "13:43:29")
+        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm")
+        ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
+        stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
+        got = {{}}
+
+        def entry(name, terms, runs):
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.hop, r.hand, r.hand_used, r.unanswered = [], "H3", {{}}, [], []
+            r.opened, r.ends, r.branches = [], [], []
+            r.mode, r.decide, r.data, r.args = "map", "positive", {{}}, N(asks="asks.jsonl", key="9")
+            r.logs = N(needs_window=True, names=lambda files: list(files))
+            r.files_of = lambda owner, today, lines: today
+            asked = []
+            r._ask = lambda key, names, asking, owners=None, whole=False: (
+                asked.append([key, list(asking.strings), str(asking.why)]) or ({{"a.log": runs}}, [], {{}}))
+            e = r._entry_end(fn, f"{{M}}::arm", 3, arm, ("2026-11-02 13:43:27", "2026-11-02 13:43:29"), terms)
+            got[name] = [e.end, e.why, e.at]
+            got[name + ": asked"] = asked
+
+        caller = run("c1 < PandaID=9 >", "13:43:20", "13:43:40")
+        # one caller's run holds the arm's and three of its calls: H2 judges each in that run
+        entry("judged", ended, [caller])
+        # a term that stops: the callers are not asked
+        entry("a term stops", stopped, [caller])
+        # no caller's run holds the arm's (another machine)
+        entry("none holds it", ended, [run("c1 < PandaID=9 >", "13:43:20", "13:43:40", "m2")])
+        # a mark holding no row's identity: each caller's logs by the key
+        identity[0] = False
+        picked[:] = [{c2_call}]
+        entry("by the key", ended, [caller])
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["judged"] == ["caller", "entered-by", f"pandaserver/m.py:{c1_calls[1]}"]
+    # the callers' marks holding the arm's row, with the run's value: c1's and c2's, whatever their holes spell
+    assert got["judged: asked"] == [["9", ["c1 < PandaID=9 >", "c2 < PandaID=9 >"],
+                                     "over the arm's run, 2026-11-02 13:43:27 .. 2026-11-02 13:43:29, "
+                                     "for 'c1 < PandaID=9 >', 'c2 < PandaID=9 >'"]]
+    assert got["a term stops"] == ["stop", "entry-unchosen", ""]
+    assert got["a term stops: asked"] == []
+    assert got["none holds it"] == ["stop", "entry-unchosen", ""]
+    assert got["by the key"] == ["caller", "entered-by", f"pandaserver/m.py:{c2_call}"]
+    assert [a[2] for a in got["by the key: asked"]] == [
+        f"for the call at pandaserver/m.py:{ln} that may have entered it" for ln in [*c1_calls, c2_call]]
+
+
+_GEN = """
+from pandaserver.srvcore.CoreUtils import naive_utcnow
+
+
+class Plugin:
+    def __init__(self):
+        self.result = Result()
+
+
+class Gen:
+    def __init__(self, job, status, retry):
+        self.job = job
+        self.job_status = status
+        self.retry = retry
+        self.started = naive_utcnow()
+        self.plugin = Plugin()
+        self.result = None
+
+    def report(self):
+        self.result = self.plugin.result
+        if self.job_status == "failed" and self.retry and self.started and self.extra and self.result:
+            self.job.jobStatus = "failed"
+"""
+
+
+def test_s4a_reads_a_field_of_self_on_through_the_maps_field_records(tmp_path):
+    # AdderGen.process_job_report 441's terms: a field bound from __init__'s parameter, one bound to what the plugin it
+    # built holds, a clock; no binding is chosen over another here (S4b's), so each is a way
+    (_corpus(tmp_path) / "pandaserver" / "g.py").write_text(_GEN)
+    lines = _GEN.splitlines()
+    pres, status, retry, started, plugin, none, bound, site = (lines.index(t) + 1 for t in (
+        "        self.result = Result()", "        self.job_status = status", "        self.retry = retry",
+        "        self.started = naive_utcnow()", "        self.plugin = Plugin()", "        self.result = None",
+        "        self.result = self.plugin.result", '            self.job.jobStatus = "failed"'))
+    test = site - 1
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        G, P, INIT, ARM = "pandaserver/g.py::Gen", "pandaserver/g.py::Plugin", "pandaserver/g.py::__init__", "pandaserver/g.py::report"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=kw.pop("changes", []),
+                                               site_owner=kw.pop("site_owner", ""), site_line=None, **kw)
+        bind = lambda line, owner, *sources: N(at=f"pandaserver/g.py:{{line}}", owner=owner, how="assign",
+                                               sources=list(sources), stops=[])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[
+                # the test's plain self: each field it reads with no record of its own at the line
+                N(owner=ARM, test_line={test}, name="self", sources=[src("self_field", "self", {test}, site_owner=G)], stops=[]),
+                N(owner=ARM, test_line={test}, name="self.result",
+                  sources=[src("self_field", "self.result", {test}, site_owner=G)], stops=[]),
+            ],
+            runnables=[],
+            field_froms=[
+                N(owner=G, field="job_status", changes=[], stops=[],
+                  bindings=[bind({status}, INIT, src("parameter", "status", {status}, site_owner=INIT))]),
+                N(owner=G, field="retry", stops=[], changes=[N(at="pandaserver/g.py:99", kind="store", key=".x", what="", via=[])],
+                  bindings=[bind({retry}, INIT, src("parameter", "retry", {retry}, site_owner=INIT))]),
+                N(owner=G, field="started", changes=[], stops=[], bindings=[bind({started}, INIT, src("call", "naive_utcnow", {started}))]),
+                N(owner=G, field="plugin", changes=[], stops=[],
+                  bindings=[bind({plugin}, INIT, src("object", "Plugin()", {plugin}, site_owner=P))]),
+                N(owner=G, field="result", changes=[], stops=[], bindings=[
+                    bind({none}, INIT, src("constant", "None", {none})),
+                    bind({bound}, ARM, src("self_field", "self.plugin", {bound}, site_owner=G, steps=[".result"])),
+                    # where a part of the job sits in it: no way of the value
+                    bind(98, "pandaserver/g.py::other", src("self_field", "self.job", 98, site_owner=G, paths=[".job"])),
+                ]),
+                N(owner=P, field="result", changes=[], bindings=[bind({pres}, INIT, src("call", "Result", {pres}))],
+                  stops=[N(kind="computed", at=["pandaserver/g.py::Plugin:3", "pandaserver/g.py::Plugin:4"])]),
+            ])]
+        fn = R.function("pandaserver/g.py", "report", within=[{site}])
+        stmt = R.statement_at(fn.node, {site})
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, ARM, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        print(json.dumps([[t.term, t.ended, [[e.end, e.why, e.at, e.param, e.of, list(e.via), [c.at for c in e.changes]]
+                                              for e in t.ends]] for t in terms]))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    g = "pandaserver/g.py"
+    assert got == [
+        # a parameter of the binding's method: read up that method's callers next (rerun's _with_callers)
+        ["self.job_status", False, [["stop", "parameter", f"{g}:{status}", "status", f"{g}::__init__", [], []]]],
+        # the record's change is on the binding's way, not a way of its own (G4)
+        ["self.retry", False, [["stop", "parameter", f"{g}:{retry}", "retry", f"{g}::__init__", [], [f"{g}:99"]]]],
+        ["self.started", True, [["clock", "naive_utcnow", f"{g}:{started}", "", "", [], []]]],
+        ["self.extra", False, [["stop", "no-field-from", f"{g}::Gen.extra", "", "", [], []]]],
+        # the plugin's result read on in the plugin's own record, through the bindings at the read's and the plugin's
+        ["self.result", False, [["constant", "None", f"{g}:{none}", "", "", [], []],
+                                ["stop", "call", f"{g}:{pres}", "", "", [f"{g}:{bound}", f"{g}:{plugin}"], []],
+                                ["stop", "computed", f"{g}::Plugin:3, {g}::Plugin:4", "", "", [f"{g}:{bound}", f"{g}:{plugin}"], []],
+                                ["stop", "parts-only", f"{g}:98", "", "", [], []]]],
+    ], got
+
+
+_GEN5 = """
+class Gen:
+    def __init__(self, tb):
+        self.job = tb.peek()
+        self.result = Res()
+
+    def report(self, tb):
+        status = tb.get_status()
+        if self.job is None and self.result.code and status:
+            fail()
+"""
+
+
+def test_g2_a_way_end_keeps_a_changes_calls_and_a_returned_values_route_and_line_and_g3_its_bare_place(tmp_path):
+    # case A's self.job at adder_gen 111 (out/gm/gm5-design.md G2): its sources came back through calls, from lines of
+    # callees; AdderAtlasPlugin.result's set_fatal at adder_result 55, made through two calls, on the binding's way
+    # (G4); a local that came back through a call.  Each is told apart by what the map's record holds, and only an end equal in all of it is one.
+    # G3: result.json keeps the place as file:line, " at " in the template.
+    (_corpus(tmp_path) / "pandaserver" / "g5.py").write_text(_GEN5)
+    lines = _GEN5.splitlines()
+    job, res, status, site = (lines.index(t) + 1 for t in (
+        "        self.job = tb.peek()", "        self.result = Res()", "        status = tb.get_status()", "            fail()"))
+    test = site - 1
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import render as T
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g5.py"
+        G, INIT, ARM = f"{{g}}::Gen", f"{{g}}::__init__", f"{{g}}::report"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=[], site_owner=kw.pop("site_owner", ""),
+                                               site_line=None, **kw)
+        back = lambda kind, name, line, *route: src(kind, name, line, route=list(route))
+        bind = lambda line, *sources: N(at=f"{{g}}:{{line}}", owner=INIT, how="assign", sources=list(sources), stops=[])
+        change = lambda via: N(at="pandaserver/res.py:55", kind="inner", key=".code", what="", via=[via])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[
+                N(owner=ARM, test_line={test}, name="self.job", sources=[src("self_field", "self.job", {test}, site_owner=G)], stops=[]),
+                N(owner=ARM, test_line={test}, name="self.result",
+                  sources=[src("self_field", "self.result", {test}, site_owner=G)], stops=[]),
+                # the local came back through get_status, from its callee's 1029, and through 1022's callee's 478;
+                # the second record is the first again
+                N(owner=ARM, test_line={test}, name="status", stops=[], sources=[
+                    back("constant", "None", 1029, f"{{g}}:{status}"), back("constant", "None", 1029, f"{{g}}:{status}"),
+                    back("constant", "None", 478, "pandaserver/tb.py:1022", f"{{g}}:{status}")]),
+            ],
+            runnables=[],
+            field_froms=[
+                N(owner=G, field="job", changes=[], stops=[], bindings=[bind({job},
+                    back("unknown", "x", 978, "pandaserver/tb.py:1025", f"{{g}}:{job}"),
+                    back("constant", "None", 478, "pandaserver/tb.py:1022", f"{{g}}:{job}"),
+                    back("constant", "None", 1029, f"{{g}}:{job}"))]),
+                N(owner=G, field="result", stops=[], bindings=[bind({res}, src("call", "Res", {res}))],
+                  changes=[change(f"{{g}}:91"), change(f"{{g}}:92")]),
+            ])]
+        fn = R.function(g, "report", within=[{site}])
+        stmt = R.statement_at(fn.node, {site})
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, ARM, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        print(json.dumps({{
+            "ends": [[t.term, [[e.end, e.why, e.at, [[c.at, list(c.made_by)] for c in e.changes], list(e.returned),
+                                e.returned_line] for e in t.ends]] for t in terms],
+            "said": [[str(rerun._way_said(e)) for e in t.ends] for t in terms],
+            "text": [[rerun._way_text(e) for e in t.ends] for t in terms],
+            "record": T.to_json(rerun._way_said(terms[1].ends[0])),
+        }}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    g, tb = "pandaserver/g5.py", "pandaserver/tb.py"
+    J, S = f"{g}:{job}", f"{g}:{status}"
+    assert got["ends"] == [
+        # each placed at the binding, told apart by the calls it came back by and its callee's line
+        ["self.job", [["stop", "unknown", J, [], [f"{tb}:1025", J], 978], ["constant", "None", J, [], [f"{tb}:1022", J], 478],
+                      ["constant", "None", J, [], [J], 1029]]],
+        # the two changes at res 55 on the binding's way (G4), told apart by the call each was made through
+        ["self.result", [["stop", "call", f"{g}:{res}", [["pandaserver/res.py:55", [f"{g}:91"]], ["pandaserver/res.py:55", [f"{g}:92"]]],
+                          [], 0]]],
+        # the local placed at its call in report, not at its callee's line in g5; the repeated record said once
+        ["status", [["constant", "None", S, [], [S], 1029], ["constant", "None", S, [], [f"{tb}:1022", S], 478]]],
+    ], got["ends"]
+    assert got["said"][0][1] == f"constant (None) at {J}, returned from callee line 478 by {tb}:1022 -> {J}"
+    changed = f"changed between it and the read: pandaserver/res.py:55 made by {g}:91; pandaserver/res.py:55 made by {g}:92"
+    assert got["said"][1][0] == f"stop (call) at {g}:{res}, {changed}"
+    assert got["text"][0][1] == f"constant (None at {J}) returned from callee line 478 by {tb}:1022 -> {J}"
+    assert got["text"][1][0] == f"stop (call at {g}:{res}), {changed}"
+    # G3: the record holds the place as it is; its words are the template's
+    facts = got["record"]["facts"]
+    assert facts["at"] == {"said": {"kind": "way-end-at", "facts": {"at": f"{g}:{res}"}}}
+    assert facts["changes"]["said"]["facts"]["changes"][0] == {"said": {"kind": "a-change", "facts": {
+        "at": "pandaserver/res.py:55", "key": ".code", "made": {"said": {"kind": "made-by", "facts": {"via": [f"{g}:91"]}}}}}}
+    assert facts["returned"] == ""
+
+
+_GEN7 = """
+class Res:
+    def set_fatal(self):
+        self.code = 2
+
+
+class Plugin:
+    def __init__(self):
+        self.result = Res()
+
+    def run(self):
+        self.result.set_fatal()
+
+
+class Gen:
+    def go(self):
+        self.plugin = Plugin()
+        self.plugin.run()
+        self.plugin.result.set_fatal()
+        self.out = self.plugin.result
+        errors = {}
+        errors["a"] = "x"
+        if self.out.code and errors["a"]:
+            fail()
+"""
+
+
+def test_g4_a_change_is_on_the_way_it_changes_at_the_level_of_the_object_it_changes(tmp_path):
+    # case A's add_result (out/gm/gm5-design.md G4): Gen.plugin's record names the plugin's set_fatal (inner .result,
+    # through run) and Gen's own set_fatal on the plugin's result; Plugin.result's record names the first as the store
+    # it makes.  The way reads .result on in Plugin.result's record: Gen.plugin's changes of what .result holds are that
+    # object's, the first one change with the record's own, the second (no record of Plugin's holds it) kept, its key not
+    # said.  A local's changes are on its own end.
+    (_corpus(tmp_path) / "pandaserver" / "g7.py").write_text(_GEN7)
+    lines = _GEN7.splitlines()
+    ln = {k: lines.index(t) + 1 for k, t in {
+        "code": "        self.code = 2", "pres": "        self.result = Res()", "run": "        self.result.set_fatal()",
+        "plugin": "        self.plugin = Plugin()", "go_run": "        self.plugin.run()",
+        "own": "        self.plugin.result.set_fatal()", "out": "        self.out = self.plugin.result",
+        "errors": "        errors = {}", "store": '        errors["a"] = "x"', "fail": "            fail()"}.items()}
+    test = ln["fail"] - 1
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g7.py"
+        LN = {ln!r}
+        G, P, ARM = f"{{g}}::Gen", f"{{g}}::Plugin", f"{{g}}::go"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=kw.pop("changes", []),
+                                               site_owner=kw.pop("site_owner", ""), site_line=None, **kw)
+        bind = lambda line, owner, *sources: N(at=f"{{g}}:{{LN[line]}}", owner=f"{{g}}::{{owner}}", how="assign",
+                                               sources=list(sources), stops=[])
+        change = lambda at, kind, key, *via: N(at=at, kind=kind, key=key, what="", via=[f"{{g}}:{{LN[v]}}" for v in via], value=[])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[
+                N(owner=ARM, test_line={test}, name="self.out", sources=[src("self_field", "self.out", {test}, site_owner=G)],
+                  stops=[]),
+                N(owner=ARM, test_line={test}, name="errors", stops=[], sources=[
+                    src("unknown", "{{}}", LN["errors"], changes=[change(f"{{g}}:{{LN['store']}}", "store", "*")])]),
+            ],
+            runnables=[],
+            field_froms=[
+                N(owner=G, field="out", changes=[], stops=[], bindings=[
+                    bind("out", "go", src("self_field", "self.plugin", LN["out"], site_owner=G, steps=[".result"]))]),
+                N(owner=G, field="plugin", stops=[], bindings=[
+                    bind("plugin", "go", src("object", "Plugin()", LN["plugin"], site_owner=P))],
+                  changes=[change(f"{{g}}:{{LN['run']}}", "inner", ".result", "go_run"),
+                           change(f"{{g}}:{{LN['own']}}", "inner", ".result")]),
+                N(owner=P, field="result", stops=[], bindings=[bind("pres", "__init__", src("call", "Res", LN["pres"]))],
+                  changes=[change(f"{{g}}:{{LN['code']}}", "store", ".code", "run")]),
+            ])]
+        fn = R.function(g, "go", within=[LN["fail"]])
+        stmt = R.statement_at(fn.node, LN["fail"])
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, ARM, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        print(json.dumps([[t.term, t.ended, [[e.end, e.why, e.at, list(e.via), [[c.at, c.key, list(c.made_by)] for c in e.changes]]
+                                              for e in t.ends]] for t in terms]))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    at = {k: f"pandaserver/g7.py:{v}" for k, v in ln.items()}
+    assert got == [
+        # the local's own end kept, its change on it
+        ["errors", False, [["stop", "unknown", at["errors"], [], [[at["store"], "*", []]]]]],
+        # one way, the Res() built in Plugin.__init__, with the store set_fatal makes through run, and Gen's own call on
+        # the plugin's result, which no record of Plugin's holds
+        ["self.out", False, [["stop", "call", at["pres"], [at["out"], at["plugin"]],
+                              [[at["code"], ".code", [at["run"]]], [at["own"], "*", []]]]]],
+    ], got
+
+
+_GEN8 = """
+class Res:
+    fatal = 2
+    temporary = 1
+
+    def __init__(self):
+        self.code = None
+
+    def set_fatal(self):
+        self.code = self.fatal
+
+    def set_temporary(self):
+        self.code = self.temporary
+
+    def ok(self):
+        return self.code == 0
+
+
+class Plugin:
+    def __init__(self, logger):
+        self.logger = logger
+        self.result = Res()
+
+    def register(self):
+        self.logger.debug("register")
+        is_fatal = False
+        try:
+            work()
+        except Exception as e:
+            is_fatal = e.fatal
+        if is_fatal:
+            self.result.set_fatal()
+        else:
+            self.result.set_temporary()
+
+    def subscribe(self):
+        self.logger.debug("subscribe")
+        self.result.set_fatal()
+
+
+class Gen:
+    def execute(self):
+        self.plugin = Plugin(self.logger)
+        self.plugin.register()
+        self.out = self.plugin.result
+        self.logger.debug(f"plugin done with {self.out.code}")
+
+    def finalize(self):
+        self.execute()
+        if self.out is None or not self.out.ok():
+            fail()
+"""
+
+
+def test_s4c_reads_the_change_a_runs_print_and_must_rows_choose_as_an_arm(tmp_path):
+    # case A's add_result after G4 (out/gm/gm5-design.md S4c): the way to self.out holds three stores of .code, through
+    # register's two arms and subscribe.  V: the run printed 2 of self.out.code after its binding, so set_temporary's 1
+    # is not what the read reads.  H2: register's rows are in the run, subscribe's are not, so the change register made
+    # is the one; read as an arm, its guard's term is bound in an except handler (S3's).  Where subscribe's rows are in
+    # the run too, two are left and named.
+    (_corpus(tmp_path) / "pandaserver" / "g8.py").write_text(_GEN8)
+    lines = _GEN8.splitlines()
+    ln = {k: lines.index(t) + 1 for k, t in {
+        "fatal": "        self.code = self.fatal", "temp": "        self.code = self.temporary",
+        "rfatal": "    fatal = 2", "rtemp": "    temporary = 1", "pres": "        self.result = Res()",
+        "init_fatal": "        is_fatal = False", "except": "        except Exception as e:", "in_handler": "            is_fatal = e.fatal",
+        "if_fatal": "        if is_fatal:", "reg_fatal": "            self.result.set_fatal()",
+        "reg_temp": "            self.result.set_temporary()", "sub_fatal": "        self.result.set_fatal()",
+        "plugin": "        self.plugin = Plugin(self.logger)", "out": "        self.out = self.plugin.result",
+        "fail": "            fail()"}.items()}
+    ln["test"] = ln["fail"] - 1
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    <PandaID=1> {}\n"
+    for name, text in {"one": ["register", "plugin done with 2"], "two": ["register", "subscribe", "plugin done with 2"]}.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from dataclasses import replace
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import render as T
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g8.py"
+        LN = {ln!r}
+        RES = f"{{g}}::Res"
+        src = lambda kind, name, line, **kw: N(kind=kind, name=name, line=line, changes=[], site_owner=kw.pop("site_owner", ""),
+                                               site_line=None, paths=[], steps=[], through=[], route=[], **kw)
+        runs = {{name: runs_for(read_log(f"{{name}}.log"), "1")[0] for name in ("one", "two")}}
+        # the map's prints of register and subscribe land in the runs' log; set_fatal prints nothing
+        printing = {{f"{{g}}::{{f}}": N(statements=[N(log_files=[runs["one"].log.name, runs["two"].log.name],
+                                                       log_files_basis="logger")]) for f in ("register", "subscribe")}}
+        R._prints_of = lambda owner, lines=(): printing.get(owner)
+        klass = lambda field, line, value: N(owner=RES, field=field, changes=[], stops=[], bindings=[N(
+            at=f"{{g}}:{{LN[line]}}", owner=RES, how="class", stops=[], sources=[src("constant", value, LN[line])])])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=f"{{g}}::register", test_line=LN["if_fatal"], name="is_fatal", stops=[], sources=[
+                src("constant", "False", LN["init_fatal"]), src("attribute", "e.fatal", LN["in_handler"])])],
+            runnables=[N(owner=f"{{g}}::ok", line=0, bound=[RES], asked=["condition"], asked_at=[f"{{g}}:{{LN['test']}}"],
+                         runnable=True, reads=["self.code"], stops=[])],
+            field_froms=[klass("fatal", "rfatal", "2"), klass("temporary", "rtemp", "1")], function_prints=[])]
+        store = lambda at, field, via: SR.Changed(
+            f"{{g}}:{{LN[at]}}", "store", ".code", (f"{{g}}:{{LN[via]}}",),
+            N(kind="store", value=[src("self_field", f"self.{{field}}", LN[at], site_owner=RES)], value_stops=[]),
+            f"{{g}}:{{LN['out']}}")
+        way = SR.End("self.out", "stop", "call", f"{{g}}:{{LN['pres']}}", via=(f"{{g}}:{{LN['out']}}", f"{{g}}:{{LN['plugin']}}"),
+                     changes=(store("fatal", "fatal", "reg_fatal"), store("temp", "temporary", "reg_temp"),
+                              store("fatal", "fatal", "sub_fatal")))
+        fn = R.function(g, "finalize", within=[LN["fail"]])
+        site = R.statement_at(fn.node, LN["fail"])
+        guards = pathcond.arm_condition(site)
+        term = SR.Term(guards[0], "self.out", (way,), LN["test"])
+        got = {{"keys": sorted(SR.read_keys(R.statement_at(fn.node, LN["test"]).test, "self.out", g, LN["test"])),
+               "stored": [SR.stored(c.record) for c in way.changes]}}
+        for name, run in runs.items():
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.mode, r.decide = [], "outside", "positive"
+            printed = {{}}
+            r._held_on(fn, site, guards, run, printed)
+            t = r._s4c(term, fn, printed, run, (run.first[:19], run.last[:19]), frozenset(), "  ")
+            e = t.ends[0]
+            m = e.made
+            got[name] = {{
+                "left": [[c.at, list(c.made_by)] for c in e.changes],
+                "made": None if m is None else [m.site, m.fn, m.how, list(m.guards),
+                                                [[u.term, [[x.end, x.why, x.at, x.handler] for x in u.ends]] for u in m.terms],
+                                                [m.entry.end, m.entry.why]],
+                "stop": T.text(rerun._first_stop(t)), "said": T.text(rerun._way_said(e)), "lines": r.lines}}
+            # one change of a part the run printed nothing of: its rows in the run say it may have run, not that it made
+            # the value rather than the way's end
+            lone = replace(way, changes=(replace(way.changes[0], key=".flag"),))
+            u = r._s4c(SR.Term(guards[0], "self.out", (lone,), LN["test"]), fn, printed, run,
+                       (run.first[:19], run.last[:19]), frozenset(), "  ")
+            got[name]["lone"] = [[[c.at, c.key] for c in u.ends[0].changes], u.ends[0].made is None]
+        # an arm read on no run (an attribute's, no window): S4c, which reads the run, is not asked
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.mode, r.decide = [], "outside", "positive"
+        r._s4c = lambda *a: (_ for _ in ()).throw(AssertionError("S4c read on no run"))
+        rfn = R.function(g, "register", within=[LN["reg_fatal"]])
+        rsite = R.statement_at(rfn.node, LN["reg_fatal"])
+        rguards = pathcond.arm_condition(rsite)
+        terms, _entry = r._arm_terms(rfn, f"{{g}}::register", LN["reg_fatal"], rguards,
+                                     rerun._guard_ifs(rfn, rsite, rguards), {{}}, None, None)
+        got["no run"] = [[u.term, len(u.ends)] for u in terms]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["no run"] == [["is_fatal", 2]]
+    at = {k: f"pandaserver/g8.py:{v}" for k, v in ln.items()}
+    # what ok() reads, by the map's Runnable; what each store stores, read to the class's literal
+    assert got["keys"] == ["code"]
+    assert got["stored"] == [["2"], ["1"], ["2"]]
+    one = got["one"]
+    assert any(f"V: {at['temp']} made by {at['reg_temp']} stores 1, not the '2' printed of self.out.code" in x
+               for x in one["lines"]), one["lines"]
+    # register's change: its rows are in the run (register's print, which both its arms pass, says it may have; none
+    # says it did) and subscribe's are not, so it is left by elimination, read as an arm at its call in register;
+    # is_fatal bound in the handler
+    assert one["left"] == [[at["fatal"], [at["reg_fatal"]]]], one
+    assert one["made"] == [at["reg_fatal"], "pandaserver/g8.py::register", "left", ["is_fatal"],
+                           [["is_fatal", [["constant", "False", at["init_fatal"], 0],
+                                          ["stop", "attribute", at["in_handler"], ln["except"]]]]],
+                           ["stop", "no-entered-from"]], [x for x in one["lines"] if "g8.py:" in x]
+    assert one["stop"] == (f"it stops at 'is_fatal' (in 'is_fatal'), in the arm that made the change at {at['reg_fatal']}, "
+                           f"bound in the except handler at {ln['except']} (S3: which exception)")
+    assert one["said"] == (
+        f"stop (call) at {at['pres']}, through the field bindings at {at['out']} -> {at['plugin']}, changed between it and "
+        f"the read by {at['fatal']} made by {at['reg_fatal']}, left by elimination (it stores what the run printed, its "
+        f"function's rows are in the run, and every other change is shown not to have run or to store another value); "
+        f"read as an arm at {at['reg_fatal']}: its "
+        f"terms is_fatal -> constant (False) at {at['init_fatal']}, stop (attribute) at {at['in_handler']}, in the except "
+        f"handler at {ln['except']} (S3: which exception); its entry: stop (no-entered-from)")
+    # subscribe ran too: two changes of 2 are left, none chosen, both named
+    two = got["two"]
+    assert two["left"] == [[at["fatal"], [at["reg_fatal"]]], [at["fatal"], [at["sub_fatal"]]]] and two["made"] is None, two
+    assert two["stop"] == "it stops at 'self.out' (in 'self.out is None or not self.out.ok()')"
+    # one change, kept, of a part not printed: not chosen, named
+    assert one["lone"] == [[[at["fatal"], ".flag"]], True], one["lone"]
+
+
+_GEN6 = """
+class Gen:
+    def report(self):
+        if self.job is None and self.ok:
+            fail()
+"""
+
+_GEN9 = """
+from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+
+def caller():
+    now = naive_utcnow()
+    target(now)
+
+
+def target(t):
+    if t:
+        pass
+
+
+class Gen:
+    def check(self):
+        stamp = naive_utcnow()
+        made = other()
+        if stamp > made:
+            fail()
+"""
+
+
+def test_a_way_ending_at_a_call_the_map_reads_as_a_clock_ends_at_the_clock(tmp_path):
+    # S2's (b): a guard's local bound to naive_utcnow() (add_main 97's timeNow) and a parameter a caller hands from it
+    # end at the clock, as a field's way does; another call stops, and so does a clock in a callee the value came back
+    # from (its line is in a file the record does not name)
+    (_corpus(tmp_path) / "pandaserver" / "g9.py").write_text(_GEN9)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g9.py"
+        src = lambda name, line, route=(): N(kind="call", name=name, line=line, route=list(route), changes=[], site_owner="",
+                                             site_line=None, steps=[], through=[], paths=[])
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=f"{g}::check", test_line=19, name="stamp", stops=[], sources=[src("naive_utcnow", 17)]),
+                         N(owner=f"{g}::check", test_line=19, name="made", stops=[], sources=[src("other", 18)])],
+            parameter_froms=[N(owner=f"{g}::target", line=10, parameter="t", stops=[], sources=[
+                src("naive_utcnow", 6, [f"{g}:7"]), src("naive_utcnow", 6, [f"{g}:30", f"{g}:7"])])],
+            entered_froms=[], runnables=[], field_froms=[])]
+        fn = R.function(g, "check", within=[20])
+        stmt = R.statement_at(fn.node, 20)
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, f"{g}::check", list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        ways = SR.param_ways(f"{g}::target", "t")
+        print(json.dumps({"terms": [[t.term, [[e.end, e.why, e.at] for e in t.ends], t.ended] for t in terms],
+                          "ways": [[w.end, w.why, list(w.route)] for w in ways]}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    g = "pandaserver/g9.py"
+    assert got["terms"] == [["made", [["stop", "call", f"{g}:18"]], False],
+                            ["stamp", [["clock", "naive_utcnow", f"{g}:17"]], True]]
+    assert got["ways"] == [["clock", "naive_utcnow", [f"{g}:7"]], ["stop", "call", [f"{g}:30", f"{g}:7"]]]
+
+
+_GEN10 = """
+from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+
+class Thread:
+    def run(self):
+        timeNow = naive_utcnow()
+        while True:
+            one = self.reports.pop()
+            if not one:
+                break
+            stamp = one[1]
+            try:
+                modTime = stamp
+                if (timeNow - modTime) > 24:
+                    flag = False
+                else:
+                    flag = True
+                gen = Gen(one, flag)
+            except Exception:
+                pass
+
+
+class Gen:
+    def __init__(self, job, ignore):
+        self.ignore = ignore
+"""
+
+
+def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
+    # add_main 127 (S2's (a)): ignoreTmpError is False at 130 and True at 134, both handed at 136, whose caller's run
+    # is not asked; the if they sit apart in is read by the map's records -- timeNow a clock (b), modTime from the
+    # pop -- and the stop goes down to its first term that does not end.  The guard both bindings share ('one') is
+    # not read.  No record at the if: it stops there.  Not read where a constant is bound in a callee it came back
+    # from, or where another way is left beside the constants.
+    (_corpus(tmp_path) / "pandaserver" / "g10.py").write_text(_GEN10)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import render as T
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g10.py"
+        INIT = f"{g}::__init__"
+        src = lambda kind, name, line, route=(): N(kind=kind, name=name, line=line, route=list(route), changes=[],
+                                                   site_owner="", site_line=None, steps=[], through=[], paths=[])
+        flag = [src("constant", "False", 16, [f"{g}:19"]), src("constant", "True", 18, [f"{g}:19"])]
+        tested = [N(owner=f"{g}::run", test_line=15, name="timeNow", stops=[], sources=[src("call", "naive_utcnow", 7)]),
+                  N(owner=f"{g}::run", test_line=15, name="modTime", stops=[], sources=[src("call", "self.reports.pop", 9)]),
+                  N(owner=f"{g}::run", test_line=10, name="one", stops=[], sources=[src("call", "self.reports.pop", 9)])]
+        got = {}
+
+        def walk(name, sources, guards):
+            mapdump._FRAGMENT[:] = [N(guard_froms=guards, runnables=[], field_froms=[], entered_froms=[],
+                                      parameter_froms=[N(owner=INIT, parameter="ignore", line=25, stops=[], sources=sources)])]
+            SR._calls_in.cache_clear()
+            SR._index.cache_clear()
+            r = object.__new__(rerun.Rerun)
+            r.lines = []
+            t = SR.Term("g", "self.ignore", (SR.End("self.ignore", SR.STOP, SR.PARAMETER, f"{g}:26", param="ignore", of=INIT),))
+            t = r._with_callers(t, "the arm's function", f"{g}::Gen.report", N(machine="m1"), ("a", "b"))
+            e = t.ends[0]
+            s = e.split
+            got[name] = {"end": [e.end, e.why], "lines": r.lines, "stop": T.text(rerun._first_stop(t)),
+                         "said": T.text(rerun._way_said(e)),
+                         "split": None if s is None else [s.call, s.fn, list(s.ifs), list(s.guards),
+                                                          [[u.term, [[x.end, x.why, x.at] for x in u.ends]] for u in s.terms]]}
+
+        walk("record", flag, tested)
+        walk("no record", flag, tested[2:])
+        walk("in a callee", [flag[0], src("constant", "True", 3, [f"{g}:19", f"{g}:19"])], tested)
+        walk("another way", [*flag, src("call", "other", 12, [f"{g}:19"])], tested)
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    g = "pandaserver/g10.py"
+    test = "timeNow - modTime > 24"  # as ast.unparse spells the if's test
+    assert got["record"]["end"] == ["stop", "parameter-unchosen"]
+    assert got["record"]["split"] == [f"{g}:19", f"{g}::run", [f"{g}:15"], [test], [
+        ["modTime", [["stop", "call", f"{g}:9"]]], ["timeNow", [["clock", "naive_utcnow", f"{g}:7"]]]]]
+    assert any(f"told apart by the if at {g}:15 (run; the bindings at {g}:16, {g}:18)" in x for x in got["record"]["lines"])
+    assert got["record"]["stop"] == (f"it stops at 'modTime' (in {test!r}), in the if at {g}:15 that tells apart the "
+                                     f"constants {g}:19 hands")
+    assert got["record"]["said"].startswith(
+        f"stop (parameter-unchosen), the constants {g}:19 hands told apart by the if at {g}:15 ({test!r}), read by the "
+        "map's records (its run not asked): its terms modTime -> stop (call) at")
+    assert got["no record"]["split"][4] == [[test, [["stop", "no-record", f"{g}:15"]]]]
+    assert got["no record"]["stop"].startswith(f"it stops at {test!r} (in {test!r}), in the if at {g}:15 ")
+    for name in ("in a callee", "another way"):
+        assert got[name]["end"] == ["stop", "parameter-unchosen"] and got[name]["split"] is None, name
+        assert got[name]["stop"] == "it stops at 'self.ignore' (in 'g')", name
+
+
+def test_a_field_record_with_no_way_stops_its_term_rather_than_drops_it(tmp_path):
+    # the map's PCS build made field records with no binding, change or stop: such a term said nothing, and the others
+    # ending would read as every value ending
+    (_corpus(tmp_path) / "pandaserver" / "g6.py").write_text(_GEN6)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g6.py"
+        G, ARM = f"{g}::Gen", f"{g}::report"
+        src = lambda name: N(kind="self_field", name=name, line=4, changes=[], site_owner=G, site_line=None)
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=ARM, test_line=4, name="self.job", sources=[src("self.job")], stops=[]),
+                         N(owner=ARM, test_line=4, name="self.ok", sources=[src("self.ok")], stops=[])],
+            runnables=[],
+            field_froms=[N(owner=G, field="job", bindings=[], changes=[], stops=[]),
+                         N(owner=G, field="ok", changes=[], stops=[], bindings=[
+                             N(at=f"{g}:9", owner=f"{g}::__init__", how="assign", stops=[],
+                               sources=[N(kind="constant", name="True", line=9, changes=[], site_owner="", site_line=None)])])])]
+        fn = R.function(g, "report", within=[5])
+        stmt = R.statement_at(fn.node, 5)
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, ARM, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        print(json.dumps([[t.term, t.ended, [[e.end, e.why, e.at] for e in t.ends]] for t in terms]))
+    """))
+    assert json.loads(out.splitlines()[-1]) == [
+        ["self.job", False, [["stop", "no-way", "pandaserver/g6.py::Gen.job"]]],
+        ["self.ok", True, [["constant", "True", "pandaserver/g6.py:9"]]]]
+
+
+def test_a_guards_local_item_of_a_literal_ends_at_the_literal_not_as_its_value(tmp_path):
+    # register_files' attempt_number (for ... in range(max_attempt), max_attempt = 3): the map's source is the constant
+    # 3 with a step and range() through; the way ends at the literal, its value not 3 (as a parameter's way says it)
+    (_corpus(tmp_path) / "pandaserver" / "g6.py").write_text(_GEN6)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.panda import pathcond
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+
+        R.ROWS_FROM = "walk"
+        g = "pandaserver/g6.py"
+        ARM = f"{g}::report"
+        src = lambda name, **kw: N(kind="constant", name=name, line=9, changes=[], site_owner="", site_line=None, **kw)
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[N(owner=ARM, test_line=4, name="self.job", stops=[], sources=[src("None", steps=[], through=[])]),
+                         N(owner=ARM, test_line=4, name="self.ok", stops=[], sources=[
+                             src("3", steps=["[*]"], through=[N(call="range", at=f"{g}:10", gives="computed")])])],
+            runnables=[], field_froms=[])]
+        fn = R.function(g, "report", within=[5])
+        stmt = R.statement_at(fn.node, 5)
+        guards = pathcond.arm_condition(stmt)
+        terms = SR.terms(fn, ARM, list(zip(guards, rerun._guard_ifs(fn, stmt, guards))))
+        print(json.dumps([[t.term, [[e.end, e.why] for e in t.ends]] for t in terms]))
+    """))
+    assert json.loads(out.splitlines()[-1]) == [
+        ["self.job", [["constant", "None"]]], ["self.ok", [["constant", "constant-through"]]]]
+
+
+def test_s4a_reads_a_field_bindings_parameter_up_its_callers_without_the_arms_prints(tmp_path):
+    # AdderGen.__init__'s job_status: handed at two calls; the arm's entry prints say nothing of __init__'s parameter
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import mapdump, rerun
+        from bamboo.querier import sources as SR
+
+        INIT = "pandaserver/g.py::__init__"
+        src = lambda kind, name, route: N(kind=kind, name=name, route=list(route), site_owner="", paths=[])
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner=INIT, parameter="status", line=5, stops=[],
+              sources=[src("constant", "'failed'", ["pandaserver/a.py:10"]), src("constant", "'finished'", ["pandaserver/a.py:20"])]),
+        ], entered_froms=[])]
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+
+        def no_print(*a):
+            raise AssertionError("the arm's prints read for another method's parameter")
+
+        r._entry_value = no_print
+        r._call_shown = lambda site, window, machine, why="": site == "pandaserver/a.py:20"
+        t = SR.Term("g", "self.job_status", (
+            SR.End("self.job_status", SR.STOP, SR.PARAMETER, "pandaserver/g.py:7", param="status", of=INIT,
+                   via=("pandaserver/g.py:30",)),
+            SR.End("self.job_status", SR.CONSTANT, "'failed'", "pandaserver/g.py:40")))
+        got = r._with_callers(t, "the arm's function", "pandaserver/g.py::report", N(machine="m1"), ("a", "b"))
+        print(json.dumps({"ends": [[e.end, e.why, e.at, list(e.via)] for e in got.ends], "said": str(rerun._way_said(got.ends[0])),
+                          "lines": r.lines}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # both constants are left (no print read); the one a caller's run shows is the way, the field's binding kept
+    assert got["ends"] == [["constant", "'finished'", "pandaserver/a.py:20", ["pandaserver/g.py:30"]],
+                           ["constant", "'failed'", "pandaserver/g.py:40", []]]
+    assert got["said"] == "constant ('finished') at pandaserver/a.py:20, through the field bindings at pandaserver/g.py:30"
+    assert "pandaserver/g.py::__init__ is not the arm's: no print read" in got["lines"][0]
+
+
+_GEN2 = """
+class Res:
+    def set_fatal(self):
+        self.code = 2
+
+
+class Gen:
+    def __init__(self, status):
+        self.job = None
+        self.status = status
+        self.result = None
+
+    def run(self):
+        self.job = fetch()
+        self.report()
+
+    def other(self):
+        self.job = fetch2()
+
+    def plug(self):
+        try:
+            self.result = Res()
+            self.result.set_fatal()
+            log("done")
+        except Exception:
+            log("failed")
+            self.result = None
+
+    def report(self):
+        if self.job is None:
+            return
+        self.result = None
+        self.plug()
+        if self.status == "x" and self.result.ok():
+            self.job.jobStatus = "failed"
+"""
+
+
+def test_s4b_takes_the_last_binding_on_the_runs_path_by_the_callers_chain_callees_and_init(tmp_path):
+    # AdderGen.process_job_report's reads (out/gm/s4b-order.md): self.job bound by run before its call (a), not by a
+    # method off the path (d); self.add_result by execute_plugin's try, not its handler (b, the run's prints); a field
+    # only __init__ binds (c)
+    (_corpus(tmp_path) / "pandaserver" / "g2.py").write_text(_GEN2)
+    lines = _GEN2.splitlines()
+    ln = {t: lines.index(t) + 1 for t in (
+        "        self.job = None", "        self.status = status", "        self.result = None", "        self.job = fetch()",
+        "        self.report()", "        self.job = fetch2()", "            self.result = Res()", '            log("done")',
+        "            self.result.set_fatal()",
+        "            self.result = None", "        self.plug()", "        if self.job is None:",
+        '        if self.status == "x" and self.result.ok():')}
+    rep_none = [i + 1 for i, t in enumerate(lines) if t == "        self.result = None"][1]
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import field_order as FO, mapdump
+        from bamboo.querier import sources as SR
+
+        F = "pandaserver/g2.py"
+        LN = {ln!r}
+        b = lambda line, owner, *src: N(at=f"{{F}}:{{line}}", owner=f"{{F}}::{{owner}}", how="assign", sources=list(src), stops=[])
+        call = lambda to, line: N(to=f"{{F}}::Gen.{{to}}", lines=[line], line=line, thread=False)
+        reach = lambda extra=(), holes=(): [
+            N(owner=f"{{F}}::Gen.run", calls=[call("report", LN["        self.report()"])], holes=[]),
+            N(owner=f"{{F}}::Gen.report", calls=[call("plug", LN["        self.plug()"])], holes=list(holes)),
+            N(owner=f"{{F}}::Gen.plug", calls=[], holes=[]),
+            N(owner=f"{{F}}::Gen.__init__", calls=[], holes=[]),
+            N(owner=f"{{F}}::Gen.other", calls=list(extra), holes=[]),
+        ]
+        G = f"{{F}}::Gen"
+        ffs = [
+            N(owner=G, field="job", changes=[], stops=[], bindings=[
+                b(LN["        self.job = None"], "__init__"),
+                # what fetch() returns, its jobStatus changed on the way
+                b(LN["        self.job = fetch()"], "run", N(kind="call", name="fetch", line=LN["        self.job = fetch()"],
+                                                           route=[], site_owner="", steps=[], paths=[], through=[],
+                                                           changes=[N(at=f"{{F}}:99", kind="store", key=".jobStatus", what="", via=[])])),
+                b(LN["        self.job = fetch2()"], "other")]),
+            N(owner=G, field="status", changes=[], stops=[], bindings=[b(LN["        self.status = status"], "__init__")]),
+            N(owner=G, field="result", stops=[], bindings=[
+                b(LN["        self.result = None"], "__init__"), b(LN["            self.result = Res()"], "plug"),
+                b(LN["            self.result = None"], "plug"), b({rep_none}, "report")],
+              # set_fatal's store, made through plug's self.result
+              changes=[N(at=f"{{F}}:4", kind="store", key=".code", what="", via=[f"{{F}}:{{LN['            self.result.set_fatal()']}}"])]),
+        ]
+        got = {{}}
+
+        def pick(name, field, test, keys, run=None):
+            ff = SR._field_froms()[(G, field)]
+            c = FO.choose(ff, F, LN[test], run, "map", keys)
+            got[name] = [[x.at.rpartition(":")[2] for x in c.bindings], [x.at.rpartition(":")[2] for x in c.changes],
+                         [[at.rpartition(":")[2], why] for at, why in c.dropped], c.entry]
+
+        def install(**kw):
+            mapdump._FRAGMENT[:] = [N(field_froms=ffs, entered_froms=[], parameter_froms=[], handler_marks=[], **kw)]
+            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+                cached.cache_clear()
+
+        install(reach_graph=reach())
+        pick("job", "job", "        if self.job is None:", frozenset())
+        pick("result", "result", '        if self.status == "x" and self.result.ok():', None)
+        pick("status", "status", '        if self.status == "x" and self.result.ok():', None)
+        # the binding's way read on: a change on it counts where the read reads what it changes
+        choose = lambda ff, rel, line, keys, of_self: FO.choose(ff, rel, line, None, "map", keys, of_self)
+        at = (F, LN["        if self.job is None:"])
+        for name, keys in (("ways, which object", frozenset()), ("ways, jobStatus", frozenset({{"jobStatus"}}))):
+            got[name] = [[w.end, w.why, [c.at for c in w.changes]] for w in SR.field_ways(G, "job", choose=choose, at=at, keys=keys)]
+        # the run printed plug's "done": its handler's binding did not run
+        real = FO._Path._narrowing
+        FO._Path._narrowing = lambda self, node, owner: (
+            ([s for s in node.body[0].body if s.lineno == LN['            log("done")']], []) if node.name == "plug" else ([], None))
+        pick("result, printed", "result", '        if self.status == "x" and self.result.ok():', None)
+        FO._Path._narrowing = real
+        # report entered from two calls: the chain stops, nothing is off the path
+        install(reach_graph=reach(extra=[call("report", LN["        self.job = fetch2()"])]))
+        pick("two callers", "job", "        if self.job is None:", frozenset())
+        # a call on the path that may go anywhere: other's binding may have run
+        install(reach_graph=reach(holes=[N(line=1, callee="x()", why="unplaced", for_classes=[])]))
+        pick("a hole", "job", "        if self.job is None:", frozenset())
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    L = {k: str(v) for k, v in ln.items()}
+    # (a) run binds before it calls report; __init__'s is rebound; other is off the run's path; which object: no change
+    assert got["job"] == [[L["        self.job = fetch()"]], [],
+                          [[L["        self.job = None"], "rebound-before-the-read"], [L["        self.job = fetch2()"], "off-the-run-s-path"]], ""]
+    # (b) plug binds on both its ways; report's own None is rebound by the call; the change through plug counts
+    assert got["result"] == [[L["            self.result = Res()"], L["            self.result = None"]], ["4"],
+                             [[L["        self.result = None"], "rebound-before-the-read"], [str(rep_none), "rebound-before-the-read"]], ""]
+    assert got["result, printed"][0] == [L["            self.result = Res()"]]
+    assert [L["            self.result = None"], "not-run"] in got["result, printed"][2]
+    # (c) only __init__ binds it
+    assert got["status"] == [[L["        self.status = status"]], [], [], ""]
+    # run's binding read on: its jobStatus changed on the way is on a read of jobStatus (G4: the call's own end kept), not
+    # on one of which object it is
+    assert got["ways, which object"] == [["stop", "call", []]]
+    assert got["ways, jobStatus"] == [["stop", "call", ["pandaserver/g2.py:99"]]]
+    # two callers: neither run's nor other's binding is chosen past report's entry
+    assert got["two callers"][0] == [L["        self.job = None"], L["        self.job = fetch()"], L["        self.job = fetch2()"]]
+    assert got["two callers"][3] == "report: 2 calls enter it"
+    assert got["a hole"][0] == [L["        self.job = fetch()"], L["        self.job = fetch2()"]]
+
+
+_GEN4 = """
+class Res:
+    def set_fatal(self):
+        self.code = 2
+
+    def set_ok(self):
+        self.code = 0
+
+
+class Plugin:
+    def __init__(self, bad):
+        self.bad = bad
+        self.result = Res()
+
+    def execute(self):
+        if self.bad:
+            log("bad")
+            self.result.set_fatal()
+            return
+        self.update()
+        log("done")
+
+    def update(self):
+        try:
+            register()
+            self.result.set_ok()
+            log("registered")
+        except Exception:
+            log("failed")
+            self.result.set_fatal()
+
+
+class Gen:
+    def run(self):
+        self.plugin = Plugin(False)
+        self.plugin.execute()
+        if self.plugin.result.code == 2:
+            fail()
+"""
+
+
+def test_g1_a_change_placed_at_its_first_call_is_read_further_in_by_each_functions_printing(tmp_path):
+    # AdderGen.adder_plugin's changes of .result (out/gm/gm5-design.md G1): each is placed at run's call of execute,
+    # which ran; the set_fatal of execute's early return and of update's handler did not, by those functions' prints.
+    # A function the run does not narrow (called twice, or no prints) drops nothing.
+    (_corpus(tmp_path) / "pandaserver" / "g4.py").write_text(_GEN4)
+    lines = _GEN4.splitlines()
+    first = lambda t: lines.index(t) + 1  # noqa: E731
+    ln = {
+        "bind": first("        self.plugin = Plugin(False)"),
+        "execute": first("        self.plugin.execute()"),
+        "read": first("        if self.plugin.result.code == 2:"),
+        "bad": first("            self.result.set_fatal()"),
+        "update": first("        self.update()"),
+        "ok": first("            self.result.set_ok()"),
+        "failed": [i + 1 for i, t in enumerate(lines) if t == "            self.result.set_fatal()"][1],
+        "done": first('        log("done")'),
+        "registered": first('            log("registered")'),
+    }
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import field_order as FO, mapdump
+        from bamboo.querier import sources as SR
+
+        F = "pandaserver/g4.py"
+        LN = {ln!r}
+        call = lambda to, line: N(to=f"{{F}}::{{to}}", lines=[line], line=line, thread=False)
+        reach = [
+            N(owner=f"{{F}}::Gen.run", calls=[call("Plugin.execute", LN["execute"])], holes=[]),
+            N(owner=f"{{F}}::Plugin.execute", calls=[call("Plugin.update", LN["update"])], holes=[]),
+            N(owner=f"{{F}}::Plugin.update", calls=[], holes=[]),
+        ]
+        change = lambda line, *via: N(at=f"{{F}}:{{LN[line]}}", kind="inner", key=".result", what="",
+                                      via=[f"{{F}}:{{LN[v]}}" for v in via])
+        ff = N(owner=f"{{F}}::Gen", field="plugin", stops=[],
+               bindings=[N(at=f"{{F}}:{{LN['bind']}}", owner=f"{{F}}::run", how="assign", sources=[], stops=[])],
+               changes=[change("bad", "execute"), change("ok", "execute", "update"),
+                        change("failed", "execute", "update")])
+        mapdump._FRAGMENT[:] = [N(field_froms=[ff], entered_froms=[], parameter_froms=[], handler_marks=[],
+                                  reach_graph=reach)]
+        for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+            cached.cache_clear()
+        got = {{}}
+        read = []
+
+        def pick(name, prints):
+            def narrowing(self, node, owner):
+                read.append(owner)
+                if node.name not in prints:
+                    return [], None
+                return [FO.R.statement_at(node, ln) for ln in prints[node.name]], []
+            FO._Path._narrowing = narrowing
+            read.clear()
+            c = FO.choose(ff, F, LN["read"], None, "map", frozenset({{"result"}}))
+            got[name] = [[x.at.rpartition(":")[2] for x in c.changes],
+                         [[at.rpartition(":")[2], why] for at, why in c.dropped], len(read) == len(set(read))]
+
+        pick("no prints", {{}})
+        pick("printed", {{"execute": [LN["done"]], "update": [LN["registered"]]}})
+        # update called twice in the run's window: its prints narrow nothing
+        pick("update twice", {{"execute": [LN["done"]]}})
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    L = {k: str(v) for k, v in ln.items()}
+    # without prints every change placed at the call of execute that ran is between
+    assert got["no prints"] == [[L["bad"], L["ok"], L["failed"]], [], True]
+    # execute printed "done": its early return's set_fatal did not run; update printed "registered" and entered no
+    # handler: its handler's set_fatal did not run; each function's prints read once
+    assert got["printed"] == [[L["ok"]], [[L["bad"], "not-run"], [L["failed"], "not-run"]], True]
+    assert got["update twice"] == [[L["ok"], L["failed"]], [[L["bad"], "not-run"]], True]
+
+
+_GEN3 = """
+class Gen:
+    def __init__(self, status):
+        self.status = status
+
+    def run(self):
+        self.report()
+
+    def report(self):
+        if self.status == "x":
+            fail()
+
+
+def thread_run():
+    gen = Gen(pop())
+    gen.run()
+
+
+def thread_again(fresh):
+    if fresh:
+        gen = Gen(pop())
+    else:
+        gen = Gen(peek())
+    gen.run()
+
+
+def api(status):
+    gen = Gen(status)
+    gen.dump()
+
+
+class Holder:
+    def go(self):
+        self.gen = Gen(pop())
+        self.gen.run()
+"""
+
+
+def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_function_by(tmp_path):
+    # AdderGen.__init__'s attempt_nr (out/gm/s4b-site.md): the path built the object at add_main 136, so pilot_api 700's
+    # ways in are left out; where the path entered at two calls both are read; under (c) or an open path, every caller's
+    # (e); the call that built the object read, by the map's records, open path or not (e2)
+    (_corpus(tmp_path) / "pandaserver" / "g3.py").write_text(_GEN3)
+    lines = _GEN3.splitlines()
+
+    def one(t, k=0):
+        return [i + 1 for i, x in enumerate(lines) if x == t][k]
+
+    L = {"bind": one("        self.status = status"), "read": one('        if self.status == "x":'),
+         "report": one("        self.report()"), "pop": one("    gen = Gen(pop())"), "run1": one("    gen.run()"),
+         "again_pop": one("        gen = Gen(pop())"), "again_peek": one("        gen = Gen(peek())"),
+         "run2": one("    gen.run()", 1), "api": one("    gen = Gen(status)"), "def": one("    def __init__(self, status):"),
+         "go_build": one("        self.gen = Gen(pop())"), "go_run": one("        self.gen.run()")}
+    out = _ok(_run(tmp_path, f"""
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import field_order as FO, mapdump, rerun
+        from bamboo.querier import sources as SR
+
+        F = "pandaserver/g3.py"
+        L = {L!r}
+        G, INIT, API = f"{{F}}::Gen", f"{{F}}::__init__", f"{{F}}::api"
+        at = lambda k: f"{{F}}:{{L[k]}}"
+        call = lambda to, k: N(to=f"{{F}}::{{to}}", lines=[L[k]], line=L[k], thread=False)
+        src = lambda kind, name, k, owner="": N(kind=kind, name=name, line=L[k], route=[at(k)], site_owner=owner,
+                                                 steps=[], paths=[], through=[], changes=[])
+        ffs = [N(owner=G, field="status", changes=[], stops=[], bindings=[
+            N(at=at("bind"), owner=INIT, how="assign", stops=[], sources=[
+                N(kind="parameter", name="status", line=L["def"], route=[], site_owner=INIT, steps=[], paths=[],
+                  through=[], changes=[])])])]
+        pfs = [N(owner=INIT, parameter="status", line=L["def"], stops=[], sources=[
+                   src("call", "pop", "pop"), src("call", "pop", "again_pop"), src("call", "peek", "again_peek"),
+                   src("parameter", "status", "api", API), src("call", "pop", "go_build")]),
+               N(owner=API, parameter="status", line=L["api"] - 1, sources=[], stops=[N(kind="no_caller")])]
+
+        def reach(callers, holes=()):
+            return [N(owner=f"{{F}}::Gen.run", calls=[call("Gen.report", "report")], holes=[],
+                      call_bindings=[N(line=L["report"], to=f"{{F}}::Gen.report", parameter="self", path="self")]),
+                    N(owner=f"{{F}}::Gen.report", calls=[], holes=list(holes)),
+                    N(owner=f"{{F}}::Gen.__init__", calls=[], holes=[]),
+                    N(owner=API, calls=[call("Gen.__init__", "api")], holes=[]), *callers]
+
+        choose = lambda ff, rel, line, keys, of_self: FO.choose(ff, rel, line, None, "map", keys, of_self)
+        got = {{}}
+
+        def pick(name, graph, of_self=False):
+            mapdump._FRAGMENT[:] = [N(field_froms=ffs, entered_froms=[], parameter_froms=pfs, handler_marks=[],
+                                      reach_graph=graph)]
+            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+                cached.cache_clear()
+            c = choose(SR._field_froms()[(G, "status")], F, L["read"], None, of_self)
+            ways = SR.field_ways(G, "status", choose=choose, at=(F, L["read"]), of_self=of_self)
+            got[name] = {{"taken": [b.at for b in c.bindings], "entered": [[b, list(s)] for b, s in c.entered],
+                          "ways": [[w.why, w.of, list(w.entered)] for w in ways],
+                          "param": [[w.end, w.why, list(w.route)] for w in SR.param_ways(INIT, "status", entered=ways[0].entered)],
+                          "off": SR.calls_off_the_path(INIT, "status", ways[0].entered)}}
+
+        thread_run = lambda *c: N(owner=f"{{F}}::thread_run", calls=list(c), holes=[])
+        pick("one call", reach([thread_run(call("Gen.__init__", "pop"), call("Gen.run", "run1"))]))
+        pick("two calls", reach([N(owner=f"{{F}}::thread_again", holes=[], calls=[
+            N(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"], thread=False),
+            call("Gen.run", "run2")])]))
+        # nothing the map holds calls run: the chain stops before the object is built, __init__ is placed first (c)
+        pick("(c)", reach([thread_run(call("Gen.__init__", "pop"))]))
+        pick("open", reach([thread_run(call("Gen.__init__", "pop"), call("Gen.run", "run1"))],
+                           holes=[N(line=1, callee="x()", why="unplaced", for_classes=[])]))
+
+        # (e2): a call in the caller may go anywhere; the object run is its local, what Gen(...) returned
+        hole = [N(line=1, callee="lock()", why="unplaced", for_classes=[])]
+        built = lambda k, how="result": N(line=L[k], name="gen", path="" if how == "result" else "other", how=how,
+                                          to=[f"{{F}}::Gen.__init__"] if how == "result" else [])
+        hands = lambda k, path="gen": N(line=L[k], to=f"{{F}}::Gen.run", parameter="self", path=path)
+        local = N(owner=f"{{F}}::thread_run", holes=hole, calls=[call("Gen.__init__", "pop"), call("Gen.run", "run1")],
+                  bindings=[built("pop")], call_bindings=[hands("run1")])
+        pick("built, open", reach([local]), of_self=True)
+        pick("built, not self's", reach([local]), of_self=False)
+        again = lambda how: N(owner=f"{{F}}::thread_again", holes=hole, calls=[
+            N(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"], thread=False),
+            call("Gen.run", "run2")], bindings=[built("again_pop"), built("again_peek", how)], call_bindings=[hands("run2")])
+        pick("built twice", reach([again("result")]), of_self=True)
+        pick("built and an alias", reach([again("alias")]), of_self=True)
+        # the object run is held in a field: not told, the path is open
+        held = lambda holes: N(owner=f"{{F}}::Holder.go", holes=holes, calls=[call("Gen.__init__", "go_build"), call("Gen.run", "go_run")],
+                               bindings=[], call_bindings=[hands("go_run", "self.gen")])
+        pick("a field's, open", reach([held(hole)]), of_self=True)
+        pick("a field's", reach([held([])]), of_self=True)
+
+        # the parameter's end on the arm's read: a call left out is not asked of its caller's logs
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner=INIT, parameter="status", line=L["def"], stops=[], sources=[
+                N(kind="constant", name="'failed'", route=["pandaserver/a.py:10"], site_owner="", paths=[]),
+                N(kind="constant", name="'finished'", route=["pandaserver/a.py:20"], site_owner="", paths=[])])],
+            entered_froms=[])]
+        SR._calls_in.cache_clear()
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+
+        def shown(site, window, machine, why=""):
+            assert site == "pandaserver/a.py:20", site
+            return True
+
+        r._call_shown = shown
+        t = SR.Term("g", "self.status", (SR.End("self.status", SR.STOP, SR.PARAMETER, at("bind"), param="status", of=INIT,
+                                                  entered=("pandaserver/a.py:20",)),))
+        end = r._with_callers(t, "the arm's function", f"{{F}}::Gen.report", N(machine="m1"), ("a", "b")).ends[0]
+        got["end"] = [end.end, end.why, end.at, r.lines]
+        # the one way left is where it ends: what a call outside the corpus returned, by the call that built it
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner=INIT, parameter="code", line=L["def"], stops=[], sources=[
+                N(kind="constant", name="'failed'", route=["pandaserver/a.py:10"], site_owner="", paths=[]),
+                N(kind="call", name="pop", route=["pandaserver/a.py:20"], site_owner="", paths=[])])],
+            entered_froms=[])]
+        SR._calls_in.cache_clear()
+        t = SR.Term("g", "self.code", (SR.End("self.code", SR.STOP, SR.PARAMETER, at("bind"), param="code", of=INIT,
+                                                via=(at("bind"),), entered=("pandaserver/a.py:20",)),))
+        end = r._with_callers(t, "the arm's function", f"{{F}}::Gen.report", N(machine="m1"), ("a", "b")).ends[0]
+        got["one left"] = [end.end, end.why, end.at, list(end.via)]
+        # two constants left, both by one call: its caller's run cannot tell them apart and is not asked (shown raises)
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[
+            N(owner=INIT, parameter="flag", line=L["def"], stops=[], sources=[
+                N(kind="constant", name="False", route=["pandaserver/a.py:30"], site_owner="", paths=[]),
+                N(kind="constant", name="True", route=["pandaserver/a.py:30"], site_owner="", paths=[])])],
+            entered_froms=[])]
+        SR._calls_in.cache_clear()
+        r.lines = []
+        t = SR.Term("g", "self.flag", (SR.End("self.flag", SR.STOP, SR.PARAMETER, at("bind"), param="flag", of=INIT),))
+        end = r._with_callers(t, "the arm's function", f"{{F}}::Gen.report", N(machine="m1"), ("a", "b")).ends[0]
+        got["same call"] = [end.end, end.why, r.lines]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    F = "pandaserver/g3.py"
+    at = {k: f"{F}:{v}" for k, v in L.items()}
+    # the path built the object at thread_run's call: only the way in by it is read
+    assert got["one call"]["taken"] == [at["bind"]]
+    assert got["one call"]["entered"] == [[at["bind"], [at["pop"]]]]
+    assert got["one call"]["ways"] == [["parameter", f"{F}::__init__", [at["pop"]]]]
+    assert got["one call"]["param"] == [["stop", "call", [at["pop"]]]]
+    assert got["one call"]["off"] == [at["again_pop"], at["again_peek"], at["api"], at["go_build"]]
+    # entered at either of two calls: both are read
+    assert got["two calls"]["entered"] == [[at["bind"], sorted([at["again_pop"], at["again_peek"]])]]
+    assert got["two calls"]["param"] == [["stop", "call", [at["again_pop"]]], ["stop", "call", [at["again_peek"]]]]
+    assert got["two calls"]["off"] == [at["pop"], at["api"], at["go_build"]]
+    # (c) and an open path tell no call: every caller's way is read; so does a field's object on an open path, and a
+    # local one binding of which reaching the call is not what Gen(...) returned
+    for name in ("(c)", "open", "built, not self's", "built and an alias", "a field's, open"):
+        assert got[name]["taken"] == [at["bind"]], name
+        assert got[name]["entered"] == [] and got[name]["off"] == [], name
+        assert [w[0] for w in got[name]["param"]] == ["stop", "stop", "stop", "api", "stop"], name
+    # (e2) the object read was built at the call whose result the caller's local holds, a call there open or not
+    assert got["built, open"]["entered"] == [[at["bind"], [at["pop"]]]]
+    assert got["built, open"]["param"] == [["stop", "call", [at["pop"]]]]
+    assert got["built, open"]["off"] == [at["again_pop"], at["again_peek"], at["api"], at["go_build"]]
+    assert got["built twice"]["entered"] == [[at["bind"], sorted([at["again_pop"], at["again_peek"]])]]
+    # a field's object on a path with no hole: (e)'s call the path entered __init__ by
+    assert got["a field's"]["entered"] == [[at["bind"], [at["go_build"]]]]
+    assert got["end"][:3] == ["constant", "'finished'", "pandaserver/a.py:20"]
+    assert "left out: 1 by pandaserver/a.py:10" in got["end"][3][0]
+    assert got["one left"] == ["stop", "call", "pandaserver/a.py:20", [at["bind"]]]
+    assert got["same call"][:2] == ["stop", "parameter-unchosen"]
+    assert "all come by pandaserver/a.py:30: its caller's run not asked" in got["same call"][2][0]

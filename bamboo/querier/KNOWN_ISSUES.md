@@ -828,7 +828,7 @@ one writer of a value that is its time), the call it is read at for a writer tha
 row whose pass wrote it (none for a value held or a value that is its time), the window asked and the run, and H3 ends
 there (END) where the arm has no guard or every guard holds in the run's values -- or, for an arm its run shows ran,
 where none is read false (K54).  A condition read false, or not read for an arm no run shows ran, is named in H3's
-stop; a guard read through a method goes on to H4 as for a status, whose steps say why the arm ran, not when.
+stop; a guard read through a call is read as any other (K74).
 Before, an attribute went on as a status does and stopped at H3 "a method the guard reads through" for an arm with no
 guard: 12 of the 14 attribute cases H2 answered on the harness's round-2 snapshot.
 
@@ -851,9 +851,8 @@ object's life <t>" (result.json's possibility rows carry `f3`: made, run, span o
 <subject> on a history row of the object, a birth or marking its runs by the object's key ... (k of n not: K37)",
 "the object's life, to ask <arms> over: <why>", "when the row was made, for the birth <arm> ...", "a writer of
 <subject> in the map", or at H3 "the values its guard reads at its run (its conditions: '<condition>' read false |
-not read)" (a guard through no method; one over a column the rows file holds is read there, K49), "a method the guard
-reads through (...)" (one through a method, read on at H4) or "a run that shows <arm> ran, to read its guards in (by
-elimination; its conditions: ...)".  A status's arm its run shows ran stops, through no method, at "where the values
+not read)" (one over a column the rows file holds is read there, K49) or "a run that shows <arm> ran, to read its
+guards in (by elimination; its conditions: ...)".  A status's arm its run shows ran stops at "where the values
 its guards held on come from, its run showing it ran (...)" (K54; "the values its guard reads at its run" for one no
 run of its own shows), and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'"
 (both "a method the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
@@ -946,7 +945,9 @@ word); and with the map's B and C (map_todo MV).
 
 ### K11. After H4 the next question is always H5, the traceback
 
-`Rerun.set_by` returns `Raised` only.  A call H4 chose that does not fail by an exception has no other
+*Retired with H4 (K74):* no step leads to H5 now.
+
+`Rerun.set_by` returned `Raised` only.  A call H4 chose that does not fail by an exception has no other
 way on.
 
 *Shows:* a stop at H5 ("a traceback through <function> in the run").
@@ -1017,12 +1018,11 @@ H2's positive (a row printed only on a path through the site, P's proof, or P re
 site ran in the pass, so its path condition held there.  H3 takes that for a guard the run's values leave unread
 (`Rerun.wrote_by`, design D1's G, out/after-q/d1s-design.md; tmaeno: "C2", 11-03 17:30).  It is not taken:
 - for a stand-in (K25), whose run is its caller's and shows the caller's call, not the arm;
-- where a guard reads false: the value decides, as before (K37: an older row, or excluded);
-- where a guard reads through a method: H4 reads which call set it, saying why the arm ran.
+- where a guard reads false: the value decides, as before (K37: an older row, or excluded).
+A guard read through a call is read as any other (K74; before, it went on to H4).
 
 An attribute then ends at H3 (K37): "its guards hold as its run shows it ran (...)".  A status does not: what it asks
-is why the arm ran, and that is where the values its guards held on came from.  Where none is a method, H3 stops on
-it, each guard with the values its run printed (V, `Rerun._held_on`, `changed.printed_at`):
+is why the arm ran, and that is where the values its guards held on came from.  H3 stops on it, each guard with the values its run printed (V, `Rerun._held_on`, `changed.printed_at`):
 - a hole of the term, or `str()` of it, at a row before the guard's `if` or after it, nothing between able to change
   it (`changed.holds`, R's rule (ii));
 - or a hole of a chain one assignment after the `if` binds to the term, the term holding up to it and the chain from
@@ -1523,7 +1523,7 @@ branches' guards as the map writes them and goes on from an exit's `if` by its l
   open.  A writer read on its caller's run whose exit is unread may have written: extractCommon:501's `not (workQueue
   is None)` (MR-T resource_type).
 - An exit that reads a method the evaluator does not run goes to H4: setupper:1105's `job.isCancelled()`
-  (MF-7398155528), which H4 finds no call setting.
+  (MF-7398155528), which H4 finds no call setting.  (Since K74 it is read as any other term.)
 
 Measured as ex1 (this on codemap-xxiv bf88f71 + K60, dump x13xxivXm) against the same tree without it (xb1):
 - No run crashed.  The case outcomes: END 100 -> 100 (one-of 61 -> 63, plain 39 -> 37), U3's K56 stop 5 -> 4, H3's
@@ -2188,6 +2188,61 @@ in the run); the tests from H down to A hold: '<test>' True ({...}) ...".
 not cut, K47) -- a reading splitting a run into calls, or the map's capture of 840; the key's turn of a loop (P1's
 turn) as the unit; a handler covered only with its marking calls (the DB proxy retry idiom: `retry : {iTry}` on the
 way that continues).
+
+### K74. A guard's call is read as any other term; H4 (which call set it) is retired
+
+H4 took a guard reading through a method with no arguments whose value the values left unknown, found the one class
+in the corpus defining the method (census.py, by name, the test modules too), the methods assigning what it reads on
+`self` and the calls of them on objects held as `self.<holder> = CLASS()`, and judged those calls.  It was built for
+`AdderResult.is_succeeded` at adder_gen 440 (case A, October).  Since then only two methods reached it, both with 0
+sites: `self._commit()` (killJob 888 in 11 m-gaps walks; it returns the database's answer to the commit, which no
+call sets, and the map's Runnable says `database` at base_module 194) and `job.isCancelled()` (setupper 1105,
+MF-7398155528; a function of `self.jobStatus`, which is assigned directly, not by a method).  A guard reads through
+three kinds of call: a state its mutator calls set, a function of the object's fields, or an action's result.  H4
+read the first alone, and the first is the second with the field's writers.
+
+Now (stage 1a of out/gm/gm-design.md, tmaeno "OK" 11-10): H3 reads a call in a guard as any term.  Where the run
+shows the arm ran, it held (K54's G), for an attribute and a status alike; a status's arm goes on to the values its
+guards held on.  census.py, `SetBy`, `Rerun.set_by` and H3's `through()` are gone, and so is the record `_guard_at`
+handed H4.  outbound.py lists the corpus by the map's rule (`calls.is_test_module`); census.py had read the test
+modules as well, so `_commit` was "3 classes" for two stand-ins in pandaserver/workflow/tests.  The call's value is
+to be read by the map's Runnable (stage 1b, in place of evaluate.PURE), and where a status's guard values came from by
+S (stage 2).
+
+*Shows:* no step leads to H5 (`Raised`) and the chain after it (H6-H10, R1-R5): they wait for S's end at an
+exception (on pin m 53 junction arms write inside an except handler, and 307 have a guard whose name is bound inside
+one).  The 12 live walks H4 stopped stop at H3's values held on.  An attribute's arm shown to run whose guard reads
+through a call ends at H3 (none in the live sets).
+*Revisit:* at stage 2's exception end; if it does not enter H5, remove H5-R5 then.
+
+### K75. A change on a term's way is chosen by its run (S4c) on four premises the walk does not read
+
+S4c (the analyzer handover's out/gm/gm5-design.md, tmaeno "OK" 11-10) reads the changes the map says may be made to a
+term's value between where its way ends and the read: it keeps those that change what the test takes off the value
+(scope 2), drops a store whose literal is not what the run printed (V) and a change whose calls or statement the run
+shows did not run (H2), and reads the one left as an arm.  Case A's `self.add_result` goes to `set_fatal` at
+adder_atlas_plugin 789 and stops at `is_fatal`, bound in the handlers at 756 and 763 (S3).  Four premises are not read:
+
+- *What a method reads of its receiver is the map's Runnable `reads`*, and those are the definition's own statements'
+  (runnable.py `_Judge.of`), not those of the definitions it calls.  On pin m 38 of 102 runnable records would read
+  more (the map's RTC census); 28 of them (`JediTaskSpec.useBuild` and 19 more through `check_split_rule`,
+  `JobSpec.isScoutJob` and 7 more through `check_special_handling`) read `[]` today, so a test calling one on a term
+  takes nothing off it and every change of the term is dropped as not read.  No live walk reads a term through one of
+  the 38 (gm4p's 273 files).
+- *A change chosen by elimination made the printed value*, not the way's end: what the end itself holds of the part is
+  not read (case A's `AdderResult()` leaves `status_code` None, read by eye).  A change only kept is chosen only where
+  V matched its stored literal to a print.
+- *A local bound to two constants in two arms ends* where its ways do (register_files' `is_failed`: False at 743, True
+  at 759); which arm bound it is not read.
+- *The if that tells apart the constants one call hands a parameter* (S2's (a), `Rerun._split`) is read by the map's
+  GuardFrom at its test, and the map makes none for a test that guards only a binding: add_main 127, which tells
+  `ignoreTmpError`'s False (130) from its True (134), stops at no-record.
+
+An arm read on no run (an attribute's, with no window) is not read by S4c: its changes stay on the way, named.
+*Shows:* where one of the first three fails, a change dropped or chosen, or a term ended, wrongly; where the last
+does, a stop at the if's test (no-record).
+*Revisit:* the first on the map's RTC (callees' reads carried); the last on its SBG (a GuardFrom for a test on the way
+to a source's binding); the other two when a walk meets them.
 
 ### K47. A candidate is read on its function's pass that holds the key at the window, not on a run that spans it
 
