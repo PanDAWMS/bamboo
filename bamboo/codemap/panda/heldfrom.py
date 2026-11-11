@@ -833,6 +833,11 @@ class _Reader:
         line = getattr(expr, "lineno", None)
         if isinstance(expr, ast.Name):
             return self._name(expr, at, file, func)
+        # A literal is read by its elements before the carry is asked whether it is rows: ``return retVal, retMsg``,
+        # whose ``retMsg`` holds a row's value, holds ``retVal`` too.
+        placed = self._placed(expr, at, file, func)
+        if placed is not None:
+            return placed
         rows = self._rows(expr, at, file, func)
         if rows:
             return rows
@@ -872,9 +877,6 @@ class _Reader:
                 else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
                 for one in self.read(element, element, file, func)
             ]
-        placed = self._placed(expr, at, file, func)
-        if placed is not None:
-            return placed
         if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
             return self._added(_added_sides(expr), at, f"{file}:{line}", file, func)
         found = self._sources(expr, at, file, func)

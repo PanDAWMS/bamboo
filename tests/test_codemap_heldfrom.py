@@ -917,6 +917,88 @@ def test_a_walrus_is_its_value_where_its_own_test_reads_it_and_after(
     assert ways("T4", "m") == {("call", "f.other", (), at("T3"))}
 
 
+MERGE = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+RETURNED = {
+    BASE: """\
+        from pandaserver.taskbuffer.db_proxy_mods.job_module import JobModule
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, pandaID):
+                isValid, tmpMsg = JobModule().viaName(pandaID)
+                if isValid is False:  # T1
+                    self.a = 1  # R1
+                pair = JobModule().isValidMergeJob(pandaID)
+                if pair:  # T2
+                    self.a = 2  # R2
+        """,
+    MERGE: """\
+        class JobModule:
+            def isValidMergeJob(self, pandaIDs):
+                try:
+                    retVal = True  # V1
+                    retMsg = ""  # M1
+                    sqlC = "SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+                    for tmpPandaID in pandaIDs:
+                        varMap = {}
+                        varMap[":PandaID"] = tmpPandaID
+                        self.cur.execute(sqlC, varMap)
+                        resC = self.cur.fetchone()
+                        if resC[0] != "merging":
+                            retVal = False  # V2
+                            retMsg = resC[0]  # M2
+                            break
+                    return retVal, retMsg
+                except Exception:
+                    return None, ""  # E1
+
+            def viaName(self, pandaIDs):
+                ret = self.isValidMergeJob(pandaIDs)
+                return ret
+        """,
+}
+
+
+def test_a_returned_tuple_holding_a_row_s_value_holds_its_other_elements_too(
+    tmp_path: Path,
+) -> None:
+    """``isValid, tmpMsg = taskBuffer.isValidMergeJob(pandaID, jediTaskID)`` in ``copyArchive.main``: the proxy's
+    ``return retVal, retMsg``, handed back through ``TaskBuffer``'s ``ret``, holds ``retVal``'s ``True`` and
+    ``False`` at ``[0]`` though ``retMsg`` holds a row's value -- a literal is read by its elements before the carry
+    is asked whether it is rows, which once took the tuple whole for the row and left only the handler's ``None``."""
+    fragment = _build(
+        tmp_path, RETURNED, (("extractCommon", "R1"), ("extractCommon", "R2"))
+    )
+
+    def ways(marker: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.owner.startswith(f"{BASE}::")
+            and one.test_line == _line(BASE, marker, RETURNED)
+        ]
+        return {(one.kind, one.name, tuple(one.at)) for one in guard.sources}
+
+    def at(*markers: str) -> tuple[str, ...]:
+        return tuple(f"{MERGE}:{_line(MERGE, marker, RETURNED)}" for marker in markers)
+
+    assert ways("T1") == {
+        ("constant", "True", at("V1")),
+        ("constant", "False", at("V2")),
+        ("constant", "None", at("E1")),
+    }
+    assert {(kind, name) for kind, name, _at in ways("T2")} >= {
+        ("constant", "True"),
+        ("constant", "False"),
+        ("constant", "''"),
+        ("constant", "None"),
+    }
+    assert "rows" in {kind for kind, _name, _at in ways("T2")}
+
+
 UNBOUND = {
     BASE: """\
         SETTING = None
