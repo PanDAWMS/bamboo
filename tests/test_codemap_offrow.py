@@ -63,6 +63,11 @@ class DBProxy:
         job.specialHandling = handling  # O1
         return job.is_debug()
 
+    def raw(self, handling):
+        job = JobSpec()
+        job.specialHandling = handling  # O_RAW
+        return object.__getattribute__(job, "PandaID")
+
     def carry(self, panda_id):
         job = JobSpec()
         job.PandaID = panda_id  # O2
@@ -386,3 +391,13 @@ def test_a_reader_of_the_rows_value_skips_an_arm_off_its_row() -> None:
         [junction], reach.ReachGraph([]), junction.subject, "y"
     )
     assert destination.arms == {}
+
+
+def test_a_spec_whose_attribute_is_read_past_its_getattribute_is_written_to_no_row(
+    tmp_path: Path,
+) -> None:
+    """``object.__getattribute__(job, "PandaID")`` (``addFile`` since panda-server #866) reads the attribute off the
+    job, as ``getattr`` does: not a call the job is handed to and lost in."""
+    fragment = _build(tmp_path, [("DBProxy.raw", "O_RAW", "JobSpec.specialHandling")])
+    raw = _off(fragment, "O_RAW")
+    assert raw is not None and raw.why == OFF_ROW_NO_WRITE

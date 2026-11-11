@@ -10934,8 +10934,8 @@ _RETRY_TESTING = "class Retry:\n    def retryTask(self, t):\n        if t:\n    
 )
 def test_a_library_object_keeps_what_its_method_is_handed(tmp_path, declared, crosses):
     """add_main's ``jor_lists = WeightedLists(lock)`` then ``jor_lists.add(3, jor_list)``: pandacommon's
-    ``WeightedLists.add(weight, list_data)`` is no builtin's, and nothing says what it does with the rows, so the
-    object keeps them, whole (:mod:`callfacts`).  It is a class's object because the corpus declares a parameter
+    ``WeightedLists.add(weight, list_data)`` is no builtin's; callfacts states that it puts the rows of list_data in
+    the object (``LIBRARY_METHODS``).  It is a class's object because the corpus declares a parameter
     ``WeightedLists`` somewhere; where nothing does, the call reads as ``set.add`` by its name, which puts the 3."""
     source = _sweeping(
         "        lists = WeightedLists(lock)\n"

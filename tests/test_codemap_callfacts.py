@@ -78,7 +78,7 @@ def test_what_a_call_puts_is_its_arguments_where_the_method_puts_them(name, text
 @pytest.mark.parametrize(
     ("name", "type_name", "expected"),
     [
-        ("get", "dict", callfacts.Give(callfacts.AT, 0, 1)),
+        ("get", "dict", callfacts.Give(callfacts.AT, 0, 1, True)),
         ("pop", "list", callfacts.Give(callfacts.AT, 0)),
         ("pop", None, callfacts.Give(callfacts.AT, 0, 1)),
         ("popleft", None, callfacts.Give(callfacts.AT)),
@@ -86,7 +86,7 @@ def test_what_a_call_puts_is_its_arguments_where_the_method_puts_them(name, text
         ("items", "dict", callfacts.Give(callfacts.ITEMS)),
         ("keys", None, callfacts.Give(callfacts.KEYS)),
         ("copy", "set", callfacts.Give(callfacts.SELF)),
-        ("get", "list", callfacts.Give(callfacts.AT, 0, 1)),
+        ("get", "list", callfacts.Give(callfacts.AT, 0, 1, True)),
         ("append", "list", None),
     ],
     ids=[
@@ -104,8 +104,9 @@ def test_what_a_call_puts_is_its_arguments_where_the_method_puts_them(name, text
 )
 def test_what_a_method_hands_back_of_its_receiver_is_said_once(name, type_name, expected):
     """By its type where the reader knows it and the type has the method, by the name for every type having it
-    otherwise: ``pop`` is one of what it holds for each, at the key a dict's is handed, with a default beside it; a
-    receiver read as a list and handed ``get`` takes the name's."""
+    otherwise: ``pop`` is one of what it holds for each, at the key a dict's is handed, with a default beside it;
+    ``get`` with no default hands back None where the key is missing; a receiver read as a list and handed ``get``
+    takes the name's."""
     assert callfacts.taken(name, type_name) == expected
     assert ({name} <= callfacts.TAKING) is (expected is not None)
 
@@ -251,7 +252,7 @@ _MODULE = (
     "from pandacommon.pandamsgbkr import msg_processor\n"
     "from pandacommon.pandalogger.LogWrapper import LogWrapper\n"
     "from pandacommon.pandautils.base import SpecBase\n"
-    "from pandacommon.pandautils.thread_utils import WeightedLists\n\n\n"
+    "from pandacommon.pandautils.thread_utils import LockPool, WeightedLists\n\n\n"
     "class Taker:\n"
     "    def append(self, x):\n"
     "        pass\n\n\n"
@@ -263,7 +264,7 @@ _MODULE = (
     "    pass\n\n\n"
     "class Agent(msg_processor.MsgProcAgentBase):\n"
     "    pass\n\n\n"
-    "def declares(lists: WeightedLists, log: LogWrapper, rucio: RucioClient) -> None:\n"
+    "def declares(lists: WeightedLists, pool: LockPool | None, log: LogWrapper, rucio: RucioClient) -> None:\n"
     "    pass\n\n\n"
     "def fills(d, v):\n"
     "    d['k'] = v\n\n\n"
@@ -272,6 +273,8 @@ _MODULE = (
     "    plain.append(v)\n"
     "    lists = WeightedLists(lock)\n"
     "    lists.add(3, v)\n"
+    "    pool = LockPool()\n"
+    "    pool.get(v)\n"
     "    log = LogWrapper(lock)\n"
     "    log.debug(v)\n"
     "    loaded = json.loads(text)\n"
@@ -302,7 +305,8 @@ _MODULE = (
     ("callee", "kind", "assumption"),
     [
         ("plain.append", callfacts.BUILTIN, None),
-        ("lists.add", callfacts.LIBRARY, "library_keeps_what_it_is_handed"),
+        ("lists.add", callfacts.LIBRARY, None),
+        ("pool.get", callfacts.LIBRARY, "library_keeps_what_it_is_handed"),
         ("log.debug", callfacts.LOGGER, "logger_keeps_nothing"),
         ("rucio.add_files_to_dataset", callfacts.CLIENT, "other_systems_keep_nothing"),
         ("mailer.sendmail", callfacts.CLIENT, "other_systems_keep_nothing"),
@@ -317,7 +321,8 @@ _MODULE = (
     ],
     ids=[
         "a-builtin-container",
-        "a-library-class-the-corpus-annotates",
+        "a-library-class-s-method-callfacts-states",
+        "a-library-class-s-method-nothing-states",
         "a-logger-s-method-of-a-library-class",
         "another-system-s-client",
         "a-base-another-system-s-client",
@@ -336,7 +341,8 @@ def test_a_call_is_read_in_one_order(tmp_path, callee, kind, assumption):
     ``Client``, a class built on ``smtplib.SMTP`` or on ``msg_processor.MsgProcAgentBase``) keeping nothing, a library
     object, a builtin container, the builtin of the name where the class cannot be said: ``WeightedLists(lock)`` is
     a library class's object because the corpus declares a parameter so -- ``json.loads(text)`` reads the same and is
-    not."""
+    not.  A library object's method is what callfacts states of it (``WeightedLists.add``), else it keeps all it is
+    handed (``LockPool.get``), an assumption."""
     calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=_MODULE), {}))
     file = f"{PACKAGE}/mod.py"
     func = next(
@@ -691,3 +697,28 @@ def test_what_the_run_read_is_told_apart_as_the_time_a_draw_or_the_machine():
     for same in ("time.strptime", "uuid.uuid5", "uuid.UUID"):
         assert callfacts.run_dependent(same) == "" and callfacts.listed(same, callfacts.RUNS_ALIKE), same
     assert callfacts.run_dependent("time.sleep") == "" and not callfacts.listed("time.sleep", callfacts.RUNS_ALIKE)
+
+
+_OBJECT_GETATTRIBUTE = '''\
+def reads(job):
+    return object.__getattribute__(job, "PandaID")
+
+
+def shadowed(job, object):
+    return object.__getattribute__(job, "PandaID")
+'''
+
+
+def test_object_getattribute_on_the_class_is_read_as_getattr_where_object_is_the_builtin(tmp_path):
+    """``object.__getattribute__(job, "PandaID")`` (a spec's ``addFile``) takes an attribute off what it is handed, as
+    ``getattr`` does; with ``object`` a parameter it is that object's method, not said."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_OBJECT_GETATTRIBUTE), {})
+    file = f"{PACKAGE}/mod.py"
+    for name, expected in (("reads", callfacts.ATTRIBUTE), ("shadowed", None)):
+        func = next(
+            node for node in ast.walk(types.tree(file)) if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        call = next(node for node in ast.walk(func) if isinstance(node, ast.Call))
+        function = callfacts.builtin_function(types, file, func, call)
+        assert (function.gives if function is not None else None) == expected
+        assert callfacts.builtin_function_at(call) == function

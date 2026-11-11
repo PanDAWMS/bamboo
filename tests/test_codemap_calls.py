@@ -934,6 +934,46 @@ def test_a_spread_argument_leaves_what_it_could_fill_unsaid(tmp_path):
     assert calls_mod.bind(call, target) == {"a": None, "b": None}
 
 
+def test_a_kwargs_parameter_holds_the_keywords_no_named_parameter_takes(tmp_path):
+    """``self.adder_plugin_class(self.job, taskBuffer=..., logger=...)`` into ``__init__(self, job, **params)``:
+    ``params`` holds a dict of the keywords, its keys constant, one node per call and function, at the call and in it;
+    empty where there are none, unknown where the call spreads a ``**``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def g(a, *, b=1, **rest):
+    return rest
+
+def named(x):
+    g(1, b=2, c=x, d="y")
+
+def plain():
+    g(2)
+
+def spread(more):
+    g(3, **more)
+''',
+    )
+    calls = _calls(roots)
+
+    def bound(owner):
+        func = _function(calls, "m", owner)
+        call = _call_in(func, "g")
+        (target,) = calls.callees("pkg/m.py", func, call).targets
+        return call, target, calls_mod.bind(call, target)
+
+    call, target, got = bound("named")
+    rest = got["rest"]
+    assert isinstance(rest, ast.Dict)
+    assert ast.unparse(rest) == "{'c': x, 'd': 'y'}"
+    assert (ast.unparse(got["a"]), ast.unparse(got["b"])) == ("1", "2")
+    assert rest.parent is call  # type: ignore[attr-defined]
+    assert (rest.lineno, rest.col_offset) == (call.lineno, call.col_offset)
+    assert calls_mod.bind(call, target)["rest"] is rest
+    assert ast.unparse(bound("plain")[2]["rest"]) == "{}"
+    assert bound("spread")[2]["rest"] is None
+
+
 def test_what_a_function_returns_is_every_return_in_its_own_body(tmp_path):
     roots = _tree(
         tmp_path,

@@ -18,8 +18,10 @@ one order:
    input, and keeps nothing of it (:data:`CLIENT`, the assumption ``other_systems_keep_nothing``) -- Rucio's
    ``Client``, ``smtplib.SMTP``, the message broker's agent;
 5. an object of any other class outside the corpus (:meth:`calls.Types.library_classes`), or of a class of the
-   corpus built on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): nothing here says
-   what the method does with what it is handed, so it keeps all of it (:data:`LIBRARY`);
+   corpus built on a base outside it that supplies the method (:meth:`calls.Types.built_outside`): the method this
+   module states for its class (:data:`LIBRARY_METHODS`: ``WeightedLists.add`` and ``pop``), else nothing here says
+   what the method does with what it is handed, so it keeps all of it (:data:`LIBRARY`, the assumption
+   ``library_keeps_what_it_is_handed``);
 6. a builtin value: a container's method by its type, a scalar's -- a text, a number (:data:`SCALARS`) -- keeping
    nothing it is handed, as each makes a new value (``", ".join(names)``) (:data:`BUILTIN`);
 7. an object whose class cannot be said, or a value a call outside the corpus made -- ``json.loads``', a row the
@@ -90,11 +92,14 @@ class Give(NamedTuple):
     *part* is :data:`SELF` (a copy), :data:`AT` (one of what it holds: the one the argument at position *key* names,
     any one where the call hands none -- ``d.get(k)``, ``xs.pop()``), :data:`KEYS` / :data:`VALUES` / :data:`ITEMS`
     (a view whose elements are its keys, its values, its (key, value) pairs) or :data:`ITEM` (one such pair);
-    *default* the position of an argument the value may be instead (``d.get(k, default)``)."""
+    *default* the position of an argument the value may be instead (``d.get(k, default)``); *none* whether, where
+    no *default* is handed, the value may be ``None`` instead -- nothing at the key (``d.get(k)``), nothing held (a
+    ``WeightedLists``' ``pop()``)."""
 
     part: str
     key: Optional[int] = None
     default: Optional[int] = None
+    none: bool = False
 
 
 class Method(NamedTuple):
@@ -151,7 +156,7 @@ BUILTIN_METHODS: dict[tuple[str, str], Method] = {
     ("dict", "pop"): _changing(Give(AT, 0, 1)),
     ("dict", "popitem"): _changing(Give(ITEM)),
     ("dict", "clear"): _changing(),
-    ("dict", "get"): _giving(Give(AT, 0, 1)),
+    ("dict", "get"): _giving(Give(AT, 0, 1, True)),
     ("dict", "__getitem__"): _giving(Give(AT, 0)),
     ("dict", "keys"): _giving(Give(KEYS)),
     ("dict", "values"): _giving(Give(VALUES)),
@@ -248,6 +253,31 @@ def containers(*holds: str) -> frozenset[str]:
 CONTAINER_MAKERS = frozenset(
     name for name, one in CONTAINERS.items() if one.builtin == name
 )
+
+#: The methods of containers outside the corpus, by ``(module, class)``, then by name, as :data:`BUILTIN_METHODS` says
+#: a builtin's: what each holds (:data:`COLLECTION`, :data:`MAPPING`) and, a call of the class making one empty, what
+#: its methods put and take.  pandacommon's ``WeightedLists`` holds lists under weights: ``add(weight, list_data)``
+#: puts list_data's elements, ``pop()`` takes one of them, or ``None`` where it holds none (add_main's
+#: ``one_jor = self.job_output_reports.pop()``, ``if not one_jor: break``).
+LIBRARY_CONTAINERS: dict[tuple[str, str], str] = {
+    ("pandacommon.pandautils.thread_utils", "WeightedLists"): COLLECTION,
+}
+LIBRARY_METHODS: dict[tuple[str, str], dict[str, Method]] = {
+    ("pandacommon.pandautils.thread_utils", "WeightedLists"): {
+        "add": Method((Put(1, ELEMENTS),), True),
+        "pop": _changing(Give(AT, none=True)),
+    },
+}
+
+
+def library_method(classes: Optional[frozenset[tuple[str, str]]], name: str) -> Optional[Method]:
+    """What the method *name* of an object of one of *classes* (``(module, class)``, outside the corpus) does, where
+    :data:`LIBRARY_METHODS` says it for each of them; ``None`` otherwise."""
+    if not classes:
+        return None
+    found = [LIBRARY_METHODS.get(one, {}).get(name) for one in sorted(classes)]
+    methods = [one for one in found if one is not None]
+    return _together(methods) if len(methods) == len(found) else None
 
 #: A logger's methods writing one line to its file at a level of their own, by their names -> that level, as the line
 #: spells it lower-cased: ``exception`` writes at ``error`` (the traceback too), ``warn`` is ``warning``'s old name.
@@ -845,6 +875,7 @@ def _together(found: list[Method]) -> Optional[Method]:
                 ),
                 None,
             ),
+            any(m.gives.none for m in found if m.gives),
         )
     return Method(
         tuple(dict.fromkeys(put for method in found for put in method.puts)),
@@ -1170,6 +1201,13 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "input": Function(None, result="str"),
 }
 
+#: The builtin classes' methods called on the class that do what a builtin function does, by (class, method):
+#: ``object.__getattribute__(x, name)`` is ``getattr(x, name)`` past a class's own ``__getattribute__`` (a spec's
+#: ``addFile`` reads the job's raw ``PandaID`` so).
+BUILTIN_CLASS_FUNCTIONS: dict[tuple[str, str], Function] = {
+    ("object", "__getattribute__"): Function(ATTRIBUTE),
+}
+
 #: The builtin classes' methods called on the class whose value is keyed by the first argument's elements:
 #: ``dict.fromkeys(xs)``, what iterating it -- or ``list()`` of it -- gives one by one.  Its values are not them.
 KEYED_BY_ELEMENTS = frozenset({("dict", "fromkeys")})
@@ -1179,9 +1217,13 @@ def builtin_function(
     types: "Types", file: str, func: ast.AST, call: ast.Call
 ) -> Optional[Function]:
     """What *call* does where it calls a builtin function by its name -- one no scope binds there
-    (:meth:`calls.Types.is_builtin`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
+    (:meth:`calls.Types.is_builtin`) -- or a method of a builtin class on the class that does what one does
+    (:data:`BUILTIN_CLASS_FUNCTIONS`); ``None`` for any other call, and for a builtin :data:`BUILTIN_FUNCTIONS` does
     not say."""
     called = call.func
+    if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+        found = BUILTIN_CLASS_FUNCTIONS.get((called.value.id, called.attr))
+        return found if found is not None and types.is_builtin(file, func, called.value.id) else None
     if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
         return None
     return (
@@ -1197,6 +1239,9 @@ def builtin_function_at(call: ast.Call) -> Optional[Function]:
     from bamboo.codemap.calls import is_builtin_at
 
     called = call.func
+    if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):
+        found = BUILTIN_CLASS_FUNCTIONS.get((called.value.id, called.attr))
+        return found if found is not None and is_builtin_at(call, called.value.id) else None
     if not isinstance(called, ast.Name) or called.id not in BUILTIN_FUNCTIONS:
         return None
     return BUILTIN_FUNCTIONS[called.id] if is_builtin_at(call, called.id) else None
@@ -1367,6 +1412,9 @@ def meaning(
     if library:
         if all(other_system(module) for module, _name in library):
             return Meaning(CLIENT, Method(), "other_systems_keep_nothing")
+        said = library_method(library, name)
+        if said is not None:
+            return Meaning(LIBRARY, said)
         return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
     if placed.unplaced == UNPLACED_NO_METHOD:
         try:

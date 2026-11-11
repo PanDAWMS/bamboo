@@ -44,6 +44,7 @@ from bamboo.codemap.models import (
     pooled_frames,
 )
 from bamboo.codemap.panda import (
+    aftermade,
     endpoints,
     entered,
     flow,
@@ -767,6 +768,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.parameter_froms,
             fragment.set_froms,
             fragment.write_froms,
+            fragment.field_froms,
         ) = heldfrom.guard_froms(
             fragment.junctions,
             fragment.read_sites,
@@ -885,6 +887,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # value skips.
             off = offrow.attach(fragment, self._modules, self._calls)
             logger.info("PandaCodeMapPlugin: %d branch(es) write their object to no row", off)
+            # And whether each other arm can leave a value other than the row's on a row made before it: what a
+            # reader comparing a row's value with an arm's counts.
+            made = aftermade.attach(fragment, self._modules, self._calls, record)
+            logger.info("PandaCodeMapPlugin: %d branch(es) read for a row made before them", made)
             # The statements each API endpoint's calls reach, on the reach record and the read terms.
             read = endpoints.attach(fragment, self._modules, self._calls, returned)
             logger.info(

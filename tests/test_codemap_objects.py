@@ -1081,13 +1081,14 @@ def test_a_corpus_method_named_as_a_containers_is_read_as_its_call(tmp_path):
 
 _KEEPER = """\
 from pandacommon.pandalogger.LogWrapper import LogWrapper
-from pandacommon.pandautils.thread_utils import WeightedLists
+from pandacommon.pandautils.thread_utils import LockPool, WeightedLists
 from rucio.client import Client as RucioClient
 
 
 class Keeper:
-    def keep(self, job, lists: WeightedLists, log: LogWrapper, rucio: RucioClient):
+    def keep(self, job, lists: WeightedLists, pool: LockPool, log: LogWrapper, rucio: RucioClient):
         lists.add(3, job)
+        pool.get(job)
         log.debug(job)
         log.keepMsg(job)
         rucio.add_files_to_dataset(job)
@@ -1097,13 +1098,15 @@ class Keeper:
 def test_a_library_object_keeps_what_its_method_is_handed_and_a_logger_keeps_nothing(
     tmp_path,
 ):
-    """``lists.add(3, job)`` on a library class's object keeps the job in it, as nothing says what ``add`` does
-    there; ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing; and
+    """``pool.get(job)`` on a library class's object keeps the job in it, as nothing says what ``get`` does there;
+    ``lists.add(3, job)`` puts the job's elements in the object's, as callfacts states ``WeightedLists.add`` does;
+    ``log.debug(job)`` writes a line -- a logger's method, by its name, keeps nothing; and
     ``rucio.add_files_to_dataset(job)`` hands it to another system, which keeps nothing of it here."""
     fragment = _build(tmp_path, keeper=_KEEPER)
     (row,) = [one for one in fragment.reach_graph if one.owner.endswith("Keeper.keep")]
     assert {(b.name, b.path) for b in row.bindings if b.how == BIND_FILL} == {
-        ("lists", "job")
+        ("pool", "job"),
+        ("lists[]", "job[]"),
     }
 
 

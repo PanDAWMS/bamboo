@@ -271,7 +271,8 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: so a reworded message is a branch a reader can no longer name from a log.
 #: ``value_frames`` is what an observed value rules the branch out by, and
 #: ``value_cuts`` which lengths of it are read as a frame's head,
-#: ``off_row`` whether a reader of the row's value skips the branch, and
+#: ``off_row`` whether a reader of the row's value skips the branch,
+#: ``after_made`` whether it can change a row made before it, and
 #: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
@@ -294,6 +295,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "history",
     "history_hole",
     "off_row",
+    "after_made",
     "same_pass",
     "rewrites",
     "rewrites_open",
@@ -359,6 +361,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "write_froms": (
         "records beside the nodes, not nodes: what the object each arm writes, and the value a passthrough arm hands "
         "on, hold, way by way -- see WriteFrom; a dump's section compare reads them"
+    ),
+    "field_froms": (
+        "records beside the nodes, not nodes: what a field of an object of a class may hold, read in the class -- "
+        "see FieldFrom; a dump's section compare reads them"
     ),
     "entered_froms": (
         "records beside the nodes, not nodes: where each function holding arms is entered from, under what tests -- "

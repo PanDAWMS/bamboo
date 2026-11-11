@@ -36,8 +36,10 @@ from bamboo.codemap.models import (
     GAP_UNNODED,
     HISTORY_ROW_CAN,
     HISTORY_ROW_SAME,
+    KEY_OBJECT,
     KEY_PARAMETER,
     KEY_ROWS,
+    KEY_SELF_FIELD,
     RUN_KEY_TIME,
     FunctionPrintsNode,
     HistoryPair,
@@ -1864,6 +1866,11 @@ def _held_ways(fragment: MapFragment):
         yield from each(f"{write.owner}:{write.line} {write.role} {write.expression}", write.sources)
     for parameter in fragment.parameter_froms:
         yield from each(f"{parameter.owner}:{parameter.line} {parameter.parameter}", parameter.sources)
+    for field in fragment.field_froms:
+        for binding in field.bindings:
+            yield from each(f"{field.owner}.{field.field} {binding.at}", binding.sources)
+        for change in field.changes:
+            yield from each(f"{field.owner}.{field.field} {change.at}", change.value)
 
 
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
@@ -1905,6 +1912,35 @@ def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
         unit="ways ending at a parameter",
         question="does a way a guard's name holds end at a parameter whose callers are not read?",
         finding="a guard's way ends at a parameter with no record of what its callers hand it",
+        failures=failures,
+    )
+
+
+def guard_fields_are_read(fragment: MapFragment) -> GateResult:
+    """(i) Every way of a :class:`GuardFrom`, :class:`ParameterFrom`, :class:`WriteFrom` or :class:`FieldFrom` that
+    ends at ``self.<field>``, or at ``self`` or an object a corpus class builds with a field as its first step, has
+    the FieldFrom of that class and field: the reader reads on there, and a missing one would end the way unsaid."""
+    from bamboo.codemap.panda.heldfrom import FIELD_STEP, end_path
+
+    read = {(one.owner, one.field) for one in fragment.field_froms}
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        if source.kind not in (KEY_SELF_FIELD, KEY_OBJECT) or not source.site_owner:
+            continue
+        path = end_path(source)
+        field = FIELD_STEP.match(path[0]) if path else None
+        if field is None:
+            continue
+        checked += 1
+        if (source.site_owner, field.group(1)) not in read:
+            failures.append(f"{where}: {source.site_owner}.{field.group(1)}")
+    return GateResult(
+        gate="guard-fields-are-read",
+        passed=not failures,
+        checked=checked,
+        unit="ways ending at a field of self or of an object built",
+        question="does a way a guard's name holds end at a field of an object with no record of the field?",
+        finding="a guard's way ends at a field with no record of what the class binds it to",
         failures=failures,
     )
 
@@ -2933,6 +2969,7 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
     if fragment.guard_froms or fragment.parameter_froms or fragment.write_froms:
         results.append(guard_rows_are_read_sites(fragment))
         results.append(guard_parameters_are_read(fragment))
+        results.append(guard_fields_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
     return results
 

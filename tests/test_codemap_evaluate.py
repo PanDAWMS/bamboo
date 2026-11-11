@@ -71,6 +71,34 @@ def test_a_call_whose_whole_text_was_printed_takes_the_printed_value_before_it_i
     assert env.used["isJumboJob(job)"] == "called isJumboJob"
 
 
+def test_a_substitution_whose_pattern_does_not_match_the_string_is_the_string() -> None:
+    """insertNewJob's rewrite of a jobName: a name without the token is the name, whatever ``originPandaID`` is;
+    a match is unknown, even with a known replacement; so is an unknown or non-string string, a keyword, a pattern
+    that does not compile.  A printed hole comes first, and the call is not decidable before the values."""
+    rewrite = r"re.sub('\\$ORIGINPANDAID', str(originPandaID), PRIOR)"
+    env = _env(PRIOR="mc23_13p6TeV.801234.build")
+    assert evaluate.evaluate(rewrite, env) == "mc23_13p6TeV.801234.build"
+    assert env.used[rewrite] == "re.sub: the pattern does not match"
+    assert (
+        evaluate.evaluate(f"{rewrite} == taskName", _env(PRIOR="a.b", taskName="a.b"))
+        is True
+    )
+    assert evaluate.evaluate(rewrite, _env(PRIOR="a.b.$ORIGINPANDAID")) is UNKNOWN
+    assert evaluate.evaluate("re.sub('\\r', '', PRIOR)", _env(PRIOR="ab")) == "ab"
+    assert evaluate.evaluate("re.sub('\\r', '', PRIOR)", _env(PRIOR="a\rb")) is UNKNOWN
+    assert evaluate.evaluate(rewrite, _env()) is UNKNOWN
+    assert evaluate.evaluate(rewrite, _env(PRIOR=None)) is UNKNOWN
+    assert evaluate.evaluate(
+        "re.sub('x', '', PRIOR, flags=re.I)", _env(PRIOR="ab")
+    ) is (UNKNOWN)
+    assert evaluate.evaluate("re.sub('(', '', PRIOR)", _env(PRIOR="ab")) is UNKNOWN
+    printed = _env(PRIOR="a.b")
+    printed.put(rewrite, "a.b.7", "printed")
+    assert evaluate.evaluate(rewrite, printed) == "a.b.7"
+    node = ast.parse(rewrite, mode="eval").body
+    assert not evaluate.decidable(node, {"PRIOR"}, Env())
+
+
 def test_a_standard_function_is_run_on_a_known_value_and_says_what_it_raises() -> None:
     """Whether ``json.loads('')`` or ``int(None)`` raises is Python's to say; a function not run, or a value not
     known, is unknown."""

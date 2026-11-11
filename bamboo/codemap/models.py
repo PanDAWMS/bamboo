@@ -675,6 +675,57 @@ class OffRow(BaseModel):
     )
 
 
+#: Why an arm cannot leave its value on a row made before it (:attr:`AfterMade.by`): its object has no row yet; the
+#: statement makes the row it writes; the statement's own test asks the row for the value it sets.
+AFTER_MADE_NO_ROW_YET = "no_row_yet"
+AFTER_MADE_NEW_ROW = "new_row"
+AFTER_MADE_SAME_VALUE_WHERE = "same_value_where"
+#: Why it may (:attr:`AfterMade.why`): its function writes the column by an ``UPDATE``, or by an ``INSERT`` of a row
+#: moved within its class; its object came from a row, a parameter or a copy, not a new object of its function; a
+#: key of the object is set; the object's row may be made before it; a part is not read; a key arm or a write of the
+#: class elsewhere breaks what "no row yet" rests on (:mod:`bamboo.codemap.panda.aftermade`).
+AFTER_MADE_UPDATE = "update"
+AFTER_MADE_MOVED = "moved"
+AFTER_MADE_ROW_OBJECT = "row_object"
+AFTER_MADE_KEY_SET = "key_set"
+AFTER_MADE_MADE_BEFORE = "made_before"
+AFTER_MADE_OPEN = "open"
+AFTER_MADE_KEY_ELSEWHERE = "key_elsewhere"
+
+
+class AfterMade(BaseModel):
+    """Whether an arm can leave a value other than the row's on a row made before it -- see
+    :mod:`bamboo.codemap.panda.aftermade`."""
+
+    counted: bool = Field(description="``True`` where it may: a reader comparing the row's value with the arm's counts it.")
+    by: str = Field(
+        default="",
+        description=(
+            f"Where not counted, why: ``{AFTER_MADE_NO_ROW_YET}`` / ``{AFTER_MADE_NEW_ROW}`` / "
+            f"``{AFTER_MADE_SAME_VALUE_WHERE}``."
+        ),
+    )
+    why: list[str] = Field(
+        default_factory=list,
+        description=(
+            f"Where counted, each reason, sorted: ``{AFTER_MADE_UPDATE}`` / ``{AFTER_MADE_MOVED}`` / "
+            f"``{AFTER_MADE_ROW_OBJECT}`` / ``{AFTER_MADE_KEY_SET}`` / ``{AFTER_MADE_MADE_BEFORE}`` / "
+            f"``{AFTER_MADE_OPEN}`` / ``{AFTER_MADE_KEY_ELSEWHERE}``."
+        ),
+    )
+    lines: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where the reason is, sorted: the key assignments, the places that may make the row before the arm, the "
+            "writes; for ``key_elsewhere`` the lines are of the arms or writes elsewhere and *elsewhere* names them."
+        ),
+    )
+    elsewhere: list[str] = Field(
+        default_factory=list,
+        description="With ``key_elsewhere``: each arm or write breaking it, as ``owner:line``, sorted.",
+    )
+
+
 
 #: How a later write of a column is made at its level (:attr:`Rewrite.how`, :attr:`RewriteSite.how`): an assignment
 #: on the object; a call whose run assigns it on the object or writes it on the object's row; a statement writing it
@@ -1049,6 +1100,14 @@ class Branch(BaseModel):
             "A reader of a value the row holds skips the arm "
             "(:meth:`~bamboo.codemap.lookup.CodeMap.producers_of`).  ``None`` "
             "where not proven: the arm may write its row, as every arm is read."
+        ),
+    )
+    after_made: Optional[AfterMade] = Field(
+        default=None,
+        description=(
+            "Whether the arm can leave a value other than the row's on a row made before it: "
+            ":mod:`bamboo.codemap.panda.aftermade`, which says what that rests on.  ``None`` where not read: an arm "
+            "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
 
@@ -3172,7 +3231,14 @@ class KeySource(BaseModel):
             "as written."
         ),
     )
-    site_owner: str = Field(default="", description="``rows`` / ``sequence``: the statement's owner.")
+    site_owner: str = Field(
+        default="",
+        description=(
+            "``rows`` / ``sequence``: the statement's owner.  On a :class:`HeldSource`, ``self_field``: the class whose "
+            "method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
+            ":class:`FieldFrom` of a field of it is found; empty where the ``self`` is no method's."
+        ),
+    )
     site_line: Optional[int] = Field(
         default=None, description="``rows`` / ``sequence``: the line the statement runs on."
     )
@@ -3306,8 +3372,13 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
             "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
-            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value.  "
-            "Where each call of *through* comes among them is its *after_steps*."
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value "
+            "the steps took, never ``()``: a source that is the value and sits at parts of it too is two sources, the "
+            "whole with no *paths* and the parts (``x = obj; x.child = obj``: ``x`` is ``obj``, and holds it at "
+            "``.child``).  Where the reader placed it -- a literal's element, a sequence joined -- the source itself "
+            "sits there (``[taskSpec.site]`` holds ``taskSpec`` ``['.site']`` at ``[0]``); where the path carry says "
+            "so (:attr:`KeySource.paths`), the source or a part of it.  Where each call of *through* comes among them "
+            "is its *after_steps*."
         ),
     )
     through: list[HeldThrough] = Field(
@@ -3353,6 +3424,26 @@ class HeldSource(KeySource):
         default_factory=list,
         description="Each such write the changes after the read were not read for, and why: :data:`KEY_STOPS`.",
     )
+    made_empty: str = Field(
+        default="",
+        description=(
+            "Where the way ends at a container made empty -- ``[]``, ``{}``, ``dict()``, ``WeightedLists(lock)`` "
+            "(:data:`bamboo.codemap.callfacts.LIBRARY_CONTAINERS`) --, what it holds: ``collection`` or ``mapping``.  "
+            "What it holds is what *changes* put: a step taken past the end reads on into their *value* "
+            "(:func:`bamboo.codemap.panda.heldfrom.held_elements`), as the map does where the way takes it.  Empty for "
+            "any other end."
+        ),
+    )
+    at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the way ends, ``file:line`` of its end, each once -- the source's own statement, where its value "
+            "is bound or made (``pandaserver/daemons/scripts/add_main.py:130`` for ``ignoreTmpError = False``); "
+            "several where ways ending at one source at several lines are this one.  The tests on the way to each "
+            "have GuardFroms (:attr:`GuardFrom.calls`).  Empty where the way ends at a parameter, or at a value "
+            "outside the function it is read in (a parameter's default)."
+        ),
+    )
 
 
 class HeldChange(BaseModel):
@@ -3377,7 +3468,11 @@ class HeldChange(BaseModel):
     )
     value: list[HeldSource] = Field(
         default_factory=list,
-        description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
+        description=(
+            "What a store stores or a method puts, read as a way is -- ``xs.append(v)``'s ``v``, ``xs.extend(vs)``'s "
+            "elements (``vs`` with ``[*]``) --; empty for the other kinds, a computed store (``+=``) and a put whose "
+            "value is not read (a ``*`` argument, a merge, several)."
+        ),
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
 
@@ -3996,6 +4091,7 @@ class MapFragment(BaseModel):
     runnables: list["Runnable"] = Field(default_factory=list)
     entered_froms: list["EnteredFrom"] = Field(default_factory=list)
     write_froms: list["WriteFrom"] = Field(default_factory=list)
+    field_froms: list["FieldFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5814,6 +5910,9 @@ KEY_STOPS: dict[str, str] = {
     "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",
     "write_first": "{name} runs only before the read in {at}",
     "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
+    "receiver": "the call at {at} runs {name} on an object it does not name",
+    "computed": "{name} may be set at {at} by a name computed there: {what}",
+    "method": "{name} is a method or property the class defines at {at}",
 }
 
 
@@ -5889,7 +5988,12 @@ class GuardFrom(BaseModel):
         default_factory=list,
         description=(
             "The lines of the calls the test is on the way to that enter a function holding arms: the sites of an "
-            ":class:`EnteredFrom` whose caller is this one's *owner*."
+            ":class:`EnteredFrom` whose caller is this one's *owner*; and of the places it is on the way to where a "
+            "way's object may be changed (a :class:`HeldChange`'s first *via*, else its *at*, on a GuardFrom's, a "
+            "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
+            "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
+            "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
+            "``ignoreTmpError = False``.  Not lines of calls only, then: the lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
@@ -5919,6 +6023,75 @@ class ParameterFrom(BaseModel):
 WRITE_OBJECT = "object"
 WRITE_VALUE = "value"
 WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
+
+
+#: How a :class:`FieldBinding` binds the field: ``self.f = v`` (with a tuple target at any depth), ``self.f: T = v``,
+#: ``self.f += v``, ``setattr(self, "f", v)`` -- or ``setattr(self, key, value)`` in a ``for key, value in
+#: P.items()`` where a caller hands ``f`` among P's keywords -- ``f = v`` in the class's body.
+FIELD_ASSIGN = "assign"
+FIELD_ANNOTATED = "annotated"
+FIELD_AUGMENTED = "augmented"
+FIELD_SETATTR = "setattr"
+FIELD_CLASS = "class"
+FIELD_BINDS = (FIELD_ASSIGN, FIELD_ANNOTATED, FIELD_AUGMENTED, FIELD_SETATTR, FIELD_CLASS)
+
+
+class FieldBinding(BaseModel):
+    """One statement of a :class:`FieldFrom`'s classes binding the field, with its value read as a
+    :class:`GuardFrom` reads a name there.
+
+    ``setattr(self, key, value)`` in ``AdderPluginBase.__init__``'s ``for key, value in params.items()``, ``params``
+    its parameter, binds a field each call hands under the field's name: the value is read at those calls -- the
+    keywords ``AdderGen.execute_plugin`` 256 hands ``AdderAtlasPlugin``'s ``**params``, which its ``__init__`` hands
+    on -- each way with the calls on its *route*.  A field no caller names is not bound there."""
+
+    at: str = Field(description="``file:line`` of the statement.")
+    owner: str = Field(description="The method it is in (``file::name``), or the class for its body.")
+    how: str = Field(description=f"How: one of {', '.join(FIELD_BINDS)}; ``augmented``'s ways are the operand's.")
+    sources: list[HeldSource] = Field(default_factory=list)
+    stops: list[KeyStop] = Field(default_factory=list)
+
+
+class FieldFrom(BaseModel):
+    """What a field of an object of a class may hold, read in the class: the next link of a way that ends at
+    ``self.<field>`` or at an object a corpus class builds with the field as its first step (``site_owner`` and the
+    field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
+
+    ``self.add_result.is_succeeded()`` at ``AdderGen.process_job_report`` 440 reads ``self.add_result``, bound in
+    the class at ``execute_plugin`` 265 to ``self.adder_plugin.result``: a way ending at ``self.adder_plugin``, built
+    at 256 by ``AdderAtlasPlugin``, whose ``result`` is bound at ``AdderPluginBase.__init__`` 45 to an
+    ``AdderResult``; ``AdderAtlasPlugin.register_files`` 789 calls ``self.result.set_fatal(...)``, which stores
+    ``status_code`` -- a change of the ``result``'s FieldFrom.
+
+    The classes are the class's corpus bases in its order and its corpus subclasses (``self`` may be any of them):
+    each binding says its method.  Not said: which binding or change a run took, nor whether before or after the
+    read -- they are read in every method, in no order; a store of the field from outside the classes' methods
+    (``x.f = v`` on another holder) is not read, only named (a stop ``outside``, by the attribute's name: an upper
+    bound).  :class:`SetFrom` and the changes after a read (:attr:`HeldSource.after`) read on through
+    ParameterFroms, not these.
+    """
+
+    owner: str = Field(description="The class, ``file::Class``.")
+    field: str
+    bindings: list[FieldBinding] = Field(default_factory=list)
+    changes: list[HeldChange] = Field(
+        default_factory=list,
+        description=(
+            "Each place the object the field holds may be changed in place in a method of the classes -- through "
+            "``self.<field>`` or a name bound to it there -- as :class:`HeldSource` *changes* says them (*via* from "
+            "that method); in no order."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)`` -- but over a "
+            "parameter's keywords every caller names, :class:`FieldBinding` -- or ``self.__dict__`` changed in "
+            "place -- an item stored, a dict method, handed on; a read sets nothing); "
+            "``method``: the classes define it as a method or property; ``outside``: the places a field of its name "
+            "is stored on another object than a method's ``self``."
+        ),
+    )
 
 
 class WriteFrom(BaseModel):

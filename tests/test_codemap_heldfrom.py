@@ -188,7 +188,7 @@ def _build(
             sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
         )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        guards, parameters, _writes, _written = heldfrom.guard_froms(
+        guards, parameters, _writes, _written, _fields = heldfrom.guard_froms(
             junctions,
             sites,
             {module.rel_path: module.tree for module in modules},
@@ -325,6 +325,327 @@ def test_an_item_is_its_root_s_ways_with_the_step_and_each_caller_is_a_way(
         "taskParamMap",
         "key_or_value",
     }
+
+
+def test_a_step_cuts_a_way_s_paths_and_a_part_no_way_reaches_is_read_as_unknown() -> (
+    None
+):
+    """adder_gen 265's shape, ``self.adder_plugin.result``: a way that is the receiver takes the step; a way at parts
+    of the receiver keeps the parts under the step, cut by it; one with no part under it is not in the value."""
+    plugin = heldfrom._Way("self_field", "self.adder_plugin")
+    job = heldfrom._Way("self_field", "self.job", paths=(".job", ".result.files[*]"))
+    assert heldfrom._taken([plugin, job], ".result") == [
+        plugin._replace(steps=(".result",)),
+        job._replace(paths=(".files[*]",)),
+    ]
+    # A part taken whole is the source itself.
+    assert heldfrom._taken([job._replace(paths=(".result",))], ".result") == [
+        job._replace(paths=())
+    ]
+    # No way reaches the part: an attribute's value, not a way of a source that is elsewhere.
+    alone = job._replace(paths=(".job",))
+    assert heldfrom._taken([alone], ".result") == [
+        heldfrom._Way("attribute", "self.job.result")
+    ]
+    # A with's __enter__() mostly gives the context itself: its paths stay.
+    assert heldfrom._taken([alone], heldfrom._ENTER) == [
+        alone._replace(steps=(heldfrom._ENTER,))
+    ]
+    # A loop over a dict takes its keys; an index does not.
+    keyed = job._replace(paths=("[key]",))
+    assert heldfrom._taken([keyed], "[*]", element=True) == [keyed._replace(paths=())]
+    assert heldfrom._taken([keyed], "[*]") == [heldfrom._Way("unknown", "self.job[*]")]
+
+
+def test_a_part_the_carry_places_a_source_at_is_not_the_source_but_a_part_the_reader_places_it_at_is() -> (
+    None
+):
+    """``jobSpec.Files + pseudoFiles``: the carry says the sum holds ``jobSpec`` or a part of it at ``[*]``; an
+    element is no job.  ``[taskSpec.site]`` holds ``taskSpec.site`` at ``[0]``, which the reader placed."""
+    carried = heldfrom._Way("parameter", "jobSpec", paths=("[*]",), loose=True)
+    assert heldfrom._taken([carried], "[*]", element=True) == [
+        heldfrom._Way("unknown", "jobSpec[*]")
+    ]
+    unread = heldfrom._Way("unknown", "fileSpec")
+    assert heldfrom._taken(
+        [carried, carried._replace(name="other")], "[*]", unread=unread
+    ) == [unread]
+    site = heldfrom._Way("parameter", "taskSpec", steps=(".site",))
+    placed = heldfrom._at("[0]", [site])
+    assert placed == [site._replace(paths=("[0]",))]
+    assert heldfrom._taken(placed, "[*]", element=True) == [site]
+    # A comprehension at a place is taken by the place's step, not its element's.
+    made = heldfrom._Through("<listcomp>", "x.py:1", "computed")
+    listed = heldfrom._at("[0]", [site._replace(through=(made._replace(steps=1),))])
+    assert heldfrom._taken(listed, "[0]") == [
+        site._replace(through=(made._replace(steps=1),))
+    ]
+    # What a callee holds at a place stays there at the caller: ``return (self.SC_FAILED, inputChunk)``.
+    chunk = heldfrom._Way("parameter", "chunk")
+    returned = heldfrom._Way("parameter", "inputChunk", paths=("[1]",))
+    assert heldfrom._onto(chunk, returned, (), ("x.py:2",)) == [
+        chunk._replace(paths=("[1]",), route=("x.py:2",))
+    ]
+    # An argument at parts of what is handed is cut by the callee's steps.
+    job = heldfrom._Way("parameter", "job", paths=(".Files[*]", ".extra"))
+    files = heldfrom._Way("parameter", "j", steps=(".Files",))
+    assert heldfrom._onto(job, files, (), ()) == [job._replace(paths=("[*]",))]
+    # A container made empty and filled: what was put, cut by the steps after the element's.
+    put = heldfrom._Change(
+        "x.py:3",
+        heldfrom.CHANGE_METHOD,
+        heldfrom.changes_mod.EVERY,
+        "append",
+        (),
+        tuple(placed),
+    )
+    rows = heldfrom._Way(
+        "unknown", "[]", made_empty="collection", steps=("[0]", "[0]"), changes=(put,)
+    )
+    assert heldfrom._joined(rows) == [site]
+
+
+PLACED = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.items = []
+                self.specs = {}
+
+            def extractCommon(self, jediTaskID, taskSpec, jobSpec):
+                sites = [taskSpec.site]
+                for site in sites:
+                    if site == "a":  # T1
+                        self.a = 1  # R1
+                pair = (taskSpec.status, jobSpec)
+                if pair[0] == "b":  # T2
+                    self.b = 1  # R2
+                names = []
+                names += [taskSpec.name]
+                for n in names:
+                    if n == "d":  # T4
+                        self.d = 1  # R4
+                labels = {"k": taskSpec.label}
+                if labels["k"] == "e":  # T5
+                    self.e = 1  # R5
+                chosen = taskSpec.first if jediTaskID else taskSpec.second
+                if chosen == "f":  # T6
+                    self.f = 1  # R6
+                self.items.append(taskSpec.item)
+                for item in self.items:
+                    if item == "g":  # T7
+                        self.g = 1  # R7
+                for g in jobSpec.Files + self.pseudo(jobSpec):
+                    if g.lfn == "h":  # T8
+                        self.h = 1  # R8
+                for key in list(self.specs):
+                    self.specs[key + "x"] = self.specs[key]
+                spec = self.specs["a"]
+                if spec == "i":  # T9
+                    self.i = 1  # R9
+
+            def pseudo(self, jobSpec):
+                made = []
+                made.append(jobSpec.PandaID)
+                return made
+        """,
+}
+
+
+def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_each_value(
+    tmp_path: Path,
+) -> None:
+    """The shapes the carry answered with a source or a part of it: a list, a tuple and a dict literal, an ``if``
+    expression, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it sits; what the carry
+    alone says sits at a field's element (T7) is a value not read, not the task.  A field read as itself holds its
+    own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them."""
+    arms = tuple(("extractCommon", f"R{n}") for n in (1, 2, 4, 5, 6, 7, 8, 9))
+    fragment = _build(tmp_path, PLACED, arms)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, PLACED) and one.name == name
+        ]
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths))
+            for one in guard.sources
+        }
+
+    assert held("T1", "site") == {("parameter", "taskSpec", (".site",), ())}
+    assert held("T2", "pair") == {
+        ("parameter", "taskSpec", (".status",), ("[0]",)),
+        ("parameter", "jobSpec", (), ("[1]",)),
+    }
+    # The empty list's element is a value nothing put there names, as before.
+    assert held("T4", "n") == {
+        ("unknown", "[]", ("[*]",), ()),
+        ("parameter", "taskSpec", (".name",), ()),
+    }
+    assert held("T5", "labels") == {
+        ("parameter", "taskSpec", (".label",), ("['k']",)),
+        ("constant", "'k'", (), ("[key]",)),
+    }
+    assert held("T6", "chosen") == {
+        ("parameter", "taskSpec", (".first",), ()),
+        ("parameter", "taskSpec", (".second",), ()),
+    }
+    assert held("T7", "item") == {
+        ("unknown", "taskSpec[*]", (), ()),
+        ("self_field", "self.items", ("[*]",), ()),
+    }
+    assert held("T8", "g") == {
+        ("parameter", "jobSpec", (".Files", "[*]"), ()),
+        ("parameter", "jobSpec", (".PandaID",), ()),
+    }
+    assert held("T9", "spec") == {("self_field", "self.specs", ("['a']",), ())}
+
+
+VIEWS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.specs = {}
+
+            def extractCommon(self, jediTaskID, taskSpec, jobSpec):
+                for spec in self.specs.values():
+                    if spec.site == "a":  # T1
+                        self.a = 1  # R1
+                chosen = list(self.specs.values())
+                if chosen[0] == "b":  # T2
+                    self.b = 1  # R2
+                for key, value in taskSpec.params.items():
+                    if key == "c" and value == "d":  # T3
+                        self.c = 1  # R3
+                kept = jobSpec.Files.copy()
+                if kept[0].lfn == "e":  # T4
+                    self.e = 1  # R4
+                pair = taskSpec.params.popitem()
+                if pair[1] == "f":  # T5
+                    self.f = 1  # R5
+                names = list(self.specs.keys())
+                if names[0] == "g":  # T6
+                    self.g = 1  # R6
+                local = {"k": jobSpec}
+                for one in local.values():
+                    if one.PandaID == 1:  # T7
+                        self.h = 1  # R7
+        """,
+}
+
+
+def test_a_view_or_a_copy_of_a_container_holds_its_values_where_callfacts_says_and_none_of_its_keys(
+    tmp_path: Path,
+) -> None:
+    """``d.values()`` and ``xs.copy()`` hold the container's values at ``[*]``, ``d.items()`` at each pair's
+    second, ``d.popitem()`` at its second (callfacts.Give, as the path carry reads them): a loop over a view takes
+    the container's value.  A key is not read -- what is put records its spelling, not its ways --: a pair's first is
+    a value not read, a view of the keys a call not read, and a dict literal's key is not one of its values (T7)."""
+    arms = tuple(("extractCommon", f"R{n}") for n in range(1, 8))
+    fragment = _build(tmp_path, VIEWS, arms)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, VIEWS) and one.name == name
+        ]
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths))
+            for one in guard.sources
+        }
+
+    assert held("T1", "spec") == {("self_field", "self.specs", ("[*]",), ())}
+    assert held("T2", "chosen") == {("self_field", "self.specs", ("[*]",), ("[*]",))}
+    assert held("T3", "key") == {("unknown", "taskSpec.params[*][0]", (), ())}
+    assert held("T3", "value") == {("parameter", "taskSpec", (".params", "[*]"), ())}
+    assert held("T4", "kept") == {("parameter", "jobSpec", (".Files", "[*]"), ("[*]",))}
+    assert held("T5", "pair") == {
+        ("parameter", "taskSpec", (".params", "[*]"), ("[1]",))
+    }
+    assert {kind for kind, *_rest in held("T6", "names")} == {"call"}
+    assert held("T7", "one") == {("parameter", "jobSpec", (), ())}
+
+
+BINDINGS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.flag = None
+
+            def extractCommon(self, jediTaskID, taskSpec, jobSpec):
+                if jobSpec:  # T2
+                    modTime = taskSpec.modificationTime
+                else:
+                    modTime = 0  # B3
+                if (jediTaskID - modTime) > 24:  # T0
+                    ignore = False  # B1
+                else:
+                    ignore = True  # B2
+                self.check(ignore)
+                self.check(self.chosen(jediTaskID))
+
+            def chosen(self, value):
+                if value:  # T4
+                    return "a"  # B4
+                else:
+                    return "b"  # B5
+
+            def check(self, ignore_error, strict=False):
+                if ignore_error or strict:  # T1
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through_their_own_sources(
+    tmp_path: Path,
+) -> None:
+    """Which of the constants one call hands in a run made is told by the test on the way to its binding
+    (``add_main``'s ``if (timeNow - modTime) > ...: ignoreTmpError = False``): each source says where it ends
+    (:attr:`HeldSource.at`) and the tests on the way there have GuardFroms, its line among their *calls* -- in the
+    callee for a value a return hands back (T4), and on through those guards' own sources (T2 guards ``modTime``'s
+    ``0``).  A parameter's default, read where the call hands nothing, says no place."""
+    fragment = _build(tmp_path, BINDINGS, (("check", "R1"),))
+
+    def at(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, BINDINGS)}"
+
+    def ends(func: str, parameter: str) -> set[tuple]:
+        (record,) = [
+            one
+            for one in fragment.parameter_froms
+            if one.owner.endswith(f"::{func}") and one.parameter == parameter
+        ]
+        return {(one.kind, one.name, tuple(one.at)) for one in record.sources}
+
+    assert ends("check", "ignore_error") == {
+        ("constant", "False", (at("B1"),)),
+        ("constant", "True", (at("B2"),)),
+        ("constant", "'a'", (at("B4"),)),
+        ("constant", "'b'", (at("B5"),)),
+    }
+    assert ends("check", "strict") == {("constant", "False", ())}
+    # A parameter is bound where the function is entered, by no statement.
+    assert ends("chosen", "value") == {("parameter", "jediTaskID", ())}
+
+    def calls(func: str, marker: str) -> set[int]:
+        guards = [
+            one
+            for one in fragment.guard_froms
+            if one.owner.endswith(f"::{func}")
+            and one.test_line == _line(BASE, marker, BINDINGS)
+        ]
+        assert guards, (func, marker)
+        return {line for one in guards for line in one.calls}
+
+    def line(marker: str) -> int:
+        return _line(BASE, marker, BINDINGS)
+
+    assert calls("extractCommon", "T0") == {line("B1"), line("B2")}
+    assert calls("chosen", "T4") == {line("B4"), line("B5")}
+    assert calls("extractCommon", "T2") == {line("B3")}
 
 
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(

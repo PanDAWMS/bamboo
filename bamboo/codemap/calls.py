@@ -553,6 +553,31 @@ def _positional(target: Target, on_class: bool) -> list[ast.arg]:
     return positional
 
 
+#: The dict a call hands a ``**kwargs`` parameter, one node per call and function (:func:`_keywords_left`): a reader
+#: keeps what it read of an expression by the node, so the call binds the parameter to the same node each time.
+_KEYWORDS_LEFT: dict[tuple[ast.Call, ast.AST], ast.Dict] = {}
+
+
+def _keywords_left(call: ast.Call, func: ast.AST) -> ast.Dict:
+    """The dict *func*'s ``**kwargs`` parameter holds from *call*: each keyword no parameter of that name takes, its
+    name a constant key and its value the keyword's.  At the call's place, its parent the call
+    (:func:`pathcond.attach_parents`), so a reader of it reads in the caller."""
+    found = _KEYWORDS_LEFT.get((call, func))
+    if found is None:
+        args = func.args  # type: ignore[attr-defined]
+        named = {parameter.arg for parameter in (*args.args, *args.kwonlyargs)}
+        left = [keyword for keyword in call.keywords if keyword.arg is not None and keyword.arg not in named]
+        keys: list[Optional[ast.expr]] = [
+            ast.copy_location(ast.Constant(value=keyword.arg), keyword) for keyword in left
+        ]
+        found = ast.copy_location(ast.Dict(keys=keys, values=[keyword.value for keyword in left]), call)
+        found.parent = call  # type: ignore[attr-defined]
+        for key in keys:
+            key.parent = found  # type: ignore[union-attr]
+        _KEYWORDS_LEFT[(call, func)] = found
+    return found
+
+
 def bind(call: ast.Call, target: Target, on_class: bool = False) -> dict[str, Optional[ast.expr]]:
     """``{parameter: the expression the call hands it}``; ``None`` where it is not said.
 
@@ -561,7 +586,9 @@ def bind(call: ast.Call, target: Target, on_class: bool = False) -> dict[str, Op
     rather than guessed; a parameter the call leaves to its default holds the
     default.  ``self`` is left out of a method reached through an instance,
     and bound to the first argument of one read off its class (*on_class*,
-    :func:`_positional`).
+    :func:`_positional`).  A ``**kwargs`` parameter holds a dict of the
+    keywords no named parameter takes (:func:`_keywords_left`), empty where
+    there are none -- unknown where the call spreads a ``**``.
     """
     args = target.func.args  # type: ignore[attr-defined]
     positional = _positional(target, on_class)
@@ -587,7 +614,35 @@ def bind(call: ast.Call, target: Target, on_class: bool = False) -> dict[str, Op
             bound[parameter.arg] = named[parameter.arg]
         else:
             bound[parameter.arg] = None if spread_named else default
+    if args.kwarg is not None:
+        bound[args.kwarg.arg] = None if spread_named else _keywords_left(call, target.func)
     return bound
+
+
+def keyed_setattr(func: ast.AST, call: ast.Call) -> Optional[ast.Name]:
+    """``P`` where *call* -- ``setattr(x, key, value)`` -- runs in a ``for key, value in P.items()`` of *func*'s own
+    body, its name and its value the loop's: it sets the field each key of P names to that key's value
+    (``AdderPluginBase.__init__``'s ``params``).  ``None`` for any other call."""
+    if len(call.args) != 3:
+        return None
+    key, value = call.args[1], call.args[2]
+    if not (isinstance(key, ast.Name) and isinstance(value, ast.Name)):
+        return None
+    for loop in own_nodes(func):
+        if (
+            isinstance(loop, ast.For)
+            and isinstance(loop.target, ast.Tuple)
+            and [getattr(one, "id", None) for one in loop.target.elts] == [key.id, value.id]
+            and isinstance(loop.iter, ast.Call)
+            and not loop.iter.args
+            and not loop.iter.keywords
+            and isinstance(loop.iter.func, ast.Attribute)
+            and loop.iter.func.attr == "items"
+            and isinstance(loop.iter.func.value, ast.Name)
+            and any(one is call for statement in loop.body for one in walk(statement))
+        ):
+            return loop.iter.func.value
+    return None
 
 
 def said(call: ast.Call, target: Target, on_class: bool = False) -> set[str]:
