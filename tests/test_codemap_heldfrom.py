@@ -568,6 +568,78 @@ def test_a_view_or_a_copy_of_a_container_holds_its_values_where_callfacts_says_a
     assert held("T7", "one") == {("parameter", "jobSpec", (), ())}
 
 
+JOB_MODULE = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+JOINED = {
+    JOB_MODULE: """\
+        comment = " /* x */"
+
+
+        class JobModule:
+            def listReports(self, limit):
+                sql = "SELECT PandaID,jobStatus,attemptNr FROM ATLAS_PANDA.Job_Output_Report WHERE rownum<=:limit "
+                self.cur.execute(sql + comment, {":limit": limit})
+                retVal = self.cur.fetchall()
+                head = retVal[: limit // 10]
+                if head == []:  # T1
+                    self.a = 1  # R1
+                retVal = head + retVal[limit // 10 :]
+                retVal = retVal[:limit]
+                for one in retVal:
+                    if one[2] == 3:  # T2
+                        self.b = 1  # R2
+                    tries = one[2] + 1
+                    if tries == 4:  # T3
+                        self.c = 1  # R3
+                total = 0
+                for one in retVal:
+                    total += one[2]
+                if total == 5:  # T4
+                    self.d = 1  # R4
+        """,
+}
+
+
+def test_a_slice_is_the_value_itself_and_a_plus_holds_its_sides_whose_element_is_a_side_s(
+    tmp_path: Path,
+) -> None:
+    """``listJobOutputReport``'s shape: a slice of the rows is the rows (T1), not a row; the rows joined of two
+    slices and sliced again are the rows, a row of them a row (T2).  A ``+`` holds each side's ways through the
+    ``+`` -- ``one[2] + 1`` computed from the row's ``[2]`` and ``1`` (T3) --; an element of its value is a side's,
+    the ``+`` left.  A ``+=`` is a ``+`` of what the name held and its value, each ``+=`` once in a loop (T4)."""
+    arms = tuple(("listReports", f"R{n}") for n in range(1, 5))
+    fragment = _build(tmp_path, JOINED, arms, base=JOB_MODULE)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(JOB_MODULE, marker, JOINED) and one.name == name
+        ]
+        return {
+            (
+                one.kind,
+                one.name,
+                tuple(one.steps),
+                tuple(one.paths),
+                tuple((t.call, t.gives, t.after_steps) for t in one.through),
+            )
+            for one in guard.sources
+        }
+
+    added = ("+", "added")
+    assert held("T1", "head") == {("database", "self.cur.fetchall", (), (), ())}
+    assert held("T2", "one") == {("database", "self.cur.fetchall", ("[*]",), (), ())}
+    assert held("T3", "tries") == {
+        ("database", "self.cur.fetchall", ("[*]", "[2]"), (), ((*added, 2),)),
+        ("constant", "1", (), (), ((*added, 0),)),
+    }
+    assert held("T4", "total") == {
+        ("constant", "0", (), (), ()),
+        ("constant", "0", (), (), ((*added, 0),)),
+        ("database", "self.cur.fetchall", ("[*]", "[2]"), (), ((*added, 2),)),
+    }
+
+
 BINDINGS = {
     BASE: """\
         class TaskRefinerBase:
