@@ -188,7 +188,7 @@ def _build(
             sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
         )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
-        guards, parameters, _writes, _written, _fields = heldfrom.guard_froms(
+        guards, parameters, _writes, _written, fields = heldfrom.guard_froms(
             junctions,
             sites,
             {module.rel_path: module.tree for module in modules},
@@ -202,6 +202,7 @@ def _build(
         read_sites=sites,
         guard_froms=guards,
         parameter_froms=parameters,
+        field_froms=fields,
     )
 
 
@@ -664,7 +665,7 @@ BINDINGS = {
                 else:
                     return "b"  # B5
 
-            def check(self, ignore_error, strict=False):
+            def check(self, ignore_error, strict=False):  # B6
                 if ignore_error or strict:  # T1
                     self.a = 1  # R1
         """,
@@ -678,7 +679,7 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
     (``add_main``'s ``if (timeNow - modTime) > ...: ignoreTmpError = False``): each source says where it ends
     (:attr:`HeldSource.at`) and the tests on the way there have GuardFroms, its line among their *calls* -- in the
     callee for a value a return hands back (T4), and on through those guards' own sources (T2 guards ``modTime``'s
-    ``0``).  A parameter's default, read where the call hands nothing, says no place."""
+    ``0``).  A parameter's default the call leaves it to is where it is written, in the callee."""
     fragment = _build(tmp_path, BINDINGS, (("check", "R1"),))
 
     def at(marker: str) -> str:
@@ -698,7 +699,7 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
         ("constant", "'a'", (at("B4"),)),
         ("constant", "'b'", (at("B5"),)),
     }
-    assert ends("check", "strict") == {("constant", "False", ())}
+    assert ends("check", "strict") == {("constant", "False", (at("B6"),))}
     # A parameter is bound where the function is entered, by no statement.
     assert ends("chosen", "value") == {("parameter", "jediTaskID", ())}
 
@@ -718,6 +719,365 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
     assert calls("extractCommon", "T0") == {line("B1"), line("B2")}
     assert calls("chosen", "T4") == {line("B4"), line("B5")}
     assert calls("extractCommon", "T2") == {line("B3")}
+
+
+CHECKER = "pandajedi/jedicore/Checker.py"
+DEFAULTED = {
+    BASE: """\
+        from pandajedi.jedicore.Checker import Checker
+
+
+        class TaskRefinerBase:
+            def extractCommon(self, jediTaskID):
+                checker = Checker()
+                checker.look(jediTaskID)
+                checker.look(jediTaskID, use_json=True)  # C1
+        """,
+    CHECKER: """\
+        class Checker:
+            def __init__(self):
+                self.a = None
+
+            def look(self, jobs, use_json=False):  # D1
+                if use_json:  # T1
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_a_parameter_s_default_is_placed_where_it_is_written_not_in_the_caller_s_file(
+    tmp_path: Path,
+) -> None:
+    """``peekJobs``' ``use_json: bool = False``, which a call in ``copyArchive.main`` leaves to its default: the
+    default ends at its line in the callee's file, though the caller's function spans the same line number in its
+    own file."""
+    fragment = _build(tmp_path, DEFAULTED, (("look", "R1"),), base=CHECKER)
+    (record,) = [
+        one
+        for one in fragment.parameter_froms
+        if one.owner.endswith("::look") and one.parameter == "use_json"
+    ]
+    assert _line(CHECKER, "D1", DEFAULTED) == 5
+    assert 5 in range(5, _line(BASE, "C1", DEFAULTED) + 1)
+    assert {(one.kind, one.name, tuple(one.at)) for one in record.sources} == {
+        ("constant", "False", (f"{CHECKER}:5",)),
+        ("constant", "True", (f"{BASE}:{_line(BASE, 'C1', DEFAULTED)}",)),
+    }
+
+
+EXCEPTIONS = "pandaserver/srvcore/exceptions.py"
+DDM = "pandaserver/dataservice/ddm.py"
+PLUGIN = "pandaserver/dataservice/adder_atlas_plugin.py"
+CAUGHT = {
+    EXCEPTIONS: """\
+        class FileRegistrationError(Exception):
+            def __init__(self, message: str = "", fatal: bool = False):  # E1
+                super().__init__(message)
+                self.fatal = fatal
+        """,
+    DDM: """\
+        from pandaserver.srvcore.exceptions import FileRegistrationError
+
+
+        class RucioAPI:
+            def register(self, files):
+                if not files:
+                    raise FileRegistrationError("no files", fatal=True)  # F1
+                raise FileRegistrationError("failed")  # F2
+        """,
+    PLUGIN: """\
+        from pandaserver.dataservice.ddm import RucioAPI
+        from pandaserver.srvcore.exceptions import FileRegistrationError
+
+
+        class AdderAtlasPlugin:
+            def __init__(self):
+                self.result = None
+
+            def register_files(self, files):
+                try:
+                    RucioAPI().register(files)
+                except FileRegistrationError as e:  # H1
+                    is_fatal = e.fatal
+                    if is_fatal:  # T1
+                        self.result = 1  # R1
+                except Exception as e:
+                    if e.args:  # T2
+                        self.result = 2  # R2
+        """,
+}
+
+
+def test_a_name_a_handler_binds_is_an_object_of_the_class_caught_whose_field_is_read_from_the_raises(
+    tmp_path: Path,
+) -> None:
+    """``AdderAtlasPlugin.register_files``' ``except FileRegistrationError as e: is_fatal = e.fatal``: ``e`` is an
+    object of the class, placed at the handler, so ``fatal`` is read where the class sets it -- the ``__init__``'s
+    parameter, handed ``True`` by one raise and left to its default by the other.  ``except Exception as e`` names
+    no class of the corpus: no object."""
+    fragment = _build(
+        tmp_path,
+        CAUGHT,
+        (("register_files", "R1"), ("register_files", "R2")),
+        base=PLUGIN,
+    )
+    (fatal,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(PLUGIN, "T1", CAUGHT)
+    ]
+    assert fatal.name == "is_fatal"
+    assert {
+        (one.kind, one.name, tuple(one.steps), one.site_owner, tuple(one.at))
+        for one in fatal.sources
+    } == {
+        (
+            "object",
+            "FileRegistrationError",
+            (".fatal",),
+            f"{EXCEPTIONS}::FileRegistrationError",
+            (f"{PLUGIN}:{_line(PLUGIN, 'H1', CAUGHT)}",),
+        )
+    }
+    (field,) = [
+        one
+        for one in fragment.field_froms
+        if one.owner == f"{EXCEPTIONS}::FileRegistrationError" and one.field == "fatal"
+    ]
+    assert {
+        (source.kind, source.name)
+        for binding in field.bindings
+        for source in binding.sources
+    } == {("parameter", "fatal")}
+    (handed,) = [
+        one
+        for one in fragment.parameter_froms
+        if one.owner == f"{EXCEPTIONS}::__init__" and one.parameter == "fatal"
+    ]
+    assert {(one.kind, one.name, tuple(one.at)) for one in handed.sources} == {
+        ("constant", "True", (f"{DDM}:{_line(DDM, 'F1', CAUGHT)}",)),
+        ("constant", "False", (f"{EXCEPTIONS}:{_line(EXCEPTIONS, 'E1', CAUGHT)}",)),
+    }
+    (other,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(PLUGIN, "T2", CAUGHT)
+    ]
+    assert "object" not in {one.kind for one in other.sources}
+
+
+WALRUS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, ds_list_dict, f):
+                if pseudo := ds_list_dict["pseudo"]:  # T1
+                    self.a = 1  # R1
+                if (n := f.count()) is not None and n == 0:  # T2
+                    self.a = 2  # R2
+                if m := f.other():  # T3
+                    if m > 3:  # T4
+                        self.a = 3  # R3
+        """,
+}
+
+
+def test_a_walrus_is_its_value_where_its_own_test_reads_it_and_after(
+    tmp_path: Path,
+) -> None:
+    """``if pseudo_coll_list := ds_list_dict["pseudo_coll_list"]:`` in ``TaskRefiner.runImpl``: the guard reads the
+    name the test binds -- at the walrus itself, or after it in the same test (``nStaging == 0``) -- as its value;
+    bindings are read by statements, which once left it unbound there.  A later statement reads it the same."""
+    fragment = _build(
+        tmp_path,
+        WALRUS,
+        (("extractCommon", "R1"), ("extractCommon", "R2"), ("extractCommon", "R3")),
+    )
+
+    def ways(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, WALRUS) and one.name == name
+        ]
+        assert guard.stops == []
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.at))
+            for one in guard.sources
+        }
+
+    def at(marker: str) -> tuple[str]:
+        return (f"{BASE}:{_line(BASE, marker, WALRUS)}",)
+
+    assert ways("T1", "pseudo") == {("parameter", "ds_list_dict", ("['pseudo']",), ())}
+    assert ways("T2", "n") == {("call", "f.count", (), at("T2"))}
+    assert ways("T3", "m") == {("call", "f.other", (), at("T3"))}
+    assert ways("T4", "m") == {("call", "f.other", (), at("T3"))}
+
+
+MERGE = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+RETURNED = {
+    BASE: """\
+        from pandaserver.taskbuffer.db_proxy_mods.job_module import JobModule
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, pandaID):
+                isValid, tmpMsg = JobModule().viaName(pandaID)
+                if isValid is False:  # T1
+                    self.a = 1  # R1
+                pair = JobModule().isValidMergeJob(pandaID)
+                if pair:  # T2
+                    self.a = 2  # R2
+        """,
+    MERGE: """\
+        class JobModule:
+            def isValidMergeJob(self, pandaIDs):
+                try:
+                    retVal = True  # V1
+                    retMsg = ""  # M1
+                    sqlC = "SELECT jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID "
+                    for tmpPandaID in pandaIDs:
+                        varMap = {}
+                        varMap[":PandaID"] = tmpPandaID
+                        self.cur.execute(sqlC, varMap)
+                        resC = self.cur.fetchone()
+                        if resC[0] != "merging":
+                            retVal = False  # V2
+                            retMsg = resC[0]  # M2
+                            break
+                    return retVal, retMsg
+                except Exception:
+                    return None, ""  # E1
+
+            def viaName(self, pandaIDs):
+                ret = self.isValidMergeJob(pandaIDs)
+                return ret
+        """,
+}
+
+
+def test_a_returned_tuple_holding_a_row_s_value_holds_its_other_elements_too(
+    tmp_path: Path,
+) -> None:
+    """``isValid, tmpMsg = taskBuffer.isValidMergeJob(pandaID, jediTaskID)`` in ``copyArchive.main``: the proxy's
+    ``return retVal, retMsg``, handed back through ``TaskBuffer``'s ``ret``, holds ``retVal``'s ``True`` and
+    ``False`` at ``[0]`` though ``retMsg`` holds a row's value -- a literal is read by its elements before the carry
+    is asked whether it is rows, which once took the tuple whole for the row and left only the handler's ``None``."""
+    fragment = _build(
+        tmp_path, RETURNED, (("extractCommon", "R1"), ("extractCommon", "R2"))
+    )
+
+    def ways(marker: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.owner.startswith(f"{BASE}::")
+            and one.test_line == _line(BASE, marker, RETURNED)
+        ]
+        return {(one.kind, one.name, tuple(one.at)) for one in guard.sources}
+
+    def at(*markers: str) -> tuple[str, ...]:
+        return tuple(f"{MERGE}:{_line(MERGE, marker, RETURNED)}" for marker in markers)
+
+    assert ways("T1") == {
+        ("constant", "True", at("V1")),
+        ("constant", "False", at("V2")),
+        ("constant", "None", at("E1")),
+    }
+    assert {(kind, name) for kind, name, _at in ways("T2")} >= {
+        ("constant", "True"),
+        ("constant", "False"),
+        ("constant", "''"),
+        ("constant", "None"),
+    }
+    assert "rows" in {kind for kind, _name, _at in ways("T2")}
+
+
+UNBOUND = {
+    BASE: """\
+        SETTING = None
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, rows, flag):
+                global SETTING
+                try:
+                    retVal: list | None = None  # B1
+                    retVal = rows.fetch()
+                except Exception:
+                    if retVal:  # T1
+                        self.a = 1  # R1
+                if flag:
+                    mode = "x"  # B3
+                if mode == "x":  # T2
+                    self.a = 2  # R2
+                if SETTING:  # T3
+                    self.a = 3  # R3
+                SETTING = 1  # B5
+                if SETTING:  # T5
+                    self.a = 5  # R5
+                if flag:
+                    import json as codec
+                else:
+                    codec = None  # B4
+                if codec:  # T4
+                    self.a = 4  # R4
+                from os import sep as separator
+                if separator:  # T6
+                    self.a = 6  # R6
+        """,
+}
+
+
+def test_the_entry_reaching_a_local_gives_no_way_but_a_binding_not_read_is_a_stop(
+    tmp_path: Path,
+) -> None:
+    """A local read where no binding of it may have run -- ``return retVal`` in the handler of a ``try`` whose first
+    statement binds it (``listJobOutputReport``), ``mode`` bound under one test and read under another -- gets no
+    value by that way: the read raises, or the way is not taken.  A name declared ``global`` is the module's by
+    that way, and its binding's where the binding reaches the read.  A name an import may bind is the function's
+    own, an import its only binding too; it is read as far as the bindings read, and a stop says the import."""
+    fragment = _build(
+        tmp_path, UNBOUND, tuple(("extractCommon", f"R{n}") for n in range(1, 7))
+    )
+
+    def guard(marker: str) -> GuardFrom:
+        (found,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, UNBOUND) and one.name != "flag"
+        ]
+        return found
+
+    def at(marker: str) -> tuple[str]:
+        return (f"{BASE}:{_line(BASE, marker, UNBOUND)}",)
+
+    def ways(marker: str) -> set[tuple]:
+        return {(one.kind, one.name, tuple(one.at)) for one in guard(marker).sources}
+
+    assert ways("T1") == {("constant", "None", at("B1"))}
+    assert ways("T2") == {("constant", "'x'", at("B3"))}
+    assert ways("T3") == {("global", "SETTING", at("T3"))}
+    assert ways("T4") == {("constant", "None", at("B4"))}
+    assert ways("T5") == {("constant", "1", at("B5"))}
+    assert ways("T6") == set()
+    for marker in ("T1", "T2", "T3", "T5"):
+        assert guard(marker).stops == []
+    assert [(one.kind, one.name, one.what, one.at) for one in guard("T4").stops] == [
+        ("unread_binding", "codec", "an import", list(at("T4")))
+    ]
+    assert [(one.kind, one.name, one.what, one.at) for one in guard("T6").stops] == [
+        ("unread_binding", "separator", "an import", list(at("T6")))
+    ]
 
 
 def test_a_local_is_one_way_per_binding_that_reaches_the_read(

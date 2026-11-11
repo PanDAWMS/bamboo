@@ -154,7 +154,8 @@ class _Way(NamedTuple):
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
     """*ways*, each end not placed yet placed in *file* where its line is among *func*'s: the innermost read that
     made the end places it.  Not a parameter, which no statement binds, nor a stop, nor an end whose line is outside
-    *func* (a parameter's default, read where the call hands nothing)."""
+    *func*.  An end read in another file is placed by the read there: a parameter's default is read in its own
+    function (:func:`_where_read`)."""
     first, last = getattr(func, "lineno", None), getattr(func, "end_lineno", None)
     if first is None or last is None:
         return ways
@@ -416,6 +417,19 @@ def _empty_literal(expr: ast.expr) -> str:
     return ""
 
 
+def _where_read(
+    given: ast.expr, call: ast.AST, file: str, func: ast.AST, target_file: str, target: ast.AST
+) -> tuple[ast.AST, str, ast.AST]:
+    """Where to read *given*, what *call* in *func* of *file* binds a parameter of *target* (of *target_file*) to
+    (:func:`calls.bind`), as (at, file, function): at the call, else -- one of *target*'s defaults, the call handing
+    the parameter nothing -- where it is written, in *target*, its line there (``use_json: bool = False`` at
+    ``TaskBuffer.py:1015``, not a line of the caller's file)."""
+    args = getattr(target, "args", None)
+    if args is not None and any(given is one for one in [*args.defaults, *args.kw_defaults]):
+        return given, target_file, target
+    return call, file, func
+
+
 def _added_sides(expr: ast.expr) -> list[ast.expr]:
     """The operands of *expr*'s ``+`` -- ``a + b + c``'s three --, *expr* itself where it is no ``+``."""
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
@@ -533,6 +547,49 @@ def _parameters(func: ast.AST) -> set[str]:
 
 def _bound_here(func: ast.AST, name: str) -> bool:
     return any(not binding.nested for binding in pathcond.bindings(func, name))
+
+
+#: A binding :func:`pathcond.bindings` does not list, by what makes it.
+_UNREAD_FORMS = {ast.alias: "an import", ast.FunctionDef: "a def", ast.AsyncFunctionDef: "a def", ast.ClassDef: "a class"}
+
+
+def _declared_or_unread(func: ast.AST) -> tuple[frozenset[str], dict[str, str]]:
+    """The names *func* declares ``global`` or ``nonlocal``, and those it binds by a form
+    :func:`pathcond.bindings` does not list -- an import, a nested ``def`` or ``class``, a ``match`` capture --, each
+    with its form; *func*'s own statements only, not a nested scope's.  Read once per function and kept on it."""
+    kept: Optional[tuple[frozenset[str], dict[str, str]]] = getattr(func, "_heldfrom_declared_or_unread", None)
+    if kept is not None:
+        return kept
+    declared: set[str] = set()
+    unread: dict[str, str] = {}
+    stack = list(ast.iter_child_nodes(func))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+        elif isinstance(node, ast.alias):
+            unread.setdefault(node.asname or node.name.split(".")[0], _UNREAD_FORMS[ast.alias])
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            unread.setdefault(node.name, "a match capture")
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            unread.setdefault(node.rest, "a match capture")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            unread.setdefault(node.name, _UNREAD_FORMS[type(node)])
+            stack.extend([*node.decorator_list, *getattr(node, "bases", ()), *getattr(node, "keywords", ())])
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    held = (frozenset(declared), unread)
+    func._heldfrom_declared_or_unread = held  # type: ignore[attr-defined]
+    return held
+
+
+def _binds(func: ast.AST, name: str) -> bool:
+    """Whether *func*'s own statements bind *name* by any form -- an import, a ``def``, a ``match`` capture too --,
+    which makes it *func*'s own by Python's rule, or, declared ``global`` or ``nonlocal``, read by those bindings
+    (:meth:`_Reader._bound`).  A name it binds by none is a module's."""
+    return _bound_here(func, name) or name in _declared_or_unread(func)[1]
 
 
 def _index(expr: ast.expr) -> Optional[int]:
@@ -776,6 +833,11 @@ class _Reader:
         line = getattr(expr, "lineno", None)
         if isinstance(expr, ast.Name):
             return self._name(expr, at, file, func)
+        # A literal is read by its elements before the carry is asked whether it is rows: ``return retVal, retMsg``,
+        # whose ``retMsg`` holds a row's value, holds ``retVal`` too.
+        placed = self._placed(expr, at, file, func)
+        if placed is not None:
+            return placed
         rows = self._rows(expr, at, file, func)
         if rows:
             return rows
@@ -815,9 +877,6 @@ class _Reader:
                 else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
                 for one in self.read(element, element, file, func)
             ]
-        placed = self._placed(expr, at, file, func)
-        if placed is not None:
-            return placed
         if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
             return self._added(_added_sides(expr), at, f"{file}:{line}", file, func)
         found = self._sources(expr, at, file, func)
@@ -981,11 +1040,15 @@ class _Reader:
         point = expr if getattr(expr, "parent", None) is not None else at
         if (
             expr.id not in _parameters(func)
-            and not _bound_here(func, expr.id)
+            and not _binds(func, expr.id)
             and pathcond.comprehension_clause(func, expr.id, point) is None
         ):
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         last = _statement_of(point)
+        if any(one.kind == pathcond.BIND_WALRUS and not one.nested for one in pathcond.bindings(func, expr.id)):
+            walrus = _walrus_before(expr.id, point, last)
+            if walrus is not None:
+                return self._site_ways(expr, point, walrus, file, func, last)
         found: list[_Way] = []
         for site in pathcond.held_at(func, expr.id, point).sites:  # type: ignore[arg-type]
             found += self._site_ways(expr, point, site, file, func, last)
@@ -1008,11 +1071,24 @@ class _Reader:
     def _bound(
         self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST
     ) -> list[_Way]:
-        """The ways of what *site*, a binding reaching the read, gives *expr*."""
+        """The ways of what *site*, a binding reaching the read, gives *expr*.  The function's entry, reaching the
+        read of a local not a parameter, gives none: that way raises ``UnboundLocalError`` or is never taken (a
+        test the binding's own test rules out, a statement before it that cannot raise) -- no value comes by it
+        (``return retVal`` in the handler of a ``try`` whose first statement binds ``retVal``).  A name the
+        function declares ``global`` or ``nonlocal`` is the module's by that way, and a binding of the function that
+        reaches the read gives its own value, no other writer being read between (``global_task_buffer =
+        task_buffer`` read on the next statement).  Where the function binds the name by a form not read
+        (:func:`_declared_or_unread`), a stop ``unread_binding``."""
         if site is func.args:  # type: ignore[attr-defined]
             if expr.id in _parameters(func):
                 return [self._parameter(file, func, expr.id)]
-            return [_stop("unbound", expr.id, at=f"{file}:{expr.lineno}")]
+            declared, unread = _declared_or_unread(func)
+            if expr.id in declared:
+                return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
+            form = unread.get(expr.id)
+            if form is not None:
+                return [_stop("unread_binding", expr.id, what=form, at=f"{file}:{expr.lineno}")]
+            return []
         targets = pathcond.targets_of(site)
         value = getattr(site, "value", None)
         if (
@@ -1034,6 +1110,23 @@ class _Reader:
             return self.read(value, site, file, func)
         return self._carried(expr, point, site, file, func)
 
+    def _caught(self, handler: ast.ExceptHandler, file: str) -> list[_Way]:
+        """The ways of the name an ``except X as e`` binds: an object of X, as a call building X is
+        (:meth:`_call`) -- of each class a tuple names --, so a field of it is read where the class sets it
+        (``e.fatal`` from FileRegistrationError's ``self.fatal = fatal``, from each raise's ``fatal=``).  Placed at
+        the handler: the raise is not the handler's to name.  Empty where a class caught is not the corpus's
+        (``except Exception as e``): what the carry says then.  A subclass's object caught is X's too: X's
+        :class:`~bamboo.codemap.models.FieldFrom` reads its corpus subclasses' bindings."""
+        caught = handler.type
+        named = caught.elts if isinstance(caught, ast.Tuple) else [caught] if caught is not None else []
+        found: list[_Way] = []
+        for one in named:
+            cls = self.calls.types.class_named(file, one)
+            if cls is None:
+                return []
+            found.append(_Way(KEY_OBJECT, cls[1].name, handler.lineno, site_owner=_class_key(*cls)))
+        return found
+
     def _carried(
         self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST
     ) -> list[_Way]:
@@ -1048,11 +1141,10 @@ class _Reader:
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
         select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` is a ``+`` of what the name
-        held and its value (:meth:`_accumulated`); another augmented assignment, ``except ... as`` and ``:=`` keep
-        what the carry says (:func:`pathcond.held_at` gives a ``:=`` no reaching binding)."""
-        carried = self._sources(expr, point, file, func) or [
-            _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
-        ]
+        held and its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an ``=``'s is -- also where the
+        read is in its own statement (:func:`_walrus_before`).  An ``except X as e`` is an object of X where the
+        corpus has the class (:meth:`_caught`); another augmented assignment and another ``except ... as`` keep what
+        the carry says."""
         binding = (
             pathcond.clause_binding(site, expr.id)
             if isinstance(site, ast.comprehension)
@@ -1061,6 +1153,15 @@ class _Reader:
                 None,
             )
         )
+        if binding is not None and binding.kind == pathcond.BIND_EXCEPT:
+            caught = self._caught(site, file)  # type: ignore[arg-type]
+            if caught:
+                return caught
+        if binding is not None and binding.kind == pathcond.BIND_WALRUS and binding.value is not None:
+            return self.read(binding.value, site, file, func)
+        carried = self._sources(expr, point, file, func) or [
+            _Way(KEY_UNKNOWN, expr.id, getattr(site, "lineno", None))
+        ]
         if binding is None or binding.kind == pathcond.BIND_EXCEPT:
             return carried
         if binding.kind == pathcond.BIND_AUGMENTED:
@@ -1309,7 +1410,7 @@ class _Reader:
                         if given is None:
                             found.append(_stop("handed_spread", inner.name, at=here))
                             continue
-                        for outer in self.read(given, call, file, func):
+                        for outer in self.read(given, *_where_read(given, call, file, func, target.file, target.func)):
                             found += _onto(outer, inner, (), (here,) + inner.route + outer.route)
                     elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
                         # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
@@ -1902,6 +2003,9 @@ class _Reader:
                 given = bind(site.call, target, placed.on_class).get(name)
             except Exception:  # noqa: BLE001 -- as _safely
                 return None
+            if given is None:
+                return None
+            at, read_file, read_func = _where_read(given, site.call, site.file, site.func, file, func)
             if isinstance(given, ast.Dict) and all(
                 isinstance(key, ast.Constant) and isinstance(key.value, str) for key in given.keys
             ):
@@ -1909,10 +2013,11 @@ class _Reader:
                     if isinstance(key, ast.Constant) and key.value == field:
                         ways += [
                             one._replace(route=(here,) + one.route)
-                            for one in self._safely(value, site.call, site.file, site.func)
+                            for one in self._safely(value, at, read_file, read_func)
                         ]
             elif (
-                isinstance(given, ast.Name)
+                read_func is site.func
+                and isinstance(given, ast.Name)
                 and given.id in _parameters(site.func)
                 and not _rebinds(site.func, given.id)
                 and level < _KEYWORD_LEVELS
@@ -1964,7 +2069,7 @@ class _Reader:
                 continue
             ways += [
                 one._replace(route=(here,) + one.route)
-                for one in self._safely(given, site.call, site.file, site.func)
+                for one in self._safely(given, *_where_read(given, site.call, site.file, site.func, file, func))
             ]
         if not sites:
             ways.append(_stop("no_caller", name, at=f"{owner}:{line}"))
@@ -2183,6 +2288,36 @@ def _statement_of(node: ast.AST) -> Optional[ast.stmt]:
     return here
 
 
+def _walrus_before(name: str, point: ast.AST, statement: Optional[ast.stmt]) -> Optional[ast.NamedExpr]:
+    """The ``:=`` binding *name* in *statement*'s own expressions -- not its body's statements, not a lambda's --
+    whose target *point* is, else the last one *point* comes after: the binding of a read in the statement that
+    binds it.  :func:`pathcond.held_at` reads bindings by statements, so a ``:=`` reaches no read in its own
+    statement: ``if pseudo_coll_list := ds_list_dict["pseudo_coll_list"]:`` and ``nStaging == 0`` in ``if (nStaging
+    := ...) is not None and nStaging == 0:`` read it.  After is by place in the text, the order Python runs an
+    expression in."""
+    if statement is None:
+        return None
+    here = (getattr(point, "lineno", 0), getattr(point, "col_offset", 0))
+    found: Optional[ast.NamedExpr] = None
+    stack = [
+        child
+        for child in ast.iter_child_nodes(statement)
+        if not isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case))
+    ]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name) and node.target.id == name:
+            if node.target is point:
+                return node
+            end = (node.end_lineno or 0, node.end_col_offset or 0)
+            if end <= here and (found is None or end > (found.end_lineno or 0, found.end_col_offset or 0)):
+                found = node
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
 def _function_at(tree: ast.AST, name: str, line: int) -> Optional[ast.AST]:
     for node in walk(tree):
         if (
@@ -2226,7 +2361,7 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
             and node.id not in ("self", "cls")
             and node.id not in inner
         ):
-            if node.id in own or _bound_here(func, node.id):
+            if node.id in own or _binds(func, node.id):
                 found.setdefault(node.id, node)
     return found
 

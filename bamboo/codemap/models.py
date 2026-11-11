@@ -3137,8 +3137,8 @@ KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
 #: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
-#: a call builds of a corpus class (``JobSpec()``), a module's name, a call neither placed nor gone through, a fetch
-#: whose rows no statement of the function reads.
+#: a call builds of a corpus class (``JobSpec()``) or a handler catches (``except FileRegistrationError as e``), a
+#: module's name, a call neither placed nor gone through, a fetch whose rows no statement of the function reads.
 KEY_OBJECT = "object"
 KEY_GLOBAL = "global"
 KEY_CALL = "call"
@@ -3444,8 +3444,9 @@ class HeldSource(KeySource):
             "Where the way ends, ``file:line`` of its end, each once -- the source's own statement, where its value "
             "is bound or made (``pandaserver/daemons/scripts/add_main.py:130`` for ``ignoreTmpError = False``); "
             "several where ways ending at one source at several lines are this one.  The tests on the way to each "
-            "have GuardFroms (:attr:`GuardFrom.calls`).  Empty where the way ends at a parameter, or at a value "
-            "outside the function it is read in (a parameter's default)."
+            "have GuardFroms (:attr:`GuardFrom.calls`).  A parameter's default a call leaves it to is where it is "
+            "written, in the callee (``pandaserver/taskbuffer/TaskBuffer.py:1015`` for ``use_json: bool = False``).  "
+            "Empty where the way ends at a parameter."
         ),
     )
 
@@ -5906,6 +5907,7 @@ KEY_STOPS: dict[str, str] = {
     "not_found": "{name} is not spelled in the statement at {at}",
     "missed": "a call of {name} may not be placed: {what}",
     "unbound": "{name} is read at {at} before a binding of it",
+    "unread_binding": "{name} is read at {at} where {what} may bind it, which is not read",
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
     "generator": "the call at {at} makes a generator of {name}, not what {name} returns",
@@ -6058,8 +6060,8 @@ class FieldBinding(BaseModel):
 
 class FieldFrom(BaseModel):
     """What a field of an object of a class may hold, read in the class: the next link of a way that ends at
-    ``self.<field>`` or at an object a corpus class builds with the field as its first step (``site_owner`` and the
-    field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
+    ``self.<field>`` or at an object a corpus class builds -- or a handler catches -- with the field as its first step
+    (``site_owner`` and the field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
 
     ``self.add_result.is_succeeded()`` at ``AdderGen.process_job_report`` 440 reads ``self.add_result``, bound in
     the class at ``execute_plugin`` 265 to ``self.adder_plugin.result``: a way ending at ``self.adder_plugin``, built
