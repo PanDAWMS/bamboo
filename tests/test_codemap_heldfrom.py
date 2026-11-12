@@ -503,6 +503,68 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
     assert held("T9", "spec") == {("self_field", "self.specs", ("['a']",), ())}
 
 
+DICT_KEYS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, ddm_if, dataset_name):
+                replica_map = {dataset_name: ddm_if.listDatasetReplicas(dataset_name)}
+                info = {}
+                for rse, data_list in replica_map[dataset_name].items():
+                    flag = False
+                    for data in data_list:
+                        if data["found"]:
+                            flag = True
+                    info[rse] = {"flag": flag}
+                for rse in info:
+                    if info[rse]["flag"]:  # T1
+                        self.a = 1  # R1
+                for name in {"x": 1, "y": 2}:
+                    if name:  # T2
+                        self.a = 2  # R2
+                for value in [3, 4]:
+                    if value:  # T3
+                        self.a = 3  # R3
+        """,
+}
+
+
+def test_a_loop_over_a_value_known_as_a_dict_takes_its_keys_not_what_its_values_hold(
+    tmp_path: Path,
+) -> None:
+    """``get_sites_with_data``'s shape: ``replica_availability_info[tmp_rse] = {...}`` puts a dict under a key that is
+    not a constant, so its value sits at ``[*]``, where a list's element sits too; ``for tmp_rse in
+    replica_availability_info`` read the dict put as ``tmp_rse`` -- its ``False`` / ``True`` and its key ``'flag'``.
+    A loop over a value known as a dict (the path carry's ``_is_dict``) takes its keys alone: a put's key is kept as
+    its spelling only, so ``rse`` is the empty dict's element, a value no way reaches; a dict literal's keys are
+    ``'x'`` and ``'y'``, not its values too; a list's elements are as before."""
+    arms = tuple(("extractCommon", f"R{n}") for n in (1, 2, 3))
+    fragment = _build(tmp_path, DICT_KEYS, arms)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, DICT_KEYS) and one.name == name
+        ]
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths))
+            for one in guard.sources
+        }
+
+    assert held("T1", "rse") == {("unknown", "{}", ("[*]",), ())}
+    assert held("T2", "name") == {
+        ("constant", "'x'", (), ()),
+        ("constant", "'y'", (), ()),
+    }
+    assert held("T3", "value") == {
+        ("constant", "3", (), ()),
+        ("constant", "4", (), ()),
+    }
+
+
 VIEWS = {
     BASE: """\
         class TaskRefinerBase:

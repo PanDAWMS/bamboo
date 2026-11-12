@@ -232,7 +232,9 @@ def _unread_part(way: _Way, step: str) -> _Way:
     return _Way(kind, way.name + "".join(way.steps) + step, way.line)
 
 
-def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = None) -> list[_Way]:
+def _step(
+    way: _Way, step: str, element: bool = False, unread: Optional[_Way] = None, keys: bool = False
+) -> list[_Way]:
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
     (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
     the values it is read as.  An element of a ``+``'s value is an element of one of its sides, the ``+`` left
@@ -244,7 +246,9 @@ def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = 
     the source itself, a way of its own with no paths, where the reader placed it (``[taskSpec.site][0]`` is
     ``taskSpec.site``); where the paths are the carry's (*loose*) it is the source or a part of it, not known which:
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
-    ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too."""
+    ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
+    value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
+    values)."""
     while (
         step.startswith("[")
         and way.through
@@ -264,7 +268,7 @@ def _step(way: _Way, step: str, element: bool = False, unread: Optional[_Way] = 
         return [way._replace(steps=way.steps + (step,))]
     from bamboo.codemap.panda.recognizers.sqlwrite import paths_under
 
-    under = paths_under(step, way.paths, element)
+    under = paths_under(step, way.paths, element, keys)
     parts = tuple(path for path in under if path != "()")
     found = [way._replace(paths=parts)] if parts else []
     if "()" in under:
@@ -281,16 +285,19 @@ def _then(way: _Way, steps: tuple[str, ...]) -> list[_Way]:
     return ways or [_unread_part(way, "".join(steps))]
 
 
-def _taken(ways: list[_Way], step: str, element: bool = False, unread: Optional[_Way] = None) -> list[_Way]:
+def _taken(
+    ways: list[_Way], step: str, element: bool = False, unread: Optional[_Way] = None, keys: bool = False
+) -> list[_Way]:
     """*ways* with *step* taken (:func:`_step`) and joined (:func:`_joined`), a stop as it is.  Where the step leaves
     none of them -- every source sits only at other parts -- the part is a value no way reaches: *unread*, else
-    :func:`_unread_part` of the first way.  *unread* is given once where several ways land on it."""
+    :func:`_unread_part` of the first way.  *unread* is given once where several ways land on it.  *element* and
+    *keys* as :func:`_step` takes them."""
     found: list[_Way] = []
     for one in ways:
-        for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread):
+        for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread, keys):
             if stepped is unread and unread in found:
                 continue
-            found += [stepped] if stepped.kind == _STOP else _joined(stepped)
+            found += [stepped] if stepped.kind == _STOP else _joined(stepped, keys)
     if ways and not found:
         return [unread or _unread_part(ways[0], step)]
     return found
@@ -366,13 +373,17 @@ def _puts_unread(change) -> bool:
     )
 
 
-def _joined(way: _Way) -> list[_Way]:
+def _joined(way: _Way, keys: bool = False) -> list[_Way]:
     """*way*, where its end is a container made empty and its first step takes an element: the ways of the values
     its changes put that the step may take, with the rest of the steps -- each through the calls to its put
     (*via*), carrying what may change an element in the container --; *way* too where a put is not read or the step
     may take a mapping's key (``[*]``).  ``TaskBuffer.peekJobs``' ``retJobs = []`` filled by ``retJobs.append(res)``:
-    ``retJobs[0]`` is ``res``.  Any other way, itself."""
+    ``retJobs[0]`` is ``res``.  Any other way, itself -- also where that step is a loop's over a value known as a
+    dict (*keys*): its element is a key, and a put's key is kept as its spelling only (:attr:`HeldChange.key`), so
+    no put gives it (``for tmp_rse in replica_availability_info`` takes none of the dicts put as its values)."""
     if way.kind == _STOP or not way.made_empty or way.through or not way.steps or not way.steps[0].startswith("["):
+        return [way]
+    if keys and len(way.steps) == 1:
         return [way]
     step, rest = way.steps[0], way.steps[1:]
     puts = [one for one in way.changes if _puts_at(one, step)]
@@ -1244,16 +1255,19 @@ class _Reader:
         """The ways of the element a loop over *value* takes (*step* ``[*]``) or of the value a ``with`` over it
         enters (``.__enter__()``): *value*'s with *step*; where *value* calls generators only, what they yield
         (:meth:`_call`) -- ``with self.request_lock(request_id) as locked_spec`` holds the request
-        ``request_lock`` yields or its ``None``."""
+        ``request_lock`` yields or its ``None``.  A loop over a value known as a dict (the path carry's reading:
+        made here, or a name the function holds dicts in) takes its keys alone."""
         if isinstance(value, ast.Call):
             placed = self.calls.callees(file, func, value, bound=selves)
             if placed.targets and not placed.thread and all(self._is_generator(one) for one in placed.targets):
                 return self._call(value, file, func, yielded=True, selves=selves)
-        return self._stepped(self.read(value, at, file, func, selves=selves), step, element=step == "[*]")
+        element = step == "[*]"
+        keys = element and self._sqlwrite._is_dict(value, self.reading.dicts_of(func))
+        return self._stepped(self.read(value, at, file, func, selves=selves), step, element=element, keys=keys)
 
     @staticmethod
-    def _stepped(ways: list[_Way], step: str, element: bool = False) -> list[_Way]:
-        return _taken(ways, step, element)
+    def _stepped(ways: list[_Way], step: str, element: bool = False, keys: bool = False) -> list[_Way]:
+        return _taken(ways, step, element, keys=keys)
 
     @classmethod
     def _of_field(cls, ways: list[_Way], field: Optional[str]) -> list[_Way]:
