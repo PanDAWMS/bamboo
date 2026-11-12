@@ -1028,6 +1028,57 @@ def test_the_tests_on_the_way_to_a_place_a_way_goes_through_have_guard_froms(
     }
 
 
+ROUTED = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def counted(self, params):
+                return params["nEvents"]
+
+            def sized(self, params, wanted):
+                if wanted:  # T1
+                    return self.counted(params)  # C1
+                raise ValueError("not wanted")
+
+            def extractCommon(self, params, wanted):
+                size = self.sized(params, wanted)  # C2
+                if size > 10:  # T2
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_the_tests_on_the_way_to_a_call_of_the_corpus_a_way_goes_through_have_guard_froms(
+    tmp_path: Path,
+) -> None:
+    """A call of the corpus on a way -- one whose return the value is, or the caller's that hands it in -- is a place
+    on it as an operator's statement is: the tests on the way to it say whether the call that gave the value ran
+    (``return self.counted(params)`` under ``if wanted:``, the way going on to the parameter).  They have
+    GuardFroms, the call's line among their *calls*."""
+    fragment = _build(tmp_path, ROUTED, (("extractCommon", "R1"),))
+
+    def place(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, ROUTED)}"
+
+    (size,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(BASE, "T2", ROUTED) and one.name == "size"
+    ]
+    assert {
+        (one.kind, one.name, frozenset(one.route), tuple(one.at), tuple(one.through))
+        for one in size.sources
+    } == {("parameter", "params", frozenset({place("C1"), place("C2")}), (), ())}
+    (wanted,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(BASE, "T1", ROUTED) and one.name == "wanted"
+    ]
+    assert _line(BASE, "C1", ROUTED) in wanted.calls
+
+
 MIXED_ROWS = {
     BASE: """\
         class TaskRefinerBase:

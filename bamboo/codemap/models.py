@@ -3414,7 +3414,8 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: each call of the corpus on it, ``file:line``, in the order the "
             "value went -- one whose return the value is, and on a ParameterFrom's way last the caller's call that "
-            "hands it in."
+            "hands it in.  The tests on the way to each have GuardFroms (:attr:`GuardFrom.calls`): whether the call "
+            "that gave or handed the value ran is read off them."
         ),
     )
     changes: list["HeldChange"] = Field(
@@ -6024,10 +6025,10 @@ class GuardFrom(BaseModel):
             "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
             "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
             "``ignoreTmpError = False``; and of the places such a way goes through on to its end: each call outside "
-            "the corpus or operator (:attr:`HeldThrough.at`), and each binding that was one of several reaching its "
-            "read (:attr:`HeldSource.chosen`): ``if 'log' not in taskParamMap:`` guards ``itemList = "
-            "taskParamMap['jobParameters']`` and the ``+`` under its ``else``.  Not lines of calls only, then: the "
-            "lines of the places it guards."
+            "the corpus or operator (:attr:`HeldThrough.at`), each binding that was one of several reaching its read "
+            "(:attr:`HeldSource.chosen`) -- ``if 'log' not in taskParamMap:`` guards ``itemList = "
+            "taskParamMap['jobParameters']`` and the ``+`` under its ``else`` --, and each call of the corpus "
+            "(:attr:`HeldSource.route`).  Not lines of calls only, then: the lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
