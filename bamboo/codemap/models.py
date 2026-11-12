@@ -3339,8 +3339,13 @@ class HeldThrough(BaseModel):
         description=(
             "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
             "as js`` too), else as the call names it (``int``); ``+`` for a ``+`` or ``+=`` "
-            f"({THROUGH_ADDED}): ``job.attemptNr + 1``; ``f''`` for an f-string, its values and literal parts "
-            f"({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...)."
+            f"({THROUGH_ADDED}): ``job.attemptNr + 1``; another arithmetic operator's symbol (``*``, ``-``, ``//``, "
+            f"``%``, ...) for it or its augmented assignment ({THROUGH_COMPUTED}; {THROUGH_TEXT} for a ``%`` on a text "
+            f"literal): ``max_walltime *= 2``.  An element of a set or a sequence a ``+``, ``-``, ``|``, ``&``, ``^`` "
+            "or ``*`` makes is an operand's element, through none of them, and never the right operand's of a ``-``: "
+            "``list(rse_set - excluded)[0]`` is ``rse_set``'s ``[0]``; a part a container holds such a value at is "
+            "the value, through the operator: ``{'k': a + b}['k']`` is ``a + b``.  ``f''`` for an f-string, its "
+            f"values and literal parts ({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...)."
         )
     )
     at: str = Field(description="``file:line`` of the call.")

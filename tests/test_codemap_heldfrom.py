@@ -677,6 +677,138 @@ def test_an_f_string_holds_its_values_and_literal_parts_through_it_not_a_value_i
     }
 
 
+OPERATED = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def choose(self, rse_set):
+                return list(rse_set)[0]
+
+            def counted(self, stats_list, extra):
+                return stats_list + extra
+
+            def extractCommon(self, taskSpec, user):
+                product = taskSpec.walltime * 2
+                if product > 3:  # T1
+                    self.a = 1  # R1
+                wall = taskSpec.walltime
+                wall *= 2
+                if wall > 3:  # T2
+                    self.a = 2  # R2
+                message = "%s/%s" % (user, taskSpec.name)
+                if message:  # T3
+                    self.a = 3  # R3
+                first = list(taskSpec.sites - taskSpec.excluded)[0]
+                if first:  # T4
+                    self.a = 4  # R4
+                either = list(taskSpec.sites | user)[0]
+                if either:  # T5
+                    self.a = 5  # R5
+                both = set(taskSpec.sites)
+                both &= set(user)
+                chosen = self.choose(both)
+                if chosen:  # T6
+                    self.a = 6  # R6
+                kept = set(taskSpec.sites)
+                kept -= set(taskSpec.excluded)
+                picked = self.choose(kept)
+                if picked:  # T7
+                    self.a = 7  # R7
+                parts = {"k": taskSpec.nfiles - user.nused}
+                whole = parts["k"]
+                if whole:  # T8
+                    self.a = 8  # R8
+                for job in taskSpec.jobs + [user]:
+                    if job:  # T9
+                        self.a = 9  # R9
+                stats_list = list(taskSpec.counts.items())
+                stats_list += list(user.counts.items())
+                for site, count in stats_list:
+                    if count:  # T10
+                        self.a = 10  # R10
+                joined = self.counted(list(taskSpec.counts.items()), user.extra)
+                for host, number in joined:
+                    if number:  # T11
+                        self.a = 11  # R11
+        """,
+}
+
+
+def test_an_operator_s_value_holds_both_operands_through_the_operator_not_either_itself(
+    tmp_path: Path,
+) -> None:
+    """An arithmetic operator other than ``+`` and its augmented assignment were left to the path carry:
+    ``taskSpec.walltime * 2`` was a value no way reaches, ``wall *= 2`` the parameter ``taskSpec`` whole.  They are
+    read in place now, as a ``+`` is: both operands through the operator's symbol, computed -- text for a ``%`` on a
+    text literal.  (``wall`` still holds ``taskSpec.walltime`` itself too, by the ``=`` that reaches past the
+    ``*=``.)  An element of a set or a sequence such an operator makes is an operand's element, past the copy made
+    of it and through no operator: both sides' of a ``|``, never the right side's of a ``-``
+    (``DataCarousel``'s ``destination_rse`` held ``excluded_destinations[0]``) -- also where a callee takes the
+    element of a set an augmented assignment made in its caller (``_choose_tape_source_rse``'s ``list(rse_set)[0]``
+    of ``rse_set &= ...``), which the join across the call had left through the ``&``.  A part a container holds
+    such a value at is the value whole: ``{"k": a - b}["k"]`` is both operands through the ``-`` (it was ``a``
+    itself, ``b`` dropped: ``JobThrottlerBase``'s ``nNotRun_queuelimit``, returned in a dict).  Parts an operand
+    held its source at before the operator are the value's own: an element of ``jobs + [user]`` is ``user`` itself,
+    of a list of ``.items()`` joined by ``+=`` a value of either dict -- also where the callee joined them -- not
+    through the ``+`` (``setupper``'s ``for job in self.jobs + [None]``, ``JobThrottlerBase``'s ``stats_list``)."""
+    fragment = _build(
+        tmp_path,
+        OPERATED,
+        tuple(("extractCommon", f"R{n}") for n in range(1, 12)),
+    )
+    times = (("*", "computed"),)
+    assert _held_through(fragment, OPERATED, "T1", "product") == {
+        ("constant", "2", (), (), times),
+        ("parameter", "taskSpec", (".walltime",), (), times),
+    }
+    wall = _held_through(fragment, OPERATED, "T2", "wall")
+    assert {
+        ("constant", "2", (), (), times),
+        ("parameter", "taskSpec", (".walltime",), (), times),
+    } <= wall
+    assert not [one for one in wall if one[:3] == ("parameter", "taskSpec", ())]
+    assert _held_through(fragment, OPERATED, "T3", "message") == {
+        ("constant", "'%s/%s'", (), (), (("%", "text"),)),
+        ("parameter", "user", (), ("[0]",), (("%", "text"),)),
+        ("parameter", "taskSpec", (".name",), ("[1]",), (("%", "text"),)),
+    }
+    copied = (("list", "copy"),)
+    assert _held_through(fragment, OPERATED, "T4", "first") == {
+        ("parameter", "taskSpec", (".sites", "[0]"), (), copied),
+    }
+    assert _held_through(fragment, OPERATED, "T5", "either") == {
+        ("parameter", "taskSpec", (".sites", "[0]"), (), copied),
+        ("parameter", "user", ("[0]",), (), copied),
+    }
+    copied_twice = (("set", "copy"), ("list", "copy"))
+    assert _held_through(fragment, OPERATED, "T6", "chosen") == {
+        ("parameter", "taskSpec", (".sites", "[0]"), (), copied_twice),
+        ("parameter", "user", ("[0]",), (), copied_twice),
+    }
+    assert _held_through(fragment, OPERATED, "T7", "picked") == {
+        ("parameter", "taskSpec", (".sites", "[0]"), (), copied_twice),
+    }
+    minus = (("-", "computed"),)
+    assert _held_through(fragment, OPERATED, "T8", "whole") == {
+        ("parameter", "taskSpec", (".nfiles",), (), minus),
+        ("parameter", "user", (".nused",), (), minus),
+    }
+    assert _held_through(fragment, OPERATED, "T9", "job") == {
+        ("parameter", "taskSpec", (".jobs", "[*]"), (), ()),
+        ("parameter", "user", (), (), ()),
+    }
+    assert _held_through(fragment, OPERATED, "T10", "count") == {
+        ("parameter", "taskSpec", (".counts", "[*]"), (), copied),
+        ("parameter", "user", (".counts", "[*]"), (), copied),
+    }
+    assert _held_through(fragment, OPERATED, "T11", "number") == {
+        ("parameter", "taskSpec", (".counts", "[*]"), (), copied),
+        ("parameter", "user", (".extra", "[*]", "[1]"), (), ()),
+    }
+
+
 VIEWS = {
     BASE: """\
         class TaskRefinerBase:

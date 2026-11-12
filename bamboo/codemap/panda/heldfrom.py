@@ -192,6 +192,12 @@ class _Through(NamedTuple):
     runs: bool = False
     #: How many of the way's steps were applied before the call: it is handed the end with ``steps[:steps]``.
     steps: int = 0
+    #: The way is the right operand of a ``-``: an element of the value is none of its (:func:`_step`).
+    drops: bool = False
+    #: The way's paths as it went through the call (:func:`_through`): where an operator's operand held the source.
+    #: Other paths at an element step are a container's that took the operator's value whole after it
+    #: (:func:`_element_of_operation`).
+    held: tuple[str, ...] = ()
 
 
 class _Change(NamedTuple):
@@ -219,6 +225,24 @@ _COMPREHENSIONS = {
 _ELEMENT_COMPREHENSIONS = frozenset({"<listcomp>", "<setcomp>", "<genexpr>"})
 #: What a ``+``'s value's ``through`` is called by (:data:`THROUGH_ADDED`).
 _ADD = "+"
+#: What another arithmetic operator's value's ``through`` is called by: its symbol (:func:`_operation`).
+_OPERATORS: dict[type, str] = {
+    ast.Sub: "-",
+    ast.Mult: "*",
+    ast.Div: "/",
+    ast.FloorDiv: "//",
+    ast.Mod: "%",
+    ast.Pow: "**",
+    ast.LShift: "<<",
+    ast.RShift: ">>",
+    ast.BitOr: "|",
+    ast.BitXor: "^",
+    ast.BitAnd: "&",
+    ast.MatMult: "@",
+}
+#: The operators whose value, where it is a set or a sequence, holds its operands' elements: an element of it is an
+#: operand's element, the right one's of a ``-`` none (:func:`_step`).
+_ELEMENT_OPERATORS = frozenset({_ADD, "-", "|", "&", "^", "*"})
 #: What an f-string's value's ``through`` is called by (:data:`THROUGH_TEXT`).
 _FORMATTED = "f''"
 
@@ -240,7 +264,12 @@ def _step(
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
     (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
     the values it is read as.  An element of a ``+``'s value is an element of one of its sides, the ``+`` left
-    (:meth:`_Reader._added`): ``(ret_head + ret_tail)[0]`` is ``ret_head``'s or ``ret_tail``'s ``[0]``.
+    (:meth:`_Reader._added`): ``(ret_head + ret_tail)[0]`` is ``ret_head``'s or ``ret_tail``'s ``[0]``; so of the
+    other operators a set or a sequence is made by (:data:`_ELEMENT_OPERATORS`), but a ``-``'s right side, whose
+    elements its value has none of: ``list(rse_set - excluded)[0]`` is ``rse_set``'s ``[0]``, not ``excluded``'s.
+    Only an element of the operator's value is: where a container took the value whole after the operator, the step
+    takes the container's part, the operator's value whole (``{"k": a + b}["k"]`` is the ``+``'s value, not ``a``
+    itself); parts an operand's value had are the value's (``self.jobs + [None]``'s element is ``None`` itself).
 
     A way whose source sits at parts of the value (*paths*) is cut by the step, as the path carry takes a part: the
     parts under it, with the rest of their steps; none where no part is under it, the source not in the part
@@ -251,13 +280,11 @@ def _step(
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
     value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
     values)."""
-    while (
-        step.startswith("[")
-        and way.through
-        and way.through[0].call == _ADD
-        and way.through[0].steps == len(way.steps)
-    ):
-        way = way._replace(through=way.through[1:])
+    if step.startswith("["):
+        element_of = _element_of_operation(way)
+        if element_of is None:
+            return []
+        way = element_of
     if (
         step.startswith("[")
         and not way.paths
@@ -276,6 +303,28 @@ def _step(
     if "()" in under:
         found.insert(0, unread or _unread_part(way, step) if way.loose else way._replace(paths=()))
     return found
+
+
+def _element_of_operation(way: _Way) -> Optional[_Way]:
+    """*way* as an element of its value reads it: past the operators the value was last made by that make a set or a
+    sequence of their operands' elements (:data:`_ELEMENT_OPERATORS`), and past copies of what they made
+    (``list(rse_set - excluded)``), those operators left out -- ``None`` where it is a ``-``'s right side.  An
+    operator the way went through with other paths than it has now (:attr:`_Through.held`) is where it stops: a
+    container took that operator's value whole after it."""
+    kept: list[_Through] = []
+    rest = list(way.through)
+    while rest and rest[0].steps == len(way.steps):
+        if rest[0].call in _ELEMENT_OPERATORS:
+            if rest[0].held != way.paths:
+                break
+            if rest[0].drops:
+                return None
+        elif rest[0].gives == THROUGH_COPY:
+            kept.append(rest[0])
+        else:
+            break
+        rest.pop(0)
+    return way._replace(through=(*kept, *rest))
 
 
 def _then(way: _Way, steps: tuple[str, ...], fall_back: bool = True) -> list[_Way]:
@@ -311,25 +360,57 @@ def _onto(
 ) -> list[_Way]:
     """What a call gives where its callee's way *inner* ends at what the call hands the callee -- *outer*, an
     argument, or the receiver with the *fields* of ``self`` *inner* names: *outer* with *fields* and *inner*'s steps
-    taken (:func:`_then`, which cuts a way at parts of the argument, falling back as *fall_back* says), held where
-    *inner* says the callee holds its end (*inner*'s paths, before the argument's own: ``return (self.SC_FAILED,
-    inputChunk)`` holds the argument at ``[1]``), *inner*'s calls after the steps they come after, *route* its
-    route."""
+    taken, held where *inner* says the callee holds its end (*inner*'s paths, before the argument's own: ``return
+    (self.SC_FAILED, inputChunk)`` holds the argument at ``[1]``), *route* its route.  Where *outer* sits at parts of
+    the argument, :func:`_then` takes the steps, cutting it at the parts and falling back as *fall_back* says, and
+    *inner*'s calls follow the steps they come after, the paths they went through with (:attr:`_Through.held`) held
+    as *inner*'s are; a stop takes the steps as they are.  Otherwise each step is
+    taken by :func:`_step` with *inner*'s calls before it in place, so a step reads across the call as it reads in
+    one function: ``list(rse_set)[0]`` in a callee handed an ``rse_set`` that ``rse_set &= ...`` made is an element
+    of the ``&``'s operands, through no ``&``."""
     steps = fields + inner.steps
-    if not outer.paths or outer.kind == _STOP:
-        ways = [outer._replace(steps=outer.steps + steps)]
+    shift = len(fields) + len(outer.steps)
+    if outer.paths and outer.kind != _STOP:
+        ways = [
+            one._replace(
+                through=tuple(
+                    call._replace(
+                        steps=min(call.steps + shift, len(one.steps)),
+                        held=tuple(spot + path for spot in call.held for path in one.paths) or call.held or one.paths,
+                    )
+                    for call in inner.through
+                )
+                + outer.through
+            )
+            for one in _then(outer, steps, fall_back)
+        ]
+    elif outer.kind == _STOP:
+        through = tuple(call._replace(steps=call.steps + shift) for call in inner.through)
+        ways = [outer._replace(steps=outer.steps + steps, through=through + outer.through)]
     else:
-        ways = _then(outer, steps, fall_back)
+
+        def before(one: _Way, place: int, last: bool = False) -> _Way:
+            """*one* with *inner*'s calls that come after *place* of the steps (after them all, *last*), before what
+            it is made by."""
+            calls = tuple(
+                call._replace(steps=len(one.steps))
+                for call in inner.through
+                if call.steps + len(fields) == place or (last and call.steps + len(fields) > place)
+            )
+            return one._replace(through=calls + one.through) if calls else one
+
+        ways = [outer]
+        for place, step in enumerate(steps):
+            ways = [taken for one in ways for taken in _step(before(one, place), step)]
+        ways = [before(one, len(steps), last=True) for one in ways]
+        if not ways and fall_back:
+            ways = [_unread_part(outer, "".join(steps))]
     found = []
     for one in ways:
         if inner.paths and one.kind != _STOP:
             held = tuple(spot + path for spot in inner.paths for path in one.paths) or inner.paths
             one = one._replace(paths=held, loose=inner.loose or one.loose)
-        through = tuple(
-            call._replace(steps=min(call.steps + len(fields) + len(outer.steps), len(one.steps)))
-            for call in inner.through
-        )
-        found.append(one._replace(through=through + outer.through, route=route, changes=one.changes + inner.changes))
+        found.append(one._replace(route=route, changes=one.changes + inner.changes))
     return found
 
 
@@ -491,11 +572,33 @@ def _added_sides(expr: ast.expr) -> list[ast.expr]:
 
 def _through(ways: list[_Way], made: _Through) -> list[_Way]:
     """*ways*, of what an expression *made* stands for is made of -- an operand, a comprehension's element, an
-    f-string's part --, as the expression's value's: each through *made* after its own steps, a stop as it is."""
+    f-string's part --, as the expression's value's: each through *made* after its own steps, with its paths, a stop
+    as it is."""
     return [
-        one if one.kind == _STOP else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
+        one
+        if one.kind == _STOP
+        else one._replace(through=(made._replace(steps=len(one.steps), held=one.paths),) + one.through)
         for one in ways
     ]
+
+
+def _operation(op: ast.operator, left: ast.expr, place: str) -> _Through:
+    """What the value of the arithmetic operator *op* at *place* is of its operands, called by its symbol: a ``+``'s
+    is added (:data:`THROUGH_ADDED`: a number or a text computed from them, or a sequence joined of them); a ``%``
+    whose *left* is a text literal or an f-string is text (``"%s/%s" % (a, b)``); another's is computed
+    (``max_walltime *= ...``, ``nRun - nQueue``)."""
+    if isinstance(op, ast.Add):
+        return _Through(_ADD, place, THROUGH_ADDED)
+    text = isinstance(op, ast.Mod) and (
+        isinstance(left, ast.JoinedStr) or (isinstance(left, ast.Constant) and isinstance(left.value, str))
+    )
+    return _Through(_OPERATORS[type(op)], place, THROUGH_TEXT if text else THROUGH_COMPUTED)
+
+
+def _right(made: _Through) -> _Through:
+    """*made*, an operator's through, as its right operand's way goes through it: a ``-``'s value holds no element of
+    its right side (:func:`_step`)."""
+    return made._replace(drops=True) if made.call == "-" else made
 
 
 def _key_spot(key: ast.expr) -> str:
@@ -932,6 +1035,12 @@ class _Reader:
             return _through(self.read(element, element, file, func, selves=selves), made)
         if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
             return self._added(_added_sides(expr), at, f"{file}:{line}", file, func, selves=selves)
+        if isinstance(expr, ast.BinOp) and type(expr.op) in _OPERATORS:
+            # Another arithmetic operator's value is computed from both operands, not either of them itself.
+            made = _operation(expr.op, expr.left, f"{file}:{line}")
+            return _through(self.read(expr.left, at, file, func, selves=selves), made) + _through(
+                self.read(expr.right, at, file, func, selves=selves), _right(made)
+            )
         if isinstance(expr, ast.JoinedStr) and expr.values:
             return self._formatted(expr, at, f"{file}:{line}", file, func, selves=selves)
         found = self._sources(expr, at, file, func)
@@ -980,8 +1089,8 @@ class _Reader:
     def _added(
         self, sides: Iterable[ast.expr], at: ast.AST, place: str, file: str, func: ast.AST, selves: _Selves = ()
     ) -> list[_Way]:
-        """The ways of the ``+`` at *place* of *sides* (``a + b``; the ``b`` of an ``x += b``), read here, not asked
-        of the carry: each side's, through the ``+`` (:func:`_through`) -- a number or a text computed from
+        """The ways of the ``+`` at *place* of *sides* (``a + b + c``'s three), read here, not asked of the carry:
+        each side's, through the ``+`` (:func:`_through`, :func:`_operation`) -- a number or a text computed from
         them, or a sequence joined of them, whose element is a side's (:func:`_step`).  ``ret_head + ret_tail`` holds
         the rows both hold; ``job.attemptNr + 1`` is computed from ``job.attemptNr`` and ``1``."""
         made = _Through(_ADD, place, THROUGH_ADDED)
@@ -1000,22 +1109,24 @@ class _Reader:
     def _accumulated(
         self, expr: ast.Name, site: ast.AugAssign, file: str, func: ast.AST, seen: set[int], selves: _Selves = ()
     ) -> list[_Way]:
-        """What ``x += b`` (*site*) leaves *expr*: a ``+`` (:meth:`_added`) of what ``x`` held before and ``b`` -- a
-        ``+=`` reaching it adds its own ``b``, each once (``scanSiteList += ...`` in a loop)."""
+        """What ``x op= b`` (*site*) leaves *expr*: the operator's value (:func:`_operation`) of what ``x`` held
+        before and ``b`` -- a ``+=`` a ``+`` (:meth:`_added`), a ``*=`` computed from both (``max_walltime *= ...``
+        holds no ``taskSpec`` itself).  An augmented assignment of the name reaching it is read the same way, each
+        once (``scanSiteList += ...`` in a loop), through this one's operator too where its own is another one:
+        ``x *= 2`` then ``x += 1`` is a ``+`` of a ``*``."""
         seen.add(id(site))
-        place = f"{file}:{site.lineno}"
-        made = _Through(_ADD, place, THROUGH_ADDED)
-        found = self._added((site.value,), site, place, file, func, selves=selves)
+        made = _operation(site.op, site.target, f"{file}:{site.lineno}")
+        found = _through(self.read(site.value, site, file, func, selves=selves), _right(made))
         for before in pathcond.held_at(func, expr.id, site).sites:  # type: ignore[arg-type]
             if id(before) in seen:
                 continue
             if (
                 isinstance(before, ast.AugAssign)
-                and isinstance(before.op, ast.Add)
                 and isinstance(before.target, ast.Name)
                 and before.target.id == expr.id
             ):
-                found += self._accumulated(expr, before, file, func, seen, selves=selves)
+                earlier = self._accumulated(expr, before, file, func, seen, selves=selves)
+                found += earlier if type(before.op) is type(site.op) else _through(earlier, made)
                 continue
             found += _through(self._site_ways(expr, site, before, file, func, site, selves=selves), made)
         return found
@@ -1232,11 +1343,11 @@ class _Reader:
         ``update_jobs``' ``for job in job_list`` read ``job`` as the list whole; ``retEvS, retNewPandaID =
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
         a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
-        select item's column (``for jediTaskID, commandStr, ... in resList``).  A ``+=`` is a ``+`` of what the name
-        held and its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an ``=``'s is -- also where the
-        read is in its own statement (:func:`_walrus_before`).  An ``except X as e`` is an object of X where the
-        corpus has the class (:meth:`_caught`); another augmented assignment and another ``except ... as`` keep what
-        the carry says."""
+        select item's column (``for jediTaskID, commandStr, ... in resList``).  An augmented assignment is its
+        operator's value of what the name held and its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an
+        ``=``'s is -- also where the read is in its own statement (:func:`_walrus_before`).  An ``except X as e`` is an
+        object of X where the corpus has the class (:meth:`_caught`); another ``except ... as`` keeps what the carry
+        says."""
         binding = (
             pathcond.clause_binding(site, expr.id)
             if isinstance(site, ast.comprehension)
@@ -1257,7 +1368,7 @@ class _Reader:
         if binding is None or binding.kind == pathcond.BIND_EXCEPT:
             return carried
         if binding.kind == pathcond.BIND_AUGMENTED:
-            if isinstance(site, ast.AugAssign) and isinstance(site.op, ast.Add):
+            if isinstance(site, ast.AugAssign):
                 return self._accumulated(expr, site, file, func, set(), selves=selves)
             return carried
         if any(one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in carried):
@@ -2254,7 +2365,10 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 KeyStop(kind=one.stop, name=one.name, what=one.what, at=at),
             )
             continue
-        key = (one._replace(line=None, end_file=""), tuple(route))
+        # A ``-``'s right side is the record's way as its left side is: one source where both reach it; so are the
+        # paths it went through with.
+        unmarked = tuple(call._replace(drops=False, held=()) for call in one.through)
+        key = (one._replace(line=None, end_file="", through=unmarked), tuple(route))
         held = sources.setdefault(
             key,
             HeldSource(
