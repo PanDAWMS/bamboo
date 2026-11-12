@@ -7336,11 +7336,14 @@ def unspelled_path(spelled: str) -> tuple[str, ...]:
     return steps
 
 
-def paths_under(step: str, spelled: Iterable[str], element: bool = False) -> list[str]:
+def paths_under(step: str, spelled: Iterable[str], element: bool = False, keys: bool = False) -> list[str]:
     """Where what a value holds at *spelled* (:attr:`KeySource.paths`) sits in its part *step*, spelled so: ``()``
     where the part is it or a part of it, none where the part holds none of it (:func:`_under`).  *element*: the
-    part is the element a loop over the value takes -- a dict's key too (:func:`_elements`)."""
+    part is the element a loop over the value takes -- a dict's key too (:func:`_elements`).  *keys*: the value is
+    known as a dict, so that element is its key alone, not what its values hold (:func:`_keys`)."""
     paths = frozenset(unspelled_path(one) for one in spelled)
+    if keys:
+        return _spelled_paths(_keys(paths))
     return _spelled_paths(_elements(paths) if element else _under(step, paths))
 
 
