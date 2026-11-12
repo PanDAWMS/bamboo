@@ -43,6 +43,7 @@ from typing import Callable, Iterable, Iterator, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -183,7 +184,11 @@ _CHANGING = frozenset(
 #: says no more than the first.  Never an answer: a reading that finds
 #: nothing else is ``unknown``.
 _NOTHING = ("nothing", "")
-_IN_PROGRESS = ("", "")
+
+
+def _settled(found: tuple[str, str]) -> tuple[str, str]:
+    """A binding's kind as it is kept: one whose reading found nothing but itself is not known."""
+    return (_UNKNOWN, "a binding that reads only itself") if found == _NOTHING else found
 
 
 def _cut(node: ast.AST) -> str:
@@ -287,7 +292,7 @@ class _Receivers:
     while it is being read adds nothing (:data:`_NOTHING`), and what is read
     under it is not kept until the binding it waited on is done -- read
     alone it would miss what that binding adds -- as Tarjan's lowlink keeps
-    a component open until its root closes.
+    a component open until its root closes (:class:`lowlink.Lowlink`).
     """
 
     DEPTH = 12
@@ -297,8 +302,7 @@ class _Receivers:
         self.types = calls.types
         self.leaves = leaves
         self._memo: dict[tuple[str, int, int], tuple[str, str]] = {}
-        self._open: dict[tuple[str, int, int], int] = {}
-        self._low: list[int] = []
+        self._lowlink = Lowlink()
         self._operators: dict[type, Optional[tuple[str, str]]] = {}
         self._held: dict[
             tuple[int, str, tuple[Optional[str], ...]],
@@ -312,31 +316,13 @@ class _Receivers:
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
     ) -> tuple[str, str]:
-        key = (file, id(func), id(expression))
-        held = self._memo.get(key)
-        if held is _IN_PROGRESS:
-            self._low[-1] = min(self._low[-1], self._open[key])
-            return _NOTHING
-        if held is not None:
-            return held
-        index = len(self._low)
-        self._memo[key] = _IN_PROGRESS
-        self._open[key] = index
-        self._low.append(index)
-        try:
-            found = self._of(file, func, expression, depth)
-        finally:
-            low = self._low.pop()
-            del self._open[key]
-            del self._memo[key]
-        if low < index:
-            # Read under a binding still open: kept by none, told to it.
-            self._low[-1] = min(self._low[-1], low)
-            return found
-        if found == _NOTHING:
-            found = _UNKNOWN, "a binding that reads only itself"
-        self._memo[key] = found
-        return found
+        return self._lowlink.read(
+            self._memo,
+            (file, id(func), id(expression)),
+            lambda: self._of(file, func, expression, depth),
+            again=_NOTHING,
+            settle=_settled,
+        )
 
     def annotation(self, file: str, annotation: Optional[ast.expr]) -> tuple[str, str]:
         """What a value annotated *annotation* in *file* is."""
