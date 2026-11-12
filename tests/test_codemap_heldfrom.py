@@ -809,6 +809,155 @@ def test_an_operator_s_value_holds_both_operands_through_the_operator_not_either
     }
 
 
+PUTS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, code, ids, flag, first, second):
+                data = {"job_ids": ids}
+                if code:
+                    data["code"] = code
+                sent = data["code"]
+                if sent == 3:  # T1
+                    self.a = 1  # R1
+                ids_sent = data["job_ids"]
+                if ids_sent:  # T2
+                    self.a = 2  # R2
+                other = {"task_id": ids}
+                if flag:
+                    other["flag"] = True
+                got = other.get("flag", False)
+                if got:  # T3
+                    self.a = 3  # R3
+                both = {"k": first}
+                both["k"] = second
+                kept = both["k"]
+                if kept:  # T4
+                    self.a = 4  # R4
+        """,
+}
+
+
+def test_an_element_of_a_literal_s_container_is_also_what_is_put_into_it_under_that_key(
+    tmp_path: Path,
+) -> None:
+    """An element step on a container a literal made with entries read its entries alone: a key put into it later
+    was a value no way reaches (``Client.kill_jobs`` builds ``{"job_ids": job_ids}`` and puts ``code`` under ``if
+    code:``).  The puts into the value are read as a container made empty has them read: each put's value the step
+    may take, beside the entries."""
+    fragment = _build(
+        tmp_path, PUTS, tuple(("extractCommon", f"R{n}") for n in range(1, 5))
+    )
+    assert _held_through(fragment, PUTS, "T1", "sent") == {
+        ("parameter", "code", (), (), ())
+    }
+    assert _held_through(fragment, PUTS, "T2", "ids_sent") == {
+        ("parameter", "ids", (), (), ())
+    }
+    assert _held_through(fragment, PUTS, "T3", "got") == {
+        ("constant", "True", (), (), ()),
+        ("constant", "False", (), (), ()),
+    }
+    assert _held_through(fragment, PUTS, "T4", "kept") == {
+        ("parameter", "first", (), (), ()),
+        ("parameter", "second", (), (), ()),
+    }
+
+
+API = "pandaserver/api/v1/job_api.py"
+CLIENT = "pandaserver/userinterface/Client.py"
+SENT = {
+    "pandaserver/api/v1/http_client.py": """\
+        api_url_ssl = "https://server/api/v1"
+
+
+        class HttpClient:
+            def get(self, url, data):
+                return 0, data
+
+            def post(self, url, data):
+                return 0, data
+
+            def post_files(self, url, data, encoding=None):
+                return 0, data
+        """,
+    "pandaserver/server/panda.py": """\
+        from pandaserver.api.v1 import job_api as job_api_v1
+
+
+        def module_mapping():
+            return {"v1": {"job": {"module": job_api_v1}}}
+        """,
+    API: """\
+        def kill(req, job_ids, code=None):
+            if code == 10:  # T1
+                req.killed = job_ids  # R1
+            return job_ids
+        """,
+    CLIENT: """\
+        from pandaserver.api.v1.http_client import HttpClient as HttpClientV1
+        from pandaserver.api.v1.http_client import api_url_ssl as api_url_ssl_v1
+
+
+        def kill_jobs(job_ids, code=None):
+            http_client = HttpClientV1()
+            url = f"{api_url_ssl_v1}/job/kill"
+            data = {"job_ids": job_ids}
+            if code:
+                data["code"] = code
+            status, output = http_client.post(url, data)  # P1
+            return status, output
+        """,
+    "pandaserver/daemons/scripts/copyArchive.py": """\
+        from pandaserver.userinterface import Client
+
+
+        def main():
+            Client.kill_jobs([1], 10)
+        """,
+}
+
+
+def test_an_endpoint_s_parameter_is_also_what_the_corpus_s_client_sends_its_route(
+    tmp_path: Path,
+) -> None:
+    """An endpoint's parameter had no caller in the corpus, only the server's routing: ``job_api.kill``'s ``code``
+    was a stop.  The corpus's client sends to the route (``f"{api_url_ssl_v1}/job/kill"``): the request's element
+    under the parameter's name is read at the send, through ``HttpClient.post`` (decoded), and where the request
+    may lack the key -- ``code`` is put under ``if code:`` -- the parameter's default, which the server binds then.
+    The callers outside the corpus stay a stop."""
+    fragment = _build(tmp_path, SENT, (("kill", "R1"),), base=API)
+    send = f"{CLIENT}:{_line(CLIENT, 'P1', SENT)}"
+
+    def record(owner: str, name: str) -> ParameterFrom:
+        (found,) = [
+            one
+            for one in fragment.parameter_froms
+            if one.owner == owner and one.parameter == name
+        ]
+        return found
+
+    code = record(f"{API}::kill", "code")
+    assert {
+        (
+            one.kind,
+            one.name,
+            tuple((call.call, call.gives) for call in one.through),
+            tuple(one.route),
+        )
+        for one in code.sources
+    } == {
+        ("parameter", "code", (("HttpClient.post", "decoded"),), (send,)),
+        ("constant", "None", (), (send,)),
+    }
+    assert [one.kind for one in code.stops] == ["no_caller", "missed"]
+    assert {
+        (one.kind, one.name) for one in record(f"{CLIENT}::kill_jobs", "code").sources
+    } == {("constant", "10")}
+
+
 MIXED_ROWS = {
     BASE: """\
         class TaskRefinerBase:

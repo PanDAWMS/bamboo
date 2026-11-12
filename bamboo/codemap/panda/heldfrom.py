@@ -161,6 +161,9 @@ class _Way(NamedTuple):
     #: The file of the function the end was read in, its *line* among the function's (:func:`_placed_in`): the end
     #: is at ``end_file:line`` (:attr:`HeldSource.at`).  Empty for a parameter, a stop, an end read elsewhere.
     end_file: str = ""
+    #: The puts into the value the end sits in at its *paths*, met since the way's last step: what an element step
+    #: may take besides the parts (:func:`_taken`).
+    puts: tuple["_Change", ...] = ()
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -279,7 +282,9 @@ def _step(
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
     value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
-    values)."""
+    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's."""
+    if way.puts:
+        way = way._replace(puts=())
     if step.startswith("["):
         element_of = _element_of_operation(way)
         if element_of is None:
@@ -340,19 +345,42 @@ def _then(way: _Way, steps: tuple[str, ...], fall_back: bool = True) -> list[_Wa
 def _taken(
     ways: list[_Way], step: str, element: bool = False, unread: Optional[_Way] = None, keys: bool = False
 ) -> list[_Way]:
-    """*ways* with *step* taken (:func:`_step`) and joined (:func:`_joined`), a stop as it is.  Where the step leaves
-    none of them -- every source sits only at other parts -- the part is a value no way reaches: *unread*, else
-    :func:`_unread_part` of the first way.  *unread* is given once where several ways land on it.  *element* and
-    *keys* as :func:`_step` takes them."""
+    """*ways* with *step* taken (:func:`_step`) and joined (:func:`_joined`), a stop as it is.  An element step also
+    takes what the value's puts put that it may take (:attr:`_Way.puts`), each put once however many of the ways
+    carry it: ``data = {"job_ids": ids}`` then ``data["code"] = code`` -- ``data["code"]`` is ``code``,
+    ``data["job_ids"]`` is ``ids``.  Where the step leaves none of them -- every source sits only at other parts, no
+    put puts it -- the part is a value no way reaches: *unread*, else :func:`_unread_part` of the first way.
+    *unread* is given once where several ways land on it.  *element* and *keys* as :func:`_step` takes them."""
     found: list[_Way] = []
+    put: dict[int, tuple[_Change, _Way]] = {}
     for one in ways:
+        if one.kind != _STOP and not keys and step.startswith("["):
+            for change in one.puts:
+                if _puts_at(change, step):
+                    put.setdefault(id(change), (change, one))
         for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread, keys):
             if stepped is unread and unread in found:
                 continue
             found += [stepped] if stepped.kind == _STOP else _joined(stepped, keys)
+    for change, one in put.values():
+        found += _put_values([change], one)
     if ways and not found:
         return [unread or _unread_part(ways[0], step)]
     return found
+
+
+def _put_values(puts: list["_Change"], way: _Way) -> list[_Way]:
+    """The ways of the values *puts* put into the value *way* reads, as an element of it: each through the calls to
+    its put (*via*) after *way*'s route, carrying what may change an element in the container (:func:`_joined`,
+    :func:`_taken`)."""
+    kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
+    return [
+        value
+        if value.kind == _STOP
+        else value._replace(route=way.route + one.via + value.route, changes=value.changes + kept)
+        for one in puts
+        for value in one.value
+    ]
 
 
 def _onto(
@@ -492,17 +520,10 @@ def _joined(way: _Way, keys: bool = False) -> list[_Way]:
     puts = [one for one in way.changes if _puts_at(one, step)]
     if not puts:
         return [way]
-    kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
     # Each put's value, the rest of the steps taken; a value they cut away is left out (a put under another key is
     # no source of the key asked), and only where nothing is left -- no value and not the way itself -- is the part
     # a value no way reaches, as :func:`_taken` falls back.
-    values = [
-        value
-        if value.kind == _STOP
-        else value._replace(route=way.route + one.via + value.route, changes=value.changes + kept)
-        for one in puts
-        for value in one.value
-    ]
+    values = _put_values(puts, way)
     found = [
         stepped
         for value in values
@@ -548,6 +569,63 @@ def _empty_literal(expr: ast.expr) -> str:
     if isinstance(expr, ast.Dict) and not expr.keys:
         return callfacts.MAPPING
     return ""
+
+
+def _default_of(func: ast.AST, name: str) -> Optional[ast.expr]:
+    """The default of *func*'s parameter *name*; ``None`` where it has none."""
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    args = func.args
+    positional = [*args.posonlyargs, *args.args]
+    for one, value in zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True):
+        if one.arg == name:
+            return value
+    for one, default in zip(args.kwonlyargs, args.kw_defaults, strict=True):
+        if one.arg == name:
+            return default
+    return None
+
+
+def _key_sent(request: ast.expr, func: ast.AST, key: str) -> tuple[bool, bool]:
+    """Whether a request *func* sends holds *key*, as its spelling says -- at all, and always: a dict literal with
+    the key, or a name *func* binds to dict literals only, one of them with the key or a store of the key into the
+    name (``data["code"] = code``); always where a literal has it or the store is in *func*'s body outside any
+    branch.  A request read otherwise (a parameter, a call's value) may hold it, not always."""
+
+    def has(literal: ast.Dict) -> bool:
+        return any(isinstance(one, ast.Constant) and one.value == key for one in literal.keys)
+
+    def stores(node: ast.AST) -> bool:
+        return isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name)
+            and target.value.id == request.id  # type: ignore[attr-defined]
+            and isinstance(target.slice, ast.Constant)
+            and target.slice.value == key
+            for target in node.targets
+        )
+
+    if isinstance(request, ast.Dict):
+        return has(request), has(request)
+    if not isinstance(request, ast.Name):
+        return True, False
+    bound = [
+        node.value
+        for node in walk(func)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and node.value is not None
+        and any(
+            isinstance(target, ast.Name) and target.id == request.id
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        )
+    ]
+    if not bound or not all(isinstance(value, ast.Dict) for value in bound):
+        return True, False
+    literal = any(has(value) for value in bound)  # type: ignore[arg-type]
+    return (
+        literal or any(stores(node) for node in walk(func)),
+        literal or any(stores(node) for node in getattr(func, "body", [])),
+    )
 
 
 def _where_read(
@@ -820,6 +898,9 @@ class _Reader:
         #: ``(owner, def line, parameter)`` -> its ParameterFrom; the ones a record's way ends at, not yet read;
         #: and the function of each a way has ended at -- a callee's, filled at its call, ends in no record.
         self.parameters: dict[tuple[str, int, str], ParameterFrom] = {}
+        #: The API's routes by their endpoint's owner, and the corpus client's sends to them, read once (:meth:`_sent`).
+        self._routes: Optional[dict[str, set[str]]] = None
+        self._sends: Optional[list[tuple[CallSite, Target, str, str, ast.expr]]] = None
         self._pending: dict[tuple[str, int, str], tuple[str, ast.AST]] = {}
         self._functions: dict[tuple[str, int, str], tuple[str, ast.AST]] = {}
         #: ``(function, name, binding, statement read at)`` -> the changes between, by ids of the build's trees.
@@ -1265,11 +1346,20 @@ class _Reader:
         self, expr: ast.Name, site: ast.AST, ways: list[_Way], file: str, func: ast.AST, last: Optional[ast.stmt],
         selves: _Selves = (),
     ) -> list[_Way]:
-        """*ways*, what *site* gives *expr*, with what may change the object in place between it and the read."""
+        """*ways*, what *site* gives *expr*, with what may change the object in place between it and the read; a way
+        whose end sits at parts of the object carries its puts too (:attr:`_Way.puts`)."""
         changed: tuple[_Change, ...] = ()
         if not _unchanging(func, expr.id, site, ways):
             changed = self._changed(file, func, expr.id, site, last, selves=selves)
-        return [one._replace(changes=one.changes + changed) if changed and one.kind != _STOP else one for one in ways]
+        if not changed:
+            return ways
+        puts = tuple(one for one in changed if one.value and one.kind in (CHANGE_METHOD, CHANGE_STORE))
+        return [
+            one
+            if one.kind == _STOP
+            else one._replace(changes=one.changes + changed, puts=one.puts + puts if one.paths else one.puts)
+            for one in ways
+        ]
 
     def _bound(
         self, expr: ast.Name, point: ast.AST, site: ast.AST, file: str, func: ast.AST, selves: _Selves = ()
@@ -2295,12 +2385,85 @@ class _Reader:
             ]
         if not sites:
             ways.append(_stop("no_caller", name, at=f"{owner}:{line}"))
+        ways += self._sent(file, func, name)
         for why in self.calls.missed(target):
             ways.append(_stop("missed", owner, what=why, at=f"{owner}:{line}"))
         sources, stops = _said(ways)
         return ParameterFrom(
             owner=owner, line=line, parameter=name, sources=sources, stops=stops
         )
+
+    def _sent(self, file: str, func: ast.AST, name: str) -> list[_Way]:
+        """The ways of what the corpus's client sends an endpoint's parameter *name* (not ``req``), from each send to
+        its route (:func:`endpoints.sent_route`): the request's element ``[name]`` read at the send -- a literal's
+        entry, a put into it (``data["code"] = code`` under ``if code:``) --, through the client's method
+        (:data:`endpoints.SENDS`: ``post`` decoded, ``get`` converted, ``post_files`` unknown); and where the request
+        may lack the key, the parameter's default, which the server binds then.  Each with the send first on its
+        route.  ``Client.kill_jobs`` posts ``{"job_ids": job_ids}`` and puts ``code`` under ``if code:``:
+        ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, and ``None``.
+        The callers outside the corpus stay a stop (``no_caller``)."""
+        from bamboo.codemap.panda import endpoints
+
+        if name == "req":
+            return []
+        if self._routes is None:
+            self._routes = {}
+            for _version, route, owner in endpoints.routes_in(self.trees):
+                self._routes.setdefault(owner, set()).add(route)
+        routes = self._routes.get(f"{file}::{getattr(func, 'name', '')}")
+        if not routes:
+            return []
+        default = _default_of(func, name)
+        found: list[_Way] = []
+        for site, target, method, route, data in self._client_sends():
+            if route not in routes:
+                continue
+            here = f"{site.file}:{site.call.lineno}"
+            sent, always = _key_sent(data, site.func, name)
+            if sent:
+                ways = self._safely(data, *_where_read(data, site.call, site.file, site.func, target.file, target.func))
+                made = _Through(f"{endpoints.HTTP_CLIENT_CLASS}.{method}", here, endpoints.SENDS[method])
+                found += [
+                    one._replace(route=(here,) + one.route) for one in _through(_taken(ways, f"[{name!r}]"), made)
+                ]
+            if not always and default is not None:
+                found += [one._replace(route=(here,) + one.route) for one in self._safely(default, default, file, func)]
+        return found
+
+    def _client_sends(self) -> list[tuple[CallSite, Target, str, str, ast.expr]]:
+        """``(site, the method's target, its name, route, request)`` for each call of the corpus's client's sending
+        methods (:data:`endpoints.SENDS`) whose URL names a route (:func:`endpoints.sent_route`) and that hands a
+        request (``data``), read once."""
+        from bamboo.codemap.panda import endpoints
+
+        if self._sends is not None:
+            return self._sends
+        self._sends = []
+        tree = self.trees.get(endpoints.HTTP_CLIENT)
+        cls = next(
+            (
+                node
+                for node in getattr(tree, "body", [])
+                if isinstance(node, ast.ClassDef) and node.name == endpoints.HTTP_CLIENT_CLASS
+            ),
+            None,
+        )
+        if cls is None:
+            return self._sends
+        for node in cls.body:
+            if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in endpoints.SENDS):
+                continue
+            target = Target(endpoints.HTTP_CLIENT, node, cls)
+            for site in self.calls.callers(target):
+                try:
+                    handed = self.calls.handed(site, target)
+                except Exception:  # noqa: BLE001 -- a send not read is no route, as _safely
+                    continue
+                route = endpoints.sent_route(handed.get("url"), site.func)
+                data = handed.get("data")
+                if route is not None and data is not None:
+                    self._sends.append((site, target, node.name, route, data))
+        return self._sends
 
 
 def _gives(
@@ -2370,7 +2533,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         # A ``-``'s right side is the record's way as its left side is: one source where both reach it; so are the
         # paths it went through with.
         unmarked = tuple(call._replace(drops=False, held=()) for call in one.through)
-        key = (one._replace(line=None, end_file="", through=unmarked), tuple(route))
+        key = (one._replace(line=None, end_file="", through=unmarked, puts=()), tuple(route))
         held = sources.setdefault(
             key,
             HeldSource(

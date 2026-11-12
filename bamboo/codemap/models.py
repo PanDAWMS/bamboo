@@ -3345,7 +3345,9 @@ class HeldThrough(BaseModel):
             "or ``*`` makes is an operand's element, through none of them, and never the right operand's of a ``-``: "
             "``list(rse_set - excluded)[0]`` is ``rse_set``'s ``[0]``; a part a container holds such a value at is "
             "the value, through the operator: ``{'k': a + b}['k']`` is ``a + b``.  ``f''`` for an f-string, its "
-            f"values and literal parts ({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...)."
+            f"values and literal parts ({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...).  "
+            "``HttpClient.post``, ``HttpClient.get``, ``HttpClient.post_files`` for what the corpus's client sends an "
+            f"endpoint's parameter ({THROUGH_DECODED}, {THROUGH_CONVERTED}, {THROUGH_UNKNOWN}: a file's contents)."
         )
     )
     at: str = Field(description="``file:line`` of the call.")
