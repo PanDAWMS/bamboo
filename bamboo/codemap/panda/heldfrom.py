@@ -62,6 +62,7 @@ from bamboo.codemap.calls import (
     own_nodes,
     returns,
 )
+from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
     CHANGE_ESCAPED,
     CHANGE_INNER,
@@ -681,6 +682,8 @@ class _Reader:
         self._functions: dict[tuple[str, int, str], tuple[str, ast.AST]] = {}
         #: ``(function, name, binding, statement read at)`` -> the changes between, by ids of the build's trees.
         self._hops: dict[tuple, tuple[_Change, ...]] = {}
+        #: The keys of *_hops* still being read: what is read under one is kept once it is done.
+        self._lowlink = Lowlink()
         #: ``(parameter, file:line)`` -> the call there handing it, read once (:meth:`hop`).
         self._hop_at: dict[tuple, Optional[_Hop]] = {}
         #: ``(class, field)`` -> its FieldFrom; what is asked of the FieldFroms and ParameterFroms with the steps past
@@ -1283,24 +1286,25 @@ class _Reader:
         if last is None:
             return ()
         key = (id(func), name, id(site), id(last), _selves_key(selves))
-        held = self._hops.get(key)
-        if held is None:
-            # Reached again while its values are read, it adds nothing new.
-            self._hops[key] = ()
+        at = last.lineno
+
+        def read() -> tuple[_Change, ...]:
             try:
                 raw = changes_mod.object_changes(self.calls, file, func, name, site, last, bound=selves)
             except Exception as error:  # noqa: BLE001 -- as _safely
                 raw = [
                     changes_mod.ObjectChange(
                         file,
-                        last.lineno,
+                        at,
                         CHANGE_UNREAD,
                         changes_mod.EVERY,
                         f"{type(error).__name__}: {error}",
                     )
                 ]
-            held = self._hops[key] = self._made(raw)
-        return held
+            return self._made(raw)
+
+        # Reached again while its values are read, it adds nothing new (:class:`lowlink.Lowlink`).
+        return self._lowlink.read(self._hops, key, read, again=())
 
     def _made(self, raw: Iterable[changes_mod.ObjectChange]) -> tuple[_Change, ...]:
         """*raw*, each once, a store's value read as a way."""
@@ -1342,9 +1346,11 @@ class _Reader:
         the function's end -- but what the two do themselves: the call handing the object down to the read, and the
         write's, whose changes the guard's and the write's own ways say."""
         key = ("after", id(func), name, id(first), id(last))
-        held = self._hops.get(key)
-        if held is None:
-            self._hops[key] = ()
+        own = {f"{file}:{first.lineno}"}
+        if last is not None:
+            own.add(f"{file}:{last.lineno}")
+
+        def read() -> tuple[_Change, ...]:
             try:
                 raw = changes_mod.object_changes(
                     self.calls, file, func, name, first, last
@@ -1359,15 +1365,13 @@ class _Reader:
                         f"{type(error).__name__}: {error}",
                     )
                 ]
-            own = {f"{file}:{first.lineno}"}
-            if last is not None:
-                own.add(f"{file}:{last.lineno}")
-            held = self._hops[key] = self._made(
+            return self._made(
                 one
                 for one in raw
                 if (one.via[0] if one.via else f"{one.file}:{one.line}") not in own
             )
-        return held
+
+        return self._lowlink.read(self._hops, key, read, again=())
 
     def hop(self, key: tuple[str, int, str], at: str) -> Optional["_Hop"]:
         """The call at *at* (``file:line``) that hands the parameter *key* names, as :meth:`_parameter_from` read it."""

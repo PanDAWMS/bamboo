@@ -108,6 +108,7 @@ from bamboo.codemap.calls import (
     own_nodes,
     returns,
 )
+from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
     CHANGE_DELETE,
     CHANGE_ESCAPED,
@@ -394,12 +395,14 @@ class _Reading:
         self._methods: Optional[dict[str, list[Target]]] = None
         self._functions: Optional[dict[str, list[Target]]] = None
         self._setters: Optional[dict[str, list[Target]]] = None
-        # Keyed by ids; each value holds its definition, as *effects* does.
+        # Keyed by ids; each value holds its definition, as *effects* does.  The three read one another through
+        # *lowlink*: a value read under a key still being read is not kept until that key is done.
         self.owned: dict[
             tuple, tuple[ast.AST, list[tuple[Optional[ast.stmt], ObjectChange]]]
         ] = {}
         self.handed_to: dict[tuple, tuple[ast.AST, list[ObjectChange]]] = {}
         self.named: dict[_Field, list[ObjectChange]] = {}
+        self.lowlink = Lowlink()
         self.runs_between: dict[tuple, bool] = {}
         self._attributes: Optional[dict[str, list[Target]]] = None
         self.holders: dict[tuple, tuple[ast.AST, bool]] = {}
@@ -959,12 +962,13 @@ class _Reading:
             field,
             tuple((where, id(cls)) for where, cls in bound),
         )
-        if key not in self.owned:
-            self.owned[key] = (
-                func,
-                self._own_changes(file, func, names, field, bound),
-            )
-        return self.owned[key][1]
+        # Reached again on its own way, it is read again: the cycle is cut where it passes a definition run with
+        # the object (:meth:`handed_changes`) or a field (:meth:`by_field`).
+        return self.lowlink.read(
+            self.owned,
+            key,
+            lambda: (func, self._own_changes(file, func, names, field, bound)),
+        )[1]
 
     def _own_changes(
         self,
@@ -1523,18 +1527,23 @@ class _Reading:
         self, target: Target, names: frozenset[str]
     ) -> list[ObjectChange]:
         """Each place a definition run with *names* holding the object may change it, in all it runs."""
-        key = (_key(target), names)
-        if key not in self.handed_to:
-            # Reached again on its own way, it adds nothing new.
-            self.handed_to[key] = (target.func, [])
-            found = [
-                change
-                for _statement, change in self.own_changes(
-                    target.file, target.func, names, None, target.bound
-                )
-            ]
-            self.handed_to[key] = (target.func, _once(found))
-        return self.handed_to[key][1]
+        # Reached again on its own way, it adds nothing new (:class:`lowlink.Lowlink`).
+        return self.lowlink.read(
+            self.handed_to,
+            (_key(target), names),
+            lambda: (
+                target.func,
+                _once(
+                    [
+                        change
+                        for _statement, change in self.own_changes(
+                            target.file, target.func, names, None, target.bound
+                        )
+                    ]
+                ),
+            ),
+            again=(target.func, []),
+        )[1]
 
     def _stored(
         self,
@@ -1587,22 +1596,23 @@ class _Reading:
         """Each place the corpus may change in place what *field* holds -- its attribute on an object of its classes:
         ``self`` in a method of one, or an expression declared one -- in every definition reading an attribute of
         that name.  An object of another class, or one whose class is not said, is not taken for it."""
-        if field not in self.named:
-            self.named[field] = []
-            found: list[ObjectChange] = []
-            for target in self.attributes().get(field[0], ()):
-                found += [
-                    change
-                    for _statement, change in self.own_changes(
-                        target.file,
-                        target.func,
-                        frozenset(),
-                        field,
-                        target.bound,
-                    )
-                ]
-            self.named[field] = _once(found)
-        return self.named[field]
+        # Reached again on its own way, it adds nothing new (:class:`lowlink.Lowlink`).
+        return self.lowlink.read(self.named, field, lambda: self._by_field(field), again=[])
+
+    def _by_field(self, field: _Field) -> list[ObjectChange]:
+        found: list[ObjectChange] = []
+        for target in self.attributes().get(field[0], ()):
+            found += [
+                change
+                for _statement, change in self.own_changes(
+                    target.file,
+                    target.func,
+                    frozenset(),
+                    field,
+                    target.bound,
+                )
+            ]
+        return _once(found)
 
     def attributes(self) -> dict[str, list[Target]]:
         """Every definition of the corpus by the attribute names its own body reads or writes."""

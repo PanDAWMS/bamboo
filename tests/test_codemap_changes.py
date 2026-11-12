@@ -752,3 +752,59 @@ def test_an_object_put_in_a_field_of_self_is_changed_through_the_field_on_object
         ("store", "'child'", "", kept),
         ("store", "'declared'", "", kept),
     ]
+
+
+CYCLE = """\
+def a(job, n):
+    if n:
+        b(job, n - 1)
+    job.x = 1
+
+
+def b(job, n):
+    if n:
+        a(job, n - 1)
+    job.y = 2
+
+
+def enter_a(job):
+    a(job, 3)
+
+
+def enter_b(job):
+    b(job, 3)
+"""
+
+
+def _cycle_changes(tmp_path: Path, order: list[str]) -> dict[str, list[str]]:
+    """``object_changes`` of ``job`` in each function of *order* of :data:`CYCLE`, read in that order by one
+    reading: the keys each changes."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "cycle.py").write_text(CYCLE)
+    tree = ast.parse(CYCLE)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/cycle.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=CYCLE, blob_sha=blob_sha(CYCLE))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    return {
+        name: sorted(
+            change.key
+            for change in changes.object_changes(calls, file, functions[name], "job", functions[name].args, None)
+        )
+        for name in order
+    }
+
+
+def test_a_definition_in_a_cycle_is_read_whole_whichever_definition_of_the_cycle_was_read_first(tmp_path):
+    """``a`` runs ``b``, which runs ``a``.  Read from ``enter_a`` first, ``b`` met ``a`` still being read and lacked
+    ``job.x``; kept, that short answer went to ``enter_b`` (and, the other way round, ``enter_a`` lacked
+    ``job.y``).  What is read under a definition still being read is kept only once it is done
+    (:class:`lowlink.Lowlink`)."""
+    whole = {"enter_a": [".x", ".y"], "enter_b": [".x", ".y"]}
+
+    assert _cycle_changes(tmp_path / "ab", ["enter_a", "enter_b"]) == whole
+    assert _cycle_changes(tmp_path / "ba", ["enter_b", "enter_a"]) == whole
