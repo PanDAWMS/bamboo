@@ -25,11 +25,11 @@ answered by, and the rule it follows:
 ``Asked``      H1  candidates           the map's readings for the symptom
                H2  which ran            ``which_ran`` over them, in the run the statuslog time falls in;
                                         where it decides nothing, the arms it left -> ``ArmsLeft``
-               H3  what its guard reads an atom that is a method call with no arguments -> ``SetBy``
+               H3  what its guard reads the values its guards held on; a call in a guard is read as any term (K74)
 ``ArmsLeft``       each arm H2 left     walked on from H3 (``WroteBy``) to its end, its stop or its guard read
                                         false; the arms not excluded are the answer ("one of N", K38)
-``SetBy``      H4  which call set it    census, dispatch, value match, then ``which_ran``  -> ``Raised``
-``Raised``     H5  what it was handed   the run's traceback through the function chosen:
+``Raised``     H5  what it was handed   the run's traceback through the function chosen (no step leads here
+                                        since H4 was retired; S's exception end will, KNOWN_ISSUES.md K74):
                                         raised outside the corpus -> the frame at the boundary,
                                         the object the exception names -> ``Missing``;
                                         raised inside -> ``FalseAtom`` (an exception as a false guard)
@@ -74,6 +74,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import builtins
 import copy
 import datetime
 import functools
@@ -88,7 +89,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types, call_statements
@@ -114,10 +115,10 @@ from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.codemap.reading import containing_function
 from bamboo.querier import asked as A
 from bamboo.querier import attr_time as AT
-from bamboo.querier import census as C
 from bamboo.querier import changed as CH
 from bamboo.querier import evaluate as E
 from bamboo.querier import false_guard as G
+from bamboo.querier import field_order as FO
 from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
@@ -129,6 +130,7 @@ from bamboo.querier import raised as X
 from bamboo.querier import render as T
 from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
+from bamboo.querier import sources as SR
 from bamboo.querier import value_diff as V
 from bamboo.querier import windows as W
 from bamboo.querier.recorded import EDGE, RecordedLogs
@@ -150,6 +152,7 @@ from bamboo.querier.which_ran import (
     class_of,
     holds_key,
     judge,
+    key_env,
     of_mover,
     once_loops_of,
     passes_of,
@@ -1345,17 +1348,6 @@ class Asked:
 
 
 @dataclass
-class SetBy:
-    """Which call set what a guard reads through a method."""
-
-    method: str
-    reading: object
-    question: object  # the run
-    guard_record: int
-    env: E.Env
-
-
-@dataclass
 class Raised:
     """What raised under the site chosen, in its run."""
 
@@ -1825,9 +1817,8 @@ L3_LOOKBACK = datetime.timedelta(days=8)
 
 
 def _identity_attrs(cls: str) -> list[str]:
-    """The ``Class.attr`` the dump's tables name *cls*'s identity by; none where no table of it names one."""
-    fragment = mapdump.fragment()
-    return next((t.identity_attrs for t in (fragment.tables if fragment else []) if t.spec_class == cls and t.identity_attrs), [])
+    """The ``Class.attr`` the dump's tables name *cls*'s identity by (``SR.identity_attrs``)."""
+    return SR.identity_attrs(cls)
 
 
 def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
@@ -1871,14 +1862,24 @@ def mark_values(token: str, mark: str) -> list[str] | None:
     return [v.strip() for v in m.groups()] if m and len(parts) > 1 else None
 
 
-def mark_handed(owner: str, line: int, run: Any) -> list[tuple[str, str]]:
-    """What *run*'s mark holds, as the map's runs of *owner*'s function read it: each hole's expression on a name --
-    ``job.PandaID`` -- with the value *run*'s token shows there.  None where no mark of the function's reads in the
-    token: a logger the caller hands in marks the run by the caller's (doBasicPostProcess's tmpLog)."""
+def mark_identities(owner: str, line: int, run: Any) -> list[tuple[str, str]]:
+    """Which rows *run*'s mark holds, as the map's runs of *owner*'s function read it: each hole whose columns hold a
+    class's identity (the dump's tables, ``JobSpec.PandaID``), as the class with the value *run*'s token shows there --
+    whatever the hole's expression spells (``job.PandaID``, ``pandaID``).  Empty where no mark of the function's reads
+    in the token (a logger the caller hands in marks the run by the caller's: doBasicPostProcess's tmpLog), or none of
+    its holes holds an identity."""
     prints = R._prints_of(owner, [line])
-    return [(k.expression, v) for r in (getattr(prints, "runs", None) or [])
-            if (vs := mark_values(run.token, r.mark)) is not None and len(vs) == len(r.key or [])
-            for k, v in zip(r.key, vs, strict=True) if "." in k.expression]
+    out: list[tuple[str, str]] = []
+    for r in getattr(prints, "runs", None) or []:
+        vs = mark_values(run.token, r.mark)
+        if vs is None or len(vs) != len(r.key or []):
+            continue
+        for k, v in zip(r.key, vs, strict=True):
+            for column in k.columns or []:
+                cls = column.partition(".")[0]
+                if column in _identity_attrs(cls) and (cls, v) not in out:
+                    out.append((cls, v))
+    return out
 
 
 def mark_columns(owner: str, lines: list[int], run: Any) -> dict[str, str]:
@@ -1961,16 +1962,369 @@ def _site(hop: str) -> str | None:
     return m[0] if m else None
 
 
+#: what a run prints of an empty container
+_EMPTY_PRINTS = ("{}", "[]", "()", "set()")
+
+
+def _printed_value(printed: str) -> Any:
+    """What a run printed, as Python reads its repr (Q6): a literal it parses, ``set()`` the empty set; ``E.UNKNOWN``
+    for any other print."""
+    v = printed.strip()
+    if v == "set()":
+        return set()
+    try:
+        return ast.literal_eval(v)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return E.UNKNOWN
+
+
+def _printed_empty(printed: str) -> bool | None:
+    """Q6's (b): whether a container's print says it was empty: True for ``{}``, ``[]``, ``()``, ``set()``; False for
+    another a container's repr starts as (one that does not parse holds a value no literal is); None for a print that
+    is no container's."""
+    v = printed.strip()
+    if v in _EMPTY_PRINTS:
+        return True
+    got = _printed_value(v)
+    if isinstance(got, (dict, list, tuple, set, frozenset)):
+        return not got
+    return False if v[:1] in ("{", "[", "(") or v.startswith(("set(", "frozenset(")) else None
+
+
+def _short_circuit(test: ast.expr, term: str, printed: dict[str, tuple[str, str]]) -> str | None:
+    """Q6's (c): where *test* reads *term* only in operands of an ``and`` or ``or`` after one whose value on the run
+    decided it -- False for ``and``, True for ``or``; *printed* what the run printed of each term at the test, by term
+    -- that operand's text: Python did not read the ones after it.  None where it read *term*, or the values do not
+    tell: an operand whose value is not known stops the reading there."""
+    env = E.Env()
+    for name, (value, where) in printed.items():
+        if (got := _printed_value(value)) is not E.UNKNOWN:
+            env.put(name, got, where)
+    skipped: dict[int, str] = {}
+    for n in ast.walk(test):
+        if not isinstance(n, ast.BoolOp):
+            continue
+        for i, v in enumerate(n.values[:-1]):
+            try:
+                got = E.evaluate(v, env)
+            except Exception:  # noqa: BLE001 -- an operand the evaluator cannot read does not tell
+                got = E.UNKNOWN
+            if got is E.UNKNOWN or not isinstance(got, (bool, int, float, str, dict, list, tuple, set, frozenset, type(None))):
+                break
+            if bool(got) is isinstance(n.op, ast.Or):
+                for later in n.values[i + 1:]:
+                    for x in ast.walk(later):
+                        skipped.setdefault(id(x), ast.unparse(v))
+                break
+    names = [x for x in ast.walk(test) if isinstance(x, (ast.Name, ast.Attribute)) and ast.unparse(x) == term]
+    return skipped[id(names[0])] if names and all(id(x) in skipped for x in names) else None
+
+
+def _held_test(guard: str) -> ast.expr | None:
+    """Q7's (f): a guard as its run held it -- its text (``not (...)`` for an else), the ``[at N]`` of a test read at
+    another line dropped -- parsed; None where it does not parse."""
+    try:
+        return ast.parse(re.sub(r"\s+\[at \d+\]$", "", guard), mode="eval").body
+    except SyntaxError:
+        return None
+
+
+def _held_rules_out(test: ast.expr | None, name: str, values: tuple[str, ...]) -> bool:
+    """Q7's (f): whether *name* (a term, or a part of one: ``job.jobStatus``) holding each of *values* (literals as
+    written) would turn *test*, which its run held, false -- read by the evaluator, the test's other names unknown;
+    False where a value or the test does not tell."""
+    if test is None or not values:
+        return False
+    for v in values:
+        try:
+            literal = ast.literal_eval(v)
+        except (ValueError, SyntaxError):
+            return False
+        env = E.Env()
+        env.put(name, literal, "Q7's (f)")
+        try:
+            got = E.evaluate(test, env)
+        except Exception:  # noqa: BLE001 -- a test the evaluator cannot read does not tell
+            return False
+        if got is E.UNKNOWN or not isinstance(got, (bool, int, float, str, type(None))) or bool(got):
+            return False
+    return True
+
+
+def _way_text(e: SR.End) -> str:
+    """One way's end for the walk's lines: its end, why, where, the calls a value came back by (out/gm/gm5-design.md
+    G2), the calls it came in by, and the changes on it between there and the read, each with the calls it was made
+    through (G4)."""
+    return (f"{e.end} ({e.why}{' at ' + e.at if e.at else ''})"
+            + (f": {e.decided!r} decided the test on its run" if e.decided else "")
+            + (f": its {e.part} as written there, of the object made at {e.made_at}" if e.part else "")
+            + (f", in the except handler at {e.handler} (S3)" if e.handler else "")
+            + (f", read off the exception the except handler at {e.caught} caught (K)" if e.caught else "")
+            + (f" returned{f' from callee line {e.returned_line}' if e.returned_line else ''} by {' -> '.join(e.returned)}"
+               if e.returned else "")
+            + (f" by {' -> '.join(e.route)}" if len(e.route) > 1 else "")
+            + (f" via {' -> '.join(e.via)}" if e.via else "")
+            + (", changed between it and the read: " + "; ".join(_change_text(c) for c in e.changes) if e.changes else "")
+            + (f", the constants {e.split.call} hands told apart by the if at {', '.join(e.split.ifs)} (S2's (a))"
+               if e.split is not None else ""))
+
+
+def _change_text(c: SR.Changed) -> str:
+    """A change on a way by its place and the calls it was made through (G4)."""
+    return c.at + (f" made by {' -> '.join(c.made_by)}" if c.made_by else "")
+
+
+def _a_change(c: SR.Changed) -> T.Said:
+    return T.Said("a-change", {"at": c.at, "key": c.key, "made": T.Said("made-by", {"via": list(c.made_by)}) if c.made_by else ""})
+
+
+def _split_asked(asked: str) -> T.Said:
+    """What a split says of its caller's run (``SR.Split.asked``): not asked, or what Q5's ask of it answered."""
+    return T.Said(f"split-run-{asked or 'not-asked'}", {})
+
+
+def _way_said(e: SR.End) -> T.Said:
+    """One way's end as result.json keeps it: each place a ``file:line`` as it is, its words in the templates (G3);
+    each change on it by its place, key and the calls it was made through (G4); the one S4c chose, with its site read
+    as an arm; the ``except`` handler the statement it ends at is in (S3's)."""
+    returned = T.Said("returned-by", {
+        "route": list(e.returned),
+        "line": T.Said("returned-from", {"line": e.returned_line}) if e.returned_line else ""}) if e.returned else ""
+    changes = [_a_change(c) for c in e.changes]
+    m = e.made
+    changed: T.Said | str = T.Said("changed-between", {"changes": changes}) if changes else ""
+    how = (T.Said("change-shown-by-its-run") if m is not None and m.how == "shown"
+           else T.Said("change-left-start-same" if m.printed_start else "change-left-start-other",
+                       {"part": m.part, "start": list(m.start)}) if m is not None and m.start
+           else T.Said("change-left-start-unread", {
+               "part": m.part, "why": T.Said("no-field-from", {"field": m.no_record}) if m.no_record else ""})
+           if m is not None and m.part
+           else T.Said("change-left-by-elimination"))
+    if m is not None and m.entry is not None:
+        changed = T.Said("made-by-a-change", {
+            "change": _a_change(m.change), "how": how, "site": m.site,
+            "terms": [T.Said("term-ends", {"term": u.term, "ends": [_way_said(x) for x in u.ends]}) for u in m.terms] or ["none"],
+            "entry": _way_said(m.entry)})
+    elif m is not None:
+        changed = T.Said("made-by-a-change-unread", {"change": _a_change(m.change), "how": how, "site": m.site,
+                                                     "guards": list(m.guards) or ["none"]})
+    at = (T.Said("way-end-unread", {"at": e.at, "operand": e.decided}) if e.decided
+          else T.Said("way-end-written", {"at": e.at, "part": e.part, "made": e.made_at}) if e.part
+          else T.Said("way-end-at-caught", {"at": e.at, "handler": e.caught}) if e.caught
+          else T.Said("way-end-at-handler", {"at": e.at, "handler": e.handler}) if e.handler
+          else T.Said("way-end-at", {"at": e.at}) if e.at else "")
+    s = e.split
+    split = T.Said("told-apart-by-an-if", {
+        "call": s.call, "ifs": list(s.ifs), "guards": list(s.guards), "asked": _split_asked(s.asked),
+        "terms": [T.Said("term-ends", {"term": u.term, "ends": [_way_said(x) for x in u.ends]}) for u in s.terms] or ["none"],
+    }) if s is not None else ""
+    return T.Said("way-end", {"end": e.end, "why": e.why,
+                              "at": at,
+                              "returned": returned,
+                              "route": T.Said("came-in-by", {"route": list(e.route)}) if len(e.route) > 1 else "",
+                              "via": T.Said("bound-via", {"via": list(e.via)}) if e.via else "",
+                              "changes": changed,
+                              "split": split})
+
+
+def _handler_line(fn: R.Function, e: SR.End) -> int:
+    """The line of the ``except`` handler of *fn* the statement a way that does not end stops at is in (by
+    ``pathcond.ancestors``): what it holds is bound where an exception was caught, S3's to read; 0 where none."""
+    rel, _, ln = e.at.rpartition(":")
+    if e.end in SR.ENDS or rel != fn.rel or not ln.isdigit():
+        return 0
+    # the handler's own line: the name it binds (the map's object of the class caught, EXF)
+    if any(isinstance(h, ast.ExceptHandler) and h.lineno == int(ln) for h in ast.walk(fn.node)):
+        return int(ln)
+    stmt = R.statement_at(fn.node, int(ln))
+    if stmt is None:
+        return 0
+    for anc in pathcond.ancestors(stmt):
+        if anc is fn.node:
+            break
+        if isinstance(anc, ast.ExceptHandler):
+            return anc.lineno
+    return 0
+
+
+def _handler_around(fn: R.Function, line: int) -> tuple[ast.Try, ast.ExceptHandler] | None:
+    """K: the ``try`` of *fn* and its ``except`` handler whose lines (its own and its body's) hold *line*, the innermost
+    where handlers nest."""
+    held = [(tr, h) for tr in ast.walk(fn.node) if isinstance(tr, ast.Try)
+            for h in tr.handlers if h.lineno <= line <= (h.end_lineno or h.lineno)]
+    return max(held, key=lambda th: th[1].lineno) if held else None
+
+
+class _Raise(TypedDict, total=False):
+    """K's form: the raise an arm in an ``except`` handler stops at, as :class:`SR.Made`'s keywords (empty where its
+    run's tracebacks do not show one)."""
+
+    raised_type: str
+    raised_at: str
+    caught_at: str
+    raised_other: str
+
+
+def _raised_through(fn: R.Function, tr: ast.Try, run: Any) -> tuple[str, str, str] | None:
+    """K: ``(type, file:line, other)`` of the exception *run*'s tracebacks show leaving *tr*'s body -- in each record,
+    the last chain with a frame of *fn* in the body (in a ``raise ... from`` series, the one caught; the ones before are
+    its causes) -- and where it was raised, the chain's last frame; *other* empty where the pin holds that frame's
+    source there, else the frame's function and printed source (the run's code was another version, or outside the
+    corpus).  None where no record shows one, or two show different ones."""
+    lo, hi = tr.body[0].lineno, max(s.end_lineno or s.lineno for s in tr.body)
+    got: set[tuple[str, str, str]] = set()
+    for record in getattr(run, "records", None) or ():
+        for ch in reversed(record.chains()):
+            if ch.frames and any(f.in_corpus and f.same_source and f.rel == fn.rel and lo <= f.line <= hi for f in ch.frames):
+                last = ch.frames[-1]
+                held = last.in_corpus and last.same_source
+                got.add((ch.exc_type, f"{last.rel or last.path}:{last.line}",
+                         "" if held else f"{last.func}: {last.source.strip()}"))
+                break
+    return next(iter(got)) if len(got) == 1 else None
+
+
+def _traceback_frames(run: Any) -> set[str]:
+    """K: ``file:line`` of every corpus frame of *run*'s tracebacks, at the pin's lines: a call standing there ran."""
+    return {f"{f.rel}:{f.line}" for record in getattr(run, "records", None) or () for ch in record.chains()
+            for f in ch.frames if f.in_corpus and f.same_source}
+
+
+def _printed_type(cls: str) -> str:
+    """``file::Class`` as Python prints the type of its exceptions: ``pandaserver.srvcore.exceptions.FileRegistrationError``."""
+    rel, _, name = cls.partition("::")
+    module = rel.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+    return f"{module}.{name}"
+
+
+@functools.cache
+def _binds_at_module(rel: str, name: str) -> bool:
+    """Whether the module *rel* binds *name* itself (an import, def, class or assignment): ``Exception`` then is not
+    the builtin."""
+    for n in ast.walk(R.tree(rel)):
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return True
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and any((a.asname or a.name.split(".")[0]) == name for a in n.names):
+            return True
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store):
+            return True
+    return False
+
+
+def _in_corpus(exc_type: str) -> bool:
+    """Whether the module of *exc_type* (as Python prints it) is the corpus's: a class outside it (a builtin, rucio's)
+    has no corpus class among its bases."""
+    module = exc_type.rpartition(".")[0].replace(".", "/")
+    return bool(module) and ((R.CORPUS / f"{module}.py").exists() or (R.CORPUS / module / "__init__.py").exists())
+
+
+def _catches(fn: R.Function, n: ast.expr, exc_type: str, cls: str) -> bool | None:
+    """K: whether an ``except`` naming *n* catches an exception of *exc_type* (as Python prints it): a builtin class
+    by ``issubclass`` where the raised one is a builtin too, else ``Exception`` and ``BaseException`` catch it; the
+    map's class of the handler (*cls*, ``file::Class``) where it is *exc_type*, not where *exc_type* is outside the
+    corpus; None where not told (another corpus class may be its base)."""
+    caught = getattr(builtins, n.id, None) if isinstance(n, ast.Name) and not _binds_at_module(fn.rel, n.id) else None
+    raised = getattr(builtins, exc_type, None) if "." not in exc_type else None
+    raised = raised if isinstance(raised, type) and issubclass(raised, BaseException) else None
+    if isinstance(caught, type) and issubclass(caught, BaseException):
+        if raised is not None:
+            return issubclass(raised, caught)
+        return True if caught in (Exception, BaseException) else None
+    if raised is not None:
+        # a builtin exception's bases are builtins: a class of the corpus or another package is none of them
+        return False
+    if cls:
+        return True if _printed_type(cls) == exc_type else None if _in_corpus(exc_type) else False
+    return None
+
+
+def _entered_handler(fn: R.Function, tr: ast.Try, exc_type: str, known: dict[int, str]) -> int:
+    """K: the line of the handler of *tr* an exception of *exc_type* (as Python prints it) enters: the first one a bare
+    ``except`` or a class it names catches (:func:`_catches`; *known*: the class a handler catches, ``file::Class``,
+    the map's object of it); 0 where one before it may catch it, not told."""
+    for h in tr.handlers:
+        if h.type is None:
+            return h.lineno
+        names = h.type.elts if isinstance(h.type, ast.Tuple) else [h.type]
+        verdicts = [_catches(fn, n, exc_type, known.get(h.lineno, "") if len(names) == 1 else "") for n in names]
+        if True in verdicts:
+            return h.lineno
+        if None in verdicts:
+            return 0
+    return 0
+
+
+def _binds_on_every_path(h: ast.ExceptHandler, name: str) -> bool:
+    """K: whether the handler *h*'s body binds *name* at its top level, so on every path through it."""
+    return any(isinstance(s, (ast.Assign, ast.AnnAssign)) and any(ast.unparse(t) == name for t in
+               (s.targets if isinstance(s, ast.Assign) else [s.target])) for s in h.body)
+
+
+def _first_stop(t: SR.Term) -> T.Said:
+    """Where the first term that does not end stops: at itself, or, where a way of it was made by a change S4c chose
+    and read as an arm, at the first term of that arm that does not end, or, where it stops at constants one call hands
+    and an ``if`` tells them apart (S2's (a)), at the first term of that if that does not end -- down the arms and ifs
+    so read; with the ``except`` handlers its stops are in (S3's)."""
+    steps: list[T.Said] = []
+    while True:
+        m = next((e.made for e in t.ends if e.made is not None), None)
+        s = next((e.split for e in t.ends if e.split is not None), None)
+        if m is not None and (nxt := next((u for u in m.terms if not u.ended), None)) is not None:
+            steps.append(T.Said("the-arm-of-a-change", {"site": m.site}))
+        elif m is None and s is not None and (nxt := next((u for u in s.terms if not u.ended), None)) is not None:
+            at = f"{s.fn.partition('::')[0]}:{nxt.line}" if nxt.line else s.ifs[0]
+            steps.append(T.Said("the-if-telling-constants-apart", {"at": at, "call": s.call}))
+        else:
+            break
+        t = nxt
+    # K's form: the arm of the change is in an except handler and its own terms end -- it stops at the raise its run's
+    # traceback shows the handler took (not an end: the raise has terms of its own)
+    m = next((e.made for e in t.ends if e.made is not None), None)
+    if m is not None and m.raised_at and all(u.ended for u in m.terms):
+        return T.Said("first-term-stops-at-a-raise", {
+            "term": t.term, "guard": t.guard,
+            "made": T.Said("reached-down", {"steps": [*steps, T.Said("the-arm-of-a-change", {"site": m.site})]}),
+            "type": m.raised_type, "handler": m.caught_at,
+            "at": T.Said("raised-at-other", {"at": m.raised_at, "other": m.raised_other}) if m.raised_other
+            else m.raised_at})
+    handlers = sorted({e.handler for e in t.ends if e.handler})
+    if not steps and not handlers:
+        return T.Said("first-term-stops", {"term": t.term, "guard": t.guard})
+    return T.Said("first-term-stops-further", {
+        "term": t.term, "guard": t.guard,
+        "made": T.Said("reached-down", {"steps": steps}) if steps else "",
+        "s3": T.Said("bound-in-a-handler", {"lines": handlers}) if handlers else ""})
+
+
+def _guard_ifs(fn: R.Function, site: ast.AST, guards: list[str]) -> list[list[ast.If]] | None:
+    """The ``if`` statements each guard of *site* (``pathcond.arm_condition``'s) is read at: an ``if`` around it, or an
+    early exit's own ``if`` above it (``pathcond.exits_above_at``); None where a test ``path_condition`` could not
+    render, or an exit's ``if`` is not found -- the guards are not placed."""
+    around: list[ast.If] = []
+    previous: ast.AST = site
+    for anc in pathcond.ancestors(site):
+        if isinstance(anc, ast.If) and (previous in anc.body or previous in anc.orelse):
+            around.append(anc)
+        previous = anc
+    around.reverse()
+    written = pathcond.path_condition(site)
+    exits = dict(pathcond.exits_above_at(site))
+    ifs_of: list[list[ast.If]] = [[one] for one in around]
+    for g in guards[len(written):]:
+        lines = exits.get(g, ())
+        ifs_of.append([n for n in ast.walk(fn.node) if isinstance(n, ast.If) and n.lineno in lines])
+    if len(around) != len(written) or guards[: len(written)] != written or any(
+        not at or len(at) != len(exits.get(g, ())) for g, at in zip(guards[len(written):], ifs_of[len(written):], strict=True)
+    ):
+        return None
+    return ifs_of
+
+
 def _same_function(a: str, b: str) -> bool:
     """Whether two owners name one function of one file, one as the map's reach spells it (``Class.method``), the
     other as a junction does (the bare name)."""
     (ra, _, fa), (rb, _, fb) = a.partition("::"), b.partition("::")
     return ra == rb and fa.split(".")[-1] == fb.split(".")[-1]
-
-
-def _expression_is(want: str) -> Callable[[Any], bool]:
-    """Whether a hole of a run mark's key prints *want* (``jobSpec.PandaID``)."""
-    return lambda k: k.expression == want
 
 
 def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> list[Caller]:
@@ -2677,7 +3031,7 @@ class Rerun:
         self.say(f"# {' '.join(sys.argv)}")
         self.stamp("start")
         steps = {
-            Asked: self.asked, WroteBy: self.wrote_by, ArmsLeft: self.arms_left, SetBy: self.set_by, Raised: self.raised, Missing: self.missing,
+            Asked: self.asked, WroteBy: self.wrote_by, ArmsLeft: self.arms_left, Raised: self.raised, Missing: self.missing,
             Branch: self.branch, Settled: self.settled, Pair: self.pair, FalseAtom: self.false_atom,
             Reproduce: self.reproduce, Field: self.field,
             Stuck: self.stuck, Passes: self.passes, Callers: self.callers, CallerPasses: self.caller, ArmCaller: self.arm_caller,
@@ -2826,7 +3180,7 @@ class Rerun:
                 self.touched.append((R.function(c.rel, c.func, c.lines), question))
         site_fn = R.function(chosen.candidate.rel, chosen.candidate.func, chosen.candidate.lines)
         # an arm left by elimination with no pass of it at the window has no run to read up to (K47)
-        at_fn, guard_record = self._guard_at(w, site_fn) if question is not None else (site_fn, None)
+        at_fn = self._guard_at(w, site_fn) if question is not None else site_fn
         if w.via is not None and question is None:
             # one of the arms left, read at a call of which no run is read (K38)
             self.say(f"{site_fn.name}:{chosen.line} prints nothing: read at its caller's call, {w.via.candidate.func}:{w.via.line}, "
@@ -2838,7 +3192,6 @@ class Rerun:
         if question is not None and len(starts := R.entries(at_fn, question, self.mode)) > 1:
             self.say(f"WARNING: the run holds {len(starts)} passes of {at_fn.name} (rule 20); the steps below read them as one")
         site = R.statement_at(site_fn.node, chosen.line)
-        reading = w.reading
         # an attribute's question is when it took the value, and H2 answered it: the pass of the arm that wrote it last
         # (KNOWN_ISSUES.md K37).  A status's goes on to why its writer's arm ran
         attribute = PT.history(q.subject) is None
@@ -2859,23 +3212,6 @@ class Rerun:
                 "fn_name": site_fn.name, "chosen_line": chosen.line,
                 "why": T.Said("left-by-elimination-no-pass") if not branch else T.Said("no-pass-at-the-window", {"left": left}),
             })))
-        def through(env: Any) -> list[tuple[str, str]]:
-            """The methods the guards read through whose values *env* leaves unknown: H4 reads which call set each.  A
-            guard read at another line (``E.read_elsewhere``) is not read in *env*."""
-            out = []
-            for g in guards:
-                if E.read_elsewhere(g):
-                    continue
-                for atom in E.atoms(ast.parse(E.strip_annotation(g), mode="eval").body):
-                    for n in ast.walk(atom):
-                        if (
-                            isinstance(n, ast.Call) and not n.args and not n.keywords
-                            and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, (ast.Attribute, ast.Name))
-                            and E.ev(n, env) is E.UNKNOWN
-                        ):
-                            out.append((n.func.attr, ast.unparse(n)))
-            return out
-
         # an arm its run shows ran (H2's positive, its own run: a stand-in's is its caller's) ran under its guards
         # (KNOWN_ISSUES.md K54)
         ran = chosen.kind == "positive" and w.via is None and question is not None
@@ -2919,10 +3255,9 @@ class Rerun:
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
                     return WroteBy(q, nxt.branch, list(nxt.premises), a.older[1:], a.only_way)
                 raise Excluded(T.at(self.hop, T.Said("it-did-not-write-at-any-row", {"where": where})))
-            # a guard the values leave unread held where the run shows the arm ran; one read false still decides, and
-            # one through a method goes on to H4, which says why the arm ran
-            by_run = ([g for g, got in read.items() if got is not True]
-                      if ran and not any(got is False for got in read.values()) and not through(env) else [])
+            # a guard the values leave unread held where the run shows the arm ran, one read through a call too; one
+            # read false still decides (KNOWN_ISSUES.md K54, K74)
+            by_run = [g for g, got in read.items() if got is not True] if ran and not any(got is False for got in read.values()) else []
             # the one writer of the value left, none dropped by a guard: a guard the values leave unread held, through a
             # method too, since the value has no other way (KNOWN_ISSUES.md K66)
             only = [g for g, got in read.items() if got is not True and g not in by_run] if a.only_way else []
@@ -2974,36 +3309,56 @@ class Rerun:
             unread = [T.Said("guard-read-false" if got is False else "guard-not-read-held" if g in held else "guard-not-read",
                              {"guard": g} | ({"keys": held[g].keys} if got is not False and g in held else {}))
                       for g, got in read.items() if got is not True]
-            # an arm left by elimination is read in no run: H4 would read its guard's method in a run not its own
+            # an arm left by elimination is read in no run: its unread guards are not shown to hold (G is a positive
+            # arm's, KNOWN_ISSUES.md K54)
             self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
-        methods = through(env)
-        self.say(f"read through a method: {methods}")
-        if not methods:
-            # what H3 lacks is then the values the guard reads at the run, not a method's
-            if not guards:
-                if ran and not attribute and mark_handed(chosen.candidate.owner, chosen.line, question):
-                    # what made it run is its callers': the call that ran it, read on the run its own run is inside, by
-                    # what the call handed the run's mark (U3)
-                    return ArmCaller(q, chosen.candidate.owner, chosen.line, question)
-                # its value is what a method its statement calls returns: the map's ways to it through that method
-                # (KNOWN_ISSUES.md K65)
-                ways = callee_ways(q.subject, chosen.candidate.owner, chosen.line, q.observed)
-                if ways:
-                    self._read_ways(q, w, site_fn, chosen, ways, ran)
-                self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
-            if ran and not attribute and site is not None:
-                # a status's arm ran under its guards: where the values they held on came from, said where its run printed
-                # them -- unless they read a guard false, which the run says held
-                held_on, read_false = self._held_on(site_fn, site, guards, question)
-                what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
-                        else T.Said("values-held-on", {"held": held_on}))
+        # what H3 lacks is then the values the guards read at the run, a call in a guard read as any term (K74)
+        if not guards:
+            if ran and not attribute and mark_identities(chosen.candidate.owner, chosen.line, question):
+                # what made it run is its callers': the call that ran it, read on the run its own run is inside, by
+                # what the call handed the run's mark (U3)
+                return ArmCaller(q, chosen.candidate.owner, chosen.line, question)
+            # its value is what a method its statement calls returns: the map's ways to it through that method
+            # (KNOWN_ISSUES.md K65)
+            ways = callee_ways(q.subject, chosen.candidate.owner, chosen.line, q.observed)
+            if ways:
+                self._read_ways(q, w, site_fn, chosen, ways, ran)
+            self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
+        if ran and not attribute and site is not None:
+            # a status's arm ran under its guards: where the values they held on came from, said where its run printed
+            # them -- unless they read a guard false, which the run says held
+            printed: dict[tuple[int, str], tuple[str, str]] = {}
+            held_on, read_false = self._held_on(site_fn, site, guards, question, printed)
+            ifs = _guard_ifs(site_fn, site, guards) if read_false is None else None
+            if read_false is not None:
+                what = T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]})
+            elif ifs is None:
+                what = T.Said("values-held-on", {"held": held_on})
             else:
-                unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
-                what = T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})})
-            self.need(what, None)
-        method = self.need(T.Said("a-method-the-guard-reads-through", {"conditions": T.Said("its-conditions", {"unread": unread}) if unread else ""}),
-                           methods[0][0])
-        return SetBy(method, reading, question, guard_record, env)
+                # where each term's ways end on the map's ways, the first that does not end named (S, gm-design.md)
+                terms, entry = self._arm_terms(site_fn, chosen.candidate.owner, chosen.line, guards, ifs, printed,
+                                               question, w.window)
+                first = next((t for t in terms if not t.ended), None)
+                # a term read by several guards the same way is said once, where it is first read
+                once: list[SR.Term] = []
+                for t in terms:
+                    if not any((o.term, o.ends) == (t.term, t.ends) for o in once):
+                        once.append(t)
+                term_ends = [T.Said("term-ends", {"term": t.term, "ends": [_way_said(e) for e in t.ends]}) for t in once]
+                if first is None and entry.end in SR.ENDS:
+                    # every value its guards held on, and its entry, end (C2): why it ran is answered
+                    self.end(T.Said("ran-where-every-value-ends", {"fn": site_fn.name, "line": chosen.line, "held": held_on,
+                                                                   "terms": term_ends, "entry": _way_said(entry)}))
+                    return None
+                what = T.Said("values-held-on-from", {
+                    "held": held_on, "terms": term_ends, "entry": _way_said(entry),
+                    "left": _first_stop(first) if first is not None else T.Said("terms-end-entry-stops"),
+                })
+        else:
+            unread = unread or [T.Said("guard-not-read", {"guard": g}) for g in guards]
+            what = T.Said("values-the-guard-reads", {"conditions": T.Said("its-conditions", {"unread": unread})})
+        self.need(what, None)
+        return None
 
     def _read_ways(self, q: Asked, w: Wrote, fn: R.Function, chosen: Verdict, ways: list[list[str]], ran: bool) -> None:
         """H3 for a status's arm with no guard of its own whose value a method its statement calls returns: the map's
@@ -3055,30 +3410,18 @@ class Rerun:
         self.need(T.Said("ways-left-to-the-value", facts | {
             "k": len(left), "ways": [T.Said("one-way", {"terms": [s for _, s in readings[i]]}) for i in left]}), None)
 
-    def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
+    def _held_on(self, fn: R.Function, site: ast.AST, guards: list[str], run: Any,
+                 printed: dict[tuple[int, str], tuple[str, str]] | None = None) -> tuple[list[T.Said], tuple[str, T.Said | str] | None]:
         """Each guard of *site* (``pathcond.arm_condition``'s: the ``if``s around it, outermost first, then the early
         exits above it) with the values its terms held at its ``if`` -- an early exit's at the exit's own ``if``
         (``pathcond.exits_above_at``), which is where a guard ``[at N]`` reads its names too -- where *fn*'s run printed
         them (:func:`CH.printed_at`, read as the map's evaluator reads a printed value), and the first guard they read
         false, with its values (KNOWN_ISSUES.md K54, K61).  Texts are not ordered: a guard ordering a value read as text
         is not read.  In a loop that holds the site, a row is read only at a record the key is on, and only where each of
-        the loop's rows printed once among those: the key's one pass of the loop."""
-        around: list[ast.If] = []
-        previous: ast.AST = site
-        for anc in pathcond.ancestors(site):
-            if isinstance(anc, ast.If) and (previous in anc.body or previous in anc.orelse):
-                around.append(anc)
-            previous = anc
-        around.reverse()
-        written = pathcond.path_condition(site)
-        exits = dict(pathcond.exits_above_at(site))
-        ifs_of: list[list[ast.If]] = [[one] for one in around]
-        for g in guards[len(written):]:
-            lines = exits.get(g, ())
-            ifs_of.append([n for n in ast.walk(fn.node) if isinstance(n, ast.If) and n.lineno in lines])
-        if len(around) != len(written) or guards[: len(written)] != written or any(
-            not at or len(at) != len(exits.get(g, ())) for g, at in zip(guards[len(written):], ifs_of[len(written):], strict=True)
-        ):
+        the loop's rows printed once among those: the key's one pass of the loop.  *printed* takes each value read, by
+        its ``if``'s line and the chain (S4c's V)."""
+        ifs_of = _guard_ifs(fn, site, guards)
+        if ifs_of is None:
             # a test path_condition could not render, or an exit's if is not found: the guards are not placed, and no
             # value is read
             return [T.Said("guard-held-on", {"guard": g, "on": ""}) for g in guards], None
@@ -3121,6 +3464,8 @@ class Rerun:
                         here.append(T.Said("term-printed", {"term": t, "value": got[0], "where": got[1]}))
                         env.put_printed(t, got[0], got[1])
                         self.say(f"  {t} = {got[0]!r} ({got[1]})")
+                        if printed is not None:
+                            printed.setdefault((one.lineno, t), got)
                 on += here
                 read_false = read_false or bool(here and not _orders_texts(text, env) and _guard_read(text, env) is False)
             said: T.Said | str = T.Said("held-on-values", {"values": on}) if on else ""
@@ -3128,6 +3473,730 @@ class Rerun:
             if false is None and read_false:
                 false = (g, said)
         return held, false
+
+    def _field_choice(self, run: Any) -> SR.Choose:
+        """S4b's choice of a field's bindings and changes for a read on *run*'s path (:mod:`field_order`), each said
+        once: what it took, what it did not and why."""
+        said: dict[tuple[Any, ...], FO.Choice] = self.__dict__.setdefault("_field_choices", {})
+
+        def choose(ff: Any, rel: str, line: int, keys: frozenset[str] | None, of_self: bool) -> FO.Choice:
+            key = (ff.owner, ff.field, rel, line, keys, of_self, id(run))
+            if key not in said:
+                c = said[key] = FO.choose(ff, rel, line, run, self.mode, keys, of_self)
+                bound = {b.at for b in ff.bindings}
+                left = [f"{at} ({why})" for at, why in c.dropped if at in bound]
+                changes: dict[str, int] = {}
+                for at, why in c.dropped:
+                    if at not in bound:
+                        changes[why] = changes.get(why, 0) + 1
+                self.say(f"  {ff.owner.rpartition('::')[2]}.{ff.field} read at {rel}:{line}"
+                         + (f" (taking {', '.join(sorted(keys)) or 'which object'})" if keys is not None else "")
+                         + f": took {', '.join(b.at for b in c.bindings) or 'no binding'}"
+                         + (f"; changes between: {', '.join(x.at for x in c.changes)}" if c.changes else "")
+                         + (f"; not taken: {', '.join(left)}" if left else "")
+                         + (f"; changes not taken: {', '.join(f'{n} {why}' for why, n in sorted(changes.items()))}" if changes else "")
+                         + (f"; {c.entry}" if c.entry else ""))
+            return said[key]
+
+        return choose
+
+    def _arm_terms(self, fn: R.Function, owner: str, line: int, guards: list[str], ifs: list[list[ast.If]],
+                   printed: dict[tuple[int, str], tuple[str, str]], run: Any, window: tuple[str, str] | None,
+                   seen: frozenset[str] = frozenset(), pad: str = "  ") -> tuple[list[SR.Term], SR.End]:
+        """Each term of the guards of *fn*'s arm at *line* (*guards*, read at *ifs*) with where its ways end (S,
+        gm-design.md): read up the callers where a way ends at a parameter (:meth:`_with_callers`), a stop at a statement
+        in an ``except`` handler of *fn* named (S3's to read), the changes on a way read (S4c, :meth:`_s4c`); and the
+        arm's entry.  *printed*: what its run printed at its tests (:meth:`_held_on`); *seen*: the arms read on the way
+        here, each read once.  With no run or no window (an attribute's arm read on no run), the changes on a way stay
+        on it, named: S4c reads the run."""
+        base = SR.terms(fn, owner, list(zip(guards, ifs, strict=True)), choose=self._field_choice(run))
+        self._say_cuts(pad)
+        terms = self._read_by_its_run(fn, [self._with_callers(self._raised(t, fn, run, pad), fn, owner, run, window)
+                                           for t in base], printed, pad)
+        out: list[SR.Term] = []
+        for t in terms:
+            t = replace(t, ends=tuple(replace(e, handler=h) if (h := _handler_line(fn, e)) else e for e in t.ends))
+            self.say(f"{pad}term {t.term!r} of {t.guard!r}: " + ", ".join(_way_text(e) for e in t.ends))
+            out.append(self._held_drops(self._s4c(t, fn, printed, run, window, seen | {f"{fn.rel}:{line}"}, pad), pad)
+                       if run is not None and window is not None else t)
+        entry = self._entry_end(fn, owner, line, run, window, out)
+        self.say(f"{pad}entry of {fn.name}: {_way_text(entry)}")
+        return out, entry
+
+    def _read_by_its_run(self, fn: R.Function, terms: list[SR.Term], printed: dict[tuple[int, str], tuple[str, str]],
+                         pad: str) -> list[SR.Term]:
+        """Q6 (out/gm/qk-design.md) on the terms of an arm, with what its run printed at their tests (*printed*, V's:
+        :meth:`_held_on`): (c) a term its test reads only after an operand of ``and`` or ``or`` that decided the test on
+        the run is not read by it -- one end, :data:`SR.UNREAD`, naming the operand; (b) a container made empty its test
+        reads for its truth alone (``SR.truth_only``: its ways its empty start, its puts and the container where a
+        change may take out of it) is its empty start and the container where the run printed it empty, and its puts
+        where not.  A term with no print at its test, as it was."""
+        out: list[SR.Term] = []
+        for t in terms:
+            stmt = R.statement_at(fn.node, t.line) if t.line else None
+            test = getattr(stmt, "test", None)
+            at = {term: got for (line, term), got in printed.items() if line == t.line}
+            if not isinstance(test, ast.expr) or not at:
+                out.append(t)
+                continue
+            if (decided := _short_circuit(test, t.term, at)) is not None:
+                self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run's test did not read it: {decided!r} decided the test")
+                out.append(replace(t, ends=(SR.End(t.term, SR.UNREAD, "short-circuit", f"{fn.rel}:{t.line}",
+                                                   decided=decided),)))
+                continue
+            got = at.get(t.term)
+            empty = _printed_empty(got[0]) if got is not None else None
+            truth = all((e.end == SR.CONSTANT and e.why in (SR.MADE_EMPTY, SR.PUT)) or (e.end == SR.STOP and e.why == SR.CONTAINER)
+                        for e in t.ends)
+            kept = tuple(e for e in t.ends if (e.why != SR.PUT if empty else e.why == SR.PUT))
+            if got is None or empty is None or not truth or not kept or len(kept) == len(t.ends) or not SR.truth_only(test, t.term):
+                out.append(t)
+                continue
+            self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run printed it {'empty' if empty else 'not empty'} at its "
+                     f"test ({got[1]}): " + ", ".join(_way_text(e) for e in kept))
+            out.append(replace(t, ends=kept))
+        return out
+
+    def _held_drops(self, t: SR.Term, pad: str) -> SR.Term:
+        """Q7's (f) on a term whose ways end at literals of different values (K75's premise 3: a local two arms bind,
+        ``parse_result``'s 0 and 2): a literal that, the term holding it, would turn the test its run held false is not
+        what the term held there -- that way goes; where every literal would, none does (the test does not tell)."""
+        lits = [e for e in t.ends if e.end == SR.CONSTANT and e.why not in SR.NO_LITERAL and not e.part and not e.changes]
+        if len({e.why for e in lits}) < 2 or (held := _held_test(t.guard)) is None:
+            return t
+        out = tuple(e for e in t.ends if e not in lits or not _held_rules_out(held, t.term, (e.why,)))
+        if len(out) == len(t.ends) or not any(e in lits for e in out):
+            return t
+        self.say(f"{pad}term {t.term!r} of {t.guard!r}: its run held the test, so not "
+                 + ", ".join(f"{e.why} at {e.at}" for e in t.ends if e not in out) + " (Q7's (f))")
+        return replace(t, ends=out)
+
+    def _s4c(self, t: SR.Term, fn: R.Function, printed: dict[tuple[int, str], tuple[str, str]], run: Any,
+             window: tuple[str, str], seen: frozenset[str], pad: str) -> SR.Term:
+        """*t* with the changes on each of its ways read (S4c, out/gm/gm5-design.md): a change that stores a value other
+        than what the run printed of the part it changes is not what the read reads (V); of those left, one the run
+        shows did not run is dropped (H2), and the one left, where its run shows it ran, or where its function's rows
+        are in the run and it stores what the run printed (by elimination, as H2 leaves an arm), is read as an arm
+        (:meth:`_change_arm`).  Where none is chosen, those left stay on the way, named.  Q7 (out/gm/qk-design.md)
+        reads what the chosen change made as the end of the part the test takes (:meth:`_made`)."""
+        if not any(e.changes for e in t.ends):
+            return t
+        stmt = R.statement_at(fn.node, t.line) if t.line else None
+        test = getattr(stmt, "test", None)
+        taken = SR.parts_taken(test, t.term, fn.rel, t.line) if isinstance(test, ast.expr) else None
+        return replace(t, ends=tuple(self._made(e, t, taken, fn, printed, run, window, seen, pad) if e.changes else e
+                                     for e in t.ends))
+
+    def _made(self, e: SR.End, t: SR.Term, taken: frozenset[str] | None, fn: R.Function,
+              printed: dict[tuple[int, str], tuple[str, str]], run: Any, window: tuple[str, str], seen: frozenset[str],
+              pad: str) -> SR.End:
+        """S4c on the way *e* of *t* (:meth:`_s4c`); *taken* the parts *t*'s test takes off its value.
+
+        Q7 (out/gm/qk-design.md): what the test takes ends at the statement that last wrote it on the run.  A change
+        whose value would turn the test its run held the other way is not that one ((f), :func:`_held_rules_out`).  The
+        change chosen ends the way at the literal it stores, where it writes the one part the test takes by name and its
+        run shows it ran, or, left by elimination, the object's start held another value of it than the run printed
+        (:func:`SR.part_start`; K75's premise 2); its site is read as an arm as before (the term ends where the arm does,
+        :func:`SR.arm_ends`).  Where every change is ruled out, the start ends it (:meth:`_start_end`)."""
+
+        def part(c: SR.Changed) -> str:
+            # the part of the value a change makes: its attribute, or, where it does not say, the one part the test takes
+            if c.key.startswith("."):
+                return c.key
+            return next(iter(taken)) if c.key == "*" and taken is not None and len(taken) == 1 else ""
+
+        shown = self._parts_printed(e, t, {p for c in e.changes if (p := part(c))}, fn, printed, run)
+        held = _held_test(t.guard)
+        left: list[SR.Changed] = []
+        # the changes V read as storing what the run printed of the part they change
+        printed_as: set[SR.Changed] = set()
+        for c in e.changes:
+            got = shown.get(part(c))
+            values = SR.stored(c.record)
+            if got is not None and values is not None and not any(SR.same_value(v, got[0]) for v in values):
+                self.say(f"{pad}  V: {_change_text(c)} stores {' or '.join(values)}, not the {got[0]!r} printed of "
+                         f"{t.term}{part(c)} ({got[1]})")
+                continue
+            if values is not None and part(c) and _held_rules_out(held, t.term + part(c), values):
+                self.say(f"{pad}  F: {_change_text(c)} stores {' or '.join(values)}: {t.term}{part(c)} so would turn "
+                         f"{t.guard!r}, which its run held, the other way (Q7's (f))")
+                continue
+            if got is not None and values is not None:
+                printed_as.add(c)
+            left.append(c)
+        ran = {c: self._change_ran(c, run, window, pad) for c in left}
+        kept = tuple(c for c in left if ran[c][0] != "not-run")
+        self.say(f"{pad}  S4c on {e.end} ({e.why}): {len(e.changes)} change(s), {len(left)} left by V; H2: "
+                 + (", ".join(f"{_change_text(c)} {ran[c][0]}{f' ({ran[c][1]})' if ran[c][1] else ''}" for c in left) or "none"))
+        if not kept and (at_start := self._start_end(e, taken, pad)) is not None:
+            return at_start
+        if len(kept) != 1 or not (ran[kept[0]][0] == "shown" or (ran[kept[0]][0] == "kept" and kept[0] in printed_as)):
+            return replace(e, changes=kept)
+        c = kept[0]
+        how = "shown" if ran[c][0] == "shown" else "left"
+        made = self._change_arm(c, ran[c][1], how, run, window, seen, pad + "    ")
+        p = part(c)
+        got = shown.get(p)
+        printed_part = got[0] if got is not None else None
+        # the start a class's __init__ binds is an object's that a constructor made and nothing filled (a row's object,
+        # filled or returned, starts at the row)
+        made_only = e.end == SR.STOP and not e.filled and bool(e.made_of)
+        start = SR.part_start(e.made_of, p) if how == "left" and p and made_only else None
+        same = start is not None and printed_part is not None and any(SR.same_value(v, printed_part) for v, _ in start)
+        if how == "left" and p:
+            unread = start is None and made_only and SR._field_froms().get((e.made_of, p[1:])) is None
+            made = replace(made, part=p, start=tuple(v for v, _ in start or ()), printed_start=same,
+                           no_record=f"{e.made_of}{p}" if unread else "")
+        values = SR.stored(c.record)
+        known = how == "shown" or (start is not None and printed_part is not None and not same)
+        if values is None or len(values) != 1 or not p or c.key != p or taken != frozenset({p}) or not known:
+            return replace(e, changes=kept, made=made)
+        self.say(f"{pad}  Q7: {t.term}{p} last written by {_change_text(c)}: {values[0]}"
+                 + ("" if start is None else f" (its start held {' or '.join(v for v, _ in start)}, not the printed {printed_part!r})"))
+        return replace(e, end=SR.CONSTANT, why=values[0], at=c.at, changes=(), made=made, part=p, made_at=e.at)
+
+    def _start_end(self, e: SR.End, taken: frozenset[str] | None, pad: str) -> SR.End | None:
+        """Q7's (a), every change on the way *e* ruled out: what the test takes is what the object held at its start --
+        the row a fill put (*e.filled*), or the one literal its class's ``__init__`` binds the one part the test takes
+        to (:func:`SR.part_start`); None where neither is read, or the way ends at no object a constructor made (a row's
+        object, filled or returned, ends at the row as it is)."""
+        if e.end != SR.STOP:
+            return None
+        if e.filled:
+            self.say(f"{pad}  Q7: every change ruled out: what the test takes is the row {', '.join(e.filled)} put")
+            return replace(e, end=SR.ROW, changes=())
+        p = next(iter(taken)) if taken is not None and len(taken) == 1 else ""
+        start = SR.part_start(e.made_of, p) if p else None
+        if start is None or len(start) != 1:
+            return None
+        value, at = start[0]
+        self.say(f"{pad}  Q7: every change ruled out: {p} is {value}, as the object's start at {at} binds it")
+        return replace(e, end=SR.CONSTANT, why=value, at=at, changes=(), part=p, made_at=e.at)
+
+    def _parts_printed(self, e: SR.End, t: SR.Term, wanted: set[str], fn: R.Function,
+                       printed: dict[tuple[int, str], tuple[str, str]], run: Any) -> dict[str, tuple[str, str]]:
+        """What the run printed of each part (*wanted*, one step: ``.status_code``, ``[disp]``) of the value *t* reads
+        on its way *e*, with where: at *t*'s test (:meth:`_held_on`'s), or after the way's first binding, in its
+        function, where every change on the way is before that binding -- none is of the read's own field record or of
+        a name of the arm (266's ``plugin done with 2`` after 265's binding of ``self.add_result``: S4c's V)."""
+        out = {p: got for p in wanted if (got := printed.get((t.line, t.term + p))) is not None}
+        rest = wanted - set(out)
+        read_at = f"{fn.rel}:{t.line}"
+        if rest and e.via and all(c.before and c.before != read_at for c in e.changes):
+            out.update(self._printed_after(e.via[0], rest, run))
+        return out
+
+    def _printed_after(self, at: str, parts: set[str], run: Any) -> dict[str, tuple[str, str]]:
+        """What *run* printed, after the binding at *at* (``file:line``) in its function, of each of *parts* of what it
+        binds, nothing between that can change it (``changed.printed_at``)."""
+        rel, _, ln = at.rpartition(":")
+        node = R.def_holding(rel, int(ln)) if ln.isdigit() else None
+        if node is None:
+            return {}
+        bfn = R.function(rel, node.name, [int(ln)])
+        stmt = R.statement_at(bfn.node, int(ln))
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target] if isinstance(stmt, ast.AnnAssign) else []
+        if stmt is None or len(targets) != 1:
+            return {}
+        bound = CH.Point(bfn, stmt, [stmt])
+        sn = R.seen(bfn, run, self.mode)
+
+        def read(row: R.Row) -> list[int]:
+            # a row after the binding: before it, what it binds is another value
+            return sn.unambiguous.get(row.line, []) if CH.precedes(bound, CH.Point(bfn, row.stmt, [row.stmt], True), bfn) else []
+
+        out: dict[str, tuple[str, str]] = {}
+        for p in sorted(parts):
+            chain = ast.unparse(targets[0]) + p
+            if (got := CH.printed_at(bfn, sn, stmt, chain, read)) is not None:
+                out[p] = got
+                self.say(f"    {chain} = {got[0]!r} ({got[1]}, after its binding at {at})")
+        return out
+
+    def _change_ran(self, c: SR.Changed, run: Any, window: tuple[str, str], pad: str) -> tuple[str, str]:
+        """H2 on a change: each call it was made through and its statement judged as a candidate in the arm's run
+        (:meth:`_site_judged`): ``not-run`` where one is excluded; else ``shown`` where one is positive, ``kept`` where
+        one is kept (its function's rows in the run, none printed only through the line), with the deepest such -- the
+        site S4c reads as an arm; else ``undecided``."""
+        verdicts = [(at, self._site_judged(at, run, window, pad)) for at in (*c.made_by, c.at)]
+        if (no := next((at for at, k in verdicts if k == "excluded"), None)) is not None:
+            return "not-run", no
+        for kind, said in (("positive", "shown"), ("kept", "kept")):
+            if found := [at for at, k in verdicts if k == kind]:
+                return said, found[-1]
+        return "undecided", ""
+
+    def _site_judged(self, at: str, run: Any, window: tuple[str, str], pad: str) -> str:
+        """H2's verdict on the line at *at* (``file:line``) as a candidate in *run* (its must rows, :func:`judge`), once
+        per run; ``unexamined`` where its function's rows are not looked for in the run's log (:meth:`files_of`): their
+        absence there says nothing."""
+        cache: dict[tuple[str, int], str] = self.__dict__.setdefault("_sites_judged", {})
+        if (at, id(run)) in cache:
+            return cache[(at, id(run))]
+        rel, _, ln = at.rpartition(":")
+        node = R.def_holding(rel, int(ln)) if ln.isdigit() else None
+        kind = "unexamined"
+        if node is not None:
+            log = getattr(getattr(run, "log", None), "name", "")
+            # where its rows are looked for, as :meth:`_call_shown` looks
+            owner = f"{rel}::{node.name}"
+            today = sorted({f for st in getattr(R._prints_of(owner, [int(ln)]), "statements", None) or [] for f in st.log_files})
+            files = self.files_of(owner, today, [int(ln)])
+            if log and log in files:
+                j = judge([Candidate(rel, node.name, [int(ln)], run=run)], {}, mode=self.mode, decide=self.decide, window=window)
+                v = j.verdicts[0] if j.verdicts else None
+                kind = v.kind if v is not None else kind
+                self.say(f"{pad}    {v.describe() if v is not None else at + ': no verdict'}")
+            else:
+                self.say(f"{pad}    {at} ({node.name}): prints nothing to {log or 'the run'}"
+                         + (f" (its log: {', '.join(sorted(files))})" if files else ""))
+        cache[(at, id(run))] = kind
+        return kind
+
+    def _change_arm(self, c: SR.Changed, site: str, how: str, run: Any, window: tuple[str, str], seen: frozenset[str],
+                    pad: str) -> SR.Made:
+        """The change *c* S4c chose (*how*: ``shown`` by its run, or ``left`` by elimination), read as an arm at *site*
+        (``file:line``, the deepest of the calls it was made through and its statement H2 left): its guards, each term's
+        ends, and its entry, as the arm itself is (:meth:`_arm_terms`); its guards alone where that arm was read on the
+        way here, or they are not placed."""
+        rel, _, ln = site.rpartition(":")
+        node = R.def_holding(rel, int(ln))
+        if node is None:
+            return SR.Made(c, site, rel, how)
+        owner = f"{rel}::{node.name}"
+        fn = R.function(rel, node.name, [int(ln)])
+        stmt = R.statement_at(fn.node, int(ln))
+        if stmt is None:
+            return SR.Made(c, site, owner, how)
+        guards = pathcond.arm_condition(stmt)
+        self.say(f"{pad}made at {site} ({node.name}), {'its run showing it' if how == 'shown' else 'left by elimination'}: "
+                 f"guards {guards}")
+        raised = self._raise_into(fn, int(ln), run, pad)
+        if site in seen:
+            return SR.Made(c, site, owner, how, tuple(guards), **raised)
+        printed: dict[tuple[int, str], tuple[str, str]] = {}
+        _held, false = self._held_on(fn, stmt, guards, run, printed)
+        ifs = _guard_ifs(fn, stmt, guards) if false is None else None
+        if ifs is None:
+            return SR.Made(c, site, owner, how, tuple(guards), **raised)
+        terms, entry = self._arm_terms(fn, owner, int(ln), guards, ifs, printed, run, window, seen, pad)
+        return SR.Made(c, site, owner, how, tuple(guards), tuple(terms), entry, **raised)
+
+    def _raise_into(self, fn: R.Function, line: int, run: Any, pad: str) -> _Raise:
+        """K's form (out/gm/qk-design.md), an arm at *line* in an ``except`` handler of *fn* (S3): the exception its
+        run's tracebacks show leaving the try's body into that handler (:func:`_raised_through`,
+        :func:`_entered_handler`), where it was raised and the handler -- where the arm's own terms end, its stop (not
+        an end: the raise has terms of its own); none where they do not show it."""
+        if run is None or (got := _handler_around(fn, line)) is None:
+            return {}
+        tr, h = got
+        if (shown := _raised_through(fn, tr, run)) is None:
+            return {}
+        exc_type, raised, other = shown
+        where = raised + (f" ({other}: its run's code, not the pin's)" if other else "")
+        if _entered_handler(fn, tr, exc_type, SR.handler_classes(fn)) != h.lineno:
+            self.say(f"{pad}  K: its run's traceback shows {exc_type} raised at {where} leaving the try at "
+                     f"{fn.rel}:{tr.lineno}; the except handler at {fn.rel}:{h.lineno} is not told to have taken it")
+            return {}
+        self.say(f"{pad}  K: its run's traceback: {exc_type} raised at {where}, caught by the except handler at "
+                 f"{fn.rel}:{h.lineno}")
+        return {"raised_type": exc_type, "raised_at": raised, "caught_at": f"{fn.rel}:{h.lineno}", "raised_other": other}
+
+    def _with_callers(self, t: SR.Term, fn: R.Function | None, owner: str, run: Any, window: tuple[str, str] | None,
+                      ask: bool = True) -> SR.Term:
+        """*t* with each way that ends at a parameter read up its callers (:meth:`_param_end`): a parameter of the arm's
+        function, or of the method a field's binding is in (*of*, S4a; the run's prints at the arm's entry say nothing of
+        it; read up the calls the run's path entered it by, S4b's (e)), with the steps the read still takes off it (Q2's
+        (c)), keeping the bindings the way went through and the changes on it after the binding (out/gm/gm5-design.md
+        G4).  *ask* False reads the map's records alone, no caller's run asked (a split's terms, Q2's (b))."""
+        ends = tuple(x for e in t.ends for x in (
+            tuple(replace(y, via=e.via, changes=(*e.changes, *y.changes), caught=e.caught)
+                  for y in self._param_end(e.term, e.of or owner, e.param, None if e.of else fn, run, window, e.entered,
+                                           e.steps, ask, e.truth))
+            if e.why == SR.PARAMETER and e.param else (e,)))
+        return replace(t, ends=ends)
+
+    def _raised(self, t: SR.Term, fn: R.Function, run: Any, pad: str) -> SR.Term:
+        """K (out/gm/qk-design.md): *t* with what its run's tracebacks say of each ``try`` of *fn* a way of it leaves by
+        a handler of -- bound in one, or read off the exception one names (*caught*).  Where they show the exception
+        that left the try's body (:func:`_raised_through`) and the handler it entered (:func:`_entered_handler`), a way
+        that cannot reach the guard through that handler goes: one bound in another handler of the try, or, the guard
+        after the try, one bound before the handler where its body binds the term again on every path; a field of the
+        exception it names is read up the raise the traceback ends at (*entered*).  Where they do not tell, *t* as it
+        was."""
+        if run is None:
+            return t
+
+        def line_of(e: SR.End) -> int:
+            rel, _, ln = e.at.rpartition(":")
+            return e.caught or (int(ln) if rel == fn.rel and ln.isdigit() else 0)
+
+        tries: dict[int, ast.Try] = {}
+        for e in t.ends:
+            if (line := line_of(e)) and (got := _handler_around(fn, line)) is not None:
+                tries.setdefault(id(got[0]), got[0])
+        if not tries:
+            return t
+        known = SR.handler_classes(fn)
+        ends = list(t.ends)
+        for tr in tries.values():
+            if (shown := _raised_through(fn, tr, run)) is None:
+                continue
+            exc_type, raised, other = shown
+            where = raised + (f" ({other}: its run's code, not the pin's)" if other else "")
+            if not (entered := _entered_handler(fn, tr, exc_type, known)):
+                self.say(f"{pad}  K: term {t.term!r} of {t.guard!r}: its run's traceback shows {exc_type} raised at "
+                         f"{where} leaving the try at {fn.rel}:{tr.lineno}; which handler took it, not told")
+                continue
+            h = next(x for x in tr.handlers if x.lineno == entered)
+            rebinds = t.line > (tr.end_lineno or tr.lineno) and _binds_on_every_path(h, t.term)
+            kept: list[SR.End] = []
+            gone: list[str] = []
+            for e in ends:
+                line = line_of(e)
+                around = _handler_around(fn, line) if line else None
+                if around is not None and around[0] is tr and around[1].lineno != entered:
+                    gone.append(e.at or f"{fn.rel}:{line}")
+                elif e.caught == entered:
+                    # the raise read up only where the pin holds its source there
+                    kept.append(replace(e, entered=(raised,)) if e.param and not other else e)
+                elif rebinds and line and line < entered and (around is None or around[0] is not tr):
+                    gone.append(e.at)
+                else:
+                    kept.append(e)
+            self.say(f"{pad}  K: term {t.term!r} of {t.guard!r}: its run's traceback: {exc_type} raised at {where}, "
+                     f"caught by the except handler at {fn.rel}:{entered}"
+                     + (f"; a way that cannot reach the guard through it goes: {', '.join(gone)}" if gone else ""))
+            ends = kept
+        return replace(t, ends=tuple(ends))
+
+    def _say_cuts(self, pad: str) -> None:
+        """The ways a callee's test ruled out on its call's constants since last said (CRO (ii), ``SR.take_cuts``)."""
+        for cut in SR.take_cuts():
+            self.say(f"{pad}ruled out by a callee's test on its call's constants (CRO (ii)): {cut}")
+
+    def _param_end(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any, window: tuple[str, str] | None,
+                   entered: tuple[str, ...] = (), steps: tuple[str, ...] = (), ask: bool = True,
+                   truth: bool = False) -> tuple[SR.End, ...]:
+        """Where the value *owner*'s *param* was handed comes from (S, gm-design.md): its ways up the map's callers
+        (``SR.param_ways``; with *entered*, only those by the calls the run's path entered *owner* by, S4b's (e); with
+        *steps*, the parts the read takes off the value, Q2's (c)); a constant whose ``str`` is not what the run printed
+        of the parameter at its entry (*fn*'s; none read where *fn* is None) is not the one; of those left, the call a
+        caller's run shows (:meth:`_call_shown`; none asked where *ask* is False) is -- not asked where two or more are
+        left and all come by one call, whose run cannot tell them apart: where they are every way left, the ``if`` that
+        tells them apart is read (:meth:`_split`, out/gm/s4-design.md rule 6's (a)) and the stop holds it.  With none
+        left, only API parameters (any value) or the database end it, or the one way left where it ends; where every way
+        ends and none is a literal a run could tell apart (a constant's part, the database), it ends at each
+        (out/gm/qk-design.md Q2); else it stops.  *truth*: the read takes the value's truth alone, so a container made
+        empty comes in as its empty start and its puts (Q6's (a))."""
+        # the calls by the path a frame of the run's traceback stands at decide too (K)
+        key = (owner, param, fn is None, entered, steps, ask,
+               frozenset(set(entered) & _traceback_frames(run)) if entered else frozenset(), truth)
+        cache: dict[tuple, tuple[SR.End, ...]] = self.__dict__.setdefault("_param_ends", {})
+        if key in cache:
+            return tuple(replace(e, term=term) for e in cache[key])
+        busy: set[tuple] = self.__dict__.setdefault("_param_busy", set())
+        if key in busy:
+            # a split's term reading the parameter whose split it is
+            return (SR.End(term, SR.STOP, "cycle", "", param=param),)
+        busy.add(key)
+        try:
+            got = self._param_end_read(term, owner, param, fn, run, window, entered, steps, ask, truth)
+        finally:
+            busy.discard(key)
+        cache[key] = got
+        return got
+
+    def _param_end_read(self, term: str, owner: str, param: str, fn: R.Function | None, run: Any,
+                        window: tuple[str, str] | None, entered: tuple[str, ...], steps: tuple[str, ...],
+                        ask: bool, truth: bool = False) -> tuple[SR.End, ...]:
+        """:meth:`_param_end`, not cached."""
+        ways = SR.param_ways(owner, param, entered=entered, steps=steps, truth=truth)
+        self._say_cuts("  ")
+        off = SR.calls_off_the_path(owner, param, entered)
+        value = self._entry_value(fn, run, param) if fn is not None else None
+        # a value made of a literal (an item of range(3)) is not the literal: it is not matched to what the run printed
+        # a container's empty start (Q1) and a put into it (Q6) are no literal a call hands: two of the other ways
+        consts = [w for w in ways if w.end == SR.CONSTANT and w.why not in (SR.MADE_EMPTY, SR.PUT)
+                  and (value is None or (w.why != SR.THROUGH and SR.same_value(w.value, value)))]
+        rest = [w for w in ways if w.end != SR.CONSTANT or w.why in (SR.MADE_EMPTY, SR.PUT)]
+        # a caller's run tells constants apart only by the calls they come by
+        calls = {w.route[0] for w in consts if w.route}
+        one_call = len(consts) > 1 and len(calls) == 1
+        # a call the caller's run shows tells a constant apart only where every way it comes by that the print leaves
+        # ends there (a call handing a container whose puts are ways hands each of them, adder_atlas_plugin 677's
+        # cont_zip_map; a call handing True or False, job_api 556's prodManager, is told apart by the print first)
+        possible = [x for x in ways if value is None or x.end != SR.CONSTANT or x.why in SR.NO_LITERAL
+                    or SR.same_value(x.value, value)]
+        alone = [w for w in consts if w.route and all(
+            (x.end, x.value, x.why) == (w.end, w.value, w.why) for x in possible if x.route[:1] == w.route[:1])]
+        # K: a call the run's path entered by (*entered*) that a frame of its run's traceback stands at ran -- the raise
+        # that made the exception a handler took; no caller's run asked
+        traced = [w for w in alone if w.route[0] in entered and w.route[0] in _traceback_frames(run)]
+        # a literal a run could tell apart is left (else each way is read where it ends, Q2 below)
+        literal = any(w.end == SR.CONSTANT and w.why not in SR.NO_LITERAL for w in ways)
+        # Q5: which of them ran is asked of the caller's own run where each is bound in the caller -- where the
+        # traceback has not told it (K) and a literal is left
+        q5 = (one_call and not rest and ask and len(traced) != 1 and literal
+              and self._bindings_in_caller(consts) is not None)
+        printed = f"its run printed {value!r} at its entry" if fn is not None else f"{owner} is not the arm's: no print read"
+        self.say(f"  {param}: {len(ways)} way(s) in by the map's callers; {printed}; constant(s) left: "
+                 + (", ".join(f"{w.value or w.why} at {w.route[0]}" for w in consts if w.route) or "none")
+                 + ("; other ways: " + ", ".join(sorted({f"{w.end} ({w.why})" for w in rest})) if rest else "")
+                 + (f"; read by the call(s) the run's path entered it by ({', '.join(entered)}), left out: "
+                    + ", ".join(f"{n} by {c}" for c, n in sorted(Counter(off).items())) if off else "")
+                 + (f"; all come by {next(iter(calls))}: " + ("which binding ran, by its caller's run (Q5)" if q5
+                                                              else "its caller's run not asked") if one_call else "")
+                 + (f"; the read takes {''.join(steps)} off it" if steps else ""))
+        if traced:
+            self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
+        shown = traced or ([] if one_call or not ask else [
+            w for w in alone if self._call_shown(w.route[0], window, getattr(run, "machine", None))])
+        if len(shown) == 1:
+            # a constant-through keeps its why: its value is not the literal's
+            return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)
+        if not consts and rest and all(r.end == SR.API for r in rest):
+            return (SR.End(term, SR.API, "no_caller", ", ".join(r.route[0] for r in rest if r.route)),)
+        if not consts and rest and all(r.end == SR.DATABASE for r in rest):
+            return (SR.End(term, SR.DATABASE, SR.PARAMETER, ""),)
+        if not consts and len(rest) == 1:
+            # the one way left is where it ends
+            return (SR.End(term, rest[0].end, rest[0].why, rest[0].route[0] if rest[0].route else "", route=rest[0].route),)
+        if ways and not literal:
+            # no literal a run could tell apart is left (modTime: a statement's rows, a part of the None 2371 binds,
+            # the + at 2406 not read): each way where it ends or stops, the term ending where every one ends
+            # (out/gm/qk-design.md Q2); a place reached by several routes is said once, by the first
+            each: dict[tuple, SR.End] = {}
+            for w in ways:
+                at = w.end_at or (w.route[0] if w.route else "")
+                each.setdefault((w.end, w.value or w.why, at, w.changes), SR.End(
+                    term, w.end, w.value or w.why, at, route=w.route, changes=w.changes, returned=w.returned,
+                    returned_line=w.returned_line))
+            if len(each) < len(ways):
+                self.say(f"    {param}: {len(ways)} way(s) end at {len(each)} place(s), each said by its first route")
+            return tuple(each.values())
+        # Q5: every way left a constant the one call hands -- which binding ran, by its caller's own run
+        chosen, asked = self._binding_shown(consts, window, getattr(run, "machine", None)) if q5 else (None, SR.NOT_ASKED)
+        if chosen is not None:
+            crel = chosen.route[0].rpartition(":")[0]
+            return (SR.End(term, SR.CONSTANT, chosen.value or chosen.why, f"{crel}:{chosen.bound_at}", route=chosen.route),)
+        # S2's (a): not told by it -- the if their bindings sit apart in
+        split = self._split(consts, asked) if one_call and not rest else None
+        return (SR.End(term, SR.STOP, "parameter-unchosen" if consts else SR.PARAMETER, "", param=param, split=split),)
+
+    def _split(self, consts: list[SR.Way], asked: str = SR.NOT_ASKED) -> SR.Split | None:
+        """S2's (a) (out/gm/s4-design.md rule 6): the constants *consts*, all handed by one call, told apart by the
+        ``if`` statements their bindings sit in different arms of -- each binding's guards (``pathcond.arm_condition``,
+        read at their ifs as H3 reads an arm's) less those every binding shares, an ``if`` read once -- and each term of
+        those tests with its ends, by the map's records alone (``SR.terms``): the caller's run is not asked for them, so
+        no field choice, change reading or entry is read there; a stop in an ``except`` handler is named (S3's).  *asked*:
+        what the caller's run said of which binding ran (Q5, ``SR.Split.asked``).  None where a binding is not in the
+        caller (bound in a callee the value came back from), its guards' ifs are not found, or no guard tells the
+        bindings apart."""
+        call = consts[0].route[0]
+        rel, _, ln = call.rpartition(":")
+        if any(not w.bound_at for w in consts) or not ln.isdigit():
+            return None
+        node = R.def_holding(rel, int(ln))
+        if node is None:
+            return None
+        fn = R.function(rel, node.name, [int(ln)])
+        owner = f"{rel}::{node.name}"
+        each: list[dict[tuple[str, tuple[int, ...]], list[ast.If]]] = []
+        for w in consts:
+            stmt = R.statement_at(fn.node, w.bound_at)
+            if stmt is None:
+                return None
+            guards = pathcond.arm_condition(stmt)
+            ifs = _guard_ifs(fn, stmt, guards)
+            if ifs is None:
+                return None
+            each.append({(g, tuple(i.lineno for i in f)): f for g, f in zip(guards, ifs, strict=True)})
+        shared = set(each[0]).intersection(*each[1:])
+        # an if is read once, by the guard of the first binding that sits in it (its test's terms are the same)
+        apart: dict[tuple[int, ...], tuple[str, list[ast.If]]] = {}
+        for e in each:
+            for (g, lines), f in e.items():
+                if (g, lines) not in shared:
+                    apart.setdefault(lines, (g, f))
+        if not apart:
+            return None
+        pairs = list(apart.values())
+        ifs_at = tuple(dict.fromkeys(f"{rel}:{n}" for lines in apart for n in lines))
+        self.say(f"    told apart by the if at {', '.join(ifs_at)} ({node.name}; the bindings at "
+                 + ", ".join(f"{rel}:{w.bound_at}" for w in consts) + f"), read by the map's records: {T.text(_split_asked(asked))}")
+        # a way ending at a parameter is read up its callers by the map's records too, no run asked (Q2's (b))
+        base = SR.terms(fn, owner, pairs)
+        self._say_cuts("    ")
+        terms = [replace(t, ends=tuple(replace(x, handler=h) if (h := _handler_line(fn, x)) else x for x in t.ends))
+                 for t in (self._with_callers(u, None, owner, None, None, ask=False) for u in base)]
+        for t in terms:
+            self.say(f"      term {t.term!r} of {t.guard!r}: " + ", ".join(_way_text(x) for x in t.ends))
+        return SR.Split(call, owner, ifs_at, tuple(g for g, _ in pairs), tuple(terms), asked)
+
+    def _entry_value(self, fn: R.Function, run: Any, param: str) -> str | None:
+        """What *run* printed of *fn*'s parameter *param* before any statement binds it again (``killJob`` prints
+        ``code=60`` at 840, before 853's ``code = str(code)``); None where it printed none, or several."""
+        rebound = [n.lineno for n in ast.walk(fn.node) if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+                   and any(isinstance(x, ast.Name) and x.id == param for x in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        upto = min(rebound, default=None)
+        sn = R.seen(fn, run, self.mode)
+        values = {row.capture(run.records[i])[param].strip()
+                  for row in fn.rows if upto is None or row.line < upto
+                  for i, *_ in sn.hits.get(row.line, ()) if param in row.capture(run.records[i])}
+        return values.pop() if len(values) == 1 else None
+
+    def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value") -> bool:
+        """Whether the caller's own run shows the call at *site* (``file:line``) ran: H2's judgement of that line as a
+        candidate, on the key's runs of the caller's logs over *window* on *machine* (the arm's run's: the call ran it in
+        the caller's process) -- its must rows printed (positive).  *why* says what the ask is for."""
+        crel, _, ln = site.rpartition(":")
+        node = R.def_holding(crel, int(ln))
+        if node is None:
+            return False
+        cowner = f"{crel}::{node.name}"
+        today = sorted({f for st in getattr(R._prints_of(cowner, [int(ln)]), "statements", None) or [] for f in st.log_files})
+        files = self.files_of(cowner, today, [int(ln)])
+        if not files or not self.logs.names(files):
+            self.say(f"    {site} ({node.name}): no log of it to hand ({', '.join(files) or 'none'})")
+            return False
+        asking = W.Asking(window, machine, T.Said(why, {"site": site}))
+        # asked as H2 asks a candidate's logs: by its function's service, its marks whole
+        runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([cowner]), whole=True)
+        self._keep_unanswered(unanswered)
+        j = judge([Candidate(crel, node.name, [int(ln)], log_files=files)], runs, mode=self.mode, decide=self.decide, window=window)
+        v = j.verdicts[0] if j.verdicts else None
+        self.say(f"    {site}: {v.describe() if v is not None else 'no verdict'}")
+        return v is not None and v.kind == "positive"
+
+    @staticmethod
+    def _bindings_in_caller(consts: list[SR.Way]) -> tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, list[int]] | None:
+        """Q5: the caller's file, its function and the lines *consts* -- handed by one call -- are bound at, where each
+        is a statement of that function; None where one is bound in a callee the value came back from, or not read."""
+        call = consts[0].route[0]
+        crel, _, ln = call.rpartition(":")
+        lines = sorted({w.bound_at for w in consts if w.bound_at})
+        if len(lines) != len(consts) or not ln.isdigit():
+            return None
+        node = R.def_holding(crel, int(ln))
+        if node is None or any(R.statement_at(node, line) is None for line in lines):
+            return None
+        return crel, node, lines
+
+    def _binding_shown(self, consts: list[SR.Way], window: tuple[str, str] | None,
+                       machine: str | None) -> tuple[SR.Way | None, str]:
+        """Q5 (out/gm/qk-design.md): which of the constants *consts*, all handed by one call and bound apart in its
+        caller (add_main 130's False and 134's True, handed at 136), the caller's own run shows bound: H2's judgement
+        of their binding lines as candidates on the key's runs of the caller's logs over *window* on *machine*, its
+        marks whole (as :meth:`_call_shown` asks) -- the one positive, or None with the kind of the answer that did not
+        tell it (``SR.Q5_ANSWERS``).  A loop around them that takes one element a turn prints every turn under one mark
+        (add_main's ``<pid=...>``): the element the key's records print the key as is bound to it
+        (:func:`which_ran.key_env`), so a row printed for another element's turn alone shows nothing of the key's
+        (:func:`which_ran.other_elements`)."""
+        if (at := self._bindings_in_caller(consts)) is None:
+            return None, SR.NOT_ASKED
+        call = consts[0].route[0]
+        crel, node, lines = at
+        cowner = f"{crel}::{node.name}"
+        today = sorted({f for st in getattr(R._prints_of(cowner, lines), "statements", None) or [] for f in st.log_files})
+        files = self.files_of(cowner, today, lines)
+        if not files or not self.logs.names(files):
+            self.say(f"    Q5: {call} ({node.name}): no log of it to hand ({', '.join(files) or 'none'}): its caller's "
+                     "run not asked")
+            return None, "no-log"
+        asking = W.Asking(window, machine, T.Said("for-a-binding-a-call-hands", {"site": call}))
+        runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([cowner]), whole=True)
+        self._keep_unanswered(unanswered)
+        c = Candidate(crel, node.name, lines, log_files=files)
+        env = key_env(c, runs, self.args.key)
+        j = judge([c], runs, mode=self.mode, decide=self.decide, window=window, env=env)
+        for v in j.verdicts:
+            self.say(f"    {call}: {v.describe()}")
+        positive = [v.line for v in j.verdicts if v.kind == "positive"]
+        if len(positive) > 1:
+            return None, "several-shown"
+        if not positive:
+            return None, "unexamined" if any(v.kind == "unexamined" for v in j.verdicts) else "none-shown"
+        chosen = next(w for w in consts if w.bound_at == positive[0])
+        self.say(f"    Q5: {call} handed {chosen.value or chosen.why}, bound at {crel}:{chosen.bound_at}: its caller's run "
+                 f"shows it" + (f" (the key's turn read by {', '.join(sorted(env.values))})" if env is not None else ""))
+        return chosen, SR.NOT_ASKED
+
+    def _entry_end(self, fn: R.Function, owner: str, line: int, run: Any, window: tuple[str, str] | None, terms: list[SR.Term]) -> SR.End:
+        """Where the arm's function was entered from, read on every arm (S, gm-design.md): a function no corpus call
+        enters starts there; else the call a parameter's chosen way came in by, or that a parameter the run printed at
+        its entry is read up to; else the one call the map's ``EnteredFrom`` holds into it where nothing else may enter
+        it (OWI, out/gm/qk-design.md), whose run is not asked; else, where every term ends, the call a caller's run
+        shows entered it (F1, :meth:`_entered_by`); else it stops."""
+        rec = SR.entered(owner, fn.node.lineno)
+        if rec is None:
+            return SR.End("entry", SR.STOP, "no-entered-from", "")
+        if not rec.sites and not rec.open:
+            return SR.End("entry", SR.ENTRY, "no-corpus-caller", f"{fn.rel}:{fn.node.lineno}")
+        into = {f"{s.owner.partition('::')[0]}:{s.line}" for s in rec.sites}
+        chosen = [e for t in terms for e in t.ends if e.route and e.route[-1] in into]
+        if not chosen:
+            params = [a.arg for a in [*fn.node.args.posonlyargs, *fn.node.args.args, *fn.node.args.kwonlyargs] if a.arg != "self"]
+            for p in params:
+                if self._entry_value(fn, run, p) is None:
+                    continue
+                got = self._param_end(p, owner, p, fn, run, window)
+                # one way chosen, not every way of several
+                if len(got) == 1 and ((got[0].route and got[0].route[-1] in into) or got[0].end == SR.API):
+                    chosen.append(got[0])
+                    break
+        if chosen:
+            e = chosen[0]
+            return SR.End("entry", e.end, e.why, e.at, route=e.route)
+        # the map's model: with nothing open the function ran only from its sites, so from the one there is
+        if len(rec.sites) == 1 and not rec.open:
+            site = next(iter(into))
+            self.say(f"  entry: the map holds one call into {fn.name}, at {site}, and no other way in")
+            return SR.End("entry", SR.CALLER, "only-way-in", site)
+        # the callers' logs are asked only where the entry is all the answer waits for (gm2-predictions.txt F4)
+        if rec.sites and all(t.ended for t in terms) and (by := self._entered_by(owner, line, run, window, rec)) is not None:
+            return by
+        return SR.End("entry", SR.STOP, "entry-unchosen", "")
+
+    def _entered_by(self, owner: str, line: int, run: Any, window: tuple[str, str] | None, rec: Any) -> SR.End | None:
+        """F1 (out/gm/s3-f1-design.md): the call at one of the map's ``EnteredFrom`` sites its caller's run shows
+        entered *owner*'s function, where no printed argument chose it.  A run whose mark holds a row's identity --
+        ``killUnusedEventServiceConsumers < PandaID=7398538282 >``, the job archiveJob archives, not the key's -- is
+        found in the run of a caller whose mark holds the same row, holding the arm's run whole (U3's parts); where
+        that caller's run holds several of the calls, H2 judges each in it.  A mark holding no identity asks each
+        caller's logs by the key (:meth:`_call_shown`).  None where not exactly one call is shown."""
+        sites = [f"{s.owner.partition('::')[0]}:{s.line}" for s in rec.sites]
+        ident = mark_identities(owner, line, run)
+        if ident:
+            self.say(f"  entry: its run {run.token!r} marks {ident}")
+            tied = self._tie_calls(owner, ident, sites)
+            to_hand = self.logs.names(self._tied_files(tied)) if tied else []
+            if not to_hand:
+                return None
+            holding, _found, missed = self._callers_holding(tied, run, to_hand)
+            self._keep_unanswered(missed)
+            if not holding:
+                return None
+            cowner, _, crun = max(holding, key=lambda h: h[2].first)
+            lines = sorted({ln for c, ln, r in holding if c == cowner and r is crun})
+            if len(lines) > 1:
+                lines = self._calls_judged(cowner, lines, crun, window)
+            shown = [f"{cowner.partition('::')[0]}:{ln}" for ln in lines]
+        else:
+            shown = [s for s in sites if self._call_shown(s, window, getattr(run, "machine", None), "for-a-call-that-may-have-entered-it")]
+        if len(shown) != 1:
+            self.say(f"  entry: {len(shown)} of the call(s) at {', '.join(sites)} shown by a caller's run")
+            return None
+        return SR.End("entry", SR.CALLER, "entered-by", shown[0])
+
+    def _calls_judged(self, cowner: str, lines: list[int], crun: Any, window: tuple[str, str] | None) -> list[int]:
+        """Of the calls at *lines* of *cowner*, those its run *crun* shows ran: H2's judgement of each as a candidate in
+        that run (positive)."""
+        crel, cname = cowner.split("::", 1)
+        j = judge([Candidate(crel, cname, [ln], run=crun) for ln in lines], {}, mode=self.mode, decide=self.decide, window=window)
+        for v in j.verdicts:
+            self.say(f"    {v.describe()}")
+        return sorted({v.line for v in j.verdicts if v.kind == "positive"})
 
     def _wrote_said(self, w: Wrote) -> dict:
         """result.json's ``wrote`` for an attribute: H2's answer -- the arm, whether its run shows the line ran (else it was
@@ -3144,15 +4213,12 @@ class Rerun:
             if shown else None,
         }
 
-    def _guard_at(self, w: Wrote, site_fn) -> tuple:
-        """``(function, record)``: whose passes the run holds and the first record past the rows that must print after
-        the chosen line -- what the steps after H3 read the run up to.  The chosen arm's function; for a writer that
-        prints nothing, read on its caller's run (``Wrote.via``), the caller at its call."""
-        at = w.via or w.chosen
-        at_fn = site_fn if w.via is None else R.function(at.candidate.rel, at.candidate.func, at.candidate.lines)
-        _, after = R.must_rows(at_fn.node, R.statement_at(at_fn.node, at.line))
-        sn = R.seen(at_fn, w.question, self.mode)
-        return at_fn, min((i for s in after for i, _, _ in sn.hits.get(s.lineno, ())), default=len(w.question.records))
+    def _guard_at(self, w: Wrote, site_fn: R.Function) -> R.Function:
+        """The function whose passes the run holds: the chosen arm's; for a writer that prints nothing, read on its
+        caller's run (``Wrote.via``), the caller at its call."""
+        if w.via is None:
+            return site_fn
+        return R.function(w.via.candidate.rel, w.via.candidate.func, w.via.candidate.lines)
 
     def _which_wrote(self, subject: str, value: str, key: str, state: dict | None = None) -> Wrote | OneOf:
         """H1 and H2: the map's writers of ``subject=value``, and which of them the run of the key at the statuslog
@@ -3845,30 +4911,6 @@ class Rerun:
         self.say(f"F1: a writer chosen for {chosen} of {len(states)} row(s); which of them can change the value, and the "
                  f"writes that leave no row, are not read yet (KNOWN_ISSUES.md K22)")
         self.hop = hop
-
-    # ------------------------------------------------------------ SetBy: which call set it
-    def set_by(self, q: SetBy):
-        self.start("H4", "which call set it")
-        question, env = q.question, q.env
-        c = C.census(q.method)
-        if c.stop:
-            self.need(c.stop, None)
-        C.settle_dispatch(c, q.reading.dispatch, question)
-        C.match_value(c, question, self.mode, q.guard_record)
-        self.say(c.report())
-        by_fn: dict[tuple[str, str], list[int]] = {}
-        for s in c.kept():
-            by_fn.setdefault((s.rel, s.func), []).append(s.line)
-        sites = [Candidate(rel, func, lines, run=question) for (rel, func), lines in by_fn.items()]
-        j = judge(sites, {question.log.name: [question]}, mode=self.mode, decide=self.decide, question_run=question, env=env)
-        self.say(j.report(question))
-        chosen = self.pick(T.Said("which-call-set-it"), j)
-        for s in sites:
-            self.touched.append((R.function(s.rel, s.func, s.lines), question))
-        self.learn([(f, q2) for f, q2 in self.touched if q2 is question])
-        self.say(f"row facts kept for later hops: { {k: v[0] for k, v in self.row_facts.items()} }")
-        # the one way on, whether or not the call failed by an exception (KNOWN_ISSUES.md K11)
-        return Raised(R.function(chosen.candidate.rel, chosen.candidate.func, within=chosen.candidate.lines), question)
 
     # ------------------------------------------------------------ Raised: what it was handed
     def raised(self, q: Raised):
@@ -4924,44 +5966,16 @@ class Rerun:
         self.start("U3", "which call ran the arm")
         rel, func = q.owner.split("::", 1)
         run = q.run
-        handed = self.need(T.Said("the-arm-s-run-mark", {"fn": func, "token": run.token}), mark_handed(q.owner, q.line, run), "K56")
-        self.say(f"{func}'s run {run.token!r}: its mark holds {handed}")
-        graph = self._graph()
-        rows = self.need(T.Said("the-map-s-call-bindings"), graph[2] if graph else None, "K56")
+        ident = self.need(T.Said("the-arm-s-run-mark", {"fn": func, "token": run.token}), mark_identities(q.owner, q.line, run), "K56")
+        self.say(f"{func}'s run {run.token!r}: its mark holds {ident}")
         writers = asyncio.run(self._writers_of(q.asked.subject))
         sites = list(dict.fromkeys(s for e in _entries_of(writers, q.owner) if (s := _site(e.split(" -> ")[-1]))))
-        tied: dict[tuple[str, int], dict[str, tuple[str, ...]]] = {}  # (caller, call line) -> {value: its marks}
-        for site in sites:
-            crel, line = site.rsplit(":", 1)[0], int(site.rsplit(":", 1)[1])
-            node = R.def_holding(crel, line)
-            if node is None:
-                continue
-            cowner = f"{crel}::{node.name}"
-            passed = {b.parameter: b.path for row in rows if row.owner.partition("::")[0] == crel
-                      for b in row.call_bindings or [] if b.line == line and _same_function(b.to, q.owner)}
-            for expr, value in handed:
-                param, _, rest = expr.partition(".")
-                name = passed.get(param)
-                marks = marks_holding(cowner, line, _expression_is(f"{name}.{rest}"), value) if name else ()
-                self.say(f"  {site} ({node.name}): hands {param} {name!r}; its run marks holding {name}.{rest}: {list(marks)}")
-                if marks:
-                    tied.setdefault((cowner, line), {})[value] = marks
+        tied = self._tie_calls(q.owner, ident, sites)
         self.need(T.Said("a-call-handing-the-mark-on", {"fn": func, "sites": sites}), tied, "K56")
-        files = sorted({f for cowner, line in tied for f in self.files_of(cowner, sorted(
-            {f for st in getattr(R._prints_of(cowner, [line]), "statements", None) or [] for f in st.log_files}), [line])})
+        files = self._tied_files(tied)
         to_hand = self.need(T.Said("a-log-of-to-hand", {"func": func, "files": files}), self.logs.names(files))
-        window = (run.first[:19], run.last[:19])
-        found, missed = [], []
-        for value in sorted({v for marks in tied.values() for v in marks}):
-            marks = tuple(sorted({m for by in tied.values() for m in by.get(value, ())}))
-            asking = W.Asking(window, run.machine, T.Said("over-the-arm-s-run", {"start": window[0], "end": window[1], "marks": list(marks)}), marks)
-            got, unanswered, _ = self._ask(value, to_hand, asking)
-            missed += unanswered
-            found += [r for runs in got.values() for r in runs]
+        holding, found, missed = self._callers_holding(tied, run, to_hand)
         self._stop_unanswered(missed)
-        # a caller's run holds the arm's whole where the call ran it: the innermost of those is the call's
-        holding = [(cowner, line, r) for cowner, line in tied for r in found
-                   if of_mover(r, cowner) and r.machine == run.machine and r.first <= run.first and r.last >= run.last]
         self.need(T.Said("a-caller-s-run-holding-the-arm-s", {"fn": func, "callers": sorted({c.split("::")[-1] for c, _ in tied}),
                                                               "start": run.first, "end": run.last, "n": len(found)}), holding, "K56")
         cowner, _, crun = max(holding, key=lambda h: h[2].first)
@@ -4981,6 +5995,48 @@ class Rerun:
         what = (T.Said("printed-values-read-false", {"guard": read_false[0], "on": read_false[1]}) if read_false is not None
                 else T.Said("values-held-on", {"held": held_on}))
         self.need(T.Said("the-call-that-ran-it", {"fn": func, "line": q.line, "caller": cname, "call_line": line, "what": what}), None, "K56")
+
+    def _tie_calls(self, owner: str, ident: list[tuple[str, str]], sites: list[str]) -> dict[tuple[str, int], dict[str, tuple[str, ...]]]:
+        """Each call at *sites* (``file:line``) into *owner* whose caller's run marks hold the row the arm's run mark
+        holds (*ident*: the class and the value of its identity, :func:`mark_identities`), in a hole of the same
+        identity column (:func:`key_marks`): ``{(caller, call line): {value: the caller's marks holding it}}`` (U3,
+        F1).  Not by the name the call hands: ``getEventRanges`` marks ``pandaID`` and hands ``tmpJobSpec``, whose
+        ``PandaID`` it set from it."""
+        tied: dict[tuple[str, int], dict[str, tuple[str, ...]]] = {}
+        for site in sites:
+            crel, line = site.rsplit(":", 1)[0], int(site.rsplit(":", 1)[1])
+            node = R.def_holding(crel, line)
+            if node is None:
+                continue
+            cowner = f"{crel}::{node.name}"
+            for cls, value in ident:
+                marks = key_marks(cowner, line, cls, value)
+                self.say(f"  {site} ({node.name}): its run marks holding {cls} {value}: {list(marks)}")
+                if marks:
+                    tied.setdefault((cowner, line), {})[value] = marks
+        return tied
+
+    def _tied_files(self, tied: dict[tuple[str, int], dict[str, tuple[str, ...]]]) -> list[str]:
+        """The logs the tied callers print their calls' rows to."""
+        return sorted({f for cowner, line in tied for f in self.files_of(cowner, sorted(
+            {f for st in getattr(R._prints_of(cowner, [line]), "statements", None) or [] for f in st.log_files}), [line])})
+
+    def _callers_holding(self, tied: dict[tuple[str, int], dict[str, tuple[str, ...]]], run: Any,
+                         to_hand: list[str]) -> tuple[list[tuple[str, int, Any]], list, list]:
+        """The tied callers' runs, asked by each value with the marks holding it over *run* on its machine, that hold
+        *run* whole -- ``(caller, call line, caller's run)``: where the call ran it, the innermost of them is the call's
+        -- with every run found and the asks not answered (U3, F1)."""
+        window = (run.first[:19], run.last[:19])
+        found, missed = [], []
+        for value in sorted({v for marks in tied.values() for v in marks}):
+            marks = tuple(sorted({m for by in tied.values() for m in by.get(value, ())}))
+            asking = W.Asking(window, run.machine, T.Said("over-the-arm-s-run", {"start": window[0], "end": window[1], "marks": list(marks)}), marks)
+            got, unanswered, _ = self._ask(value, to_hand, asking)
+            missed += unanswered
+            found += [r for runs in got.values() for r in runs]
+        holding = [(cowner, line, r) for cowner, line in tied for r in found
+                   if of_mover(r, cowner) and r.machine == run.machine and r.first <= run.first and r.last >= run.last]
+        return holding, found, missed
 
     def _caller_absent(self, c: Caller, up: Callers, to_hand: list[str], asking: W.Asking, holes: dict):
         """U2 where no pass of the caller *c* took the row in the window: judgement 3 for it -- it did not run on the row

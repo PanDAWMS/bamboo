@@ -10,7 +10,7 @@ this instance:
   evaluated for every row of the loop it sits in (``loop at 279: for file in
   self.job.Files`` in the step's ``unseen``), and the one whose value equals
   the printed one is the origin that took effect -- rule 9, value match, the
-  same selection H4 makes among ``set_*`` calls.
+  same selection the retired H4 made among ``set_*`` calls (KNOWN_ISSUES.md K74).
 * **the other operand** of ``in`` is a container, and what the atom tested
   is its key set: the keys every write to it put in (``d[k] = ...`` read
   off the step's own statement, because the walk's step carries the value

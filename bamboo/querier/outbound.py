@@ -9,11 +9,36 @@ module-level instance that module builds (``rucioAPI = RucioAPI()`` in
 from __future__ import annotations
 
 import ast
+import functools
 import re
 from dataclasses import dataclass
 
+from bamboo.codemap.calls import is_test_module
+
 from . import rows as R
-from .census import corpus_files, parsed
+from .records import CORPUS
+
+PACKAGES = ("pandaserver", "pandajedi")
+
+
+@functools.cache
+def corpus_files() -> tuple[str, ...]:
+    """The corpus's modules, tests left out by the map's rule (``calls.is_test_module``)."""
+    out = []
+    for package in PACKAGES:
+        for p in sorted((CORPUS / package).rglob("*.py")):
+            rel = str(p.relative_to(CORPUS))
+            if not is_test_module(rel):
+                out.append(rel)
+    return tuple(out)
+
+
+@functools.cache
+def parsed(rel: str) -> ast.Module | None:
+    try:
+        return R.tree(rel)
+    except (SyntaxError, UnicodeDecodeError):
+        return None
 
 VERBS = [
     # ``register_dataset`` alone: the ``_location`` and ``_subscription`` calls attach to a dataset that exists
