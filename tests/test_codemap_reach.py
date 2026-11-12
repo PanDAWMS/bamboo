@@ -632,6 +632,25 @@ def test_a_call_left_open_closes_by_its_name_where_no_function_of_the_name_reach
     assert run.writes is None and reach.HOLE_STATEMENT_NOT_READ in run.holes[0]
     assert unclosed.writes is None and unclosed.closed == []
 
+
+def test_a_hole_is_spelled_for_its_name_only_where_a_name_can_close_it_as_the_closure_reads_one(tmp_path):
+    """EOB: ``holes_spelled`` -- what an EnteredFrom opens a definition's entry by, and what rows read back go by --
+    reads a hole as the closure does: ``thing.note()`` may land at any ``note``; a queue's ``put`` and a database
+    call whose statement was not read land at no definition by their name, though ``Runner.execute`` is one."""
+
+    def leaves(file, func, call, placed):
+        if getattr(call.func, "attr", "") == "execute":
+            return "hole", f"{reach.HOLE_STATEMENT_NOT_READ}: no statement this function builds reaches this call"
+        return None
+
+    record = _record(tmp_path, leaves=leaves, mod=_BY_NAME)
+    noted = next(n for n, line in enumerate(_BY_NAME.split("\n"), 1) if "thing.note()" in line)
+
+    assert record.holes_spelled("note") == [("pkg/mod.py::quiet", noted, "thing.note")]
+    assert record.holes_spelled("put") == []
+    assert record.holes_spelled("execute") == []
+
+
 def test_what_outside_code_returns_from_a_corpus_object_it_was_handed_is_not_taken_as_outside(
     tmp_path,
 ):
