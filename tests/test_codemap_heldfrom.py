@@ -809,6 +809,58 @@ def test_an_operator_s_value_holds_both_operands_through_the_operator_not_either
     }
 
 
+MIXED_ROWS = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def recordQueuing(self, spec):
+                if spec is None:
+                    self.cur.execute("SELECT jediTaskID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE PandaID=:PandaID", {})
+                    res = self.cur.fetchone()
+                    taskID, status = res
+                else:
+                    taskID = spec.jediTaskID
+                if taskID:  # T1
+                    self.a = 1  # R1
+
+            def fixFiles(self, secondary_id):
+                if secondary_id is not None:
+                    idList = [secondary_id]
+                else:
+                    self.cur.execute("SELECT datasetID FROM ATLAS_PANDA.JEDI_Datasets WHERE jediTaskID=:t", {})
+                    res = self.cur.fetchall()
+                    idList = [one for (one,) in res]
+                for one_id in idList:
+                    if one_id:  # T2
+                        self.a = 2  # R2
+        """,
+}
+
+
+def test_a_binding_the_carry_says_holds_rows_and_other_ways_is_read_as_any_other(
+    tmp_path: Path,
+) -> None:
+    """Where the path carry's answer for an unpacking or a loop's target held rows, it was kept whole, its other
+    ways too -- the carry's word that a source or a part of it sits somewhere in the value: ``taskID`` held ``spec``
+    whole, of the ``else`` branch's ``spec.jediTaskID`` (and ``for fileSpec in jobSpec.Files``, refilled with files
+    packed from rows, held ``job``, which ``jobSpec`` copies).  Only an answer of rows alone is kept now; another is
+    read as any binding is: ``taskID`` is a row's or ``spec.jediTaskID``; ``one_id``, of ``[secondary_id]`` or of
+    rows, keeps ``secondary_id`` itself, as before."""
+    fragment = _build(
+        tmp_path, MIXED_ROWS, (("recordQueuing", "R1"), ("fixFiles", "R2"))
+    )
+    assert _held_through(fragment, MIXED_ROWS, "T1", "taskID") == {
+        ("rows", f"m:{BASE}::recordQueuing@7", (), (), ()),
+        ("parameter", "spec", (".jediTaskID",), (), ()),
+    }
+    assert _held_through(fragment, MIXED_ROWS, "T2", "one_id") == {
+        ("rows", f"m:{BASE}::fixFiles@19", (), (), ()),
+        ("parameter", "secondary_id", (), (), ()),
+    }
+
+
 VIEWS = {
     BASE: """\
         class TaskRefinerBase:

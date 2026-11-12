@@ -1342,12 +1342,14 @@ class _Reader:
 
         ``update_jobs``' ``for job in job_list`` read ``job`` as the list whole; ``retEvS, retNewPandaID =
         self.ppEventServiceJob(job, ...)`` read the new job's ``PandaID`` as ``job``.  Where the carry says the value is
-        a statement's rows -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot given its
-        select item's column (``for jediTaskID, commandStr, ... in resList``).  An augmented assignment is its
-        operator's value of what the name held and its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an
-        ``=``'s is -- also where the read is in its own statement (:func:`_walrus_before`).  An ``except X as e`` is an
-        object of X where the corpus has the class (:meth:`_caught`); another ``except ... as`` keeps what the carry
-        says."""
+        a statement's rows alone -- a fetch unpacked, a loop over fetched rows -- its ways are kept, a loop's slot
+        given its select item's column (``for jediTaskID, commandStr, ... in resList``).  Where its answer holds rows
+        and other ways, the binding is read as any other: the carry says only that the other ways' sources sit
+        somewhere in the value (``for fileSpec in jobSpec.Files``, refilled with files packed from rows, is not
+        ``job``, which ``jobSpec`` copies).  An augmented assignment is its operator's value of what the name held and
+        its value (:meth:`_accumulated`).  A ``:=`` is its value, read as an ``=``'s is -- also where the read is in its
+        own statement (:func:`_walrus_before`).  An ``except X as e`` is an object of X where the corpus has the class
+        (:meth:`_caught`); another ``except ... as`` keeps what the carry says."""
         binding = (
             pathcond.clause_binding(site, expr.id)
             if isinstance(site, ast.comprehension)
@@ -1371,7 +1373,7 @@ class _Reader:
             if isinstance(site, ast.AugAssign):
                 return self._accumulated(expr, site, file, func, set(), selves=selves)
             return carried
-        if any(one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in carried):
+        if all(one.kind in (KEY_ROWS, KEY_SEQUENCE) for one in carried):
             if binding.kind == pathcond.BIND_FOR and binding.unpacked and binding.slot is not None:
                 return [self._slot_column(one, binding.slot, expr, file, func) for one in carried]
             return carried
