@@ -4127,7 +4127,8 @@ class Rerun:
         enters starts there; else the call a parameter's chosen way came in by, or that a parameter the run printed at
         its entry is read up to; else the one call the map's ``EnteredFrom`` holds into it where nothing else may enter
         it (OWI, out/gm/qk-design.md), whose run is not asked; else, where every term ends, the call a caller's run
-        shows entered it (F1, :meth:`_entered_by`); else it stops."""
+        shows entered it (F1, :meth:`_entered_by`); else, with nothing open, the one call the values its run printed at
+        its entry leave (EBV, :meth:`_entered_by_values`); else it stops."""
         rec = SR.entered(owner, fn.node.lineno)
         if rec is None:
             return SR.End("entry", SR.STOP, "no-entered-from", "")
@@ -4156,7 +4157,44 @@ class Rerun:
         # the callers' logs are asked only where the entry is all the answer waits for (gm2-predictions.txt F4)
         if rec.sites and all(t.ended for t in terms) and (by := self._entered_by(owner, line, run, window, rec)) is not None:
             return by
+        if rec.sites and not rec.open and (by := self._entered_by_values(fn, owner, run, into)) is not None:
+            return by
         return SR.End("entry", SR.STOP, "entry-unchosen", "")
+
+    def _entered_by_values(self, fn: R.Function, owner: str, run: Any, into: set[str]) -> SR.End | None:
+        """EBV (out/gm/qk-design.md): the call into *fn* that the values its run printed at its entry leave, *into* being
+        every call into it (the map's ``EnteredFrom`` with nothing open).  A call is not the one where every way of a
+        parameter the run printed at its entry (:meth:`_entry_value`) that comes by it ends at a literal other than
+        the print -- killJob's ``code`` printed '50': ``"51"`` at task_complex_module 5732 and ``"55"`` at
+        job_complex_module 799 rule those calls out, its ways by TaskBuffer 1190 do not.  A default the call leaves is
+        such a literal; a value a literal is only part of (:data:`SR.THROUGH`), a container's empty start or put, and
+        any other end are not; a call no way of the parameter comes by stays.  The one call left is the entry; None
+        where nothing was printed, none was ruled out, several are left, or a way of a printed parameter comes by no
+        call of *into* (it stops at *fn* itself)."""
+        if run is None:
+            return None
+        params = [a.arg for a in [*fn.node.args.posonlyargs, *fn.node.args.args, *fn.node.args.kwonlyargs] if a.arg != "self"]
+        left = set(into)
+        out: dict[str, list[str]] = {}
+        for p in params:
+            value = self._entry_value(fn, run, p)
+            if value is None:
+                continue
+            ways = SR.param_ways(owner, p)
+            if any(not w.route or w.route[-1] not in into for w in ways):
+                return None
+            for call in sorted(into):
+                by = [w for w in ways if w.route[-1] == call]
+                if by and all(w.end == SR.CONSTANT and w.why not in SR.NO_LITERAL and not SR.same_value(w.value, value)
+                              for w in by):
+                    left.discard(call)
+                    out.setdefault(call, []).append(f"{p} {'/'.join(sorted({w.value for w in by}))}, printed {value!r}")
+        if not out or len(left) != 1:
+            return None
+        call = next(iter(left))
+        self.say(f"  entry: its run's prints at its entry rule out the call(s) into {fn.name} at "
+                 + "; ".join(f"{c} ({', '.join(why)})" for c, why in sorted(out.items())) + f": {call} is left")
+        return SR.End("entry", SR.CALLER, "by-values", call)
 
     def _entered_by(self, owner: str, line: int, run: Any, window: tuple[str, str] | None, rec: Any) -> SR.End | None:
         """F1 (out/gm/s3-f1-design.md): the call at one of the map's ``EnteredFrom`` sites its caller's run shows

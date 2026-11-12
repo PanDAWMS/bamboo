@@ -10623,6 +10623,98 @@ def test_owi_ends_an_entry_at_the_one_call_the_map_holds_into_it_where_nothing_e
     assert got["two sites"] == ["stop", "entry-unchosen", "", 1, []]
 
 
+def test_ebv_ends_an_entry_at_the_one_call_the_values_its_run_printed_at_its_entry_leave(tmp_path):
+    # killJob (job_complex_module 812), MJE-7397556704: four calls in, nothing open; its run printed code '50' at its
+    # entry, so the calls handing "51" (task_complex_module 5732) and "" / "55" are not it, and TaskBuffer 1190, whose
+    # ways go on to '50' and a stop, is left.  MJE-7397817316: code '51' leaves 5732 too; user 'JEDI' rules it out.
+    src = textwrap.dedent(
+        """\
+        class K:
+            def arm(self, code, user):
+                self.status = "closed"
+
+            def c1(self):
+                self.arm("51", "reassign")
+
+            def c2(self):
+                self.arm("", "x")
+
+            def c3(self, code, user):
+                self.arm(code, user)
+        """
+    )
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(src)
+    lines = src.splitlines()
+    c1, c2, c3 = [f"pandaserver/m.py:{i + 1}" for i, t in enumerate(lines) if t.strip().startswith("self.arm(")]
+    out = _ok(_run(tmp_path, f"""
+        import ast
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import sources as SR
+
+        M = "pandaserver/m.py"
+        c1, c2, c3 = {c1!r}, {c2!r}, {c3!r}
+        sites = [N(owner=f"{{M}}::K.{{c}}", line=int(at.rpartition(":")[2])) for c, at in (("c1", c1), ("c2", c2), ("c3", c3))]
+        arm = N(token="arm", first="2026-11-02 13:43:27,000", last="2026-11-02 13:43:29,000", machine="m1",
+                describe=lambda: "the run 'arm'")
+        fn = N(node=ast.parse("def arm(self, code, user):\\n    pass").body[0], rel=M, name="arm")
+        ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
+        stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
+        W, C = SR.Way, SR.CONSTANT
+        base = {{"code": [W(C, '"51"', "constant", (c1,)), W(C, '""', "constant", (c2,)),
+                          W(C, "'50'", "constant", ("pandaserver/n.py:4", c3)),
+                          W(SR.STOP, "", "missed,no_caller", ("pandaserver/api.py:9", c3))],
+                 "user": [W(C, '"reassign"', "constant", (c1,)), W(C, '"x"', "constant", (c2,)),
+                          W(SR.STOP, "", "unknown", (c3,))]}}
+        got = {{}}
+
+        def entry(name, printed, terms=stopped, ways=base, open_=(), f1=None):
+            SR.entered = lambda owner, line: N(sites=sites, open=list(open_))
+            SR.param_ways = lambda owner, p, **kw: ways[p]
+            r = object.__new__(rerun.Rerun)
+            r.lines = []
+            asked = []
+            r._entered_by = lambda owner, line, run, window, rec: asked.append(owner) or f1
+            r._entry_value = lambda fn, run, p: printed.get(p)
+            r._param_end = lambda term, owner, p, fn, run, window, **kw: (SR.End(term, SR.STOP, "parameter-unchosen", ""),)
+            e = r._entry_end(fn, f"{{M}}::K.arm", 2, arm, ("2026-11-02 13:43:27", "2026-11-02 13:43:29"), terms)
+            got[name] = [e.end, e.why, e.at, len(asked), r.lines]
+
+        entry("code rules out two", {{"code": "50"}})
+        entry("code leaves two, user rules one out", {{"code": "51", "user": "JEDI"}})
+        entry("code leaves two", {{"code": "51"}})
+        entry("every term ends: F1 first", {{"code": "50"}}, terms=ended)
+        entry("F1 shows a call", {{"code": "50"}}, terms=ended, f1=SR.End("entry", SR.CALLER, "entered-by", c2))
+        entry("nothing printed", {{}})
+        entry("something open", {{"code": "50"}}, open_=[N(kind="hole", at="pandaserver/n.py:7", text="x.arm")])
+        entry("a part of a literal", {{"code": "50"}}, ways={{**base, "code": [W(C, "", SR.THROUGH, (c1,)), *base["code"][1:]]}})
+        entry("a way stops at the function", {{"code": "50"}}, ways={{**base, "code": [*base["code"], W(SR.STOP, "", "missed", (f"{{M}}:2",))]}})
+        entry("a call no way comes by", {{"code": "50"}}, ways={{**base, "code": [base["code"][0], *base["code"][2:]]}})
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    head = "  entry: its run's prints at its entry rule out the call(s) into arm at "
+    two = sorted([(c1, "code \"51\", printed '50'"), (c2, "code \"\", printed '50'")])
+    assert got["code rules out two"] == ["caller", "by-values", c3, 0, [
+        head + "; ".join(f"{c} ({w})" for c, w in two) + f": {c3} is left"]]
+    by_user = sorted([(c1, "user \"reassign\", printed 'JEDI'"), (c2, "code \"\", printed '51', user \"x\", printed 'JEDI'")])
+    assert got["code leaves two, user rules one out"] == ["caller", "by-values", c3, 0, [
+        head + "; ".join(f"{c} ({w})" for c, w in by_user) + f": {c3} is left"]]
+    assert got["code leaves two"] == ["stop", "entry-unchosen", "", 0, []]
+    # F1 is read first where every term ends; EBV only where it shows none
+    assert got["every term ends: F1 first"][:4] == ["caller", "by-values", c3, 1]
+    assert got["F1 shows a call"] == ["caller", "entered-by", c2, 1, []]
+    assert got["nothing printed"] == ["stop", "entry-unchosen", "", 0, []]
+    assert got["something open"] == ["stop", "entry-unchosen", "", 0, []]
+    # a literal a value is only part of is not the value: c1 stays
+    assert got["a part of a literal"] == ["stop", "entry-unchosen", "", 0, []]
+    # a way in by no call the map holds: the calls are not every way in
+    assert got["a way stops at the function"] == ["stop", "entry-unchosen", "", 0, []]
+    # c2 hands code no way: it stays beside c3
+    assert got["a call no way comes by"] == ["stop", "entry-unchosen", "", 0, []]
+
+
 _GEN = """
 from pandaserver.srvcore.CoreUtils import naive_utcnow
 
