@@ -3350,7 +3350,13 @@ class HeldThrough(BaseModel):
             f"endpoint's parameter ({THROUGH_DECODED}, {THROUGH_CONVERTED}, {THROUGH_UNKNOWN}: a file's contents)."
         )
     )
-    at: str = Field(description="``file:line`` of the call.")
+    at: str = Field(
+        description=(
+            "``file:line`` of the call.  The tests on the way to it have GuardFroms (:attr:`GuardFrom.calls`): which "
+            "statement a run went through is read off them (``itemList = taskParamMap['jobParameters'] + "
+            "taskParamMap['log']`` under the ``else`` of ``if 'log' not in taskParamMap:``) where the way ends past it."
+        )
+    )
     gives: str = Field(
         description=(
             f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
@@ -3455,6 +3461,16 @@ class HeldSource(KeySource):
             "have GuardFroms (:attr:`GuardFrom.calls`).  A parameter's default a call leaves it to is where it is "
             "written, in the callee (``pandaserver/taskbuffer/TaskBuffer.py:1015`` for ``use_json: bool = False``).  "
             "Empty where the way ends at a parameter."
+        ),
+    )
+    chosen: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The bindings the way came from that were one of several reaching their read, ``file:line`` of each "
+            "binding's statement, each once: ``itemList = taskParamMap['jobParameters']`` under ``if 'log' not in "
+            "taskParamMap:``, where the bindings under its ``elif`` and ``else`` reach the loop too.  Which of them a "
+            "run made is the tests on the way to each, which have GuardFroms (:attr:`GuardFrom.calls`).  Not the "
+            "function's entry, which no statement is; empty where each read on the way had one binding reaching it."
         ),
     )
 
@@ -6007,7 +6023,11 @@ class GuardFrom(BaseModel):
             "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
             "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
             "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
-            "``ignoreTmpError = False``.  Not lines of calls only, then: the lines of the places it guards."
+            "``ignoreTmpError = False``; and of the places such a way goes through on to its end: each call outside "
+            "the corpus or operator (:attr:`HeldThrough.at`), and each binding that was one of several reaching its "
+            "read (:attr:`HeldSource.chosen`): ``if 'log' not in taskParamMap:`` guards ``itemList = "
+            "taskParamMap['jobParameters']`` and the ``+`` under its ``else``.  Not lines of calls only, then: the "
+            "lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
