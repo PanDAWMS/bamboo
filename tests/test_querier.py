@@ -4805,6 +4805,90 @@ def test_a_candidate_is_read_on_its_pass_that_holds_the_key_at_the_window_and_th
     assert got["windows"] == [True, False]
 
 
+_KILLS = textwrap.dedent("""
+    def kill(self, pandaID, code, user):
+        tmp_log = MsgWrapper(logger, f"kill < PandaID={pandaID} >")
+        tmp_log.debug(f"code={code} user={user} wg=[]")
+        for table in tables:
+            tmp_log.debug("using prod role")
+        tmp_log.debug(f"done code={code}")
+
+
+    def kill_twin(self, pandaID, code, user, who):
+        tmp_log = MsgWrapper(logger, f"kill_twin < PandaID={pandaID} >")
+        tmp_log.debug(f"code={code} user={user} wg=[]")
+        tmp_log.debug(f"user={who} wg=[]")
+        tmp_log.debug(f"done code={code}")
+""")
+
+
+def test_sc_an_entry_record_read_only_literally_cuts_where_nothing_else_can_have_printed_it(tmp_path):
+    # SC (out/gm/qk-design.md): killJob's 840 closes `user` at its first blank, so "finish by ..." is read whole
+    # nowhere and MJE-7396802500's two calls (05:27:04, 05:40:46) stayed one pass
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_KILLS)
+    line = "2026-01-01 05:{},000 panda.log.X: DEBUG    {} < PandaID=777 > {}\n"
+
+    def calls(mark: str, user: str) -> str:
+        return "".join(line.format(at, mark, t) for at, t in [
+            ("27:04", f"code=52 user={user} wg=[]"), ("27:04", "done code=52"),
+            ("40:46", f"code=52 user={user} wg=[]"), ("40:46", "using prod role"), ("40:46", "done code=52")])
+
+    for name, mark, user in [("blank", "kill", "finish by A B"), ("bare", "kill", "jedi"), ("twin", "kill_twin", "finish by A B")]:
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "w.log").write_text(calls(mark, user))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            run = {name: runs_for(read_log(f"{name}/w.log"), "777")[0] for name in ("blank", "bare", "twin")}
+            kill, twin = R.function("pandaserver/a.py", "kill", [4]), R.function("pandaserver/a.py", "kill_twin", [12])
+            import re
+
+            # the writers' index as the dump gives it, built from these functions' own map rows (the walk's), with
+            # "other" holding kill's rows too where another function prints through kill's logger
+            def rows_of(fn, owner):
+                return [(re.compile(m.pattern, re.S), owner, R._prefix_regex((m.prefix,)) if m.prefix else None, None, m)
+                        for r in fn.rows for m in r.map_rows if m.pattern]
+
+            dump = object()
+            R.mapdump.fragment = lambda: dump
+            got = {}
+            for writers in ("alone", "shared"):
+                shared = rows_of(kill, "pandaserver/a.py::other") if writers == "shared" else []
+                R._WRITERS[:] = [dump, rows_of(kill, "pandaserver/a.py::kill") + rows_of(twin, "pandaserver/a.py::kill_twin")
+                                 + shared, {}, {}, {}, {}, {}]
+                first = run["blank"].records[0]
+                got[writers] = [R.entries(kill, run["blank"], "outside"), R.passes(kill, run["blank"], "outside")[1],
+                                sorted(R.line_writers(first, "w.log")), sorted(R.literal_writers(first, "w.log"))]
+            got["bare"] = [R.entries(kill, run["bare"], "outside"), R.passes(kill, run["bare"], "outside")[1]]
+            got["twin"] = [R.entries(twin, run["twin"], "outside"), R.passes(twin, run["twin"], "outside")[1]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # read as the entry row's line only with its holes taking any characters, no other row of kill finding it and no
+    # other function reading it so: each call is a pass, and the word says how the cut was read.  The map's own pattern
+    # (user's hole takes no blank) finds the record for no function, kill's row neither: line_writers is empty, and
+    # only the literal reading names kill (the measure scb missed MJE-7396802500 on a guard by line_writers)
+    assert got["alone"] == [[0, 2], "cut at entry row 4 of kill (2 read as its line only with its holes taking any "
+                                    "characters, nothing else printing it): 2 pass(es)", [], ["pandaserver/a.py::kill"]]
+    # another function reads it so too: it may be that function's line, and the run stays one
+    assert got["shared"] == [[], "entry row 4 of kill is read whole at none of its 2 record(s) in the run (2 the map "
+                                 "cannot read whole): the run is not split", [],
+                             ["pandaserver/a.py::kill", "pandaserver/a.py::other"]]
+    # a user with no blank is read whole, as before
+    assert got["bare"] == [[0, 2], "cut at entry row 4 of kill: 2 pass(es)"]
+    # another row of the function finds the record ("user={who} wg=[]"): it may be that row's line, no cut
+    assert got["twin"] == [[], "entry row 12 of kill_twin is read whole at none of its 2 record(s) in the run (2 the "
+                               "map cannot read whole): the run is not split"]
+
+
 def test_a_run_no_entry_row_cuts_is_at_the_window_only_where_a_record_of_it_lies_near(tmp_path):
     # K57: a child task's run held only its two key lines, hours apart, and was read for the parent's write between
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(_PASSES)
