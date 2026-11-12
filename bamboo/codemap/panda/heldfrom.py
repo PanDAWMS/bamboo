@@ -2612,7 +2612,8 @@ def _end_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
     or a FieldFrom binding's way, as :func:`_change_sites` reads their changes: where it ends
     (:attr:`HeldSource.at`), the source's own statement; each call outside the corpus it went through
     (:attr:`HeldThrough.at`), an operator's statement among them; each binding it came from that was one of several
-    reaching its read (:attr:`HeldSource.chosen`)."""
+    reaching its read (:attr:`HeldSource.chosen`); each call of the corpus on it (:attr:`HeldSource.route`), the one
+    whose return the value is or the caller's that hands it in.  Every place on the way, then."""
     found: set[str] = set()
     sources = [
         *(source for guard in guards for source in guard.sources),
@@ -2623,6 +2624,7 @@ def _end_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
         found.update(source.at)
         found.update(call.at for call in source.through if call.at)
         found.update(source.chosen)
+        found.update(source.route)
     return found
 
 
@@ -3012,8 +3014,8 @@ def guard_froms(
     # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
     # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
     # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``);
-    # so is it at each call outside the corpus or operator the way went through and each binding it came from that
-    # was one of several (``itemList = ... + ...`` under ``else``), the end past them (_end_sites).
+    # so is it at each call the way went through, of the corpus or not, an operator, and each binding it came from
+    # that was one of several (``itemList = ... + ...`` under ``else``), the end past them (_end_sites).
     # Their ways' too, until no place is new.
     guarded: set[str] = set()
     held: dict[str, list[ast.AST]] = {}
