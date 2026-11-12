@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach
+from bamboo.codemap import pathcond, reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     KEY_CONSTANT,
@@ -24,7 +24,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     SourceModule,
 )
-from bamboo.codemap.panda import heldfrom, pathcond, sql
+from bamboo.codemap.panda import heldfrom, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
 

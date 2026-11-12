@@ -1041,9 +1041,10 @@ def test_a_build_s_record_is_the_same_twice(tmp_path):
 
 def _database(tmp_path, text: str) -> reach.ReachGraph:
     """The record of ``pkg/db.py`` as a build makes it: the plugin's database leaves, statements read through the module's calls."""
+    from bamboo.codemap import pathcond
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.models import SourceModule
-    from bamboo.codemap.panda import pathcond, sql
+    from bamboo.codemap.panda import sql
     from bamboo.codemap.panda.plugin import _DatabaseLeaves
     from bamboo.codemap.panda.recognizers import sqlwrite
 

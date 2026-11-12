@@ -28,11 +28,10 @@ from __future__ import annotations
 import ast
 from typing import Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import MapEntry
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.reaching import reaching
 
 #: A dict's methods that put entries into it.
 _PUTTING = frozenset(

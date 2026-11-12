@@ -42,11 +42,10 @@ import ast
 import re
 from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.pathcond import single_definition
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.pathcond import single_definition
+from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -587,9 +586,58 @@ def _literal_mapping(node: ast.expr) -> Optional[Mapping]:
     return mapping or None
 
 
+#: How many calls out a statement's text or binds are followed.  ``getJobs``
+#: is two: its ``WHERE`` is a closure's return, which is
+#: ``construct_where_clause``'s.
+RETURN_HOPS = 3
+
+
+def every_return(
+    func: ast.AST, call: ast.Call, calls: Optional["Calls"], hops: int = 0
+) -> Optional[list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]]:
+    """``(callee, value)`` for every value *call* can hand back, read through the corpus's *calls*; ``None`` if one
+    cannot be followed.
+
+    :func:`bamboo.codemap.panda.sql.returned` reads a statement's text, where a
+    piece that cannot be followed stays a hole and the rest is still worth
+    reading.  A value set is used differently -- to eliminate -- so one short
+    of a member is a false one: a helper returning a literal on one branch and
+    an unplaced call on another would read as returning the literal alone.  So
+    every function the call can land in, every ``return`` in each, and every
+    call such a return makes are followed, or nothing is claimed.
+
+    Without *calls* it is ``None`` too: no calls, no claim.
+    """
+    from bamboo.codemap.calls import returns
+
+    if calls is None or hops >= RETURN_HOPS:
+        return None
+    file = calls.types.file_of(func)
+    if file is None:
+        return None
+    placed = calls.callees(file, func, call)
+    if not placed.targets or placed.unplaced or placed.returns_none:
+        return None
+    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
+    for target in placed.targets:
+        values = returns(target.func)
+        if not values:
+            return None
+        for value in values:
+            if isinstance(value, ast.Call):
+                deeper = every_return(target.func, value, calls, hops + 1)
+                if deeper is None:
+                    return None
+                found.extend(deeper)
+            else:
+                found.append((target.func, value))  # type: ignore[arg-type]
+    return found
+
+
 def _mapping_behind(
     node: ast.expr,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    calls: Optional["Calls"],
 ) -> Optional[list[Mapping]]:
     """Return the literal mappings *node* can evaluate to.
 
@@ -597,8 +645,8 @@ def _mapping_behind(
     it -- ``commandStatusMap = JediTaskSpec.commandStatusMap()`` sits at the top
     of the method that subscripts it a hundred lines further down.
 
-    The call is followed through the corpus's calls to what it returns
-    (:func:`sql.every_return`), so it is the class the receiver *is* that
+    The call is followed through the corpus's *calls* to what it returns
+    (:func:`every_return`), so it is the class the receiver *is* that
     answers, not every class declaring a method of that name.  Read by name, two
     classes returning different mappings under one name had to be dropped, and
     a method taking a parameter could not be read at all.  Every return has to
@@ -608,9 +656,7 @@ def _mapping_behind(
     if isinstance(node, ast.Call):
         if func is None:
             return None
-        from bamboo.codemap.panda import sql
-
-        returned = sql.every_return(func, node)
+        returned = every_return(func, node, calls)
         if returned is None:
             return None
         found: list[Mapping] = []
@@ -628,13 +674,14 @@ def _mapping_behind(
     if isinstance(node, ast.Name) and func is not None:
         definition = single_definition(func, node.id)
         if definition is not None and definition is not node:
-            return _mapping_behind(definition, func)
+            return _mapping_behind(definition, func, calls)
     return None
 
 
 def _mapping_iterated(
     name: str,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    calls: Optional["Calls"],
 ) -> Optional[list[Mapping]]:
     """The declared mapping *name* takes an entry of, when a loop binds it.
 
@@ -668,7 +715,7 @@ def _mapping_iterated(
             and node.iter.func.attr == "items"
         ):
             continue
-        mappings = _mapping_behind(node.iter.func.value, func)
+        mappings = _mapping_behind(node.iter.func.value, func, calls)
         if mappings is not None:
             return mappings
     return None
@@ -678,6 +725,7 @@ def mapping_values(
     expression: ast.expr,
     *,
     func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    calls: Optional["Calls"] = None,
 ) -> list[str]:
     """The values a subscript of a declared mapping can produce, if it is one.
 
@@ -690,7 +738,8 @@ def mapping_values(
     ``ready`` alone.
 
     A name a loop bound to one entry of the mapping enters one level down, and
-    is otherwise the same walk -- see :func:`_mapping_iterated`.
+    is otherwise the same walk -- see :func:`_mapping_iterated`.  A call's
+    mapping is read through the corpus's *calls* (:func:`_mapping_behind`).
 
     Returns ``[]`` when the expression is not this shape, when the mapping is
     not declared, or when a stated key is not in it -- that last one being a
@@ -705,11 +754,11 @@ def mapping_values(
     if not keys:
         return []
     level: list[Union[str, Mapping]]
-    mappings = _mapping_behind(node, func)
+    mappings = _mapping_behind(node, func, calls)
     if mappings is not None:
         level = list(mappings)
     else:
-        iterated = _mapping_iterated(node.id, func) if isinstance(node, ast.Name) else None
+        iterated = _mapping_iterated(node.id, func, calls) if isinstance(node, ast.Name) else None
         if iterated is None:
             return []
         level = [entry for mapping in iterated for entry in mapping.values()]
@@ -753,10 +802,14 @@ def _keys_the_way_leaves(
     return {name for name in names if not pathcond.ruled_out_at(expression, func, key.id, name)}
 
 
-def resolver():
+def resolver(calls: Optional["Calls"] = None):
     """Return a ``(expression, func) -> [value, ...]`` callable for one build.
 
-    Handed to :func:`bamboo.codemap.panda.pathcond.literal_values` so that a
+    *calls*, the corpus's, read what a call returns and a constant another
+    module or class declares (:func:`declared_constant`); without them, a
+    literal and a mapping the function itself writes are read.
+
+    Handed to :func:`bamboo.codemap.pathcond.literal_values` so that a
     local assigned from a declared mapping resolves the same way one assigned a
     literal does.  That is where the two statuses this closes actually live:
     ``newTaskStatus = commandStatusMap[commandStr]["doing"]`` reaches the
@@ -778,7 +831,7 @@ def resolver():
             if isinstance(expression.value, str):
                 return [expression.value]
             return [ast.unparse(expression)]
-        return mapping_values(expression, func=func) or declared_constant(expression, func)
+        return mapping_values(expression, func=func, calls=calls) or declared_constant(expression, func, calls)
 
     return resolve
 
@@ -789,7 +842,7 @@ _CONSTANT_HOPS = 3
 
 
 def declared_constant(
-    expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]
+    expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef], calls: Optional["Calls"] = None
 ) -> list[str]:
     """What a constant of a module or a class holds, where *expression* names one the corpus assigns once, or ``[]``.
 
@@ -799,11 +852,8 @@ def declared_constant(
     staging]`` in its class, each a constant of the class.  An attribute of a class (its bases' too) or of an imported
     module, or a name the function neither binds nor is handed -- the module's own, or one it imports -- assigned once
     at that level a literal, or a list of them, or such a name.  Assigned twice (under an ``if`` and its ``else``), it
-    is not one value.  Read through the corpus's calls (:func:`sql.across_calls`); outside them, nothing is.
+    is not one value.  Read through *calls*, the corpus's; without them, nothing is.
     """
-    from bamboo.codemap.panda import sql
-
-    calls = sql._CALLS
     if calls is None or func is None:
         return []
     types = calls.types
@@ -884,7 +934,7 @@ def bind_settler(calls: Optional["Calls"]):
     parameter's callers hand it -- every value, or none where one is not known (:func:`known`).  The write side's row
     preconditions read the same values the read side's selects do: ``Bound values are settled the same way the write
     side settles them`` said the read side, while the guards settled a literal alone."""
-    plain = resolver()
+    plain = resolver(calls)
     handing = handed(plain, calls)
 
     def settle(expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]) -> list[str]:
@@ -1439,7 +1489,7 @@ def stated(
 
     The clock, a ``timedelta`` of constants, a number, and ``+``/``-``/``*``/
     ``/`` of those settle; a plain name is followed through the writes that
-    reach the read (:func:`~bamboo.codemap.panda.reaching.reaching`, the call's
+    reach the read (:func:`~bamboo.codemap.reaching.reaching`, the call's
     own value counting as one for a parameter), so ``copyArchive``'s
     twenty-six ``timeLimit`` writes give the one line 375 reads.  Anything
     else -- an attribute, a subscript, a call that is not the clock -- is said.

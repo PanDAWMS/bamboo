@@ -57,6 +57,7 @@ import re
 from typing import NamedTuple, Optional
 
 from bamboo.codemap import calls as calls_mod
+from bamboo.codemap import pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import (
@@ -70,9 +71,12 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import pathcond, sql, sqltext, values
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.panda.recognizers import logfile, sqlwrite
+from bamboo.codemap.panda.recognizers.emit import row_count_lines
+from bamboo.codemap.panda.recognizers.trigger import sole_definitions
+from bamboo.codemap.pathcond import (
     attach_parents,
     enclosing_function,
     functions_with_owner,
@@ -80,9 +84,6 @@ from bamboo.codemap.panda.pathcond import (
     site_of,
     targets_of,
 )
-from bamboo.codemap.panda.recognizers import logfile, sqlwrite
-from bamboo.codemap.panda.recognizers.emit import row_count_lines
-from bamboo.codemap.panda.recognizers.trigger import sole_definitions
 
 #: The spec classes declare this to build a ``SET`` clause out of whatever was
 #: assigned to them.  Its presence is the method saying it is a flush.
@@ -287,7 +288,7 @@ def flush_methods(
     # threaded through ``attach``: both halves of a ``row_precondition`` have
     # to be settled by one rule, and the rule is ``sql.settled_precondition``
     # -- what each caller supplies is only the table of declared constants.
-    settle = values.resolver()
+    settle = values.resolver(sql._CALLS)
     declared = logfile.declared_files(modules)
     inherited = logfile.inherited_files(modules, declared)
     found: dict[str, Flush] = {}
@@ -386,7 +387,7 @@ class _Built:
     """What a call hands a parameter by an expression that makes a new value -- an operator, a comprehension, an
     f-string: not ``None``, and nothing else known.  ``JobGenerator.runImpl`` hands ``updateTask_JEDI``
     ``oldStatus=JediTaskSpec.statusForJobGenerator() + ["pending"]``, which ``if oldStatus is not None`` lets through.
-    Its truth and what it equals raise the ``TypeError`` :func:`~bamboo.codemap.panda.pathcond.decided` reads as
+    Its truth and what it equals raise the ``TypeError`` :func:`~bamboo.codemap.pathcond.decided` reads as
     undecided."""
 
     def __bool__(self) -> bool:
@@ -716,7 +717,7 @@ def _guard_at(
         return term
     raw, method, binds = held
     at = site_of(call)
-    plain = values.resolver()
+    plain = values.resolver(sql._CALLS)
 
     def held_by(key: str) -> Optional[set[str]]:
         found: set[str] = set()

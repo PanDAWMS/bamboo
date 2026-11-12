@@ -2,7 +2,7 @@
 
 A reader of a run asks it of the statements around what the run printed: can the call have run this statement
 between those two records, did every way between them pass it, can this print and that statement both be in one
-call.  The map reads values by one flow (:mod:`bamboo.codemap.panda.reaching`), so it answers these as well: the
+call.  The map reads values by one flow (:mod:`bamboo.codemap.reaching`), so it answers these as well: the
 question is :func:`runs_after`, and the others are made of it.
 
 * **A statement has run once it is entered.**  A call that raised ran as far as the raise -- its writes, a
@@ -25,7 +25,7 @@ question is :func:`runs_after`, and the others are made of it.
   ``with-exits-are-read`` gate fails on one (none in PanDA).
 
 The statements asked of must be of one function, on a tree with parent links
-(:func:`bamboo.codemap.panda.pathcond.attach_parents`).
+(:func:`bamboo.codemap.pathcond.attach_parents`).
 """
 
 from __future__ import annotations
@@ -34,9 +34,9 @@ import ast
 from typing import Iterable, Iterator, Optional, Sequence
 
 from bamboo.codemap.models import SwallowingManager
-from bamboo.codemap.panda.reaching import reaching, reaching_end
+from bamboo.codemap.reaching import reaching, reaching_end
 
-#: The nodes whose body is a scope of its own, as :mod:`~bamboo.codemap.panda.reaching` reads them.
+#: The nodes whose body is a scope of its own, as :mod:`~bamboo.codemap.reaching` reads them.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
 _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 

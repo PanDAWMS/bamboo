@@ -159,7 +159,7 @@ from collections import defaultdict, deque
 from functools import partial
 from typing import Callable, Iterator, NamedTuple, Optional, Union
 
-from bamboo.codemap import callfacts, objects, reach
+from bamboo.codemap import callfacts, objects, pathcond, reach, values
 from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
@@ -189,9 +189,9 @@ from bamboo.codemap.models import (
     RunStart,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, mustprints, pathcond, sql, sqltext, values
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda import keycolumns, mustprints, sql, sqltext
 from bamboo.codemap.panda.recognizers import logfile
+from bamboo.codemap.reaching import reaching
 
 #: The tables PanDA keeps a subject's past values in, lower-cased, each with
 #: the subject it records: one row per change, stamped when it is written.
@@ -452,7 +452,7 @@ class _Reader:
         self._arms: dict[tuple[str, str], list[tuple[ast.stmt, str]]] = {}
         #: Each history writer's source of its subject's value (:meth:`_recorded_from`).
         self._sources: dict[str, Optional[str]] = {}
-        self._settle = values.resolver()
+        self._settle = values.resolver(sql._CALLS)
 
     # -- runs ----------------------------------------------------------------- #
 

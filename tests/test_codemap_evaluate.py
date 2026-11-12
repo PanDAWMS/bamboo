@@ -7,8 +7,8 @@ import ast
 
 import pytest
 
-from bamboo.codemap.panda import evaluate, pathcond
-from bamboo.codemap.panda.evaluate import UNKNOWN, Env
+from bamboo.codemap import evaluate, pathcond
+from bamboo.codemap.evaluate import UNKNOWN, Env
 
 
 def _env(**values: object) -> Env:

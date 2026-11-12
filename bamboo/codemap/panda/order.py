@@ -46,6 +46,7 @@ from collections import defaultdict
 from typing import NamedTuple, Optional
 
 from bamboo.codemap import calls as C
+from bamboo.codemap import pathcond
 from bamboo.codemap.models import (
     ENTRY_LINE,
     EXIT_LINE,
@@ -65,8 +66,7 @@ from bamboo.codemap.objects import (
     line_paths,
     root_name,
 )
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching_each, reaching_exit
+from bamboo.codemap.reaching import reaching_each, reaching_exit
 
 #: The spec methods that take a changed attribute back out (one, by name) or all of them.
 RESET_ONE = "resetChangedAttr"

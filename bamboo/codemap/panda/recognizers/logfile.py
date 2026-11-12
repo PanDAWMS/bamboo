@@ -53,7 +53,7 @@ import ast
 from collections import defaultdict
 from typing import NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import Calls, CallSite, Target, bind
 from bamboo.codemap.models import (
@@ -63,7 +63,6 @@ from bamboo.codemap.models import (
     LogSiteNode,
     SourceModule,
 )
-from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.recognizers import trigger
 
 # PandaLogger.getLogger(name) opens "<logdir>/panda-<name>.log".

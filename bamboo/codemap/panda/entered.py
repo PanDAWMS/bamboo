@@ -4,7 +4,7 @@ A reader ruling an arm out by the tests its function was called under -- the que
 ``doGeneratePrePro``'s arms to say they run only under ``doGenerate`` 1150's ``taskSpec.usePrePro()`` -- asks two
 things of the map: the tests each call into the function sits under, and whether those calls are every way in.  The
 first is the reach record's edges into the function (:class:`~bamboo.codemap.models.ReachCall`, every ``how``), each
-read in its caller by :func:`~bamboo.codemap.panda.pathcond.arm_condition`.  The second is every way in the record does
+read in its caller by :func:`~bamboo.codemap.pathcond.arm_condition`.  The second is every way in the record does
 not hold, each said as a record (:class:`~bamboo.codemap.models.EnteredOpen`):
 
 - a hole, or a call placed elsewhere and left open, made with the function's name: it may land there;
@@ -27,7 +27,7 @@ import ast
 import logging
 from typing import Iterable, Optional
 
-from bamboo.codemap import callfacts, reach
+from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap.calls import UNPLACED_DYNAMIC, UNPLACED_OUTSIDE, Calls
 from bamboo.codemap.models import (
     ENTERED_ENDPOINT,
@@ -44,7 +44,6 @@ from bamboo.codemap.models import (
     ReachCall,
     ReachNode,
 )
-from bamboo.codemap.panda import pathcond
 
 logger = logging.getLogger(__name__)
 
