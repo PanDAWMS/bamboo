@@ -565,6 +565,71 @@ def test_a_loop_over_a_value_known_as_a_dict_takes_its_keys_not_what_its_values_
     }
 
 
+SITE_DATA = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+KEYED_PUTS = {
+    BASE: """\
+        from pandaserver.taskbuffer.db_proxy_mods.task_module import Checker
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, scanSiteList):
+                nWNmap = Checker().getCurrentSiteData()
+                for tmpSiteName in scanSiteList:
+                    one = nWNmap[tmpSiteName]["getJob"]
+                    if one == 0:  # T1
+                        self.a = 1  # R1
+                    other = nWNmap[tmpSiteName]["flag"]
+                    if other:  # T2
+                        self.a = 2  # R2
+        """,
+    SITE_DATA: """\
+        class Checker:
+            def getCurrentSiteData(self):
+                sql = "SELECT siteid,getJob,updateJob FROM ATLAS_PANDAMETA.SiteData WHERE HOURS=3 "
+                self.cur.execute(sql, {})
+                res = self.cur.fetchall()
+                ret = {}
+                for site, getJob, updateJob in res:
+                    ret[site] = {"getJob": getJob, "updateJob": updateJob}
+                return ret
+        """,
+}
+
+
+def test_a_step_cutting_away_some_of_a_value_s_ways_leaves_them_out_and_falls_back_once_where_it_cuts_away_all(
+    tmp_path: Path,
+) -> None:
+    """``doBrokerage``'s ``nPilot``: the callee puts ``{"getJob": getJob, "updateJob": updateJob}`` into ``ret``
+    under each site, and the caller reads ``nWNmap[tmpSiteName]["getJob"]``.  The step ``['getJob']`` takes the
+    local ``getJob`` (the rows' second column) and cuts away the literal's keys and its other value.  Each way cut
+    away was read as a value no way reaches -- ``'getJob'['getJob']``, ``'updateJob'['getJob']``,
+    ``self.cur.fetchall[*][2]['getJob']`` --; now they are left out, and only where the step leaves none of the
+    value's ways (``["flag"]``, which no put holds) is the part a value no way reaches, once: here the dict's own
+    element, which a put under a key not read may hold."""
+    arms = (("extractCommon", "R1"), ("extractCommon", "R2"))
+    fragment = _build(tmp_path, KEYED_PUTS, arms)
+
+    def held(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, KEYED_PUTS) and one.name == name
+        ]
+        return {
+            (one.kind, one.name, tuple(one.steps), tuple(one.paths))
+            for one in guard.sources
+        }
+
+    assert held("T1", "one") == {
+        ("database", "self.cur.fetchall", ("[*]", "[1]"), ()),
+        ("unknown", "{}", ("[*]", "['getJob']"), ()),
+    }
+    assert held("T2", "other") == {("unknown", "{}", ("[*]", "['flag']"), ())}
+
+
 VIEWS = {
     BASE: """\
         class TaskRefinerBase:

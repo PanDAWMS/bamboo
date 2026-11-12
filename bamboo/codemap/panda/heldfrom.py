@@ -276,13 +276,14 @@ def _step(
     return found
 
 
-def _then(way: _Way, steps: tuple[str, ...]) -> list[_Way]:
+def _then(way: _Way, steps: tuple[str, ...], fall_back: bool = True) -> list[_Way]:
     """*way* with *steps* taken one after another as :func:`_step` takes each, a stop as it is; where none is left,
-    the part no way reaches (:func:`_unread_part`)."""
+    the part no way reaches (:func:`_unread_part`) -- or nothing, without *fall_back*: a caller reading one value's
+    ways falls back once, where the steps leave none of them, as :func:`_taken` does (:func:`_onto_each`)."""
     ways = [way]
     for step in steps:
         ways = [taken for one in ways for taken in ([one] if one.kind == _STOP else _step(one, step))]
-    return ways or [_unread_part(way, "".join(steps))]
+    return ways if ways or not fall_back else [_unread_part(way, "".join(steps))]
 
 
 def _taken(
@@ -303,17 +304,20 @@ def _taken(
     return found
 
 
-def _onto(outer: _Way, inner: _Way, fields: tuple[str, ...], route: tuple[str, ...]) -> list[_Way]:
+def _onto(
+    outer: _Way, inner: _Way, fields: tuple[str, ...], route: tuple[str, ...], fall_back: bool = True
+) -> list[_Way]:
     """What a call gives where its callee's way *inner* ends at what the call hands the callee -- *outer*, an
     argument, or the receiver with the *fields* of ``self`` *inner* names: *outer* with *fields* and *inner*'s steps
-    taken (:func:`_then`, which cuts a way at parts of the argument), held where *inner* says the callee holds its
-    end (*inner*'s paths, before the argument's own: ``return (self.SC_FAILED, inputChunk)`` holds the argument at
-    ``[1]``), *inner*'s calls after the steps they come after, *route* its route."""
+    taken (:func:`_then`, which cuts a way at parts of the argument, falling back as *fall_back* says), held where
+    *inner* says the callee holds its end (*inner*'s paths, before the argument's own: ``return (self.SC_FAILED,
+    inputChunk)`` holds the argument at ``[1]``), *inner*'s calls after the steps they come after, *route* its
+    route."""
     steps = fields + inner.steps
     if not outer.paths or outer.kind == _STOP:
         ways = [outer._replace(steps=outer.steps + steps)]
     else:
-        ways = _then(outer, steps)
+        ways = _then(outer, steps, fall_back)
     found = []
     for one in ways:
         if inner.paths and one.kind != _STOP:
@@ -324,6 +328,22 @@ def _onto(outer: _Way, inner: _Way, fields: tuple[str, ...], route: tuple[str, .
             for call in inner.through
         )
         found.append(one._replace(through=through + outer.through, route=route, changes=one.changes + inner.changes))
+    return found
+
+
+def _onto_each(
+    outers: list[_Way], inner: _Way, fields: tuple[str, ...], route: tuple[str, ...]
+) -> list[_Way]:
+    """:func:`_onto` of each of *outers*, the ways of one value a call hands -- an argument or the receiver --, each
+    with *route* before its own.  A way the steps cut away is left out; only where they leave none of them is the
+    part a value no way reaches, once, of the first way, as :func:`_taken` falls back.  ``ret[site] = {"getJob":
+    getJob, "updateJob": updateJob}`` read as ``nWNmap[tmpSiteName]["getJob"]`` is the local ``getJob`` alone, not
+    also ``'getJob'['getJob']`` and ``updateJob['getJob']``, the parts the step cuts away."""
+    found = [
+        one for outer in outers for one in _onto(outer, inner, fields, route + outer.route, fall_back=False)
+    ]
+    if outers and not found:
+        return _onto(outers[0], inner, fields, route + outers[0].route)
     return found
 
 
@@ -390,18 +410,25 @@ def _joined(way: _Way, keys: bool = False) -> list[_Way]:
     if not puts:
         return [way]
     kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
-    found = [
-        stepped
+    # Each put's value, the rest of the steps taken; a value they cut away is left out (a put under another key is
+    # no source of the key asked), and only where nothing is left -- no value and not the way itself -- is the part
+    # a value no way reaches, as :func:`_taken` falls back.
+    values = [
+        value
+        if value.kind == _STOP
+        else value._replace(route=way.route + one.via + value.route, changes=value.changes + kept)
         for one in puts
         for value in one.value
-        for stepped in (
-            [value]
-            if value.kind == _STOP
-            else _then(value._replace(route=way.route + one.via + value.route, changes=value.changes + kept), rest)
-        )
+    ]
+    found = [
+        stepped
+        for value in values
+        for stepped in ([value] if value.kind == _STOP else _then(value, rest, fall_back=False))
     ]
     if any(_puts_unread(one) for one in way.changes) or (way.made_empty == callfacts.MAPPING and step == "[*]"):
         found.append(way)
+    if values and not found:
+        found = _then(values[0], rest)
     return found
 
 
@@ -1475,8 +1502,12 @@ class _Reader:
                         read_at, read_file, read_func = _where_read(given, call, file, func, target.file, target.func)
                         # A default is read in the callee, ``self`` its classes there; a value handed, in the caller.
                         read_selves = target.bound if read_func is target.func else selves
-                        for outer in self.read(given, read_at, read_file, read_func, selves=read_selves):
-                            found += _onto(outer, inner, (), (here,) + inner.route + outer.route)
+                        found += _onto_each(
+                            self.read(given, read_at, read_file, read_func, selves=read_selves),
+                            inner,
+                            (),
+                            (here,) + inner.route,
+                        )
                     elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
                         # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
                         if receiver is None:
@@ -1485,8 +1516,7 @@ class _Reader:
                             found.append(_stop("receiver", owner_of(target.file, target.func), at=here))
                             continue
                         fields = tuple(f".{part}" for part in inner.name.split(".")[1:])
-                        for outer in receiver:
-                            found += _onto(outer, inner, fields, (here,) + inner.route + outer.route)
+                        found += _onto_each(receiver, inner, fields, (here,) + inner.route)
                     else:
                         found.append(inner._replace(route=(here,) + inner.route))
             if placed.unplaced:
