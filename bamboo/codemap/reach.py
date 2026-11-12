@@ -2967,16 +2967,20 @@ class Destination:
         self.unmatched = unmatched
 
 
-def _named_call(hole: str) -> Optional[str]:
-    """The name *hole*'s call is made with -- ``mb_proxy.send`` gives ``send`` --, or ``None`` where no name can close
-    it: a hole of :data:`_NOT_BY_NAME`, a called local or parameter, a callee cut short, no call (a write no function
-    holds)."""
-    found = _HOLE_TEXT.match(hole)
-    if found is None or found.group("why").startswith(_NOT_BY_NAME):
+def _by_name(callee: str, why: str) -> Optional[str]:
+    """The name a hole's call *callee* is made with -- ``mb_proxy.send`` gives ``send`` --, or ``None`` where no name
+    can close it: a hole of :data:`_NOT_BY_NAME` (its *why*), a called local or parameter, a callee cut short."""
+    if why.startswith(_NOT_BY_NAME):
         return None
-    callee = found.group("callee")
     _head, dot, name = callee.rpartition(".")
     return name if dot and not callee.endswith("…") and name.isidentifier() else None
+
+
+def _named_call(hole: str) -> Optional[str]:
+    """:func:`_by_name` of a hole's text, ``owner:line callee -- why``; ``None`` where it is no call (a write no
+    function holds)."""
+    found = _HOLE_TEXT.match(hole)
+    return None if found is None else _by_name(found.group("callee"), found.group("why"))
 
 
 class _ByName:
@@ -3030,8 +3034,8 @@ class ReachGraph:
             if row.anchor is not None:
                 self._by_file.setdefault(row.anchor.file, []).append(row)
             for hole in row.holes:
-                _head, dot, name = hole.callee.rpartition(".")
-                if dot:
+                name = _by_name(hole.callee, hole.why)
+                if name is not None:
                     self._spelled.setdefault(name, []).append((row.owner, hole.line, hole.callee))
 
     def function_at(self, file: str, line: int) -> Optional[str]:
@@ -3058,8 +3062,9 @@ class ReachGraph:
         return None
 
     def holes_spelled(self, name: str) -> list[tuple[str, int, str]]:
-        """``(owner, line, callee)`` of each hole spelled ``x.<name>(...)``: a call no reading placed that, if it lands
-        in the corpus at all, lands at a definition named *name*."""
+        """``(owner, line, callee)`` of each hole spelled ``x.<name>(...)`` a name can close (:func:`_by_name`, as the
+        closure reads one): a call no reading placed that, if it lands in the corpus at all, lands at a definition named
+        *name* -- not a statement not read on a call placed, nor a value handed through a queue."""
         return self._spelled.get(name, [])
 
     def is_database(self, file: str, call: ast.Call) -> bool:
