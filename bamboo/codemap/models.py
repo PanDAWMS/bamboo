@@ -3474,6 +3474,16 @@ class HeldSource(KeySource):
             "function's entry, which no statement is; empty where each read on the way had one binding reaching it."
         ),
     )
+    sent: bool = Field(
+        default=False,
+        description=(
+            "On a ParameterFrom's way of an endpoint's parameter: the way is what the corpus's client sends the "
+            "endpoint -- the request's element at a send through ``HttpClient``'s method (*through*), or the "
+            "parameter's default where the request may lack the key -- and the send, the client's call, is the last "
+            "of *route*.  ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, "
+            "and ``None``: both sent.  False on a way a call of the corpus hands in."
+        ),
+    )
 
 
 class HeldChange(BaseModel):
