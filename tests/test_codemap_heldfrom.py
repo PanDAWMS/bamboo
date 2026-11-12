@@ -630,6 +630,53 @@ def test_a_step_cutting_away_some_of_a_value_s_ways_leaves_them_out_and_falls_ba
     assert held("T2", "other") == {("unknown", "{}", ("[*]", "['flag']"), ())}
 
 
+def _held_through(
+    fragment: MapFragment, sources: dict[str, str], marker: str, name: str
+) -> set[tuple]:
+    (guard,) = [
+        one
+        for one in fragment.guard_froms
+        if one.test_line == _line(BASE, marker, sources) and one.name == name
+    ]
+    return {
+        (
+            one.kind,
+            one.name,
+            tuple(one.steps),
+            tuple(one.paths),
+            tuple((through.call, through.gives) for through in one.through),
+        )
+        for one in guard.sources
+    }
+
+
+FORMATTED = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, user):
+                text = f"killed by {user}"
+                if text == "x":  # T1
+                    self.a = 1  # R1
+        """,
+}
+
+
+def test_an_f_string_holds_its_values_and_literal_parts_through_it_not_a_value_itself(
+    tmp_path: Path,
+) -> None:
+    """An f-string was left to the path carry, which says only that a source or a part of it sits in the value:
+    ``f'killed by {user}'`` was ``user`` itself.  It is read in place now: each ``{}``'s value and each literal
+    part, through ``f''`` (text, a text holding it)."""
+    fragment = _build(tmp_path, FORMATTED, (("extractCommon", "R1"),))
+    assert _held_through(fragment, FORMATTED, "T1", "text") == {
+        ("constant", "'killed by '", (), (), (("f''", "text"),)),
+        ("parameter", "user", (), (), (("f''", "text"),)),
+    }
+
+
 VIEWS = {
     BASE: """\
         class TaskRefinerBase:

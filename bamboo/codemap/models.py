@@ -3339,7 +3339,8 @@ class HeldThrough(BaseModel):
         description=(
             "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
             "as js`` too), else as the call names it (``int``); ``+`` for a ``+`` or ``+=`` "
-            f"({THROUGH_ADDED}): ``job.attemptNr + 1``."
+            f"({THROUGH_ADDED}): ``job.attemptNr + 1``; ``f''`` for an f-string, its values and literal parts "
+            f"({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...)."
         )
     )
     at: str = Field(description="``file:line`` of the call.")

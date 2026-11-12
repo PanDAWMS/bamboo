@@ -219,6 +219,8 @@ _COMPREHENSIONS = {
 _ELEMENT_COMPREHENSIONS = frozenset({"<listcomp>", "<setcomp>", "<genexpr>"})
 #: What a ``+``'s value's ``through`` is called by (:data:`THROUGH_ADDED`).
 _ADD = "+"
+#: What an f-string's value's ``through`` is called by (:data:`THROUGH_TEXT`).
+_FORMATTED = "f''"
 
 
 #: A ``with``'s step: its ``__enter__`` mostly gives the context itself, so a way's paths stay as they are.
@@ -238,7 +240,7 @@ def _step(
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
     (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
     the values it is read as.  An element of a ``+``'s value is an element of one of its sides, the ``+`` left
-    (:func:`_through_added`): ``(ret_head + ret_tail)[0]`` is ``ret_head``'s or ``ret_tail``'s ``[0]``.
+    (:meth:`_Reader._added`): ``(ret_head + ret_tail)[0]`` is ``ret_head``'s or ``ret_tail``'s ``[0]``.
 
     A way whose source sits at parts of the value (*paths*) is cut by the step, as the path carry takes a part: the
     parts under it, with the rest of their steps; none where no part is under it, the source not in the part
@@ -487,10 +489,9 @@ def _added_sides(expr: ast.expr) -> list[ast.expr]:
     return [expr]
 
 
-def _through_added(ways: list[_Way], place: str) -> list[_Way]:
-    """*ways*, of a side of the ``+`` at *place*, as the ``+``'s value's: each through the ``+``
-    (:data:`THROUGH_ADDED`) after its own steps, a stop as it is."""
-    made = _Through(_ADD, place, THROUGH_ADDED)
+def _through(ways: list[_Way], made: _Through) -> list[_Way]:
+    """*ways*, of what an expression *made* stands for is made of -- an operand, a comprehension's element, an
+    f-string's part --, as the expression's value's: each through *made* after its own steps, a stop as it is."""
     return [
         one if one.kind == _STOP else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
         for one in ways
@@ -928,14 +929,11 @@ class _Reader:
             # A new collection of the element's values: the element's ways, through the comprehension.
             element = expr.value if isinstance(expr, ast.DictComp) else expr.elt
             made = _Through(_COMPREHENSIONS[type(expr)], f"{file}:{line}", THROUGH_COMPUTED)
-            return [
-                one
-                if one.kind == _STOP
-                else one._replace(through=(made._replace(steps=len(one.steps)),) + one.through)
-                for one in self.read(element, element, file, func, selves=selves)
-            ]
+            return _through(self.read(element, element, file, func, selves=selves), made)
         if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
             return self._added(_added_sides(expr), at, f"{file}:{line}", file, func, selves=selves)
+        if isinstance(expr, ast.JoinedStr) and expr.values:
+            return self._formatted(expr, at, f"{file}:{line}", file, func, selves=selves)
         found = self._sources(expr, at, file, func)
         empty = _empty_literal(expr)
         if empty:
@@ -983,10 +981,21 @@ class _Reader:
         self, sides: Iterable[ast.expr], at: ast.AST, place: str, file: str, func: ast.AST, selves: _Selves = ()
     ) -> list[_Way]:
         """The ways of the ``+`` at *place* of *sides* (``a + b``; the ``b`` of an ``x += b``), read here, not asked
-        of the carry: each side's, through the ``+`` (:func:`_through_added`) -- a number or a text computed from
+        of the carry: each side's, through the ``+`` (:func:`_through`) -- a number or a text computed from
         them, or a sequence joined of them, whose element is a side's (:func:`_step`).  ``ret_head + ret_tail`` holds
         the rows both hold; ``job.attemptNr + 1`` is computed from ``job.attemptNr`` and ``1``."""
-        return _through_added([one for side in sides for one in self.read(side, at, file, func, selves=selves)], place)
+        made = _Through(_ADD, place, THROUGH_ADDED)
+        return _through([one for side in sides for one in self.read(side, at, file, func, selves=selves)], made)
+
+    def _formatted(
+        self, expr: ast.JoinedStr, at: ast.AST, place: str, file: str, func: ast.AST, selves: _Selves = ()
+    ) -> list[_Way]:
+        """The ways of the f-string *expr* at *place*, read here, not asked of the carry: each part's -- a ``{}``'s
+        value and a literal part, a constant --, through the f-string (:data:`THROUGH_TEXT`, a text holding it).
+        ``f'killed by {user}'`` holds ``user`` and ``'killed by '``, not ``user`` itself."""
+        parts = [one.value if isinstance(one, ast.FormattedValue) else one for one in expr.values]
+        made = _Through(_FORMATTED, place, THROUGH_TEXT)
+        return _through([one for part in parts for one in self.read(part, at, file, func, selves=selves)], made)
 
     def _accumulated(
         self, expr: ast.Name, site: ast.AugAssign, file: str, func: ast.AST, seen: set[int], selves: _Selves = ()
@@ -995,6 +1004,7 @@ class _Reader:
         ``+=`` reaching it adds its own ``b``, each once (``scanSiteList += ...`` in a loop)."""
         seen.add(id(site))
         place = f"{file}:{site.lineno}"
+        made = _Through(_ADD, place, THROUGH_ADDED)
         found = self._added((site.value,), site, place, file, func, selves=selves)
         for before in pathcond.held_at(func, expr.id, site).sites:  # type: ignore[arg-type]
             if id(before) in seen:
@@ -1007,7 +1017,7 @@ class _Reader:
             ):
                 found += self._accumulated(expr, before, file, func, seen, selves=selves)
                 continue
-            found += _through_added(self._site_ways(expr, site, before, file, func, site, selves=selves), place)
+            found += _through(self._site_ways(expr, site, before, file, func, site, selves=selves), made)
         return found
 
     def _returned_field(
