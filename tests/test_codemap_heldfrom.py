@@ -927,7 +927,8 @@ def test_an_endpoint_s_parameter_is_also_what_the_corpus_s_client_sends_its_rout
     was a stop.  The corpus's client sends to the route (``f"{api_url_ssl_v1}/job/kill"``): the request's element
     under the parameter's name is read at the send, through ``HttpClient.post`` (decoded), and where the request
     may lack the key -- ``code`` is put under ``if code:`` -- the parameter's default, which the server binds then.
-    The callers outside the corpus stay a stop."""
+    The callers outside the corpus stay a stop.  Both ways are marked sent, the send last on their route; the ways of
+    ``Client.kill_jobs``' ``code``, from a call of the corpus, are not."""
     fragment = _build(tmp_path, SENT, (("kill", "R1"),), base=API)
     send = f"{CLIENT}:{_line(CLIENT, 'P1', SENT)}"
 
@@ -946,16 +947,18 @@ def test_an_endpoint_s_parameter_is_also_what_the_corpus_s_client_sends_its_rout
             one.name,
             tuple((call.call, call.gives) for call in one.through),
             tuple(one.route),
+            one.sent,
         )
         for one in code.sources
     } == {
-        ("parameter", "code", (("HttpClient.post", "decoded"),), (send,)),
-        ("constant", "None", (), (send,)),
+        ("parameter", "code", (("HttpClient.post", "decoded"),), (send,), True),
+        ("constant", "None", (), (send,), True),
     }
     assert [one.kind for one in code.stops] == ["no_caller", "missed"]
     assert {
-        (one.kind, one.name) for one in record(f"{CLIENT}::kill_jobs", "code").sources
-    } == {("constant", "10")}
+        (one.kind, one.name, one.sent)
+        for one in record(f"{CLIENT}::kill_jobs", "code").sources
+    } == {("constant", "10", False)}
 
 
 CHOSEN = {

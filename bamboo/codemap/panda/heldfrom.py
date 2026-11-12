@@ -167,6 +167,8 @@ class _Way(NamedTuple):
     #: ``file:line`` of each binding on the way that was one of several reaching its read, each once
     #: (:attr:`HeldSource.chosen`, :func:`_chosen`).
     chosen: tuple[str, ...] = ()
+    #: What the corpus's client sends an endpoint's parameter (:attr:`HeldSource.sent`, :meth:`_Reader._sent`).
+    sent: bool = False
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -2429,7 +2431,7 @@ class _Reader:
         entry, a put into it (``data["code"] = code`` under ``if code:``) --, through the client's method
         (:data:`endpoints.SENDS`: ``post`` decoded, ``get`` converted, ``post_files`` unknown); and where the request
         may lack the key, the parameter's default, which the server binds then.  Each with the send first on its
-        route.  ``Client.kill_jobs`` posts ``{"job_ids": job_ids}`` and puts ``code`` under ``if code:``:
+        route, and sent.  ``Client.kill_jobs`` posts ``{"job_ids": job_ids}`` and puts ``code`` under ``if code:``:
         ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, and ``None``.
         The callers outside the corpus stay a stop (``no_caller``)."""
         from bamboo.codemap.panda import endpoints
@@ -2454,10 +2456,14 @@ class _Reader:
                 ways = self._safely(data, *_where_read(data, site.call, site.file, site.func, target.file, target.func))
                 made = _Through(f"{endpoints.HTTP_CLIENT_CLASS}.{method}", here, endpoints.SENDS[method])
                 found += [
-                    one._replace(route=(here,) + one.route) for one in _through(_taken(ways, f"[{name!r}]"), made)
+                    one._replace(route=(here,) + one.route, sent=True)
+                    for one in _through(_taken(ways, f"[{name!r}]"), made)
                 ]
             if not always and default is not None:
-                found += [one._replace(route=(here,) + one.route) for one in self._safely(default, default, file, func)]
+                found += [
+                    one._replace(route=(here,) + one.route, sent=True)
+                    for one in self._safely(default, default, file, func)
+                ]
         return found
 
     def _client_sends(self) -> list[tuple[CallSite, Target, str, str, ast.expr]]:
@@ -2590,6 +2596,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 route=route,
                 changes=[_change_said(change) for change in one.changes],
                 made_empty=one.made_empty,
+                sent=one.sent,
             ),
         )
         if one.end_file and one.line is not None and f"{one.end_file}:{one.line}" not in held.at:
