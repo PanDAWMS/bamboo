@@ -175,8 +175,14 @@ TEMPLATES: dict[str, str] = {
     "way-end": "{end} ({why}){at}{returned}{route}{via}{changes}{split}",
     "told-apart-by-an-if": (
         ", the constants {call} hands told apart by the if at {ifs:join=, } ({guards:rjoin=, }), read by the map's "
-        "records (its run not asked): its terms {terms:join=; }"
+        "records ({asked}): its terms {terms:join=; }"
     ),
+    # what a split says of its caller's run (Split.asked): not asked, or what Q5's ask of it answered
+    "split-run-not-asked": "its run not asked",
+    "split-run-no-log": "its caller's run not asked which binding ran (Q5): no log of it to hand",
+    "split-run-unexamined": "its caller's run asked which binding ran (Q5), not answered",
+    "split-run-none-shown": "its caller's run asked which binding ran (Q5): it shows none",
+    "split-run-several-shown": "its caller's run asked which binding ran (Q5): it shows more than one",
     "way-end-at": " at {at}",
     "way-end-at-handler": " at {at}, in the except handler at {handler} (S3: which exception)",
     "way-end-at-caught": " at {at}, read off the exception the except handler at {handler} caught (K: its run's traceback)",

@@ -11134,11 +11134,12 @@ class Gen:
 
 
 def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
-    # add_main 127 (S2's (a)): ignoreTmpError is False at 130 and True at 134, both handed at 136, whose caller's run
-    # is not asked; the if they sit apart in is read by the map's records -- timeNow a clock (b), modTime from the
-    # pop -- and the stop goes down to its first term that does not end.  The guard both bindings share ('one') is
-    # not read.  No record at the if: it stops there.  Not read where a constant is bound in a callee it came back
-    # from, or where another way is left beside the constants.
+    # add_main 127 (S2's (a)): ignoreTmpError is False at 130 and True at 134, both handed at 136.  Their caller's
+    # run is asked which binding ran (Q5); where it does not tell, the if they sit apart in is read by the map's
+    # records -- timeNow a clock (b), modTime from the pop -- the stop goes down to its first term that does not end,
+    # and the split says what the run answered.  The guard both bindings share ('one') is not read.  No record at the
+    # if: it stops there.  Not read where a constant is bound in a callee it came back from, or where another way is
+    # left beside the constants.
     (_corpus(tmp_path) / "pandaserver" / "g10.py").write_text(_GEN10)
     out = _ok(_run(tmp_path, """
         import json
@@ -11159,7 +11160,7 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
                   N(owner=f"{g}::run", test_line=10, name="one", stops=[], sources=[src("call", "self.reports.pop", 9)])]
         got = {}
 
-        def walk(name, sources, guards, shown=None, no_log=False):
+        def walk(name, sources, guards, shown=None, no_log=False, answer="none-shown", ask=True):
             mapdump._FRAGMENT[:] = [N(guard_froms=guards, runnables=[], field_froms=[], entered_froms=[],
                                       parameter_froms=[N(owner=INIT, parameter="ignore", line=25, stops=[], sources=sources)])]
             SR._calls_in.cache_clear()
@@ -11173,25 +11174,31 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
                 R._prints_of = lambda owner, lines: None
                 r.files_of = lambda owner, today, lines: []
             else:
-                # Q5: the caller's run asked which binding ran -- here it shows none, or the one at *shown*
-                r._binding_shown = lambda consts, window, machine: (
+                # Q5: the caller's run asked which binding ran -- here it shows the one at *shown*, or tells none
+                # (*answer*)
+                def binding_shown(consts, window, machine):
                     asked.append([w.bound_at for w in consts])
-                    or next((w for w in consts if w.bound_at == shown), None))
+                    way = next((w for w in consts if w.bound_at == shown), None)
+                    return way, "" if way is not None else answer
+                r._binding_shown = binding_shown
             t = SR.Term("g", "self.ignore", (SR.End("self.ignore", SR.STOP, SR.PARAMETER, f"{g}:26", param="ignore", of=INIT),))
             try:
-                t = r._with_callers(t, "the arm's function", f"{g}::Gen.report", N(machine="m1"), ("a", "b"))
+                t = r._with_callers(t, "the arm's function", f"{g}::Gen.report", N(machine="m1"), ("a", "b"), ask=ask)
             finally:
                 R._prints_of = prints_of
             e = t.ends[0]
             s = e.split
             got[name] = {"end": [e.end, e.why, e.at, list(e.route)], "lines": r.lines, "stop": T.text(rerun._first_stop(t)),
-                         "said": T.text(rerun._way_said(e)), "asked": asked,
+                         "said": T.text(rerun._way_said(e)), "asked": asked, "split_asked": None if s is None else s.asked,
                          "split": None if s is None else [s.call, s.fn, list(s.ifs), list(s.guards),
                                                           [[u.term, [[x.end, x.why, x.at] for x in u.ends]] for u in s.terms]]}
 
         walk("shown", flag, tested, shown=18)
         walk("record", flag, tested)
         walk("no log", flag, tested, no_log=True)
+        walk("unanswered", flag, tested, answer="unexamined")
+        walk("several", flag, tested, answer="several-shown")
+        walk("not asked", flag, tested, ask=False)
         # a part of each constant: no literal left (Q2), Q5 not reached
         part = [src("constant", "False", 16, [f"{g}:19"]), src("constant", "True", 18, [f"{g}:19"])]
         for s in part:
@@ -11224,9 +11231,19 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
     assert any(f"told apart by the if at {g}:15 (run; the bindings at {g}:16, {g}:18)" in x for x in got["record"]["lines"])
     assert got["record"]["stop"] == (f"it stops at 'modTime' (in {test!r}), in the if at {g}:15 that tells apart the "
                                      f"constants {g}:19 hands")
-    assert got["record"]["said"].startswith(
-        f"stop (parameter-unchosen), the constants {g}:19 hands told apart by the if at {g}:15 ({test!r}), read by the "
-        "map's records (its run not asked): its terms modTime -> stop (call) at")
+    # the split says what the caller's run said of which binding ran (Q5), or that it was not asked
+    said = (f"stop (parameter-unchosen), the constants {g}:19 hands told apart by the if at {g}:15 ({test!r}), read by the "
+            "map's records ({}): its terms modTime -> stop (call) at")
+    for name, asked, text in (
+            ("record", "none-shown", "its caller's run asked which binding ran (Q5): it shows none"),
+            ("unanswered", "unexamined", "its caller's run asked which binding ran (Q5), not answered"),
+            ("several", "several-shown", "its caller's run asked which binding ran (Q5): it shows more than one"),
+            ("no log", "no-log", "its caller's run not asked which binding ran (Q5): no log of it to hand"),
+            ("not asked", "", "its run not asked")):
+        assert got[name]["split_asked"] == asked and got[name]["split"] == got["record"]["split"], name
+        assert got[name]["said"].startswith(said.format(text)), (name, got[name]["said"])
+        assert any(x.strip().endswith(f"read by the map's records: {text}") for x in got[name]["lines"]), name
+    assert got["not asked"]["asked"] == [] and not any("Q5" in x for x in got["not asked"]["lines"])
     assert got["no record"]["split"][4] == [[test, [["stop", "no-record", f"{g}:15"]]]]
     assert got["no record"]["stop"].startswith(f"it stops at {test!r} (in {test!r}), in the if at {g}:15 ")
     for name in ("in a callee", "another way"):

@@ -2078,6 +2078,11 @@ def _a_change(c: SR.Changed) -> T.Said:
     return T.Said("a-change", {"at": c.at, "key": c.key, "made": T.Said("made-by", {"via": list(c.made_by)}) if c.made_by else ""})
 
 
+def _split_asked(asked: str) -> T.Said:
+    """What a split says of its caller's run (``SR.Split.asked``): not asked, or what Q5's ask of it answered."""
+    return T.Said(f"split-run-{asked or 'not-asked'}", {})
+
+
 def _way_said(e: SR.End) -> T.Said:
     """One way's end as result.json keeps it: each place a ``file:line`` as it is, its words in the templates (G3);
     each change on it by its place, key and the calls it was made through (G4); the one S4c chose, with its site read
@@ -2110,7 +2115,7 @@ def _way_said(e: SR.End) -> T.Said:
           else T.Said("way-end-at", {"at": e.at}) if e.at else "")
     s = e.split
     split = T.Said("told-apart-by-an-if", {
-        "call": s.call, "ifs": list(s.ifs), "guards": list(s.guards),
+        "call": s.call, "ifs": list(s.ifs), "guards": list(s.guards), "asked": _split_asked(s.asked),
         "terms": [T.Said("term-ends", {"term": u.term, "ends": [_way_said(x) for x in u.ends]}) for u in s.terms] or ["none"],
     }) if s is not None else ""
     return T.Said("way-end", {"end": e.end, "why": e.why,
@@ -3971,21 +3976,23 @@ class Rerun:
                 self.say(f"    {param}: {len(ways)} way(s) end at {len(each)} place(s), each said by its first route")
             return tuple(each.values())
         # Q5: every way left a constant the one call hands -- which binding ran, by its caller's own run
-        if q5 and (chosen := self._binding_shown(consts, window, getattr(run, "machine", None))):
+        chosen, asked = self._binding_shown(consts, window, getattr(run, "machine", None)) if q5 else (None, SR.NOT_ASKED)
+        if chosen is not None:
             crel = chosen.route[0].rpartition(":")[0]
             return (SR.End(term, SR.CONSTANT, chosen.value or chosen.why, f"{crel}:{chosen.bound_at}", route=chosen.route),)
         # S2's (a): not told by it -- the if their bindings sit apart in
-        split = self._split(consts) if one_call and not rest else None
+        split = self._split(consts, asked) if one_call and not rest else None
         return (SR.End(term, SR.STOP, "parameter-unchosen" if consts else SR.PARAMETER, "", param=param, split=split),)
 
-    def _split(self, consts: list[SR.Way]) -> SR.Split | None:
+    def _split(self, consts: list[SR.Way], asked: str = SR.NOT_ASKED) -> SR.Split | None:
         """S2's (a) (out/gm/s4-design.md rule 6): the constants *consts*, all handed by one call, told apart by the
         ``if`` statements their bindings sit in different arms of -- each binding's guards (``pathcond.arm_condition``,
         read at their ifs as H3 reads an arm's) less those every binding shares, an ``if`` read once -- and each term of
-        those tests with its ends, by the map's records alone (``SR.terms``): the caller's run is not asked, so no field
-        choice, change reading or entry is read there; a stop in an ``except`` handler is named (S3's).  None where a
-        binding is not in the caller (bound in a callee the value came back from), its guards' ifs are not found, or no
-        guard tells the bindings apart."""
+        those tests with its ends, by the map's records alone (``SR.terms``): the caller's run is not asked for them, so
+        no field choice, change reading or entry is read there; a stop in an ``except`` handler is named (S3's).  *asked*:
+        what the caller's run said of which binding ran (Q5, ``SR.Split.asked``).  None where a binding is not in the
+        caller (bound in a callee the value came back from), its guards' ifs are not found, or no guard tells the
+        bindings apart."""
         call = consts[0].route[0]
         rel, _, ln = call.rpartition(":")
         if any(not w.bound_at for w in consts) or not ln.isdigit():
@@ -4017,7 +4024,7 @@ class Rerun:
         pairs = list(apart.values())
         ifs_at = tuple(dict.fromkeys(f"{rel}:{n}" for lines in apart for n in lines))
         self.say(f"    told apart by the if at {', '.join(ifs_at)} ({node.name}; the bindings at "
-                 + ", ".join(f"{rel}:{w.bound_at}" for w in consts) + "), read by the map's records: its run not asked")
+                 + ", ".join(f"{rel}:{w.bound_at}" for w in consts) + f"), read by the map's records: {T.text(_split_asked(asked))}")
         # a way ending at a parameter is read up its callers by the map's records too, no run asked (Q2's (b))
         base = SR.terms(fn, owner, pairs)
         self._say_cuts("    ")
@@ -4025,7 +4032,7 @@ class Rerun:
                  for t in (self._with_callers(u, None, owner, None, None, ask=False) for u in base)]
         for t in terms:
             self.say(f"      term {t.term!r} of {t.guard!r}: " + ", ".join(_way_text(x) for x in t.ends))
-        return SR.Split(call, owner, ifs_at, tuple(g for g, _ in pairs), tuple(terms))
+        return SR.Split(call, owner, ifs_at, tuple(g for g, _ in pairs), tuple(terms), asked)
 
     def _entry_value(self, fn: R.Function, run: Any, param: str) -> str | None:
         """What *run* printed of *fn*'s parameter *param* before any statement binds it again (``killJob`` prints
@@ -4076,16 +4083,18 @@ class Rerun:
             return None
         return crel, node, lines
 
-    def _binding_shown(self, consts: list[SR.Way], window: tuple[str, str] | None, machine: str | None) -> SR.Way | None:
+    def _binding_shown(self, consts: list[SR.Way], window: tuple[str, str] | None,
+                       machine: str | None) -> tuple[SR.Way | None, str]:
         """Q5 (out/gm/qk-design.md): which of the constants *consts*, all handed by one call and bound apart in its
         caller (add_main 130's False and 134's True, handed at 136), the caller's own run shows bound: H2's judgement
         of their binding lines as candidates on the key's runs of the caller's logs over *window* on *machine*, its
-        marks whole (as :meth:`_call_shown` asks) -- the one positive, or None.  A loop around them that takes one
-        element a turn prints every turn under one mark (add_main's ``<pid=...>``): the element the key's records print
-        the key as is bound to it (:func:`which_ran.key_env`), so a row printed for another element's turn alone shows
-        nothing of the key's (:func:`which_ran.other_elements`)."""
+        marks whole (as :meth:`_call_shown` asks) -- the one positive, or None with the kind of the answer that did not
+        tell it (``SR.Q5_ANSWERS``).  A loop around them that takes one element a turn prints every turn under one mark
+        (add_main's ``<pid=...>``): the element the key's records print the key as is bound to it
+        (:func:`which_ran.key_env`), so a row printed for another element's turn alone shows nothing of the key's
+        (:func:`which_ran.other_elements`)."""
         if (at := self._bindings_in_caller(consts)) is None:
-            return None
+            return None, SR.NOT_ASKED
         call = consts[0].route[0]
         crel, node, lines = at
         cowner = f"{crel}::{node.name}"
@@ -4094,7 +4103,7 @@ class Rerun:
         if not files or not self.logs.names(files):
             self.say(f"    Q5: {call} ({node.name}): no log of it to hand ({', '.join(files) or 'none'}): its caller's "
                      "run not asked")
-            return None
+            return None, "no-log"
         asking = W.Asking(window, machine, T.Said("for-a-binding-a-call-hands", {"site": call}))
         runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([cowner]), whole=True)
         self._keep_unanswered(unanswered)
@@ -4104,12 +4113,14 @@ class Rerun:
         for v in j.verdicts:
             self.say(f"    {call}: {v.describe()}")
         positive = [v.line for v in j.verdicts if v.kind == "positive"]
-        if len(positive) != 1:
-            return None
+        if len(positive) > 1:
+            return None, "several-shown"
+        if not positive:
+            return None, "unexamined" if any(v.kind == "unexamined" for v in j.verdicts) else "none-shown"
         chosen = next(w for w in consts if w.bound_at == positive[0])
         self.say(f"    Q5: {call} handed {chosen.value or chosen.why}, bound at {crel}:{chosen.bound_at}: its caller's run "
                  f"shows it" + (f" (the key's turn read by {', '.join(sorted(env.values))})" if env is not None else ""))
-        return chosen
+        return chosen, SR.NOT_ASKED
 
     def _entry_end(self, fn: R.Function, owner: str, line: int, run: Any, window: tuple[str, str] | None, terms: list[SR.Term]) -> SR.End:
         """Where the arm's function was entered from, read on every arm (S, gm-design.md): a function no corpus call

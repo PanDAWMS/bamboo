@@ -380,13 +380,23 @@ class Split:
     caller's run cannot tell apart, told apart by the ``if`` statements their bindings sit in different arms of --
     *ifs* each one's ``file:line``, in *fn* (``file::name``), the call at *call*; *guards* as the bindings' path
     conditions spell them -- and each term of those tests with its ends, by the map's records alone: the caller's run
-    is not asked, so no field choice, change reading (S4b, S4c) or entry is read there."""
+    is not asked for them, so no field choice, change reading (S4b, S4c) or entry is read there.  *asked*: what the
+    caller's run said of which binding ran (Q5) -- :data:`NOT_ASKED`, or the kind of the answer that did not tell it
+    (:data:`Q5_ANSWERS`)."""
 
     call: str
     fn: str
     ifs: tuple[str, ...]
     guards: tuple[str, ...] = ()
     terms: tuple[Term, ...] = ()
+    asked: str = ""
+
+
+#: Split.asked: Q5 not reached (another way left, the walk not asking, a binding not in the caller)
+NOT_ASKED = ""
+#: Split.asked, Q5 reached and not told: no log of the caller to hand; asked and not answered (a binding unexamined);
+#: answered, none shown; answered, two or more shown
+Q5_ANSWERS = ("no-log", "unexamined", "none-shown", "several-shown")
 
 
 @dataclass(frozen=True)
