@@ -3137,8 +3137,8 @@ KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
 KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
 #: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
-#: a call builds of a corpus class (``JobSpec()``), a module's name, a call neither placed nor gone through, a fetch
-#: whose rows no statement of the function reads.
+#: a call builds of a corpus class (``JobSpec()``) or a handler catches (``except FileRegistrationError as e``), a
+#: module's name, a call neither placed nor gone through, a fetch whose rows no statement of the function reads.
 KEY_OBJECT = "object"
 KEY_GLOBAL = "global"
 KEY_CALL = "call"
@@ -3160,7 +3160,8 @@ HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE
 #: (``json.dumps``), a value computed from it that holds none of it (``len``, ``math.ceil``), one of its elements
 #: (``max``), what tells only its class or identity (``type``), not said (``random.choice``).  A builtin
 #: :class:`~bamboo.codemap.callfacts.Function` says another word of is said with that word (``enumerate``'s
-#: ``numbered``).
+#: ``numbered``).  A ``+`` (or ``+=``) of the value and others is said ``added``: a number or a text computed from
+#: them, or a sequence joined of them -- an element of its value is one of a side's, read without the ``+``.
 THROUGH_DECODED = "decoded"
 THROUGH_COPY = "copy"
 THROUGH_CONVERTED = "converted"
@@ -3169,6 +3170,7 @@ THROUGH_COMPUTED = "computed"
 THROUGH_ONE = "one"
 THROUGH_TELLS = "tells"
 THROUGH_UNKNOWN = "unknown"
+THROUGH_ADDED = "added"
 #: Why a row-naming term's values were not read (:attr:`KeyFrom.unread`); the last, a flush call's term the method
 #: fills with values no argument of the call brings -- its own rows, a field of its own ``self``.
 KEY_NO_MAP = "no bind map"
@@ -3231,7 +3233,14 @@ class KeySource(BaseModel):
             "as written."
         ),
     )
-    site_owner: str = Field(default="", description="``rows`` / ``sequence``: the statement's owner.")
+    site_owner: str = Field(
+        default="",
+        description=(
+            "``rows`` / ``sequence``: the statement's owner.  On a :class:`HeldSource`, ``self_field``: the class whose "
+            "method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
+            ":class:`FieldFrom` of a field of it is found; empty where the ``self`` is no method's."
+        ),
+    )
     site_line: Optional[int] = Field(
         default=None, description="``rows`` / ``sequence``: the line the statement runs on."
     )
@@ -3329,14 +3338,16 @@ class HeldThrough(BaseModel):
     call: str = Field(
         description=(
             "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
-            "as js`` too), else as the call names it (``int``)."
+            "as js`` too), else as the call names it (``int``); ``+`` for a ``+`` or ``+=`` "
+            f"({THROUGH_ADDED}): ``job.attemptNr + 1``."
         )
     )
     at: str = Field(description="``file:line`` of the call.")
     gives: str = Field(
         description=(
             f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
-            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, a builtin's other word, {THROUGH_UNKNOWN}."
+            f"{THROUGH_COMPUTED}, {THROUGH_ONE}, {THROUGH_TELLS}, {THROUGH_ADDED}, a builtin's other word, "
+            f"{THROUGH_UNKNOWN}."
         )
     )
     hooks: list[str] = Field(
@@ -3365,8 +3376,13 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: the part of what the way ends at that the value is, each step "
             "as applied -- ``['tgtNumEventsPerJob']`` of the decoded task parameters, ``.taskSpec``, ``[*]`` an "
-            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value.  "
-            "Where each call of *through* comes among them is its *after_steps*."
+            "item not named; empty for the whole.  *paths* says the other thing, where the source sits in the value "
+            "the steps took, never ``()``: a source that is the value and sits at parts of it too is two sources, the "
+            "whole with no *paths* and the parts (``x = obj; x.child = obj``: ``x`` is ``obj``, and holds it at "
+            "``.child``).  Where the reader placed it -- a literal's element, a sequence joined -- the source itself "
+            "sits there (``[taskSpec.site]`` holds ``taskSpec`` ``['.site']`` at ``[0]``); where the path carry says "
+            "so (:attr:`KeySource.paths`), the source or a part of it.  Where each call of *through* comes among them "
+            "is its *after_steps*."
         ),
     )
     through: list[HeldThrough] = Field(
@@ -3412,6 +3428,27 @@ class HeldSource(KeySource):
         default_factory=list,
         description="Each such write the changes after the read were not read for, and why: :data:`KEY_STOPS`.",
     )
+    made_empty: str = Field(
+        default="",
+        description=(
+            "Where the way ends at a container made empty -- ``[]``, ``{}``, ``dict()``, ``WeightedLists(lock)`` "
+            "(:data:`bamboo.codemap.callfacts.LIBRARY_CONTAINERS`) --, what it holds: ``collection`` or ``mapping``.  "
+            "What it holds is what *changes* put: a step taken past the end reads on into their *value* "
+            "(:func:`bamboo.codemap.panda.heldfrom.held_elements`), as the map does where the way takes it.  Empty for "
+            "any other end."
+        ),
+    )
+    at: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the way ends, ``file:line`` of its end, each once -- the source's own statement, where its value "
+            "is bound or made (``pandaserver/daemons/scripts/add_main.py:130`` for ``ignoreTmpError = False``); "
+            "several where ways ending at one source at several lines are this one.  The tests on the way to each "
+            "have GuardFroms (:attr:`GuardFrom.calls`).  A parameter's default a call leaves it to is where it is "
+            "written, in the callee (``pandaserver/taskbuffer/TaskBuffer.py:1015`` for ``use_json: bool = False``).  "
+            "Empty where the way ends at a parameter."
+        ),
+    )
 
 
 class HeldChange(BaseModel):
@@ -3436,7 +3473,11 @@ class HeldChange(BaseModel):
     )
     value: list[HeldSource] = Field(
         default_factory=list,
-        description="What a store stores, read as a way is; empty for the other kinds and a computed store (``+=``).",
+        description=(
+            "What a store stores or a method puts, read as a way is -- ``xs.append(v)``'s ``v``, ``xs.extend(vs)``'s "
+            "elements (``vs`` with ``[*]``) --; empty for the other kinds, a computed store (``+=``) and a put whose "
+            "value is not read (a ``*`` argument, a merge, several)."
+        ),
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
 
@@ -4055,6 +4096,7 @@ class MapFragment(BaseModel):
     runnables: list["Runnable"] = Field(default_factory=list)
     entered_froms: list["EnteredFrom"] = Field(default_factory=list)
     write_froms: list["WriteFrom"] = Field(default_factory=list)
+    field_froms: list["FieldFrom"] = Field(default_factory=list)
     tables: list[TableRecord] = Field(default_factory=list)
     endpoints: list[Endpoint] = Field(default_factory=list)
     handlers: list[Endpoint] = Field(
@@ -5865,6 +5907,7 @@ KEY_STOPS: dict[str, str] = {
     "not_found": "{name} is not spelled in the statement at {at}",
     "missed": "a call of {name} may not be placed: {what}",
     "unbound": "{name} is read at {at} before a binding of it",
+    "unread_binding": "{name} is read at {at} where {what} may bind it, which is not read",
     "cycle": "{name} is reached again on its own way at {at}",
     "open": "the call at {at} may also land somewhere not read: {what}",
     "generator": "the call at {at} makes a generator of {name}, not what {name} returns",
@@ -5873,6 +5916,9 @@ KEY_STOPS: dict[str, str] = {
     "unnamed": "between the read and {name}, {at} holds the object by no name: {what}",
     "write_first": "{name} runs only before the read in {at}",
     "no_bind": "{name} is filled by no assignment of the bind map the write at {at} runs with",
+    "receiver": "the call at {at} runs {name} on an object it does not name",
+    "computed": "{name} may be set at {at} by a name computed there: {what}",
+    "method": "{name} is a method or property the class defines at {at}",
 }
 
 
@@ -5948,7 +5994,12 @@ class GuardFrom(BaseModel):
         default_factory=list,
         description=(
             "The lines of the calls the test is on the way to that enter a function holding arms: the sites of an "
-            ":class:`EnteredFrom` whose caller is this one's *owner*."
+            ":class:`EnteredFrom` whose caller is this one's *owner*; and of the places it is on the way to where a "
+            "way's object may be changed (a :class:`HeldChange`'s first *via*, else its *at*, on a GuardFrom's, a "
+            "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
+            "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
+            "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
+            "``ignoreTmpError = False``.  Not lines of calls only, then: the lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
@@ -5978,6 +6029,75 @@ class ParameterFrom(BaseModel):
 WRITE_OBJECT = "object"
 WRITE_VALUE = "value"
 WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
+
+
+#: How a :class:`FieldBinding` binds the field: ``self.f = v`` (with a tuple target at any depth), ``self.f: T = v``,
+#: ``self.f += v``, ``setattr(self, "f", v)`` -- or ``setattr(self, key, value)`` in a ``for key, value in
+#: P.items()`` where a caller hands ``f`` among P's keywords -- ``f = v`` in the class's body.
+FIELD_ASSIGN = "assign"
+FIELD_ANNOTATED = "annotated"
+FIELD_AUGMENTED = "augmented"
+FIELD_SETATTR = "setattr"
+FIELD_CLASS = "class"
+FIELD_BINDS = (FIELD_ASSIGN, FIELD_ANNOTATED, FIELD_AUGMENTED, FIELD_SETATTR, FIELD_CLASS)
+
+
+class FieldBinding(BaseModel):
+    """One statement of a :class:`FieldFrom`'s classes binding the field, with its value read as a
+    :class:`GuardFrom` reads a name there.
+
+    ``setattr(self, key, value)`` in ``AdderPluginBase.__init__``'s ``for key, value in params.items()``, ``params``
+    its parameter, binds a field each call hands under the field's name: the value is read at those calls -- the
+    keywords ``AdderGen.execute_plugin`` 256 hands ``AdderAtlasPlugin``'s ``**params``, which its ``__init__`` hands
+    on -- each way with the calls on its *route*.  A field no caller names is not bound there."""
+
+    at: str = Field(description="``file:line`` of the statement.")
+    owner: str = Field(description="The method it is in (``file::name``), or the class for its body.")
+    how: str = Field(description=f"How: one of {', '.join(FIELD_BINDS)}; ``augmented``'s ways are the operand's.")
+    sources: list[HeldSource] = Field(default_factory=list)
+    stops: list[KeyStop] = Field(default_factory=list)
+
+
+class FieldFrom(BaseModel):
+    """What a field of an object of a class may hold, read in the class: the next link of a way that ends at
+    ``self.<field>`` or at an object a corpus class builds -- or a handler catches -- with the field as its first step
+    (``site_owner`` and the field), as a way ending at a parameter reads on in its :class:`ParameterFrom`.
+
+    ``self.add_result.is_succeeded()`` at ``AdderGen.process_job_report`` 440 reads ``self.add_result``, bound in
+    the class at ``execute_plugin`` 265 to ``self.adder_plugin.result``: a way ending at ``self.adder_plugin``, built
+    at 256 by ``AdderAtlasPlugin``, whose ``result`` is bound at ``AdderPluginBase.__init__`` 45 to an
+    ``AdderResult``; ``AdderAtlasPlugin.register_files`` 789 calls ``self.result.set_fatal(...)``, which stores
+    ``status_code`` -- a change of the ``result``'s FieldFrom.
+
+    The classes are the class's corpus bases in its order and its corpus subclasses (``self`` may be any of them):
+    each binding says its method.  Not said: which binding or change a run took, nor whether before or after the
+    read -- they are read in every method, in no order; a store of the field from outside the classes' methods
+    (``x.f = v`` on another holder) is not read, only named (a stop ``outside``, by the attribute's name: an upper
+    bound).  :class:`SetFrom` and the changes after a read (:attr:`HeldSource.after`) read on through
+    ParameterFroms, not these.
+    """
+
+    owner: str = Field(description="The class, ``file::Class``.")
+    field: str
+    bindings: list[FieldBinding] = Field(default_factory=list)
+    changes: list[HeldChange] = Field(
+        default_factory=list,
+        description=(
+            "Each place the object the field holds may be changed in place in a method of the classes -- through "
+            "``self.<field>`` or a name bound to it there -- as :class:`HeldSource` *changes* says them (*via* from "
+            "that method); in no order."
+        ),
+    )
+    stops: list[KeyStop] = Field(
+        default_factory=list,
+        description=(
+            "``computed``: a method may set it by a name it computes (``setattr(self, name, v)`` -- but over a "
+            "parameter's keywords every caller names, :class:`FieldBinding` -- or ``self.__dict__`` changed in "
+            "place -- an item stored, a dict method, handed on; a read sets nothing); "
+            "``method``: the classes define it as a method or property; ``outside``: the places a field of its name "
+            "is stored on another object than a method's ``self``."
+        ),
+    )
 
 
 class WriteFrom(BaseModel):

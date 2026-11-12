@@ -934,6 +934,46 @@ def test_a_spread_argument_leaves_what_it_could_fill_unsaid(tmp_path):
     assert calls_mod.bind(call, target) == {"a": None, "b": None}
 
 
+def test_a_kwargs_parameter_holds_the_keywords_no_named_parameter_takes(tmp_path):
+    """``self.adder_plugin_class(self.job, taskBuffer=..., logger=...)`` into ``__init__(self, job, **params)``:
+    ``params`` holds a dict of the keywords, its keys constant, one node per call and function, at the call and in it;
+    empty where there are none, unknown where the call spreads a ``**``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def g(a, *, b=1, **rest):
+    return rest
+
+def named(x):
+    g(1, b=2, c=x, d="y")
+
+def plain():
+    g(2)
+
+def spread(more):
+    g(3, **more)
+''',
+    )
+    calls = _calls(roots)
+
+    def bound(owner):
+        func = _function(calls, "m", owner)
+        call = _call_in(func, "g")
+        (target,) = calls.callees("pkg/m.py", func, call).targets
+        return call, target, calls_mod.bind(call, target)
+
+    call, target, got = bound("named")
+    rest = got["rest"]
+    assert isinstance(rest, ast.Dict)
+    assert ast.unparse(rest) == "{'c': x, 'd': 'y'}"
+    assert (ast.unparse(got["a"]), ast.unparse(got["b"])) == ("1", "2")
+    assert rest.parent is call  # type: ignore[attr-defined]
+    assert (rest.lineno, rest.col_offset) == (call.lineno, call.col_offset)
+    assert calls_mod.bind(call, target)["rest"] is rest
+    assert ast.unparse(bound("plain")[2]["rest"]) == "{}"
+    assert bound("spread")[2]["rest"] is None
+
+
 def test_what_a_function_returns_is_every_return_in_its_own_body(tmp_path):
     roots = _tree(
         tmp_path,
@@ -3476,9 +3516,127 @@ def unbound(factory: FactoryBase):
     assert landed("run", "impl.doAction") == plugins
     assert landed("build", "factory.requireImpl('atlas').doAction") == plugins
     assert landed("build", "broker.requireImpl('atlas').doAction") == plugins
-    # A parameter nothing binds names no class, as before.
+    # A parameter nothing here binds is each class the corpus binds it to: PluginBase.
     assert landed("unbound", "factory.requireImpl") == ["FactoryBase"]
-    assert landed("unbound", "factory.requireImpl('atlas').doAction") == []
+    assert landed("unbound", "factory.requireImpl('atlas').doAction") == plugins
+
+
+_GENERIC_HOLDER = '''\
+from typing import Generic, Protocol, TypeVar
+
+
+class _Plugin(Protocol):
+    def refresh(self) -> None: ...
+
+
+T = TypeVar("T", bound=_Plugin)
+
+
+class FactoryBase(Generic[T]):
+    def __init__(self) -> None:
+        self.implMap: dict[str, dict[str, T]] = {}
+
+    def getImpl(self, vo: str, sub: str) -> T | None:
+        voImplMap = self.implMap[vo]
+        tmpImpl = voImplMap[sub]
+        tmpImpl.refresh()
+        return tmpImpl
+
+    def requireImpl(self, vo: str, sub: str) -> T:
+        impl = self.getImpl(vo, sub)
+        impl.refresh()
+        return impl
+'''
+
+_REFRESHED_PLUGINS = '''\
+class BrokerBase:
+    def refresh(self) -> None:
+        pass
+
+
+class AtlasBroker(BrokerBase):
+    def refresh(self) -> None:
+        pass
+
+
+class DogBase:
+    def refresh(self) -> None:
+        pass
+
+
+class Unrelated:
+    def refresh(self) -> None:
+        pass
+'''
+
+
+def test_a_type_parameter_inside_its_generic_class_is_what_the_class_of_self_binds_it_to(tmp_path):
+    """``FactoryBase.getImpl``: ``tmpImpl = voImplMap[sub]``, ``voImplMap = self.implMap[vo]``, ``self.implMap:
+    dict[str, dict[str, T]]``.  ``tmpImpl.refresh()`` lands at the family ``self``'s class binds ``T`` to -- read as
+    no subclass, at each family the corpus binds it to -- and not at every ``refresh``: undeclared, it was placed by
+    the name at JEDI's 12, the ``_Plugin`` stub's and a decorator's among them (FGT)."""
+    roots = _tree(
+        tmp_path,
+        factory=_GENERIC_HOLDER,
+        plugins=_REFRESHED_PLUGINS,
+        m='''\
+from pkg.factory import FactoryBase
+from pkg.plugins import BrokerBase, DogBase
+
+
+class Broker(FactoryBase[BrokerBase]):
+    pass
+
+
+class WatchDog(FactoryBase[DogBase]):
+    pass
+''',
+    )
+    calls = _calls(roots)
+    module = f"{PACKAGE}/m.py"
+    broker = next(n for n in ast.walk(calls.types.tree(module)) if isinstance(n, ast.ClassDef) and n.name == "Broker")
+
+    def landed(func_name, text, bound=()):
+        func = _function(calls, "factory", func_name)
+        placed = calls.callees(f"{PACKAGE}/factory.py", func, _call_in(func, text), bound)
+        return sorted(t.cls.name for t in placed.targets)
+
+    families = ["AtlasBroker", "BrokerBase", "DogBase"]
+    assert landed("getImpl", "tmpImpl.refresh") == families
+    assert landed("getImpl", "tmpImpl.refresh", ((module, broker),)) == ["AtlasBroker", "BrokerBase"]
+    # What a method of ``self`` returns, declared ``T``, is read so too.
+    assert landed("requireImpl", "impl.refresh") == families
+    assert landed("requireImpl", "impl.refresh", ((module, broker),)) == ["AtlasBroker", "BrokerBase"]
+
+
+def test_an_alias_of_a_containers_element_is_declared_as_the_element(tmp_path):
+    """``row = self.sites[a]`` then ``row[b].check()``, ``self.sites: dict[str, dict[str, Site]]``: ``row`` is
+    declared ``dict[str, Site]``, so ``row[b]`` is a ``Site``."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+class Site:
+    def check(self) -> None:
+        pass
+
+
+class Other:
+    def check(self) -> None:
+        pass
+
+
+class Mapper:
+    def __init__(self) -> None:
+        self.sites: dict[str, dict[str, Site]] = {}
+
+    def run(self, a: str, b: str) -> None:
+        row = self.sites[a]
+        row[b].check()
+''',
+    )
+    calls = _calls(roots)
+
+    assert [t.cls.name for t in _placed(calls, "m", "run", "row[b].check").targets] == ["Site"]
 
 
 def test_a_field_declared_with_a_descriptor_reads_as_what_its_get_returns(tmp_path):

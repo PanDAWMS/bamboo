@@ -43,6 +43,7 @@ from typing import Callable, Iterable, Iterator, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -183,7 +184,11 @@ _CHANGING = frozenset(
 #: says no more than the first.  Never an answer: a reading that finds
 #: nothing else is ``unknown``.
 _NOTHING = ("nothing", "")
-_IN_PROGRESS = ("", "")
+
+
+def _settled(found: tuple[str, str]) -> tuple[str, str]:
+    """A binding's kind as it is kept: one whose reading found nothing but itself is not known."""
+    return (_UNKNOWN, "a binding that reads only itself") if found == _NOTHING else found
 
 
 def _cut(node: ast.AST) -> str:
@@ -287,7 +292,7 @@ class _Receivers:
     while it is being read adds nothing (:data:`_NOTHING`), and what is read
     under it is not kept until the binding it waited on is done -- read
     alone it would miss what that binding adds -- as Tarjan's lowlink keeps
-    a component open until its root closes.
+    a component open until its root closes (:class:`lowlink.Lowlink`).
     """
 
     DEPTH = 12
@@ -297,8 +302,7 @@ class _Receivers:
         self.types = calls.types
         self.leaves = leaves
         self._memo: dict[tuple[str, int, int], tuple[str, str]] = {}
-        self._open: dict[tuple[str, int, int], int] = {}
-        self._low: list[int] = []
+        self._lowlink = Lowlink()
         self._operators: dict[type, Optional[tuple[str, str]]] = {}
         self._held: dict[
             tuple[int, str, tuple[Optional[str], ...]],
@@ -312,31 +316,13 @@ class _Receivers:
     def of(
         self, file: str, func: ast.AST, expression: ast.expr, depth: int = 0
     ) -> tuple[str, str]:
-        key = (file, id(func), id(expression))
-        held = self._memo.get(key)
-        if held is _IN_PROGRESS:
-            self._low[-1] = min(self._low[-1], self._open[key])
-            return _NOTHING
-        if held is not None:
-            return held
-        index = len(self._low)
-        self._memo[key] = _IN_PROGRESS
-        self._open[key] = index
-        self._low.append(index)
-        try:
-            found = self._of(file, func, expression, depth)
-        finally:
-            low = self._low.pop()
-            del self._open[key]
-            del self._memo[key]
-        if low < index:
-            # Read under a binding still open: kept by none, told to it.
-            self._low[-1] = min(self._low[-1], low)
-            return found
-        if found == _NOTHING:
-            found = _UNKNOWN, "a binding that reads only itself"
-        self._memo[key] = found
-        return found
+        return self._lowlink.read(
+            self._memo,
+            (file, id(func), id(expression)),
+            lambda: self._of(file, func, expression, depth),
+            again=_NOTHING,
+            settle=_settled,
+        )
 
     def annotation(self, file: str, annotation: Optional[ast.expr]) -> tuple[str, str]:
         """What a value annotated *annotation* in *file* is."""
@@ -2981,16 +2967,20 @@ class Destination:
         self.unmatched = unmatched
 
 
-def _named_call(hole: str) -> Optional[str]:
-    """The name *hole*'s call is made with -- ``mb_proxy.send`` gives ``send`` --, or ``None`` where no name can close
-    it: a hole of :data:`_NOT_BY_NAME`, a called local or parameter, a callee cut short, no call (a write no function
-    holds)."""
-    found = _HOLE_TEXT.match(hole)
-    if found is None or found.group("why").startswith(_NOT_BY_NAME):
+def _by_name(callee: str, why: str) -> Optional[str]:
+    """The name a hole's call *callee* is made with -- ``mb_proxy.send`` gives ``send`` --, or ``None`` where no name
+    can close it: a hole of :data:`_NOT_BY_NAME` (its *why*), a called local or parameter, a callee cut short."""
+    if why.startswith(_NOT_BY_NAME):
         return None
-    callee = found.group("callee")
     _head, dot, name = callee.rpartition(".")
     return name if dot and not callee.endswith("…") and name.isidentifier() else None
+
+
+def _named_call(hole: str) -> Optional[str]:
+    """:func:`_by_name` of a hole's text, ``owner:line callee -- why``; ``None`` where it is no call (a write no
+    function holds)."""
+    found = _HOLE_TEXT.match(hole)
+    return None if found is None else _by_name(found.group("callee"), found.group("why"))
 
 
 class _ByName:
@@ -3044,8 +3034,8 @@ class ReachGraph:
             if row.anchor is not None:
                 self._by_file.setdefault(row.anchor.file, []).append(row)
             for hole in row.holes:
-                _head, dot, name = hole.callee.rpartition(".")
-                if dot:
+                name = _by_name(hole.callee, hole.why)
+                if name is not None:
                     self._spelled.setdefault(name, []).append((row.owner, hole.line, hole.callee))
 
     def function_at(self, file: str, line: int) -> Optional[str]:
@@ -3072,8 +3062,9 @@ class ReachGraph:
         return None
 
     def holes_spelled(self, name: str) -> list[tuple[str, int, str]]:
-        """``(owner, line, callee)`` of each hole spelled ``x.<name>(...)``: a call no reading placed that, if it lands
-        in the corpus at all, lands at a definition named *name*."""
+        """``(owner, line, callee)`` of each hole spelled ``x.<name>(...)`` a name can close (:func:`_by_name`, as the
+        closure reads one): a call no reading placed that, if it lands in the corpus at all, lands at a definition named
+        *name* -- not a statement not read on a call placed, nor a value handed through a queue."""
         return self._spelled.get(name, [])
 
     def is_database(self, file: str, call: ast.Call) -> bool:

@@ -61,9 +61,11 @@ name between; in a definition the object is handed to, every statement.  A chang
   whose elements this reading does not follow --: a change inside that part, as of a part handed -- save a part
   declared a value no change in place can touch (``jediTaskID: int | None``, :func:`callfacts.immutable_annotation`),
   on the premise that a declaration holds;
-- an object put into another object's attribute: what the corpus does through an attribute of that name, on any
-  object, as :func:`may_change` reads a lost object by the attribute's name -- ``self.updatedTaskParams =
-  taskParamMap`` is changed by nothing, since the one function reading the attribute only encodes it;
+- an object put into another object's attribute (``x.attr = obj``, ``x.__setattr__("attr", obj)``): what the
+  corpus does through that field of an object of a class ``x`` is -- ``self`` in a method of the class, of a base or
+  of a subclass of it, or an expression declared one of them (:meth:`Types.declared`) -- ``self.updatedTaskParams =
+  taskParamMap`` is changed by nothing, since the one method reading the field only encodes it; where the class of
+  ``x`` is not known, the object escapes: a field's name says no object;
 - the object put where this reading loses it -- a container, a closure, a value yielded -- or handed where it
   cannot be followed (a ``*args``, a thread): a change of any key (:data:`EVERY`).
 
@@ -106,6 +108,7 @@ from bamboo.codemap.calls import (
     own_nodes,
     returns,
 )
+from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
     CHANGE_DELETE,
     CHANGE_ESCAPED,
@@ -140,6 +143,9 @@ _SETATTR_METHODS = frozenset({"__setattr__", "__delattr__"})
 _CLASS, _DICT = "__class__", "__dict__"
 #: A builtin handing back what holds every attribute of what it is handed.
 _VARS = "vars"
+#: A field of objects of some classes: the attribute's name, and each class, by ``(file, line)``, an object holding
+#: it may be (:meth:`_Reading.family`).
+_Field = tuple[str, frozenset[tuple[str, int]]]
 #: What a builtin function's value holds of what it is handed where it holds none of it (:class:`callfacts.Function`).
 _KEEPS_NONE = frozenset(
     {
@@ -181,7 +187,8 @@ class ObjectChange(NamedTuple):
     :data:`EVERY`, *what* the method, where the object went or the call not followed.  *via*: the calls and
     statements from the function asked of to it, ``file:line`` in the order they run -- one way of them, where
     several reach it.  *func* and *value*: the
-    definition holding it and what a store stores, for a reader to read the value there."""
+    definition holding it and what a store stores or a method puts, for a reader to read the value there; *element*
+    the step from *value* to what is put, ``[*]`` where its elements are (``xs.extend(ys)``)."""
 
     file: str
     line: int
@@ -191,6 +198,7 @@ class ObjectChange(NamedTuple):
     via: tuple[str, ...] = ()
     func: Optional[ast.AST] = None
     value: Optional[ast.expr] = None
+    element: str = ""
 
 
 class _Follow(NamedTuple):
@@ -264,9 +272,27 @@ def object_changes(
     return [
         change
         for statement, change in reading.own_changes(
-            file, func, frozenset({name}), frozenset(), bound
+            file, func, frozenset({name}), None, bound
         )
         if reading.between(name, first, statement, last, killers)
+    ]
+
+
+def field_changes(
+    calls: "Calls",
+    file: str,
+    func: ast.AST,
+    holder: str,
+    bound: tuple = (),
+) -> list[ObjectChange]:
+    """Each place the object a field of *func*'s ``self`` holds -- *holder*, ``self.result`` -- may be changed in
+    place anywhere in *func* of *file*, through the field or a name bound to it there, as :func:`object_changes` reads
+    a name's, in no order with the field's reads: a reader of the field in another method cannot tell which ran
+    first.  ``self.result.set_fatal(...)`` at ``AdderAtlasPlugin.register_files`` 789 stores ``.status_code``.
+    *bound*: the classes ``self`` can be in *func* (:attr:`Target.bound`)."""
+    return [
+        change
+        for _statement, change in _reading(calls).own_changes(file, func, frozenset({holder}), None, bound)
     ]
 
 
@@ -369,12 +395,14 @@ class _Reading:
         self._methods: Optional[dict[str, list[Target]]] = None
         self._functions: Optional[dict[str, list[Target]]] = None
         self._setters: Optional[dict[str, list[Target]]] = None
-        # Keyed by ids; each value holds its definition, as *effects* does.
+        # Keyed by ids; each value holds its definition, as *effects* does.  The three read one another through
+        # *lowlink*: a value read under a key still being read is not kept until that key is done.
         self.owned: dict[
             tuple, tuple[ast.AST, list[tuple[Optional[ast.stmt], ObjectChange]]]
         ] = {}
         self.handed_to: dict[tuple, tuple[ast.AST, list[ObjectChange]]] = {}
-        self.named: dict[str, list[ObjectChange]] = {}
+        self.named: dict[_Field, list[ObjectChange]] = {}
+        self.lowlink = Lowlink()
         self.runs_between: dict[tuple, bool] = {}
         self._attributes: Optional[dict[str, list[Target]]] = None
         self.holders: dict[tuple, tuple[ast.AST, bool]] = {}
@@ -920,42 +948,55 @@ class _Reading:
         file: str,
         func: ast.AST,
         names: frozenset[str],
-        attributes: frozenset[str],
+        field: Optional[_Field],
         bound: tuple,
     ) -> list[tuple[Optional[ast.stmt], ObjectChange]]:
-        """Each place *func*'s own body may change in place the object *names* hold there -- or, by name, what an
-        attribute named one of *attributes* holds on any object -- with the statement it is in."""
+        """Each place *func*'s own body may change in place the object *names* hold there -- a name, or a field of a
+        name spelled ``self.result`` -- or what *field* holds on an object of one of its classes: ``self``, where it
+        is one there, or an expression declared one (:meth:`_Reading.holder_classes`) -- with the statement it is
+        in."""
         key = (
             file,
             id(func),
             names,
-            attributes,
+            field,
             tuple((where, id(cls)) for where, cls in bound),
         )
-        if key not in self.owned:
-            self.owned[key] = (
-                func,
-                self._own_changes(file, func, names, attributes, bound),
-            )
-        return self.owned[key][1]
+        # Reached again on its own way, it is read again: the cycle is cut where it passes a definition run with
+        # the object (:meth:`handed_changes`) or a field (:meth:`by_field`).
+        return self.lowlink.read(
+            self.owned,
+            key,
+            lambda: (func, self._own_changes(file, func, names, field, bound)),
+        )[1]
 
     def _own_changes(
         self,
         file: str,
         func: ast.AST,
         names: frozenset[str],
-        attributes: frozenset[str],
+        field: Optional[_Field],
         bound: tuple,
     ) -> list[tuple[Optional[ast.stmt], ObjectChange]]:
         nodes = list(own_nodes(func))
         held = set(names)
+        # Keyed by the ids of *func*'s nodes, which it holds while this reading runs.
+        of_field: dict[int, bool] = {}
 
         def holds(expression: ast.AST) -> bool:
             if isinstance(expression, ast.Name):
                 return expression.id in held
-            return (
-                isinstance(expression, ast.Attribute) and expression.attr in attributes
-            )
+            if not isinstance(expression, ast.Attribute):
+                return False
+            # ``self.result`` held as such (:func:`field_changes`): that field of that name, not any ``.result``.
+            if isinstance(expression.value, ast.Name) and f"{expression.value.id}.{expression.attr}" in held:
+                return True
+            if field is None or expression.attr != field[0]:
+                return False
+            if id(expression) not in of_field:
+                classes = self.holder_classes(file, func, expression.value, bound)
+                of_field[id(expression)] = any((where, cls.lineno) in field[1] for where, cls in classes)
+            return of_field[id(expression)]
 
         held |= self._aliases(file, func, nodes, holds, bound)
         found: list[tuple[Optional[ast.stmt], ObjectChange]] = []
@@ -996,9 +1037,10 @@ class _Reading:
                             # A name bound to it, an attribute it is read by, a part of it: read as the object.
                             continue
                         if isinstance(target, ast.Attribute):
-                            here = f"{file}:{line}"
-                            for change in self.by_name(target.attr):
-                                add(node, change._replace(via=(here,) + change.via))
+                            for change in self._stored(
+                                file, func, line, target.value, target.attr, bound, ast.unparse(target)
+                            ):
+                                add(node, change)
                         elif not self._holds_only(
                             file, func, nodes, _root_name(target)
                         ):
@@ -1177,6 +1219,7 @@ class _Reading:
                 holds,
                 call.args[0] if off_class and call.args else called.value,
                 int(off_class),
+                bound,
             )
         try:
             placed = self.calls.callees(file, func, call, bound)
@@ -1335,9 +1378,10 @@ class _Reading:
         holds,
         obj: Optional[ast.expr],
         position: int,
+        bound: tuple,
     ) -> list[ObjectChange]:
         """``setattr``'s method, ``obj.__setattr__(name, v)``: a store or delete of the attribute named on the
-        object; the object, set on another, put in that attribute."""
+        object; the object, set on another, put in that attribute (:meth:`_stored`)."""
         line, method = call.lineno, call.func.attr  # type: ignore[attr-defined]
         named = call.args[position] if len(call.args) > position else None
         attribute = (
@@ -1360,11 +1404,7 @@ class _Reading:
                 return [
                     ObjectChange(file, line, CHANGE_ESCAPED, EVERY, method, func=func)
                 ]
-            here = f"{file}:{line}"
-            return [
-                change._replace(via=(here,) + change.via)
-                for change in self.by_name(attribute)
-            ]
+            return self._stored(file, func, line, obj, attribute, bound, method)
         return []
 
     def _holds_only(
@@ -1442,11 +1482,16 @@ class _Reading:
         called = call.func
         found: list[ObjectChange] = []
         if isinstance(called, ast.Attribute) and (on_object or within):
+            try:
+                library = self.types.library_classes(file, func, called.value)
+            except Exception:  # noqa: BLE001 -- a reading that fails says nothing
+                library = None
             found += _container_changes(
                 file,
                 func,
                 call,
                 None if on_object else _first_step(called.value, holds),
+                callfacts.library_method(library, called.attr),
             )
         if not (handed and isinstance(called, ast.Attribute) and not on_object):
             return found
@@ -1482,37 +1527,92 @@ class _Reading:
         self, target: Target, names: frozenset[str]
     ) -> list[ObjectChange]:
         """Each place a definition run with *names* holding the object may change it, in all it runs."""
-        key = (_key(target), names)
-        if key not in self.handed_to:
-            # Reached again on its own way, it adds nothing new.
-            self.handed_to[key] = (target.func, [])
-            found = [
+        # Reached again on its own way, it adds nothing new (:class:`lowlink.Lowlink`).
+        return self.lowlink.read(
+            self.handed_to,
+            (_key(target), names),
+            lambda: (
+                target.func,
+                _once(
+                    [
+                        change
+                        for _statement, change in self.own_changes(
+                            target.file, target.func, names, None, target.bound
+                        )
+                    ]
+                ),
+            ),
+            again=(target.func, []),
+        )[1]
+
+    def _stored(
+        self,
+        file: str,
+        func: ast.AST,
+        line: int,
+        holder: Optional[ast.expr],
+        attribute: str,
+        bound: tuple,
+        what: str,
+    ) -> list[ObjectChange]:
+        """The object, put at *line* of *func* into the attribute *attribute* of what *holder* is there: each place
+        the corpus may change in place what that field holds on an object of *holder*'s classes (:meth:`by_field`),
+        the store on the way; where those classes are not known, the object escapes -- the attribute's name says no
+        object.  *bound*: the classes ``self`` can be in *func*."""
+        classes = self.holder_classes(file, func, holder, bound) if holder is not None else ()
+        if not classes:
+            return [ObjectChange(file, line, CHANGE_ESCAPED, EVERY, what, func=func)]
+        here = f"{file}:{line}"
+        return [
+            change._replace(via=(here,) + change.via)
+            for change in self.by_field((attribute, self.family(classes)))
+        ]
+
+    def holder_classes(
+        self, file: str, func: ast.AST, holder: ast.expr, bound: tuple
+    ) -> tuple[tuple[str, ast.ClassDef], ...]:
+        """The classes *holder*, read in *func* of *file*, can be an object of: ``self``'s -- *bound*, else the
+        class of the method (:meth:`Types.method_class`) --, or what it is declared (:meth:`Types.declared`); none
+        where it is not known."""
+        if isinstance(holder, ast.Name) and holder.id == "self":
+            if bound:
+                return tuple(bound)
+            owner = self.types.method_class(file, func)
+            return (owner,) if owner is not None else ()
+        return tuple(self.types.declared(file, func, holder, bound=bound) or ())
+
+    def family(
+        self, classes: tuple[tuple[str, ast.ClassDef], ...]
+    ) -> frozenset[tuple[str, int]]:
+        """Each class, by ``(file, line)``, whose methods and declared objects may reach an object of one of
+        *classes*: each, its bases (:meth:`Types.lineage`) and its subclasses (:meth:`Calls.subclasses`)."""
+        return frozenset(
+            (where, one.lineno)
+            for file, cls in classes
+            for where, one in (*self.types.lineage(file, cls), *self.calls.subclasses(file, cls))
+        )
+
+    def by_field(self, field: _Field) -> list[ObjectChange]:
+        """Each place the corpus may change in place what *field* holds -- its attribute on an object of its classes:
+        ``self`` in a method of one, or an expression declared one -- in every definition reading an attribute of
+        that name.  An object of another class, or one whose class is not said, is not taken for it."""
+        # Reached again on its own way, it adds nothing new (:class:`lowlink.Lowlink`).
+        return self.lowlink.read(self.named, field, lambda: self._by_field(field), again=[])
+
+    def _by_field(self, field: _Field) -> list[ObjectChange]:
+        found: list[ObjectChange] = []
+        for target in self.attributes().get(field[0], ()):
+            found += [
                 change
                 for _statement, change in self.own_changes(
-                    target.file, target.func, names, frozenset(), target.bound
+                    target.file,
+                    target.func,
+                    frozenset(),
+                    field,
+                    target.bound,
                 )
             ]
-            self.handed_to[key] = (target.func, _once(found))
-        return self.handed_to[key][1]
-
-    def by_name(self, attribute: str) -> list[ObjectChange]:
-        """Each place the corpus may change in place what an attribute named *attribute* holds, on any object."""
-        if attribute not in self.named:
-            self.named[attribute] = []
-            found: list[ObjectChange] = []
-            for target in self.attributes().get(attribute, ()):
-                found += [
-                    change
-                    for _statement, change in self.own_changes(
-                        target.file,
-                        target.func,
-                        frozenset(),
-                        frozenset({attribute}),
-                        target.bound,
-                    )
-                ]
-            self.named[attribute] = _once(found)
-        return self.named[attribute]
+        return _once(found)
 
     def attributes(self) -> dict[str, list[Target]]:
         """Every definition of the corpus by the attribute names its own body reads or writes."""
@@ -1722,21 +1822,28 @@ def _builtin_changes(
 
 
 def _container_changes(
-    file: str, func: ast.AST, call: ast.Call, inner: Optional[str]
+    file: str,
+    func: ast.AST,
+    call: ast.Call,
+    inner: Optional[str],
+    library: Optional[callfacts.Method] = None,
 ) -> list[ObjectChange]:
-    """A builtin container's method changing its receiver (:data:`callfacts.BUILTIN_METHODS`): by the key where it
-    names one -- ``pop`` and ``setdefault`` of a literal, ``update`` of a dict literal and keywords -- else of any
-    key; on a part of the object (*inner*, its step), a change inside it.  Another method changes nothing."""
+    """A container's method changing its receiver: a builtin's (:data:`callfacts.BUILTIN_METHODS`, by its name), or
+    one outside the corpus *library* says (:data:`callfacts.LIBRARY_METHODS`).  By the key where it names one --
+    ``pop`` and ``setdefault`` of a literal, ``update`` of a dict literal and keywords -- else of any key; with what
+    it puts where one argument is put as an element or as its elements (``append(v)``, ``extend(vs)``,
+    ``WeightedLists.add(weight, list_data)``); on a part of the object (*inner*, its step), a change inside it.
+    Another method changes nothing."""
     method = call.func.attr  # type: ignore[attr-defined]
-    if not any(
-        said.changes
-        for (_kind, name), said in callfacts.BUILTIN_METHODS.items()
-        if name == method
-    ):
+    said = library or callfacts.by_name(method)
+    if said is None or not said.changes:
         return []
     line = call.lineno
     if inner is not None:
         return [ObjectChange(file, line, CHANGE_INNER, inner, method, func=func)]
+    put = _put_value(said, call)
+    if put is not None:
+        return [ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func, value=put[0], element=put[1])]
     first = call.args[0] if call.args else None
     if (
         method in ("pop", "setdefault")
@@ -1794,6 +1901,19 @@ def _container_changes(
             ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func)
         ]
     return [ObjectChange(file, line, CHANGE_METHOD, EVERY, method, func=func)]
+
+
+def _put_value(said: callfacts.Method, call: ast.Call) -> Optional[tuple[ast.expr, str]]:
+    """What *call* of a method *said* puts, where it puts one argument as an element (``""``) or as its elements
+    (``[*]``) and nothing else: ``None`` where it hands a ``*`` or ``**`` argument or puts under a key, a merge or
+    several arguments."""
+    if any(isinstance(one, ast.Starred) for one in call.args) or any(one.arg is None for one in call.keywords):
+        return None
+    puts = callfacts.put_arguments(said, call)
+    if len(puts) != 1 or puts[0][1].into not in (callfacts.ELEMENT, callfacts.ELEMENTS):
+        return None
+    value, put, _key, _keyword = puts[0]
+    return value, "[*]" if put.into == callfacts.ELEMENTS else ""
 
 
 def _is_setter(decorator: ast.expr) -> bool:

@@ -782,6 +782,37 @@ def runnables(
     return sorted(found, key=lambda one: (one.owner, one.line, one.bound))
 
 
+def condition_fields(
+    junctions: Iterable[JunctionNode],
+    trees: dict[str, ast.AST],
+    calls: Optional[Calls],
+    record,
+    entered: Iterable[EnteredFrom] = (),
+) -> list[tuple[str, str]]:
+    """``(file::Class, field)`` for each field of ``self`` a definition an arm's path condition calls reads (its
+    :attr:`Runnable.reads`), for each class the call binds ``self`` to -- the method's own where it binds none: what
+    a reader running it reads of the object it is called on, whose values a :class:`FieldFrom` says
+    (``self.add_result.is_succeeded()`` reads ``AdderResult``'s ``status_code``).  Read before the guards' ways, from
+    what :func:`runnables` reads the conditions from; nothing without *calls* or *record*."""
+    from bamboo.codemap.panda.heldfrom import _class_key
+
+    if calls is None or record is None:
+        return []
+    conditions, _missed = asked(junctions, trees, calls, entered)
+    judge = _Judge(calls, record, trees)
+    found: dict[tuple[str, str], None] = {}
+    for target, _places in conditions.values():
+        fields = [one.partition(".")[2] for one in judge.own(target).reads if one.startswith("self.")]
+        if not fields:
+            continue
+        owner = calls.types.method_class(target.file, target.func)
+        for file, cls in target.bound or ((owner,) if owner is not None else ()):
+            for field in fields:
+                if field.isidentifier():
+                    found.setdefault((_class_key(file, cls), field), None)
+    return sorted(found)
+
+
 def _ways(records: Iterable) -> Iterable[HeldSource]:
     """Every way of *records*, the ways of their changes' values too."""
     pending = [source for one in records for source in one.sources]

@@ -641,8 +641,8 @@ def test_a_call_building_an_object_runs_its_init_on_the_new_one_not_on_what_hold
     tmp_path,
 ):
     """``self.plugin_class`` holds a class: calling it builds a ``Plugin``, whose ``__init__`` stores on the new
-    object, not on ``self``.  The part handed, ``self.job``, is kept on it, where the reading loses it: read by the
-    attribute's name, ``Plugin.run`` changes inside what a ``job`` holds."""
+    object, not on ``self``.  The part handed, ``self.job``, is kept on it, in Plugin's field ``job``: through that
+    field, ``Plugin.run`` changes inside what a ``job`` holds."""
     found = _holder_changes(tmp_path, walked=True)
 
     assert found["self.plugin_class(self.job)"] == [("inner", ".job")]
@@ -652,10 +652,159 @@ def test_a_reader_handed_no_trees_reads_the_corpus_by_names_as_the_build_does(
     tmp_path,
 ):
     """A reader of a run makes its calls with no trees handed in: what it reads by a name -- a method on a receiver
-    no class is said of (``thing.mark``), an object kept where the reading loses it -- is the corpus's all the
-    same."""
+    no class is said of (``thing.mark``) -- and through a field of a class is the corpus's all the same."""
     built = _holder_changes(tmp_path / "built", walked=True)
     run = _holder_changes(tmp_path / "run", walked=False)
 
     assert built["thing.mark(self.job)"] == [("inner", ".job")]
     assert run == built
+
+
+FIELDS = """\
+class Base:
+    def mark(self):
+        self.saved["base"] = 1
+
+
+class Holder(Base):
+    def keep(self, params):
+        self.saved = params
+
+    def touch(self):
+        self.saved["own"] = 2
+
+
+class Child(Holder):
+    def touch_child(self):
+        self.saved["child"] = 3
+
+
+class Other:
+    def touch_other(self):
+        self.saved["other"] = 4
+
+
+def by_declared(holder: Holder):
+    holder.saved["declared"] = 5
+
+
+def by_undeclared(thing):
+    thing.saved["undeclared"] = 6
+
+
+def keep_on(holder: Holder, other: Other, thing, params):
+    holder.saved = params
+    other.saved = params
+    thing.saved = params
+    object.__setattr__(thing, "saved", params)
+"""
+
+
+def _field_changes(tmp_path: Path, name: str) -> list[tuple[str, str, str, list[str]]]:
+    """``object_changes`` of ``params`` in *name* of :data:`FIELDS`, to its end: each change's kind, key and what,
+    and the lines on its way."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "fields.py").write_text(FIELDS)
+    tree = ast.parse(FIELDS)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/fields.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=FIELDS, blob_sha=blob_sha(FIELDS))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    func = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name)
+    lines = FIELDS.splitlines()
+    return [
+        (change.kind, change.key, change.what, [lines[int(one.rpartition(":")[2]) - 1].strip() for one in change.via])
+        for change in changes.object_changes(calls, file, func, "params", func.args, None)
+    ]
+
+
+def test_an_object_put_in_a_field_is_changed_through_that_field_of_its_holders_class_and_escapes_where_none_is_said(
+    tmp_path,
+):
+    """``holder.saved = params``, ``holder`` declared a ``Holder``: the map is changed through ``.saved`` of
+    ``self`` in a method of Holder, of its base and of its subclass, and of an object declared a Holder -- not of
+    ``self`` in ``Other``, nor of ``thing``, whose class is not said.  Put in ``other.saved``, it is changed
+    through Other's.  Put in ``thing.saved``, or by ``object.__setattr__`` on ``thing``, it escapes: the field's
+    name says no object."""
+    holder = ["holder.saved = params"]
+
+    assert _field_changes(tmp_path, "keep_on") == [
+        ("store", "'base'", "", holder),
+        ("store", "'own'", "", holder),
+        ("store", "'child'", "", holder),
+        ("store", "'declared'", "", holder),
+        ("store", "'other'", "", ["other.saved = params"]),
+        ("escaped", changes.EVERY, "thing.saved", []),
+        ("escaped", changes.EVERY, "__setattr__", []),
+    ]
+
+
+def test_an_object_put_in_a_field_of_self_is_changed_through_the_field_on_objects_of_the_methods_class(tmp_path):
+    """``self.saved = params`` in ``Holder.keep``: the field of a Holder, read as ``holder.saved`` is."""
+    kept = ["self.saved = params"]
+
+    assert _field_changes(tmp_path, "keep") == [
+        ("store", "'base'", "", kept),
+        ("store", "'own'", "", kept),
+        ("store", "'child'", "", kept),
+        ("store", "'declared'", "", kept),
+    ]
+
+
+CYCLE = """\
+def a(job, n):
+    if n:
+        b(job, n - 1)
+    job.x = 1
+
+
+def b(job, n):
+    if n:
+        a(job, n - 1)
+    job.y = 2
+
+
+def enter_a(job):
+    a(job, 3)
+
+
+def enter_b(job):
+    b(job, 3)
+"""
+
+
+def _cycle_changes(tmp_path: Path, order: list[str]) -> dict[str, list[str]]:
+    """``object_changes`` of ``job`` in each function of *order* of :data:`CYCLE`, read in that order by one
+    reading: the keys each changes."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "cycle.py").write_text(CYCLE)
+    tree = ast.parse(CYCLE)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/cycle.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=CYCLE, blob_sha=blob_sha(CYCLE))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    return {
+        name: sorted(
+            change.key
+            for change in changes.object_changes(calls, file, functions[name], "job", functions[name].args, None)
+        )
+        for name in order
+    }
+
+
+def test_a_definition_in_a_cycle_is_read_whole_whichever_definition_of_the_cycle_was_read_first(tmp_path):
+    """``a`` runs ``b``, which runs ``a``.  Read from ``enter_a`` first, ``b`` met ``a`` still being read and lacked
+    ``job.x``; kept, that short answer went to ``enter_b`` (and, the other way round, ``enter_a`` lacked
+    ``job.y``).  What is read under a definition still being read is kept only once it is done
+    (:class:`lowlink.Lowlink`)."""
+    whole = {"enter_a": [".x", ".y"], "enter_b": [".x", ".y"]}
+
+    assert _cycle_changes(tmp_path / "ab", ["enter_a", "enter_b"]) == whole
+    assert _cycle_changes(tmp_path / "ba", ["enter_b", "enter_a"]) == whole

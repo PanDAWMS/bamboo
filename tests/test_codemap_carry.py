@@ -19,7 +19,13 @@ import pytest
 from bamboo.codemap import reach
 from bamboo.codemap.calls import Calls, Types
 from bamboo.codemap.panda.pathcond import attach_parents
-from bamboo.codemap.panda.recognizers.sqlwrite import _PathCarry, _Reading
+from bamboo.codemap.panda.recognizers.sqlwrite import (
+    _PathCarry,
+    _Reading,
+    _spelled_paths,
+    paths_under,
+    unspelled_path,
+)
 
 SHAPES = {
     "a link written before the rows arrived": """
@@ -303,6 +309,25 @@ SHAPES = {
             res = self.cur.fetchone()  # rows
             return os.path.join(base, res[0])  # holds
     """,
+    # AdderPluginBase.__init__'s loop over the keywords AdderGen hands the plugin: each key's value goes to the field
+    # the key names -- the job's field holds none of what extra_info does.
+    "set by the field its key names": """
+        def f(self, other):
+            res = self.cur.fetchall()  # rows
+            params = {"extra_info": res, "logger": other}
+            for key, value in params.items():
+                setattr(self, key, value)
+            g(self.extra_info)  # holds
+            g(self.job)  # not
+    """,
+    "set by a key not known": """
+        def f(self, name):
+            res = self.cur.fetchall()  # rows
+            params = {name: res}
+            for key, value in params.items():
+                setattr(self, key, value)
+            g(self.job)  # holds
+    """,
     # Over no corpus no method is placed, so what ``pack`` keeps of its
     # argument is not read (``_get_datasets_with_unprocessed_inputs``; placed,
     # it is -- test_codemap's rows put into an object).
@@ -351,3 +376,40 @@ def test_a_write_holds_the_rows_where_some_run_brings_them(title, line, unread_k
 
     mark = lines[line - 1].rstrip()
     assert held == (mark.endswith("# holds") or (unread_kept and mark.endswith("# unread")))
+
+
+@pytest.mark.parametrize(
+    ("spelled", "steps"),
+    [
+        ("()", ()),
+        (".job.ddmErrorDiag", (".job", ".ddmErrorDiag")),
+        (".subscription_map[*][*][2]...", (".subscription_map", "[*]", "[*]", "[2]", "...")),
+        ("['x]y'][key].*", ("['x]y']", "[key]", ".*")),
+        ('["a"][0]', ('["a"]', "[0]")),
+    ],
+)
+def test_a_spelled_path_reads_back_as_its_steps(spelled: str, steps: tuple[str, ...]) -> None:
+    assert unspelled_path(spelled) == steps
+    assert _spelled_paths(frozenset({steps})) == [spelled]
+
+
+@pytest.mark.parametrize(
+    ("step", "spelled", "element", "under"),
+    [
+        # adder_gen 265 ``self.adder_plugin.result``: of the plugin's parts, those under .result, cut by it.
+        (".result", [".result.status_code", ".job", ".dataset_map[key]"], False, [".status_code"]),
+        (".result", [".result"], False, ["()"]),
+        (".result", [".job"], False, []),
+        ("[0]", ["[*].name"], False, [".name"]),
+        ("['k']", ["[*]"], False, ["()"]),
+        (".a", [".*.b"], False, [".b"]),
+        (".a", ["....b"], False, ["()"]),
+        # A key is no value an index takes, but it is an element a loop over a dict takes.
+        ("[*]", ["[key]"], False, []),
+        ("[*]", ["[key]", "[*].x"], True, ["()", ".x"]),
+    ],
+)
+def test_the_part_a_step_takes_holds_the_parts_under_it(
+    step: str, spelled: list[str], element: bool, under: list[str]
+) -> None:
+    assert paths_under(step, spelled, element) == under
