@@ -4125,8 +4125,9 @@ class Rerun:
     def _entry_end(self, fn: R.Function, owner: str, line: int, run: Any, window: tuple[str, str] | None, terms: list[SR.Term]) -> SR.End:
         """Where the arm's function was entered from, read on every arm (S, gm-design.md): a function no corpus call
         enters starts there; else the call a parameter's chosen way came in by, or that a parameter the run printed at
-        its entry is read up to; else, where every term ends, the call a caller's run shows entered it (F1,
-        :meth:`_entered_by`); else it stops."""
+        its entry is read up to; else the one call the map's ``EnteredFrom`` holds into it where nothing else may enter
+        it (OWI, out/gm/qk-design.md), whose run is not asked; else, where every term ends, the call a caller's run
+        shows entered it (F1, :meth:`_entered_by`); else it stops."""
         rec = SR.entered(owner, fn.node.lineno)
         if rec is None:
             return SR.End("entry", SR.STOP, "no-entered-from", "")
@@ -4147,6 +4148,11 @@ class Rerun:
         if chosen:
             e = chosen[0]
             return SR.End("entry", e.end, e.why, e.at, route=e.route)
+        # the map's model: with nothing open the function ran only from its sites, so from the one there is
+        if len(rec.sites) == 1 and not rec.open:
+            site = next(iter(into))
+            self.say(f"  entry: the map holds one call into {fn.name}, at {site}, and no other way in")
+            return SR.End("entry", SR.CALLER, "only-way-in", site)
         # the callers' logs are asked only where the entry is all the answer waits for (gm2-predictions.txt F4)
         if rec.sites and all(t.ended for t in terms) and (by := self._entered_by(owner, line, run, window, rec)) is not None:
             return by

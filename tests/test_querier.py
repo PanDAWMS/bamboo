@@ -10559,6 +10559,70 @@ def test_f1_reads_the_entry_by_the_call_a_callers_run_shows_where_no_printed_arg
         f"for the call at pandaserver/m.py:{ln} that may have entered it" for ln in [*c1_calls, c2_call]]
 
 
+def test_owi_ends_an_entry_at_the_one_call_the_map_holds_into_it_where_nothing_else_may_enter(tmp_path):
+    # process_job_report (adder_gen 382): the map's EnteredFrom holds run:114 alone and nothing open, so the arm's
+    # function was entered there -- read without asking a caller's run, even where a term stops (F4's gate); adder's
+    # execute, one site and a hole open, stays with F1
+    src = textwrap.dedent(
+        """\
+        class K:
+            def arm(self):
+                self.status = "closed"
+
+            def c1(self):
+                self.arm()
+
+            def c2(self):
+                self.arm()
+        """
+    )
+    (_corpus(tmp_path) / "pandaserver" / "m.py").write_text(src)
+    lines = src.splitlines()
+    c1_call, c2_call = [i + 1 for i, t in enumerate(lines) if t.strip() == "self.arm()"]
+    out = _ok(_run(tmp_path, f"""
+        import ast
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import sources as SR
+
+        M = "pandaserver/m.py"
+        one = [N(owner=f"{{M}}::K.c1", line={c1_call})]
+        two = [*one, N(owner=f"{{M}}::K.c2", line={c2_call})]
+        hole = [N(kind="hole", at="pandaserver/n.py:7", text="x.arm")]
+        arm = N(token="arm", first="2026-11-02 13:43:27,000", last="2026-11-02 13:43:29,000", machine="m1",
+                describe=lambda: "the run 'arm'")
+        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm")
+        ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
+        stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
+        got = {{}}
+
+        def entry(name, sites, open_, terms):
+            SR.entered = lambda owner, line: N(sites=sites, open=open_)
+            r = object.__new__(rerun.Rerun)
+            r.lines = []
+            asked = []
+            r._entered_by = lambda owner, line, run, window, rec: asked.append(owner)
+            e = r._entry_end(fn, f"{{M}}::K.arm", 2, arm, ("2026-11-02 13:43:27", "2026-11-02 13:43:29"), terms)
+            got[name] = [e.end, e.why, e.at, len(asked), r.lines]
+
+        entry("one site, a term stops", one, [], stopped)
+        entry("one site, every term ends", one, [], ended)
+        entry("one site and a hole", one, hole, ended)
+        entry("one site and a hole, a term stops", one, hole, stopped)
+        entry("two sites", two, [], ended)
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    said = [f"  entry: the map holds one call into arm, at pandaserver/m.py:{c1_call}, and no other way in"]
+    assert got["one site, a term stops"] == ["caller", "only-way-in", f"pandaserver/m.py:{c1_call}", 0, said]
+    assert got["one site, every term ends"] == ["caller", "only-way-in", f"pandaserver/m.py:{c1_call}", 0, said]
+    # something open: F1 asks where every term ends, else the entry stops as before
+    assert got["one site and a hole"] == ["stop", "entry-unchosen", "", 1, []]
+    assert got["one site and a hole, a term stops"] == ["stop", "entry-unchosen", "", 0, []]
+    assert got["two sites"] == ["stop", "entry-unchosen", "", 1, []]
+
+
 _GEN = """
 from pandaserver.srvcore.CoreUtils import naive_utcnow
 
