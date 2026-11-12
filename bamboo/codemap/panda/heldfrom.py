@@ -164,6 +164,9 @@ class _Way(NamedTuple):
     #: The puts into the value the end sits in at its *paths*, met since the way's last step: what an element step
     #: may take besides the parts (:func:`_taken`).
     puts: tuple["_Change", ...] = ()
+    #: ``file:line`` of each binding on the way that was one of several reaching its read, each once
+    #: (:attr:`HeldSource.chosen`, :func:`_chosen`).
+    chosen: tuple[str, ...] = ()
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -181,6 +184,20 @@ def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
         and one.line is not None
         and first <= one.line <= last
         else one
+        for one in ways
+    ]
+
+
+def _chosen(ways: list[_Way], file: str, site: ast.AST) -> list[_Way]:
+    """*ways*, from *site*, one of several bindings reaching a read, each with *site*'s ``file:line`` among its
+    *chosen*: which of them a run made is the tests on the way to it (``itemList = ...`` under ``if`` and ``else``).
+    Not the function's entry, which no statement is, nor a stop."""
+    line = getattr(site, "lineno", None)
+    if isinstance(site, ast.arguments) or line is None:
+        return ways
+    here = f"{file}:{line}"
+    return [
+        one if one.kind == _STOP or here in one.chosen else one._replace(chosen=(*one.chosen, here))
         for one in ways
     ]
 
@@ -377,10 +394,17 @@ def _put_values(puts: list["_Change"], way: _Way) -> list[_Way]:
     return [
         value
         if value.kind == _STOP
-        else value._replace(route=way.route + one.via + value.route, changes=value.changes + kept)
+        else value._replace(
+            route=way.route + one.via + value.route, changes=value.changes + kept, chosen=_chosen_of(value, way)
+        )
         for one in puts
         for value in one.value
     ]
+
+
+def _chosen_of(*ways: _Way) -> tuple[str, ...]:
+    """The *chosen* of *ways* together, as one way's that went through them all: each place once."""
+    return tuple(dict.fromkeys(place for one in ways for place in one.chosen))
 
 
 def _onto(
@@ -438,7 +462,7 @@ def _onto(
         if inner.paths and one.kind != _STOP:
             held = tuple(spot + path for spot in inner.paths for path in one.paths) or inner.paths
             one = one._replace(paths=held, loose=inner.loose or one.loose)
-        found.append(one._replace(route=route, changes=one.changes + inner.changes))
+        found.append(one._replace(route=route, changes=one.changes + inner.changes, chosen=_chosen_of(inner, one)))
     return found
 
 
@@ -548,7 +572,11 @@ def held_elements(source: HeldSource, step: str) -> tuple[list[HeldSource], bool
     kept = [one for one in source.changes if one.kind in _ELEMENT_CHANGES]
     values = [
         value.model_copy(
-            update={"route": [*value.route, *reversed(one.via), *source.route], "changes": [*value.changes, *kept]}
+            update={
+                "route": [*value.route, *reversed(one.via), *source.route],
+                "changes": [*value.changes, *kept],
+                "chosen": list(dict.fromkeys([*value.chosen, *source.chosen])),
+            }
         )
         for one in puts
         for value in one.value
@@ -1328,8 +1356,10 @@ class _Reader:
             if walrus is not None:
                 return self._site_ways(expr, point, walrus, file, func, last, selves=selves)
         found: list[_Way] = []
-        for site in pathcond.held_at(func, expr.id, point).sites:  # type: ignore[arg-type]
-            found += self._site_ways(expr, point, site, file, func, last, selves=selves)
+        sites = pathcond.held_at(func, expr.id, point).sites  # type: ignore[arg-type]
+        for site in sites:
+            ways = self._site_ways(expr, point, site, file, func, last, selves=selves)
+            found += _chosen(ways, file, site) if len(sites) > 1 else ways
         return found
 
     def _site_ways(
@@ -2533,7 +2563,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         # A ``-``'s right side is the record's way as its left side is: one source where both reach it; so are the
         # paths it went through with.
         unmarked = tuple(call._replace(drops=False, held=()) for call in one.through)
-        key = (one._replace(line=None, end_file="", through=unmarked, puts=()), tuple(route))
+        key = (one._replace(line=None, end_file="", through=unmarked, puts=(), chosen=()), tuple(route))
         held = sources.setdefault(
             key,
             HeldSource(
@@ -2564,25 +2594,35 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         )
         if one.end_file and one.line is not None and f"{one.end_file}:{one.line}" not in held.at:
             held.at.append(f"{one.end_file}:{one.line}")
+        held.chosen.extend(place for place in one.chosen if place not in held.chosen)
     for held in sources.values():
-        held.at.sort(key=lambda place: (place.rpartition(":")[0], int(place.rpartition(":")[2])))
+        held.at.sort(key=_place_order)
+        held.chosen.sort(key=_place_order)
     return list(sources.values()), list(stops.values())
 
 
+def _place_order(place: str) -> tuple[str, int]:
+    """A ``file:line``'s order: by file, then by line."""
+    file, _, line = place.rpartition(":")
+    return file, int(line)
+
+
 def _end_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
-    """``file:line`` of each place a way ends at (:attr:`HeldSource.at`): the source's own statement, on a
-    GuardFrom's, a ParameterFrom's or a FieldFrom binding's way, as :func:`_change_sites` reads their changes."""
+    """``file:line`` of each place on a way whose tests say which way a run took, on a GuardFrom's, a ParameterFrom's
+    or a FieldFrom binding's way, as :func:`_change_sites` reads their changes: where it ends
+    (:attr:`HeldSource.at`), the source's own statement; each call outside the corpus it went through
+    (:attr:`HeldThrough.at`), an operator's statement among them; each binding it came from that was one of several
+    reaching its read (:attr:`HeldSource.chosen`)."""
     found: set[str] = set()
-    for guard in guards:
-        for source in guard.sources:
-            found.update(source.at)
-    for parameter in reader.parameters.values():
-        for source in parameter.sources:
-            found.update(source.at)
-    for field in reader.fields.values():
-        for binding in field.bindings:
-            for source in binding.sources:
-                found.update(source.at)
+    sources = [
+        *(source for guard in guards for source in guard.sources),
+        *(source for parameter in reader.parameters.values() for source in parameter.sources),
+        *(source for field in reader.fields.values() for binding in field.bindings for source in binding.sources),
+    ]
+    for source in sources:
+        found.update(source.at)
+        found.update(call.at for call in source.through if call.at)
+        found.update(source.chosen)
     return found
 
 
@@ -2971,7 +3011,9 @@ def guard_froms(
         reader.ask_field(owner, field)
     # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
     # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
-    # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``).
+    # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``);
+    # so is it at each call outside the corpus or operator the way went through and each binding it came from that
+    # was one of several (``itemList = ... + ...`` under ``else``), the end past them (_end_sites).
     # Their ways' too, until no place is new.
     guarded: set[str] = set()
     held: dict[str, list[ast.AST]] = {}

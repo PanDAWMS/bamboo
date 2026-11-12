@@ -958,6 +958,76 @@ def test_an_endpoint_s_parameter_is_also_what_the_corpus_s_client_sends_its_rout
     } == {("constant", "10")}
 
 
+CHOSEN = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def counted(self, params, wanted):
+                if wanted:  # T1
+                    size = int(params["nEvents"])  # B1
+                    return size
+                raise ValueError("not wanted")
+
+            def items(self, params, flag):
+                if flag:  # T2
+                    found = params["jobParameters"]  # B2
+                else:
+                    found = params["log"]  # B3
+                return found
+
+            def extractCommon(self, params, wanted, flag):
+                size = self.counted(params, wanted)
+                if size > 10:  # T3
+                    self.a = 1  # R1
+                for item in self.items(params, flag):
+                    if item["type"] == "template":  # T4
+                        self.a = 2  # R2
+        """,
+}
+
+
+def test_the_tests_on_the_way_to_a_place_a_way_goes_through_have_guard_froms(
+    tmp_path: Path,
+) -> None:
+    """The tests on the way to where a way ends had GuardFroms (which binding a run made); a way that went on past a
+    statement left its tests unasked.  So do the tests on the way to a call outside the corpus or an operator the way
+    went through (``int(params["nEvents"])`` under ``if wanted:``, the way ending at the parameter) and to a binding
+    that was one of several reaching its read (``found = params["jobParameters"]`` under ``if flag:``, ``found =
+    params["log"]`` under its ``else``), which the way's source keeps as *chosen*.  A read one binding reaches
+    chooses nothing."""
+    fragment = _build(
+        tmp_path, CHOSEN, (("extractCommon", "R1"), ("extractCommon", "R2"))
+    )
+
+    def place(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, CHOSEN)}"
+
+    def guard(marker: str, name: str) -> GuardFrom:
+        (found,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, CHOSEN) and one.name == name
+        ]
+        return found
+
+    assert _line(BASE, "B1", CHOSEN) in guard("T1", "wanted").calls
+    assert {_line(BASE, "B2", CHOSEN), _line(BASE, "B3", CHOSEN)} <= set(
+        guard("T2", "flag").calls
+    )
+    assert {
+        (tuple(through.at for through in one.through), tuple(one.chosen))
+        for one in guard("T3", "size").sources
+    } == {((place("B1"),), ())}
+    assert {
+        (tuple(one.steps), tuple(one.chosen)) for one in guard("T4", "item").sources
+    } == {
+        (("['jobParameters']", "[*]"), (place("B2"),)),
+        (("['log']", "[*]"), (place("B3"),)),
+    }
+
+
 MIXED_ROWS = {
     BASE: """\
         class TaskRefinerBase:
@@ -1156,7 +1226,7 @@ BINDINGS = {
 
             def extractCommon(self, jediTaskID, taskSpec, jobSpec):
                 if jobSpec:  # T2
-                    modTime = taskSpec.modificationTime
+                    modTime = taskSpec.modificationTime  # B7
                 else:
                     modTime = 0  # B3
                 if (jediTaskID - modTime) > 24:  # T0
@@ -1225,7 +1295,8 @@ def test_the_tests_on_the_way_to_a_source_s_own_statement_have_guards_on_through
 
     assert calls("extractCommon", "T0") == {line("B1"), line("B2")}
     assert calls("chosen", "T4") == {line("B4"), line("B5")}
-    assert calls("extractCommon", "T2") == {line("B3")}
+    # B7's way ends at the parameter, at no statement; it is one of the two bindings the read at T0 reaches (chosen).
+    assert calls("extractCommon", "T2") == {line("B7"), line("B3")}
 
 
 CHECKER = "pandajedi/jedicore/Checker.py"
