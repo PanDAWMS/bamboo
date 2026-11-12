@@ -228,6 +228,7 @@ TEMPLATES: dict[str, str] = {
     "bound-in-a-handler": ", bound in the except handler at {lines:join=, } (S3: which exception)",
     "terms-end-entry-stops": "every term ends; its entry does not",
     "for-a-call-handing-a-value": "for the call at {site} that may have handed the value",
+    "for-a-binding-a-call-hands": "for which binding the call at {site} hands ran (Q5)",
     "for-a-call-that-may-have-entered-it": "for the call at {site} that may have entered it",
     "guard-held-on": "{guard!r} held{on}",
     "held-on-values": " on {values:join=, }",

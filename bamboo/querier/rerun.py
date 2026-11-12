@@ -152,6 +152,7 @@ from bamboo.querier.which_ran import (
     class_of,
     holds_key,
     judge,
+    key_env,
     of_mover,
     once_loops_of,
     passes_of,
@@ -3917,14 +3918,6 @@ class Rerun:
         # a caller's run tells constants apart only by the calls they come by
         calls = {w.route[0] for w in consts if w.route}
         one_call = len(consts) > 1 and len(calls) == 1
-        printed = f"its run printed {value!r} at its entry" if fn is not None else f"{owner} is not the arm's: no print read"
-        self.say(f"  {param}: {len(ways)} way(s) in by the map's callers; {printed}; constant(s) left: "
-                 + (", ".join(f"{w.value or w.why} at {w.route[0]}" for w in consts if w.route) or "none")
-                 + ("; other ways: " + ", ".join(sorted({f"{w.end} ({w.why})" for w in rest})) if rest else "")
-                 + (f"; read by the call(s) the run's path entered it by ({', '.join(entered)}), left out: "
-                    + ", ".join(f"{n} by {c}" for c, n in sorted(Counter(off).items())) if off else "")
-                 + (f"; all come by {next(iter(calls))}: its caller's run not asked" if one_call else "")
-                 + (f"; the read takes {''.join(steps)} off it" if steps else ""))
         # a call the caller's run shows tells a constant apart only where every way it comes by that the print leaves
         # ends there (a call handing a container whose puts are ways hands each of them, adder_atlas_plugin 677's
         # cont_zip_map; a call handing True or False, job_api 556's prodManager, is told apart by the print first)
@@ -3935,6 +3928,21 @@ class Rerun:
         # K: a call the run's path entered by (*entered*) that a frame of its run's traceback stands at ran -- the raise
         # that made the exception a handler took; no caller's run asked
         traced = [w for w in alone if w.route[0] in entered and w.route[0] in _traceback_frames(run)]
+        # a literal a run could tell apart is left (else each way is read where it ends, Q2 below)
+        literal = any(w.end == SR.CONSTANT and w.why not in SR.NO_LITERAL for w in ways)
+        # Q5: which of them ran is asked of the caller's own run where each is bound in the caller -- where the
+        # traceback has not told it (K) and a literal is left
+        q5 = (one_call and not rest and ask and len(traced) != 1 and literal
+              and self._bindings_in_caller(consts) is not None)
+        printed = f"its run printed {value!r} at its entry" if fn is not None else f"{owner} is not the arm's: no print read"
+        self.say(f"  {param}: {len(ways)} way(s) in by the map's callers; {printed}; constant(s) left: "
+                 + (", ".join(f"{w.value or w.why} at {w.route[0]}" for w in consts if w.route) or "none")
+                 + ("; other ways: " + ", ".join(sorted({f"{w.end} ({w.why})" for w in rest})) if rest else "")
+                 + (f"; read by the call(s) the run's path entered it by ({', '.join(entered)}), left out: "
+                    + ", ".join(f"{n} by {c}" for c, n in sorted(Counter(off).items())) if off else "")
+                 + (f"; all come by {next(iter(calls))}: " + ("which binding ran, by its caller's run (Q5)" if q5
+                                                              else "its caller's run not asked") if one_call else "")
+                 + (f"; the read takes {''.join(steps)} off it" if steps else ""))
         if traced:
             self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
         shown = traced or ([] if one_call or not ask else [
@@ -3949,7 +3957,7 @@ class Rerun:
         if not consts and len(rest) == 1:
             # the one way left is where it ends
             return (SR.End(term, rest[0].end, rest[0].why, rest[0].route[0] if rest[0].route else "", route=rest[0].route),)
-        if ways and not any(w.end == SR.CONSTANT and w.why not in SR.NO_LITERAL for w in ways):
+        if ways and not literal:
             # no literal a run could tell apart is left (modTime: a statement's rows, a part of the None 2371 binds,
             # the + at 2406 not read): each way where it ends or stops, the term ending where every one ends
             # (out/gm/qk-design.md Q2); a place reached by several routes is said once, by the first
@@ -3962,7 +3970,11 @@ class Rerun:
             if len(each) < len(ways):
                 self.say(f"    {param}: {len(ways)} way(s) end at {len(each)} place(s), each said by its first route")
             return tuple(each.values())
-        # S2's (a): every way left a constant the one call hands -- the if their bindings sit apart in
+        # Q5: every way left a constant the one call hands -- which binding ran, by its caller's own run
+        if q5 and (chosen := self._binding_shown(consts, window, getattr(run, "machine", None))):
+            crel = chosen.route[0].rpartition(":")[0]
+            return (SR.End(term, SR.CONSTANT, chosen.value or chosen.why, f"{crel}:{chosen.bound_at}", route=chosen.route),)
+        # S2's (a): not told by it -- the if their bindings sit apart in
         split = self._split(consts) if one_call and not rest else None
         return (SR.End(term, SR.STOP, "parameter-unchosen" if consts else SR.PARAMETER, "", param=param, split=split),)
 
@@ -4049,6 +4061,55 @@ class Rerun:
         v = j.verdicts[0] if j.verdicts else None
         self.say(f"    {site}: {v.describe() if v is not None else 'no verdict'}")
         return v is not None and v.kind == "positive"
+
+    @staticmethod
+    def _bindings_in_caller(consts: list[SR.Way]) -> tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, list[int]] | None:
+        """Q5: the caller's file, its function and the lines *consts* -- handed by one call -- are bound at, where each
+        is a statement of that function; None where one is bound in a callee the value came back from, or not read."""
+        call = consts[0].route[0]
+        crel, _, ln = call.rpartition(":")
+        lines = sorted({w.bound_at for w in consts if w.bound_at})
+        if len(lines) != len(consts) or not ln.isdigit():
+            return None
+        node = R.def_holding(crel, int(ln))
+        if node is None or any(R.statement_at(node, line) is None for line in lines):
+            return None
+        return crel, node, lines
+
+    def _binding_shown(self, consts: list[SR.Way], window: tuple[str, str] | None, machine: str | None) -> SR.Way | None:
+        """Q5 (out/gm/qk-design.md): which of the constants *consts*, all handed by one call and bound apart in its
+        caller (add_main 130's False and 134's True, handed at 136), the caller's own run shows bound: H2's judgement
+        of their binding lines as candidates on the key's runs of the caller's logs over *window* on *machine*, its
+        marks whole (as :meth:`_call_shown` asks) -- the one positive, or None.  A loop around them that takes one
+        element a turn prints every turn under one mark (add_main's ``<pid=...>``): the element the key's records print
+        the key as is bound to it (:func:`which_ran.key_env`), so a row printed for another element's turn alone shows
+        nothing of the key's (:func:`which_ran.other_elements`)."""
+        if (at := self._bindings_in_caller(consts)) is None:
+            return None
+        call = consts[0].route[0]
+        crel, node, lines = at
+        cowner = f"{crel}::{node.name}"
+        today = sorted({f for st in getattr(R._prints_of(cowner, lines), "statements", None) or [] for f in st.log_files})
+        files = self.files_of(cowner, today, lines)
+        if not files or not self.logs.names(files):
+            self.say(f"    Q5: {call} ({node.name}): no log of it to hand ({', '.join(files) or 'none'}): its caller's "
+                     "run not asked")
+            return None
+        asking = W.Asking(window, machine, T.Said("for-a-binding-a-call-hands", {"site": call}))
+        runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([cowner]), whole=True)
+        self._keep_unanswered(unanswered)
+        c = Candidate(crel, node.name, lines, log_files=files)
+        env = key_env(c, runs, self.args.key)
+        j = judge([c], runs, mode=self.mode, decide=self.decide, window=window, env=env)
+        for v in j.verdicts:
+            self.say(f"    {call}: {v.describe()}")
+        positive = [v.line for v in j.verdicts if v.kind == "positive"]
+        if len(positive) != 1:
+            return None
+        chosen = next(w for w in consts if w.bound_at == positive[0])
+        self.say(f"    Q5: {call} handed {chosen.value or chosen.why}, bound at {crel}:{chosen.bound_at}: its caller's run "
+                 f"shows it" + (f" (the key's turn read by {', '.join(sorted(env.values))})" if env is not None else ""))
+        return chosen
 
     def _entry_end(self, fn: R.Function, owner: str, line: int, run: Any, window: tuple[str, str] | None, terms: list[SR.Term]) -> SR.End:
         """Where the arm's function was entered from, read on every arm (S, gm-design.md): a function no corpus call

@@ -11159,23 +11159,44 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
                   N(owner=f"{g}::run", test_line=10, name="one", stops=[], sources=[src("call", "self.reports.pop", 9)])]
         got = {}
 
-        def walk(name, sources, guards):
+        def walk(name, sources, guards, shown=None, no_log=False):
             mapdump._FRAGMENT[:] = [N(guard_froms=guards, runnables=[], field_froms=[], entered_froms=[],
                                       parameter_froms=[N(owner=INIT, parameter="ignore", line=25, stops=[], sources=sources)])]
             SR._calls_in.cache_clear()
             SR._index.cache_clear()
             r = object.__new__(rerun.Rerun)
             r.lines = []
+            asked = []
+            prints_of = R._prints_of
+            if no_log:
+                # Q5 itself, with no log of the caller to hand: nothing asked
+                R._prints_of = lambda owner, lines: None
+                r.files_of = lambda owner, today, lines: []
+            else:
+                # Q5: the caller's run asked which binding ran -- here it shows none, or the one at *shown*
+                r._binding_shown = lambda consts, window, machine: (
+                    asked.append([w.bound_at for w in consts])
+                    or next((w for w in consts if w.bound_at == shown), None))
             t = SR.Term("g", "self.ignore", (SR.End("self.ignore", SR.STOP, SR.PARAMETER, f"{g}:26", param="ignore", of=INIT),))
-            t = r._with_callers(t, "the arm's function", f"{g}::Gen.report", N(machine="m1"), ("a", "b"))
+            try:
+                t = r._with_callers(t, "the arm's function", f"{g}::Gen.report", N(machine="m1"), ("a", "b"))
+            finally:
+                R._prints_of = prints_of
             e = t.ends[0]
             s = e.split
-            got[name] = {"end": [e.end, e.why], "lines": r.lines, "stop": T.text(rerun._first_stop(t)),
-                         "said": T.text(rerun._way_said(e)),
+            got[name] = {"end": [e.end, e.why, e.at, list(e.route)], "lines": r.lines, "stop": T.text(rerun._first_stop(t)),
+                         "said": T.text(rerun._way_said(e)), "asked": asked,
                          "split": None if s is None else [s.call, s.fn, list(s.ifs), list(s.guards),
                                                           [[u.term, [[x.end, x.why, x.at] for x in u.ends]] for u in s.terms]]}
 
+        walk("shown", flag, tested, shown=18)
         walk("record", flag, tested)
+        walk("no log", flag, tested, no_log=True)
+        # a part of each constant: no literal left (Q2), Q5 not reached
+        part = [src("constant", "False", 16, [f"{g}:19"]), src("constant", "True", 18, [f"{g}:19"])]
+        for s in part:
+            s.steps = ["[0]"]
+        walk("through", part, tested)
         walk("no record", flag, tested[2:])
         walk("in a callee", [flag[0], src("constant", "True", 3, [f"{g}:19", f"{g}:19"])], tested)
         walk("another way", [*flag, src("call", "other", 12, [f"{g}:19"])], tested)
@@ -11184,7 +11205,20 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
     got = json.loads(out.splitlines()[-1])
     g = "pandaserver/g10.py"
     test = "timeNow - modTime > 24"  # as ast.unparse spells the if's test
-    assert got["record"]["end"] == ["stop", "parameter-unchosen"]
+    # Q5: the caller's run asked first; where it shows one binding, the constant it binds is the end, no split read
+    assert got["shown"]["asked"] == [[16, 18]] and got["record"]["asked"] == [[16, 18]]
+    assert got["shown"]["end"] == ["constant", "True", f"{g}:18", [f"{g}:19"]] and got["shown"]["split"] is None
+    assert any(f"all come by {g}:19: which binding ran, by its caller's run (Q5)" in x for x in got["shown"]["lines"])
+    # no log of the caller: said so, nothing asked, the if read as without Q5
+    assert got["no log"]["asked"] == [] and got["no log"]["split"] == got["record"]["split"]
+    assert any(f"all come by {g}:19: which binding ran, by its caller's run (Q5)" in x for x in got["no log"]["lines"])
+    assert any(x.strip() == f"Q5: {g}:19 (run): no log of it to hand (none): its caller's run not asked"
+               for x in got["no log"]["lines"]), got["no log"]["lines"]
+    # no literal left: each way read where it ends (Q2), not asked, and not said to be
+    assert got["through"]["asked"] == [] and got["through"]["end"][:2] == ["constant", "constant-through"], got["through"]
+    assert any(f"all come by {g}:19: its caller's run not asked" in x for x in got["through"]["lines"]), got["through"]["lines"]
+    assert not any("Q5" in x for x in got["through"]["lines"]), got["through"]["lines"]
+    assert got["record"]["end"][:3] == ["stop", "parameter-unchosen", ""]
     assert got["record"]["split"] == [f"{g}:19", f"{g}::run", [f"{g}:15"], [test], [
         ["modTime", [["stop", "call", f"{g}:9"]]], ["timeNow", [["clock", "naive_utcnow", f"{g}:7"]]]]]
     assert any(f"told apart by the if at {g}:15 (run; the bindings at {g}:16, {g}:18)" in x for x in got["record"]["lines"])
@@ -11196,8 +11230,124 @@ def test_s2a_reads_the_if_telling_apart_the_constants_one_call_hands(tmp_path):
     assert got["no record"]["split"][4] == [[test, [["stop", "no-record", f"{g}:15"]]]]
     assert got["no record"]["stop"].startswith(f"it stops at {test!r} (in {test!r}), in the if at {g}:15 ")
     for name in ("in a callee", "another way"):
-        assert got[name]["end"] == ["stop", "parameter-unchosen"] and got[name]["split"] is None, name
+        assert got[name]["end"][:2] == ["stop", "parameter-unchosen"] and got[name]["split"] is None, name
         assert got[name]["stop"] == "it stops at 'self.ignore' (in 'g')", name
+
+
+_Q5_ADDM = """
+import datetime
+
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+from pandacommon.pandalogger.PandaLogger import PandaLogger
+from pandacommon.pandautils.PandaUtils import naive_utcnow
+
+_logger = PandaLogger().getLogger("add_main")
+
+
+def main(taskBuffer=None):
+    tmpLog = LogWrapper(_logger, "<pid=1>")
+    tmpLog.debug("start")
+
+    class AdderThread:
+        def run(self):
+            timeNow = naive_utcnow()
+            uniq_pid = self.get_pid()
+            tmpLog.debug(f"pid={uniq_pid} : run")
+            while True:
+                one_jor = self.job_output_reports.pop()
+                if not one_jor:
+                    break
+                panda_id, job_status, attempt_nr, time_stamp = one_jor
+                token_str = f"pid={uniq_pid} : job={panda_id}.{attempt_nr}"
+                tmpLog.debug(f"{token_str} to lock timestamp={time_stamp}")
+                try:
+                    modTime = time_stamp
+                    if (timeNow - modTime) > datetime.timedelta(hours=24):
+                        tmpLog.debug(f"{token_str} last add st={job_status}")
+                        ignoreTmpError = False
+                    else:
+                        tmpLog.debug(f"{token_str} add st={job_status}")
+                        ignoreTmpError = True
+                    adder_gen = AdderGen(taskBuffer, panda_id, job_status, attempt_nr, ignore_tmp_error=ignoreTmpError)
+                    adder_gen.run()
+                    tmpLog.debug(f"{token_str} done")
+                except Exception as e:
+                    tmpLog.error(f"pid={uniq_pid} : failed {e}")
+            tmpLog.debug(f"pid={uniq_pid} : processed")
+
+        def each(self, jobs):
+            for panda_id in jobs:
+                token_str = f"each job={panda_id}."
+                if panda_id > 0:
+                    tmpLog.debug(f"{token_str} kept")
+                    kept = True
+                else:
+                    tmpLog.debug(f"{token_str} dropped")
+                    kept = False
+"""
+
+
+def test_q5_a_loop_turn_printed_for_another_element_shows_nothing_of_the_keys_binding(tmp_path):
+    # add_main 106-134 (out/gm/qk-design.md Q5): one mark for every turn of the while that pops a job; 129 'last add
+    # st=' printed for another job made 130 positive beside 134.  The name the key's records print the key as
+    # (panda_id, through token_str) is bound to it, and a row printed only for another value is not the key's turn's.
+    # A for loop's element through a template is read alike; both turns of the key itself still leave both.
+    (_corpus(tmp_path) / "pandaserver" / "addm.py").write_text(_Q5_ADDM)
+    line = "2026-01-01 {} panda.log.add_main: DEBUG    <pid=1> {}\n"
+    def turn(j: int, last: bool) -> list[str]:
+        return [f"pid=9 : job={j}.1 to lock timestamp=x", f"pid=9 : job={j}.1 {'last add' if last else 'add'} st=failed",
+                f"pid=9 : job={j}.1 done"]
+
+    whole =["pid=9 : run", *turn(777, False), *turn(555, True), "pid=9 : processed", "each job=555. kept", "each job=777. dropped"]
+    logs = {
+        "whole": [line.format(f"13:00:00,{i:03d}", t) for i, t in enumerate(whole)],
+        # the key's own lines, from two cycles, one through each binding
+        "both": ["# extract by 777: lines holding it\n"] + [line.format(f"12:00:00,{i:03d}", t) for i, t in enumerate(turn(777, True))]
+        + [line.format(f"13:00:00,{i:03d}", t) for i, t in enumerate(turn(777, False))],
+    }
+    for name, said in logs.items():
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "panda-add_main.log").write_text("".join(said))
+    out = _ok(_run(tmp_path, """
+        import json
+        from bamboo.querier import evaluate as E
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+        from bamboo.querier.which_ran import Candidate, judge, key_env
+
+        R.ROWS_FROM = "walk"
+        # a guard's call (datetime.timedelta) is read through the pure functions, which E fills from pandaserver at
+        # the first call; the dev install (CI) has no pandaserver, and none of them is read here
+        E.PURE.setdefault("<no pure function is read here>", None)
+        f = "pandaserver/addm.py"
+        text = open("corpus/pandaserver/addm.py").read().splitlines()
+        at_line = lambda s: next(i for i, x in enumerate(text, 1) if s in x)
+        no, yes, kept, dropped = (at_line(s) for s in ("ignoreTmpError = False", "ignoreTmpError = True", "kept = True", "kept = False"))
+        at = ("2026-01-01 13:00:00", "2026-01-01 13:00:00")
+        log = "panda-add_main.log"
+        got = {"lines": [no, yes, kept, dropped]}
+        for name, func, lines in (("whole", "run", [no, yes]), ("both", "run", [no, yes]), ("for", "each", [kept, dropped])):
+            runs = {log: runs_for(read_log(f"{'whole' if name == 'for' else name}/{log}"), "777")}
+            c = Candidate(f, func, lines, [log])
+            env = key_env(c, runs, "777")
+            got[name] = {"env": sorted(env.values) if env else None,
+                         "with": [[v.line, v.kind, v.reasons] for v in judge([c], runs, window=at, env=env).verdicts],
+                         "without": [[v.line, v.kind] for v in judge([c], runs, window=at).verdicts]}
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    no, yes, kept, dropped = got["lines"]
+    for name in ("whole", "both", "for"):
+        assert got[name]["env"] == ["panda_id"], (name, got[name])
+    # today's judge, no element bound: both bindings positive
+    assert got["whole"]["without"] == [[no, "positive"], [yes, "positive"]]
+    assert [x[:2] for x in got["whole"]["with"]] == [[no, "excluded"], [yes, "positive"]], got["whole"]
+    assert any("printed only for other values of panda_id" in r and "not '777'" in r for r in got["whole"]["with"][0][2])
+    # the key's own turns through both: still both
+    assert [x[:2] for x in got["both"]["with"]] == [[no, "positive"], [yes, "positive"]], got["both"]
+    # a for loop's element through a template
+    assert got["for"]["without"] == [[kept, "positive"], [dropped, "positive"]]
+    assert [x[:2] for x in got["for"]["with"]] == [[kept, "excluded"], [dropped, "positive"]], got["for"]
 
 
 def test_a_field_record_with_no_way_stops_its_term_rather_than_drops_it(tmp_path):

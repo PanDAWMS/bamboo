@@ -1334,36 +1334,139 @@ def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.S
     return ""
 
 
+#: the calls a ``while`` takes its next element by (Q5): ``self.job_output_reports.pop()``, ``queue.get()``
+_TAKES = frozenset({"pop", "popleft", "get", "get_nowait"})
+
+
+def loop_elements(loop: ast.AST) -> dict[str, set[int]]:
+    """The names *loop* binds each element to, with the ids of the statements that bind them: a ``for``'s name target
+    (the loop itself); a ``while``'s names its body binds, at its own level, from a call that takes the next element
+    and is handed nothing (``pop()``, ``get()``; ``next(it)``) or unpacked from such a name -- add_main 108 and 112,
+    ``one_jor = self.job_output_reports.pop()`` and ``panda_id, job_status, attempt_nr, time_stamp = one_jor``
+    (out/gm/qk-design.md Q5)."""
+    if isinstance(loop, (ast.For, ast.AsyncFor)):
+        return {loop.target.id: {id(loop)}} if isinstance(loop.target, ast.Name) else {}
+    if not isinstance(loop, ast.While):
+        return {}
+    got: dict[str, set[int]] = {}
+    for s in loop.body:
+        if not isinstance(s, ast.Assign):
+            continue
+        v = s.value
+        takes = isinstance(v, ast.Call) and (
+            (isinstance(v.func, ast.Attribute) and v.func.attr in _TAKES and not v.args and not v.keywords)
+            or (isinstance(v.func, ast.Name) and v.func.id == "next" and len(v.args) == 1 and not v.keywords))
+        if takes or (isinstance(v, ast.Name) and v.id in got):
+            for t in s.targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                        got.setdefault(n.id, set()).add(id(s))
+    return got
+
+
+def _element_value(fn: R.Function, loop: ast.AST, var: str, got: dict[str, str]) -> str | None:
+    """What a record printed of *loop*'s element *var*: its own hole in *got* (the row's capture), or, where the row
+    prints it through a local the loop's body binds to an f-string holding it -- add_main 113's ``token_str =
+    f"pid={uniq_pid} : job={panda_id}.{attempt_nr}"``, printed at 129 as ``{token_str} last add st=...`` -- read out
+    of that local's hole by the f-string's shape (Q5); None where neither reads it."""
+    if var in got:
+        return got[var]
+    for s in ast.walk(loop):
+        if not (isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name)
+                and isinstance(s.value, ast.JoinedStr) and s.targets[0].id in got
+                and any(isinstance(n, ast.Name) and n.id == var for n in ast.walk(s.value))):
+            continue
+        for shape in R._alternatives(s.value, fn.node, s, expand=False):
+            pattern, groups = R._regex(shape, True)
+            if m := re.fullmatch(pattern, got[s.targets[0].id].strip(), re.S):
+                read = {groups[g]: v for g, v in m.groupdict().items()}
+                if var in read:
+                    return read[var]
+    return None
+
+
+def key_env(c: Candidate, logs: dict[str, list[Run]], key: str) -> E.Env | None:
+    """Q5: the element of a loop around *c*'s lines that the key's runs print the key as, bound to the key -- the name
+    the records say (add_main's ``panda_id``, printed as ``job=7338795608.1`` through ``token_str``), not one a
+    spelling picks; None where no record prints it so, or two names do (:func:`other_elements` then reads nothing)."""
+    try:
+        fn = R.function(c.rel, c.func, c.lines)
+    except (LookupError, ValueError, SyntaxError):
+        return None
+    pattern = re.compile(rf"(?<![0-9A-Za-z_]){re.escape(key)}(?![0-9A-Za-z_])")
+    named: set[str] = set()
+    for line in c.lines:
+        stmt = R.statement_at(fn.node, line)
+        if stmt is None:
+            continue
+        for loop in pathcond.ancestors(stmt):
+            if loop is fn.node:
+                break
+            if not isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                continue
+            elements = loop_elements(loop)
+            inside = [r for r in fn.rows if any(n is r.stmt for b in loop.body for n in ast.walk(b))]
+            if not elements or not inside:
+                continue
+            for f in c.log_files:
+                for run in logs.get(f, []):
+                    for record in run.records:
+                        if key not in record.message:
+                            continue
+                        for row in inside:
+                            got = row.capture(record)
+                            for var in elements:
+                                value = _element_value(fn, loop, var, got) if got else None
+                                if value is not None and pattern.fullmatch(value.strip()):
+                                    named.add(var)
+    if len(named) != 1:
+        return None
+    var = named.pop()
+    env = E.Env()
+    env.put(var, key, f"the key's records print it as {var} ({c.owner})")
+    return env
+
+
 def other_elements(fn: R.Function, stmt: ast.stmt, row: R.Row, sn: R.Seen, env: E.Env | None) -> str:
     """Why *row*, which the run printed, did not print for the loop element *stmt* is asked about; '' if it may have.
 
-    A row inside the same ``for`` as *stmt* prints once per element.  When *env* binds the loop's variable (H7 binds
-    the make call's name to the object the outside says is missing) and every record of the row holds another value
-    of it, the row printed for the other elements only (``register_dataset {name}`` at 861 printed for
-    the two top-level names and not for the ``_sub``, so the make call under it did not run for the ``_sub``).  Not
-    when the body rebinds the variable, nor when a record's value cannot be read.
+    A row inside the same loop as *stmt* prints once per element: a ``for``'s, or a ``while``'s that takes its next
+    element in its body (:func:`loop_elements`, Q5).  When *env* binds an element's name (H7 binds the make call's
+    name to the object the outside says is missing; Q5 the name the key's records print the key as, :func:`key_env`)
+    and every record of the row holds another value of it -- in its own hole, or through a local the body makes of
+    it (:func:`_element_value`) -- the row printed for the other elements only (``register_dataset {name}`` at 861
+    printed for the two top-level names and not for the ``_sub``, so the make call under it did not run for the
+    ``_sub``; add_main's 129 ``last add st=`` printed for another job's turn).  Not when the body binds the name
+    again, nor when a record's value cannot be read.
     """
     if env is None:
         return ""
     for loop in pathcond.ancestors(stmt):
         if loop is fn.node:
             break
-        if not isinstance(loop, (ast.For, ast.AsyncFor)) or not isinstance(loop.target, ast.Name):
+        if not isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
             continue
-        var = loop.target.id
-        if env.canonical(var) not in env.values or not any(n is row.stmt for b in loop.body for n in ast.walk(b)):
+        elements = loop_elements(loop)
+        if not elements or not any(n is row.stmt for b in loop.body for n in ast.walk(b)):
             continue
-        if any(isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store) for b in loop.body for n in ast.walk(b)):
-            continue
-        values = []
-        for i, _, _ in sn.hits.get(row.line, ()):
-            value = row.capture(sn.run.records[i]).get(var)
-            if value is None:
-                return ""
-            values.append(value.strip())
-        wanted = str(env.lookup(var))
-        if values and wanted not in values:
-            return f"row {row.line} printed only for other values of {var} ({len(values)} time(s)), not {wanted!r}"
+        for var, binders in sorted(elements.items()):
+            if env.canonical(var) not in env.values:
+                continue
+            # the element's own bindings bind it; any other store binds it again
+            bound_by = {id(n) for b in loop.body if id(b) in binders and isinstance(b, ast.Assign)
+                        for t in b.targets for n in ast.walk(t)}
+            if any(isinstance(n, ast.Name) and n.id == var and isinstance(n.ctx, ast.Store) and id(n) not in bound_by
+                   for b in loop.body for n in ast.walk(b)):
+                continue
+            values = []
+            for i, _, _ in sn.hits.get(row.line, ()):
+                value = _element_value(fn, loop, var, row.capture(sn.run.records[i]))
+                if value is None:
+                    return ""
+                values.append(value.strip())
+            wanted = str(env.lookup(var))
+            if values and wanted not in values:
+                return f"row {row.line} printed only for other values of {var} ({len(values)} time(s)), not {wanted!r}"
     return ""
 
 
