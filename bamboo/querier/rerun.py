@@ -4107,10 +4107,11 @@ class Rerun:
     def _entry_first(self, w: SR.Way, window: tuple[str, str]) -> str | None:
         """The first line of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key and began
         last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before killJobs ran --
-        or None where its logs are not to hand or hold no such pass.  A run is cut into the endpoint's passes
-        (:func:`passes_of`): a mark many calls share makes one run of hours -- job_api's ``kill``, a day's 198 lines on
-        one machine -- whose first line, or its first inside the window, is another call's (MJE-7395160958's
-        16:34:40,732, a kill of other jobs)."""
+        or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
+        endpoint's entry row whole (``rows.entries``): a mark many calls share makes one run of hours -- job_api's
+        ``kill``, a day's 198 lines on one machine -- whose first line, or its first inside the window, is another
+        call's (MJE-7395160958's 16:34:40,732, a kill of other jobs).  A run with no record read so begins no pass here:
+        kept whole, its first line may be another call's, or one printed after the call began."""
         entry = w.sent_into
         lines = [n] if (n := SR.def_line(entry)) else []
         today = sorted({f for st in getattr(R._prints_of(entry, lines), "statements", None) or [] for f in st.log_files})
@@ -4123,14 +4124,19 @@ class Rerun:
         self._keep_unanswered(unanswered)
         rel, _, name = entry.partition("::")
         try:
-            fn: R.Function | None = R.function(rel, name.rpartition(".")[2], within=lines)
+            fn = R.function(rel, name.rpartition(".")[2], within=lines)
         except LookupError:
-            fn = None
-            self.say(f"    {name}: not found in {rel}, its runs not cut into its passes")
-        # a run kept whole is a pass only where its first line is in the window: a shared mark's is not
-        firsts = [p.first for rs in runs.values() for r in rs if of_mover(r, entry)
-                  for p in (passes_of(fn, r, self.mode)[0] if fn is not None else [r])
-                  if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]]
+            self.say(f"    {name}: not found in {rel}, so no pass of it begins")
+            return None
+        firsts = []
+        for r in (r for rs in runs.values() for r in rs if of_mover(r, entry)):
+            starts = R.entries(fn, r, self.mode)
+            if not starts:
+                continue
+            for a, b in zip(starts, [*starts[1:], len(r.records)], strict=True):
+                p = r.part(a, b)
+                if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]:
+                    firsts.append(p.first)
         return max(firsts) if firsts else None
 
     def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",

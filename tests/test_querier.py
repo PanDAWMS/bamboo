@@ -13228,6 +13228,10 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     calls = [("08:00:00,000", "[777]"), ("15:45:00,000", "[5]"), ("15:51:58,491", "[777, 8]"), ("15:52:30,000", "[777]")]
     (tmp_path / "panda-api_job.log").write_text("".join(
         line.format(at, f"Start job_ids: {ids}") + line.format(at[:-3] + "900", "Done with ret: [True]") for at, ids in calls))
+    # a run of the key's one line, as an ask by the key alone finds it: one pass, begun at its entry row
+    (tmp_path / "one.log").write_text(line.format("15:51:58,491", "Start job_ids: [777, 8]"))
+    # a run of the key with no entry row: no pass of it begins in these records
+    (tmp_path / "done.log").write_text(line.format("15:51:58,900", "Done with ret: [True] job_ids: [777]"))
     out = _ok(_run(tmp_path, """
         import json
         from dataclasses import replace
@@ -13274,6 +13278,10 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         r._caller_shows(replace(sent, route=("pandaserver/d.py:904", *sent.route[1:])), window, arm)
         # in this window only a pass of other jobs began (15:45); the key's pass at 08:00 is outside it
         r._caller_shows(sent, ("2026-11-02 15:50:00", "2026-11-02 15:50:00"), arm)
+        entry = {"panda-api_job.log": runs_for(read_log("one.log"), "777")}
+        r._caller_shows(sent, ("2026-11-02 15:52:00", "2026-11-02 15:52:00"), arm)
+        entry = {"panda-api_job.log": runs_for(read_log("done.log"), "777")}
+        r._caller_shows(sent, ("2026-11-02 15:52:01", "2026-11-02 15:52:01"), arm)
         entry = {}
         r._caller_shows(sent, ("2026-11-02 16:34:45", "2026-11-02 16:34:45"), arm)
         print(json.dumps({"whole": whole, "shown": shown, "asked": asked, "lines": r.lines}))
@@ -13287,11 +13295,15 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         ["pandaserver/d.py:634", across, None, "for-a-call-across-a-send", send],
         ["pandaserver/d.py:904", across, None, "for-a-call-across-a-send", send],
         ["pandaserver/d.py:634", ["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:00", "2026-11-02 15:51:58,491"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, "for-a-call-across-a-send", send],
         ["pandaserver/d.py:634", ["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, "for-a-call-across-a-send", send],
     ], got
     why = "for the run of kill the send at pandaserver/c.py:7 entered, its first line closing the caller's window"
     assert got["asked"] == [[["2026-11-02 15:41:59", "2026-11-02 15:51:59"], None, why],
                             [["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, why],
+                            [["2026-11-02 15:42:00", "2026-11-02 15:52:00"], None, why],
+                            [["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, why],
                             [["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, why]], got
     none = "the window's end: no pass of the entry holding the key began in it"
     assert got["lines"] == [
@@ -13299,6 +13311,10 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:40:00 to "
         f"2026-11-02 15:50:00 ({none}), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:00 to "
+        "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:01 to "
+        f"2026-11-02 15:52:01 ({none}), on every machine",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 16:24:45 to "
         f"2026-11-02 16:34:45 ({none}), on every machine",
     ], got
