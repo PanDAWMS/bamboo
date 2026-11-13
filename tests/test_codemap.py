@@ -20,7 +20,7 @@ from collections import Counter
 import click.testing
 import pytest
 
-from bamboo.codemap import diff, evidence, gates
+from bamboo.codemap import diff, evidence, gates, pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     KEY_BOUND,
@@ -53,7 +53,7 @@ from bamboo.codemap.models import (
     ValueEnumNode,
     required_values,
 )
-from bamboo.codemap.panda import attribution, pathcond, promotion, sql, sqltext, values
+from bamboo.codemap.panda import attribution, promotion, sql, sqltext
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -2386,7 +2386,7 @@ def test_a_row_precondition_settles_its_binds_as_the_read_side_does(tmp_path, fu
         if function == "finishEvents":
             # The value the write gives the row reads in the same spelling, by the resolver both sides share.
             bound = sql.bound_values(func, run.varmap, ":newStatus", run.window, at=run)
-            assert [values.resolver()(bind.value, func) for bind in bound] == [["3"]]
+            assert [values.resolver(calls)(bind.value, func) for bind in bound] == [["3"]]
 
 
 @pytest.mark.parametrize("guarded_first", [False, True])
@@ -5100,7 +5100,7 @@ def test_promotion_follows_a_passthrough_into_its_source():
 
 def _func(source: str, name: str = "f"):
     tree = ast.parse(source)
-    from bamboo.codemap.panda.pathcond import attach_parents
+    from bamboo.codemap.pathcond import attach_parents
 
     attach_parents(tree)
     return next(
@@ -5347,12 +5347,17 @@ class JediTaskSpec(object):
 _IMPORTS_TASK_SPEC = "from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec\n"
 
 
-def _with_calls(modules):
-    """The corpus's calls over in-memory *modules*, for the length of a block."""
+def _corpus_calls(modules):
+    """The corpus's calls over in-memory *modules*."""
     from pathlib import Path
 
     roots = {package: Path("/nonexistent") / package for package in ("pandaserver", "pandajedi")}
-    return sql.across_calls(sqlwrite.corpus_calls(modules, roots))
+    return sqlwrite.corpus_calls(modules, roots)
+
+
+def _with_calls(modules):
+    """The corpus's calls over in-memory *modules*, for the length of a block."""
+    return sql.across_calls(_corpus_calls(modules))
 
 
 def _settled(caller: str, *others: tuple[str, str]) -> list[list[str]]:
@@ -5367,9 +5372,8 @@ def _settled(caller: str, *others: tuple[str, str]) -> list[list[str]]:
         for node in ast.walk(modules[-1].tree)
         if isinstance(node, ast.FunctionDef) and node.name == "f"
     )
-    settle = values.resolver()
-    with _with_calls(modules):
-        return [settle(node.value, func) for node in ast.walk(func) if isinstance(node, ast.Assign)]
+    settle = values.resolver(_corpus_calls(modules))
+    return [settle(node.value, func) for node in ast.walk(func) if isinstance(node, ast.Assign)]
 
 
 def test_a_run_time_key_enumerates_the_level_a_stated_one_narrows_it():
@@ -5443,13 +5447,12 @@ def _settled_by_name(caller: str) -> dict[str, list[str]]:
         for node in ast.walk(modules[-1].tree)
         if isinstance(node, ast.FunctionDef) and node.name == "f"
     )
-    settle = values.resolver()
-    with _with_calls(modules):
-        return {
-            node.targets[0].id: settle(node.value, func)
-            for node in ast.walk(func)
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript)
-        }
+    settle = values.resolver(_corpus_calls(modules))
+    return {
+        node.targets[0].id: settle(node.value, func)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Subscript)
+    }
 
 
 def test_a_run_time_key_a_test_on_the_way_decides_reads_only_the_entries_it_leaves():
@@ -9498,6 +9501,24 @@ def test_an_annotated_declaration_that_yields_nothing_is_counted():
     declarations = progress.spec_declarations([_module(source)])
 
     assert [(cls, names) for cls, _file, names in declarations] == [("WFDataSpec", set())]
+
+
+def test_an_empty_literal_declaration_declares_no_column():
+    """Read, and empty: pandacommon's ``SpecBase`` says ``attributes: tuple[str, ...] = ()``, the base its specs
+    declare theirs over.  It is left off the list as a class with nothing to declare, while a declaration read as
+    nothing (the derived one above) stays on it."""
+    source = (
+        "class SpecBase(object):\n"
+        "    attributes: tuple[str, ...] = ()\n\n\n"
+        "class WFDataSpec(SpecBase):\n"
+        "    attributes: tuple[str, ...] = tuple(a.attribute for a in _pairs)\n"
+    )
+
+    declarations = progress.spec_declarations([_module(source)])
+
+    assert [(cls, names) for cls, _file, names in declarations] == [
+        ("WFDataSpec", set())
+    ]
 
 
 def test_two_nodes_sharing_a_signature_are_reported_rather_than_one_being_lost():
@@ -16712,6 +16733,29 @@ def test_an_early_exit_below_the_write_implies_nothing():
     assert pathcond.UNSEEN_EARLY_EXIT not in {
         u.kind for u in pathcond.enclosing_guards(node)
     }
+
+
+def test_an_early_exit_says_which_side_leaves():
+    # The side as a flag, not as the negation spelled into a condition's text.
+    func = _func(
+        "def f(self, specs):\n"
+        "    for spec in specs:\n"
+        "        if spec.is_pseudo():\n"
+        "            continue\n"
+        "        if spec.ready:\n"
+        "            pass\n"
+        "        else:\n"
+        "            return\n"
+        "        spec.status = 'ok'\n"
+    )
+    node = [n for n in ast.walk(func) if isinstance(n, ast.Assign)][-1]
+
+    found = pathcond.early_exit_ifs(node)
+
+    assert [(ast.unparse(one.test), body_leaves) for one, body_leaves in found] == [
+        ("spec.is_pseudo()", True),
+        ("spec.ready", False),
+    ]
 
 
 def test_a_branch_that_falls_through_is_not_an_early_exit():

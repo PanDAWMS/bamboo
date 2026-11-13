@@ -55,6 +55,7 @@ import ast
 from collections import defaultdict
 from typing import TYPE_CHECKING, Iterator, Optional
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.models import (
     KEY_PARAMETER,
     KEY_ROWS,
@@ -65,7 +66,6 @@ from bamboo.codemap.models import (
     Waker,
     branch_excludes,
 )
-from bamboo.codemap.panda import pathcond
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls

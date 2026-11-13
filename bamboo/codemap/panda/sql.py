@@ -53,7 +53,7 @@ from typing import TYPE_CHECKING, Callable, Iterator, NamedTuple, Optional, Sequ
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.panda import sqleval, sqltext
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.pathcond import (
     BIND_ANNOTATED,
     BIND_ASSIGN,
     BIND_FOR,
@@ -75,7 +75,7 @@ from bamboo.codemap.panda.pathcond import (
     tested_values,
     written_value,
 )
-from bamboo.codemap.panda.values import rendered_text
+from bamboo.codemap.values import RETURN_HOPS, rendered_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -225,7 +225,9 @@ _CLAUSE_JOIN = re.compile(r"\b(?:AND|OR)\b", re.IGNORECASE)
 #: The helper every ``IN`` list in the corpus is built with: it returns the
 #: placeholders as one string and their values as a map, and both are spliced
 #: in -- ``f"jobStatus IN ({names})"`` and ``varMap.update(values)``.  It is
-#: pandacommon's, outside the corpus, and what it does is stated here once.
+#: pandacommon's, read as outside the corpus
+#: (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`), and what it does is
+#: stated here once.
 IN_LIST_HELPER = "get_sql_IN_bind_variables"
 
 
@@ -328,12 +330,6 @@ _CALLS: Optional["Calls"] = None
 
 #: What a mapping can hold, read through :data:`_CALLS` (:func:`_corpus_keys`), with the calls it was read through.
 _RECEIVERS: Optional[tuple["Calls", "_Receivers"]] = None
-
-#: How many calls out a statement's text or binds are followed.  ``getJobs``
-#: is two: its ``WHERE`` is a closure's return, which is
-#: ``construct_where_clause``'s.
-RETURN_HOPS = 3
-
 
 @contextlib.contextmanager
 def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
@@ -480,45 +476,6 @@ def placed(func: ast.AST, call: ast.Call) -> Optional["Placed"]:
     if file is None:
         return None
     return _CALLS.callees(file, func, call)
-
-
-def every_return(
-    func: ast.AST, call: ast.Call, hops: int = 0
-) -> Optional[list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]]]:
-    """``(callee, value)`` for every value *call* can hand back; ``None`` if one cannot be followed.
-
-    :func:`returned` reads a statement's text, where a piece that cannot be
-    followed stays a hole and the rest is still worth reading.  A value set is
-    used differently -- to eliminate -- so one short of a member is a false
-    one: a helper returning a literal on one branch and an unplaced call on
-    another would read as returning the literal alone.  So every function the
-    call can land in, every ``return`` in each, and every call such a return
-    makes are followed, or nothing is claimed.
-
-    Empty outside :func:`across_calls` is ``None`` too: no calls, no claim.
-    """
-    if _CALLS is None or hops >= RETURN_HOPS:
-        return None
-    file = _CALLS.types.file_of(func)
-    if file is None:
-        return None
-    placed = _CALLS.callees(file, func, call)
-    if not placed.targets or placed.unplaced or placed.returns_none:
-        return None
-    found: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ast.expr]] = []
-    for target in placed.targets:
-        values = _returns(target.func)
-        if not values:
-            return None
-        for value in values:
-            if isinstance(value, ast.Call):
-                deeper = every_return(target.func, value, hops + 1)
-                if deeper is None:
-                    return None
-                found.extend(deeper)
-            else:
-                found.append((target.func, value))  # type: ignore[arg-type]
-    return found
 
 
 #: The function being read as one call site runs it, and the constants that
@@ -3052,7 +3009,7 @@ def _not_on_its_passes(
     carries into a pass is read apart -- kept where it reaches the top of the
     innermost loop holding the call and a value there reaches the call, cut
     so.  A ``for`` writes its target at the top of each pass, where
-    :func:`~bamboo.codemap.panda.reaching.reaching` puts it, so the loop
+    :func:`~bamboo.codemap.reaching.reaching` puts it, so the loop
     stands for that value; a ``while`` has no such write, and what it carries
     is kept.  A map taken from a list is the one built where it was appended
     (:func:`_live_at`): its binds are kept where that ``for`` reaches the call.
@@ -3248,7 +3205,7 @@ def _rereads(write: ast.AST, varmap: str) -> bool:
 
     ``varMap[":diag"] = JobSpec.truncateStringAttr("supErrorDiag",
     varMap[":diag"])`` keeps the text above it, shortened, so it cancels
-    nothing -- as ``x += y`` does in :mod:`~bamboo.codemap.panda.reaching`.  Read as
+    nothing -- as ``x += y`` does in :mod:`~bamboo.codemap.reaching`.  Read as
     a replacement it took ``updateJobStatus``'s diagnostic template with it.
     """
     targets = targets_of(write)

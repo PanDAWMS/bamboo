@@ -47,8 +47,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from bamboo.codemap import models as M
-from bamboo.codemap.panda import flow, pathcond
-from bamboo.codemap.panda import reaching as RE
+from bamboo.codemap import pathcond
+from bamboo.codemap import reaching as RE
+from bamboo.codemap.panda import flow
 
 from . import mapdump
 from . import rows as R

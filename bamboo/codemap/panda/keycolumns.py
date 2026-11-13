@@ -65,11 +65,11 @@ from __future__ import annotations
 import ast
 from typing import Callable, Optional
 
-from bamboo.codemap import callfacts, objects, reach
+from bamboo.codemap import callfacts, objects, pathcond, reach
 from bamboo.codemap import calls as C
 from bamboo.codemap.models import MAP_KEY, KeyStop, MapFragment, SourceModule
 from bamboo.codemap.panda import objects as panda_objects
-from bamboo.codemap.panda import pathcond, sql, sqltext
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
 

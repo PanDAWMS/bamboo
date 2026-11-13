@@ -24,7 +24,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Callable, Iterator, Optional
 
-from bamboo.codemap import callfacts, reach
+from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -64,7 +64,7 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     SourceModule,
 )
-from bamboo.codemap.panda import objects, pathcond, sql, sqltext
+from bamboo.codemap.panda import objects, sql, sqltext
 
 if TYPE_CHECKING:
     from bamboo.codemap.panda.recognizers import sqlwrite

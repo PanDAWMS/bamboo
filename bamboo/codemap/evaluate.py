@@ -1,7 +1,7 @@
 """A test's value from what is known: one evaluator for the map and its readers.
 
 The map decides a test with the constants its code fixes --
-:func:`bamboo.codemap.panda.pathcond.decided` with the literal a caller
+:func:`bamboo.codemap.pathcond.decided` with the literal a caller
 hands a flag parameter -- and a reader of a run decides it with what the run
 printed and the rows it read.  The question is one, so the evaluator is one:
 the values are the caller's, and each carries where it came from.

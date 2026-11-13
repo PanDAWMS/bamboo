@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import STOP_CLOCK, STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
-from bamboo.codemap.panda.pathcond import names_bound_by, targets_of, written_value
+from bamboo.codemap.pathcond import names_bound_by, targets_of, written_value
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Types

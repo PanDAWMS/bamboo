@@ -7,9 +7,10 @@ import ast
 
 import pytest
 
+from bamboo.codemap import pathcond, reaching
 from bamboo.codemap.gates import with_exits_are_read
 from bamboo.codemap.models import MapFragment
-from bamboo.codemap.panda import flow, pathcond, reaching
+from bamboo.codemap.panda import flow
 
 FLOW = """\
 def handled(proxy, log):

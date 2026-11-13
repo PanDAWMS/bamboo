@@ -108,7 +108,7 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
-from bamboo.codemap import callfacts, reach
+from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -126,7 +126,7 @@ from bamboo.codemap.models import (
     WrittenValue,
 )
 from bamboo.codemap.objects import RETURN, ObjectReach, _under, follow, table_classes
-from bamboo.codemap.panda import mapentries, order, pathcond, specwrites, sql, sqltext
+from bamboo.codemap.panda import mapentries, order, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
 #: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).

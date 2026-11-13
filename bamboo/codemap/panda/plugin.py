@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from bamboo.codemap import callfacts, reach, reading, trace
+from bamboo.codemap import callfacts, pathcond, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.base import CodeMapPlugin
@@ -53,7 +53,6 @@ from bamboo.codemap.panda import (
     mustprints,
     objects,
     offrow,
-    pathcond,
     promotion,
     runnable,
     runs,
@@ -66,11 +65,6 @@ from bamboo.codemap.panda.attribution import (
     annotation_readings,
     class_bases,
     spec_annotation_forms,
-)
-from bamboo.codemap.panda.pathcond import (
-    attach_parents,
-    functions_with_owner,
-    qualified_name,
 )
 from bamboo.codemap.panda.recognizers import (
     alias,
@@ -87,6 +81,7 @@ from bamboo.codemap.panda.recognizers import (
     tables,
     trigger,
 )
+from bamboo.codemap.pathcond import attach_parents, functions_with_owner, qualified_name
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +193,12 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
             existing.vocabulary = subject.vocabulary
     return list(merged.values())
 
-PACKAGES = ("pandaserver", "pandajedi")
+#: The packages of the corpus, each a directory of the source root.  ``pandacommon`` holds what the pin's copy of a
+#: panda-common release puts there: ``pandautils``' ``base``, ``PandaUtils``, ``thread_utils`` and ``net_utils``, the
+#: base the specs are built on (``SpecBase``) and the helpers beside it; the definitions the map has facts for are
+#: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules are
+#: not there and stay outside.
+PACKAGES = ("pandaserver", "pandajedi", "pandacommon")
 
 # Test code is not the system's behaviour: :func:`calls.is_test_module`, the
 # one rule the build and the call index share.

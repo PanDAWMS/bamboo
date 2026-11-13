@@ -56,14 +56,14 @@ from typing import Iterator, Optional
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, LoopCutNode, SourceModule
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.panda.recognizers.selection import _TAG, _identifiers, _rendered
+from bamboo.codemap.pathcond import (
     attach_parents,
     enclosing_function,
     functions_with_owner,
     path_condition,
     targets_of,
 )
-from bamboo.codemap.panda.recognizers.selection import _TAG, _identifiers, _rendered
 
 _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
