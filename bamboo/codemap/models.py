@@ -3339,10 +3339,24 @@ class HeldThrough(BaseModel):
         description=(
             "The function, as its module and name spell it where it is imported (``json.loads``, under ``import json "
             "as js`` too), else as the call names it (``int``); ``+`` for a ``+`` or ``+=`` "
-            f"({THROUGH_ADDED}): ``job.attemptNr + 1``."
+            f"({THROUGH_ADDED}): ``job.attemptNr + 1``; another arithmetic operator's symbol (``*``, ``-``, ``//``, "
+            f"``%``, ...) for it or its augmented assignment ({THROUGH_COMPUTED}; {THROUGH_TEXT} for a ``%`` on a text "
+            f"literal): ``max_walltime *= 2``.  An element of a set or a sequence a ``+``, ``-``, ``|``, ``&``, ``^`` "
+            "or ``*`` makes is an operand's element, through none of them, and never the right operand's of a ``-``: "
+            "``list(rse_set - excluded)[0]`` is ``rse_set``'s ``[0]``; a part a container holds such a value at is "
+            "the value, through the operator: ``{'k': a + b}['k']`` is ``a + b``.  ``f''`` for an f-string, its "
+            f"values and literal parts ({THROUGH_TEXT}); a comprehension's code name (``<listcomp>``, ...).  "
+            "``HttpClient.post``, ``HttpClient.get``, ``HttpClient.post_files`` for what the corpus's client sends an "
+            f"endpoint's parameter ({THROUGH_DECODED}, {THROUGH_CONVERTED}, {THROUGH_UNKNOWN}: a file's contents)."
         )
     )
-    at: str = Field(description="``file:line`` of the call.")
+    at: str = Field(
+        description=(
+            "``file:line`` of the call.  The tests on the way to it have GuardFroms (:attr:`GuardFrom.calls`): which "
+            "statement a run went through is read off them (``itemList = taskParamMap['jobParameters'] + "
+            "taskParamMap['log']`` under the ``else`` of ``if 'log' not in taskParamMap:``) where the way ends past it."
+        )
+    )
     gives: str = Field(
         description=(
             f"What its value is of the value: {THROUGH_DECODED}, {THROUGH_COPY}, {THROUGH_CONVERTED}, {THROUGH_TEXT}, "
@@ -3400,7 +3414,8 @@ class HeldSource(KeySource):
         description=(
             "On a GuardFrom's or ParameterFrom's way: each call of the corpus on it, ``file:line``, in the order the "
             "value went -- one whose return the value is, and on a ParameterFrom's way last the caller's call that "
-            "hands it in."
+            "hands it in.  The tests on the way to each have GuardFroms (:attr:`GuardFrom.calls`): whether the call "
+            "that gave or handed the value ran is read off them."
         ),
     )
     changes: list["HeldChange"] = Field(
@@ -3447,6 +3462,26 @@ class HeldSource(KeySource):
             "have GuardFroms (:attr:`GuardFrom.calls`).  A parameter's default a call leaves it to is where it is "
             "written, in the callee (``pandaserver/taskbuffer/TaskBuffer.py:1015`` for ``use_json: bool = False``).  "
             "Empty where the way ends at a parameter."
+        ),
+    )
+    chosen: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The bindings the way came from that were one of several reaching their read, ``file:line`` of each "
+            "binding's statement, each once: ``itemList = taskParamMap['jobParameters']`` under ``if 'log' not in "
+            "taskParamMap:``, where the bindings under its ``elif`` and ``else`` reach the loop too.  Which of them a "
+            "run made is the tests on the way to each, which have GuardFroms (:attr:`GuardFrom.calls`).  Not the "
+            "function's entry, which no statement is; empty where each read on the way had one binding reaching it."
+        ),
+    )
+    sent: bool = Field(
+        default=False,
+        description=(
+            "On a ParameterFrom's way of an endpoint's parameter: the way is what the corpus's client sends the "
+            "endpoint -- the request's element at a send through ``HttpClient``'s method (*through*), or the "
+            "parameter's default where the request may lack the key -- and the send, the client's call, is the last "
+            "of *route*.  ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, "
+            "and ``None``: both sent.  False on a way a call of the corpus hands in."
         ),
     )
 
@@ -5999,7 +6034,11 @@ class GuardFrom(BaseModel):
             "ParameterFrom's or a FieldFrom's way, or a FieldFrom's change): ``if is_fatal:`` guards "
             "``self.result.set_fatal()``; and of the places such a way ends at (:attr:`HeldSource.at`), the source's "
             "own statement: ``if (timeNow - modTime) > datetime.timedelta(hours=24):`` guards "
-            "``ignoreTmpError = False``.  Not lines of calls only, then: the lines of the places it guards."
+            "``ignoreTmpError = False``; and of the places such a way goes through on to its end: each call outside "
+            "the corpus or operator (:attr:`HeldThrough.at`), each binding that was one of several reaching its read "
+            "(:attr:`HeldSource.chosen`) -- ``if 'log' not in taskParamMap:`` guards ``itemList = "
+            "taskParamMap['jobParameters']`` and the ``+`` under its ``else`` --, and each call of the corpus "
+            "(:attr:`HeldSource.route`).  Not lines of calls only, then: the lines of the places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")

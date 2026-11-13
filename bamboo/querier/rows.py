@@ -718,6 +718,14 @@ class Row:
         said = {trace.reads_whole(m, record.token, record.text) for m in self.map_rows}
         return True if True in said else False if False in said else None
 
+    def reads_literally(self, record: Record) -> bool | None:
+        """Whether the map reads *record* as this row's line whole with every hole taking any characters
+        (``trace.reads_literally``): what :meth:`reads_whole` leaves None where a hole's guessed class does not take
+        the text -- killJob's ``user={user} wg=`` closes ``user`` at the first blank.  None where none of the map's
+        rows of it can say, as :meth:`reads_whole`."""
+        said = {trace.reads_literally(m, record.token, record.text) for m in self.map_rows}
+        return True if True in said else False if False in said else None
+
     def capture(self, record: Record) -> dict[str, str]:
         """Hole values in *record*, keyed by the expression each hole prints; none from a record the search cut."""
         if record.cut:
@@ -886,9 +894,9 @@ def _prefix_regex(prefixes: tuple[str, ...]) -> re.Pattern[str]:
 
 
 #: ``[fragment, [(pattern, owner, prefix regex or None, logs or None, map row)], {text: [(owner, prefix, logs, map
-#: row)]}, {(log, token, text): writers}, {(log, token, text): whole writers}]`` for the installed dump
-#: (:func:`line_writers`, :func:`whole_writers`); the fragment is held, so a dump installed after is told from it by
-#: identity
+#: row)]}, {(log, token, text): writers}, {(log, token, text): whole writers}, {first word: rows with no prefix},
+#: {(log, token, text): literal writers}]`` for the installed dump (:func:`line_writers`, :func:`whole_writers`,
+#: :func:`literal_writers`); the fragment is held, so a dump installed after is told from it by identity
 _WRITERS: list = []
 
 
@@ -910,7 +918,7 @@ def _writers() -> list | None:
                         rows.append(row)
                         if not r.prefix and (word := head_word(r.pattern)):
                             heads.setdefault(word, []).append(row)
-        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads]
+        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads, {}]
     return _WRITERS
 
 
@@ -962,6 +970,26 @@ def whole_writers(record: Record, log: str) -> frozenset[str]:
     if key not in known:
         known[key] = frozenset(
             o for o, row in _found(writers, record, log) if trace.reads_whole(row, record.token, record.text) is True)
+    return known[key]
+
+
+def literal_writers(record: Record, log: str) -> frozenset[str]:
+    """The functions of the installed dump with a row that reads *record* as its line whole with every hole taking any
+    characters (``trace.reads_literally``), whose prefix stands where the record's line starts or which has none, and
+    whose statement's lines can land in *log* -- :func:`line_writers` with the holes loosened.  The map's own pattern
+    keeps a hole's guessed class: killJob 840's ``user=[^\\ ]*\\ wg=`` does not find ``user=finish by ... wg=``, so
+    line_writers holds no function for that record, killJob's own row neither; this reading holds killJob alone.  A row
+    with no pattern the map can ask with (all holes) is not counted, as in line_writers.  None without a dump."""
+    if (writers := _writers()) is None:
+        return frozenset()
+    known: dict[tuple[str, str, str], frozenset[str]] = writers[6]
+    key = (log, record.token, record.text)
+    if key not in known:
+        line = f"{record.token} {record.text}"
+        known[key] = frozenset(
+            o for _, o, p, logs, row in writers[1]
+            if (logs is None or log in logs) and (p is None or p.match(line))
+            and trace.reads_literally(row, record.token, record.text) is True)
     return known[key]
 
 
@@ -1284,17 +1312,39 @@ def entries(fn: Function, run: Run, mode: str) -> list[int]:
     per pass of *fn*.  The row's pattern finds more: the ``start`` of prepareTasksToBeFinished_JEDI finds its loop's
     ``start 3/10 jediTaskID=...``, and TaskRefiner's runImpl's finds doRefine's ``start taskType=anal`` through the
     same logger -- not a pass begun.  A record the map cannot read whole does not cut either: the passes it may begin
-    stay one (KNOWN_ISSUES.md K47)."""
-    return sorted(i for i, whole in _entry_reads(fn, run, mode) if whole)
+    stay one (KNOWN_ISSUES.md K47) -- unless it is the entry row's line with its holes taking any characters and
+    nothing else can have printed it (:func:`_entry_reads`)."""
+    return sorted(i for i, whole, _ in _entry_reads(fn, run, mode) if whole)
 
 
-def _entry_reads(fn: Function, run: Run, mode: str) -> list[tuple[int, bool | None]]:
-    """Each record of *run* *fn*'s entry row finds, with whether the map reads it as the row's line whole."""
+def _entry_reads(fn: Function, run: Run, mode: str) -> list[tuple[int, bool | None, bool]]:
+    """Each record of *run* *fn*'s entry row finds: ``(index, whether it is the row's line, read so only literally)``.
+
+    It is the row's line where the map reads it so whole (:meth:`Row.reads_whole`).  Where the map cannot say (None),
+    it is the row's line too where the map reads it so with every hole taking any characters
+    (:meth:`Row.reads_literally`) and nothing else can have printed it: no other row of *fn* finds it, and no other
+    function of the dump reads it so (:func:`literal_writers`; :func:`line_writers` keeps the guessed classes, and
+    holds no function at all for such a record).
+    killJob's 840 ``code={code} role={prodManager} user={user} wg=...`` closes ``user`` at its first blank, so a user
+    holding blanks (``finish by ...``) is read whole nowhere: MJE-7396802500's two calls under one mark (05:27:04,
+    skipped with NOWAIT, and 05:40:46) stayed one pass, which J does not read (out/gm/qk-design.md, SC)."""
     entry = entry_row(fn)
     if entry is None:
         return []
-    hits = seen(fn, run, mode).hits.get(entry.line, ())
-    return [(i, entry.reads_whole(run.records[i])) for i, _, _ in hits]
+    hits = seen(fn, run, mode).hits
+    finders: dict[int, set[int]] = {}
+    for line, found in hits.items():
+        for i, _, _ in found:
+            finders.setdefault(i, set()).add(line)
+    owner = f"{fn.rel}::{pathcond.qualified_name(fn.node)}"
+    out: list[tuple[int, bool | None, bool]] = []
+    for i, _, _ in hits.get(entry.line, ()):
+        record = run.records[i]
+        whole = entry.reads_whole(record)
+        literal = (whole is None and finders[i] == {entry.line} and entry.reads_literally(record) is True
+                   and literal_writers(record, run.log.name) == {owner})
+        out.append((i, True if literal else whole, literal))
+    return out
 
 
 def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
@@ -1312,16 +1362,19 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
     if entry is None:
         return [run], f"{fn.name} has no entry row: the run is not split"
     read = _entry_reads(fn, run, mode)
-    starts = sorted(i for i, whole in read if whole)
+    starts = sorted(i for i, whole, _ in read if whole)
     if not starts:
-        unread = sum(1 for _, whole in read if whole is None)
+        unread = sum(1 for _, whole, _ in read if whole is None)
         found = (f"is read whole at none of its {len(read)} record(s) in the run"
                  + (f" ({unread} the map cannot read whole)" if unread else "")) if read else "is not in the run"
         return [run], f"entry row {entry.line} of {fn.name} {found}: the run is not split"
     cuts = starts + [len(run.records)]
     parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
     before = f"; {starts[0]} record(s) before the first are not a pass of it" if starts[0] else ""
-    return parts, f"cut at entry row {entry.line} of {fn.name}: {len(parts)} pass(es){before}"
+    literal = sum(1 for _, _, lit in read if lit)
+    by = (f" ({literal} read as its line only with its holes taking any characters, nothing else printing it)"
+          if literal else "")
+    return parts, f"cut at entry row {entry.line} of {fn.name}{by}: {len(parts)} pass(es){before}"
 
 
 def prefix_holes(fn: Function, row: Row, record: Record) -> dict[str, str]:

@@ -426,6 +426,11 @@ class Way:
     end_at: str = ""
     #: as :attr:`End.made_of` (Q7)
     made_of: str = ""
+    #: a way that came across a send (the map's ``HeldSource.sent``, SND): the client's call that sent it, the last of
+    #: that source's route (``file:line``), and the endpoint function the send entered (``file::name``); the send
+    #: nearest the way's end where it came across more than one (:func:`param_ways`)
+    sent: str = ""
+    sent_into: str = ""
 
 
 def _made_of(s: Any) -> str:
@@ -884,6 +889,43 @@ def _callers() -> tuple[dict, dict]:
     return _calls_in(id(fragment)) if fragment is not None else ({}, {})
 
 
+@functools.cache
+def _sends_in(fragment_id: int) -> tuple[dict[str, tuple[str, ...]], dict[tuple[str, str], list[tuple[str, tuple[int, ...]]]]]:
+    fragment = mapdump.fragment()
+    sends: dict[str, set[str]] = {}
+    for p in getattr(fragment, "parameter_froms", None) or []:
+        for s in p.sources:
+            if getattr(s, "sent", False) and s.route:
+                sends.setdefault(p.owner, set()).add(s.route[-1])
+    calls: dict[tuple[str, str], list[tuple[str, tuple[int, ...]]]] = {}
+    for n in getattr(fragment, "reach_graph", None) or []:
+        for c in n.calls:
+            rel, _, qual = c.to.split("#")[0].partition("::")
+            calls.setdefault((rel, qual), []).append((n.owner.split("#")[0], tuple(sorted(set(c.lines or [c.line])))))
+    return {o: tuple(sorted(v)) for o, v in sends.items()}, calls
+
+
+def sends_into(owner: str) -> tuple[str, ...]:
+    """The client's calls that send into the endpoint function *owner* (``file::name``): the last of the route of each
+    source of its ``ParameterFrom`` records the map marks sent (``HeldSource.sent``, SND) -- job_api.kill's from
+    Client.py:273, Client.kill_jobs's ``HttpClient.post``.  Empty where nothing is sent into it."""
+    fragment = mapdump.fragment()
+    return _sends_in(id(fragment))[0].get(owner, ()) if fragment is not None else ()
+
+
+def def_line(owner: str) -> int:
+    """The line of *owner*'s ``def`` as its ``ParameterFrom`` records hold it (``file::name``); 0 where it has none."""
+    return next((p.line for (o, _), p in _callers()[0].items() if o == owner), 0)
+
+
+def calls_into(rel: str, qual: str) -> list[tuple[str, tuple[int, ...]]]:
+    """Each function whose calls go into the function of *rel* the map names *qual* (``kill_jobs``, ``Class.method``:
+    the map's ``ReachNode.calls``), with the lines of those calls: into Client.kill_jobs, copyArchive's main at 19 lines
+    and add_sub's main at 205."""
+    fragment = mapdump.fragment()
+    return list(_sends_in(id(fragment))[1].get((rel, qual), [])) if fragment is not None else []
+
+
 def _by_the_path(sources: list, entered: tuple[str, ...]) -> tuple[list, list[str]]:
     """Of a ``ParameterFrom``'s *sources*, those that come in by one of the calls *entered* (``file:line``, the first
     of a source's route: S4b's (e)), and the call each of the others comes in by.  All, with none left out, where
@@ -1095,7 +1137,12 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
     ways: list[Way] = []
     whole, parts = _ways_of_the_value(_by_the_path(pf.sources, entered)[0])
     for s in whole:
-        ways += _param_source_ways(s, steps, seen, truth)
+        got = _param_source_ways(s, steps, seen, truth)
+        if getattr(s, "sent", False) and s.route:
+            # SND: the value came across a send into *owner*, the client's call last on the source's route; a send
+            # read further up (nearer the way's end) is kept
+            got = [w if w.sent else replace(w, sent=s.route[-1], sent_into=owner) for w in got]
+        ways += got
     kinds = sorted({st.kind for st in pf.stops})
     here = (f"{owner.partition('::')[0]}:{pf.line}",)
     if not whole and parts:

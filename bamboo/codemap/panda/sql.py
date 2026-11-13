@@ -225,7 +225,9 @@ _CLAUSE_JOIN = re.compile(r"\b(?:AND|OR)\b", re.IGNORECASE)
 #: The helper every ``IN`` list in the corpus is built with: it returns the
 #: placeholders as one string and their values as a map, and both are spliced
 #: in -- ``f"jobStatus IN ({names})"`` and ``varMap.update(values)``.  It is
-#: pandacommon's, outside the corpus, and what it does is stated here once.
+#: pandacommon's, read as outside the corpus
+#: (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`), and what it does is
+#: stated here once.
 IN_LIST_HELPER = "get_sql_IN_bind_variables"
 
 

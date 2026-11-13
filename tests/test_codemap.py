@@ -9503,6 +9503,24 @@ def test_an_annotated_declaration_that_yields_nothing_is_counted():
     assert [(cls, names) for cls, _file, names in declarations] == [("WFDataSpec", set())]
 
 
+def test_an_empty_literal_declaration_declares_no_column():
+    """Read, and empty: pandacommon's ``SpecBase`` says ``attributes: tuple[str, ...] = ()``, the base its specs
+    declare theirs over.  It is left off the list as a class with nothing to declare, while a declaration read as
+    nothing (the derived one above) stays on it."""
+    source = (
+        "class SpecBase(object):\n"
+        "    attributes: tuple[str, ...] = ()\n\n\n"
+        "class WFDataSpec(SpecBase):\n"
+        "    attributes: tuple[str, ...] = tuple(a.attribute for a in _pairs)\n"
+    )
+
+    declarations = progress.spec_declarations([_module(source)])
+
+    assert [(cls, names) for cls, _file, names in declarations] == [
+        ("WFDataSpec", set())
+    ]
+
+
 def test_two_nodes_sharing_a_signature_are_reported_rather_than_one_being_lost():
     """The signature is the merge key, so a shared one is a node about to vanish.
 
