@@ -2587,7 +2587,7 @@ class _Walk:
             return None
         package, _, relative = file.partition("/")
         root = self.roots.get(package)
-        if root is None or not relative:
+        if root is None or not relative or calls_mod.left_out(file):
             # Outside the corpus the map covers, which is the walk's stop rule
             # rather than a failure: a name that comes from somewhere else is
             # exactly what a boundary is for.

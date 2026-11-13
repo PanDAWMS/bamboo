@@ -193,11 +193,12 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
             existing.vocabulary = subject.vocabulary
     return list(merged.values())
 
-#: The packages of the corpus, each a directory of the source root.  ``pandacommon`` holds what the pin's copy of a
-#: panda-common release puts there: ``pandautils``' ``base``, ``PandaUtils``, ``thread_utils`` and ``net_utils``, the
-#: base the specs are built on (``SpecBase``) and the helpers beside it; the definitions the map has facts for are
-#: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules are
-#: not there and stay outside.
+#: The packages of the corpus, each a directory of the source root.  ``pandacommon`` is the pin's copy of a
+#: panda-common release, whole, so the code run from the pin imports it; the corpus reads of it ``pandautils``'
+#: ``base``, ``PandaUtils``, ``thread_utils`` and ``net_utils``, the base the specs are built on (``SpecBase``) and the
+#: helpers beside it (:data:`bamboo.codemap.callfacts.PACKAGE_FILES`), and the definitions the map has facts for are
+#: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules stay
+#: outside.
 PACKAGES = ("pandaserver", "pandajedi", "pandacommon")
 
 # Test code is not the system's behaviour: :func:`calls.is_test_module`, the
@@ -1235,6 +1236,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 rel_path = f"{pkg}/{path.relative_to(root)}"
                 if _is_test_module(rel_path):
                     skipped_tests += 1
+                    continue
+                if calls_mod.left_out(rel_path):
                     continue
                 # The process's one tree for the file, so the build and the
                 # walks it makes hold the same nodes -- see ``calls.parsed``.
