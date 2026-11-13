@@ -138,6 +138,7 @@ from bamboo.codemap.models import (
     Symptom,
     branch_excludes,
     fitting_frames,
+    writes_its_value,
 )
 
 logger = logging.getLogger(__name__)
@@ -355,19 +356,22 @@ def _reaching(junction: JunctionNode, observed: str, cut: Optional[int] = None) 
     :meth:`~bamboo.codemap.lookup.CodeMap.producers_of`, and this is the same
     test arm by arm, or a surviving junction would be offered with no arm to
     read.  *cut* is where the subject's spec cuts the field (``truncated_to``).
-    An arm whose object the records prove is written to no row (``off_row``)
-    is none of them.
+    An arm whose object the records prove is written to no row (``off_row``),
+    or whose writes take the row only where it holds the arm's value already
+    (``unchanged``), is none of them (:func:`~bamboo.codemap.models.writes_its_value`).
     """
     return [
         b
         for b in junction.branches
-        if b.off_row is None
+        if writes_its_value(b)
         and (b.outcome == observed or (b.tier == 2 and not branch_excludes(b, observed, cut)))
     ]
 
 
 def _candidate(junction: JunctionNode, observed: str, cut: Optional[int] = None) -> Candidate:
-    stated = any(b.outcome == observed and b.off_row is None for b in junction.branches)
+    stated = any(
+        b.outcome == observed and writes_its_value(b) for b in junction.branches
+    )
     return Candidate(
         owner=junction.owner,
         file=junction.anchor.file if junction.anchor else "",

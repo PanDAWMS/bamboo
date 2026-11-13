@@ -675,6 +675,26 @@ class OffRow(BaseModel):
     )
 
 
+class Unchanged(BaseModel):
+    """What shows an arm leaves its column as the row held it -- see :attr:`Branch.unchanged`."""
+
+    name: str = Field(
+        description=(
+            "The name the arm's value is (``runtime(taskStatus)``), bound at one place in its function: within one run "
+            "of that place it holds one value."
+        )
+    )
+    calls: list[int] = Field(
+        description=(
+            "The line of each flush call the arm's assignment reaches, sorted: each hands ``name`` to a precondition "
+            "on the column it has on every way, so it writes the row only where the column holds that value already."
+        )
+    )
+    terms: list[str] = Field(
+        description="Those preconditions, as their methods spell them (``status IN (:old___in)``), sorted.",
+    )
+
+
 #: Why an arm cannot leave its value on a row made before it (:attr:`AfterMade.by`): its object has no row yet; the
 #: statement makes the row it writes; the statement's own test asks the row for the value it sets.
 AFTER_MADE_NO_ROW_YET = "no_row_yet"
@@ -1102,6 +1122,17 @@ class Branch(BaseModel):
             "where not proven: the arm may write its row, as every arm is read."
         ),
     )
+    unchanged: Optional[Unchanged] = Field(
+        default=None,
+        description=(
+            "Where every flush call the arm's assignment reaches writes the row only where the column already holds "
+            "the arm's value: the arm writes its row and leaves the column as it was "
+            "(:mod:`bamboo.codemap.panda.recognizers.flush`).  Only flush calls are read: a write the arm's object "
+            "reaches by another way is not.  A reader of a value the row holds skips the arm "
+            "(:func:`writes_its_value`).  ``None`` where not shown: the arm may change the column, as every arm is "
+            "read."
+        ),
+    )
     after_made: Optional[AfterMade] = Field(
         default=None,
         description=(
@@ -1110,6 +1141,13 @@ class Branch(BaseModel):
             "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
+
+
+def writes_its_value(branch: Branch) -> bool:
+    """Whether the arm may leave its value in its column where the row held another: neither is its object written to
+    no row (:attr:`Branch.off_row`), nor does every write it reaches take the row only where the column holds its
+    value already (:attr:`Branch.unchanged`).  What a reader of a value the row holds reads an arm by."""
+    return branch.off_row is None and branch.unchanged is None
 
 
 #: A hole in a frame -- see :attr:`Branch.value_frames`.

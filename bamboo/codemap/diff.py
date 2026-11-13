@@ -272,7 +272,7 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: so a reworded message is a branch a reader can no longer name from a log.
 #: ``value_frames`` is what an observed value rules the branch out by, and
 #: ``value_cuts`` which lengths of it are read as a frame's head,
-#: ``off_row`` whether a reader of the row's value skips the branch,
+#: ``off_row`` and ``unchanged`` whether a reader of the row's value skips the branch,
 #: ``after_made`` whether it can change a row made before it, and
 #: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's.
 BRANCH_FIELDS: tuple[str, ...] = (
@@ -296,6 +296,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "history",
     "history_hole",
     "off_row",
+    "unchanged",
     "after_made",
     "same_pass",
     "rewrites",

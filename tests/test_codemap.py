@@ -50,8 +50,10 @@ from bamboo.codemap.models import (
     RowKeySource,
     SourceModule,
     SubjectNode,
+    Unchanged,
     ValueEnumNode,
     required_values,
+    writes_its_value,
 )
 from bamboo.codemap.panda import attribution, promotion, sql, sqltext
 from bamboo.codemap.panda.recognizers import (
@@ -19765,6 +19767,88 @@ class Agent:
         # The status set after the call is no write of it: the bind, as the method has it.
         "partly": {"running": ["status=ready"], "done": ["status IN (:old___in)"]},
     }
+
+
+def test_an_arm_whose_every_flush_asks_the_row_for_its_value_leaves_the_column_as_it_was(
+    tmp_path,
+):
+    """``TaskRefiner.runImpl`` sets ``status = taskStatus``, the status it read, and hands each flush that name for
+    its row's status: the row is written only where it holds it already.  Not so where the arm's value is another
+    name, where the name is bound twice, or where a call it reaches has no such precondition."""
+    caller = """
+class Agent:
+    def keep(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        taskSpec.status = taskStatus
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])  # keep's list
+        self.taskBufferIF.registerTaskInOneShot_JEDI(jediTaskID, taskSpec, taskStatus)  # keep's value
+
+    def move(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus, newStatus):
+        taskSpec.status = newStatus
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])
+
+    def rebound(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        taskStatus = taskStatus.lower()
+        taskSpec.status = taskStatus
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])
+
+    def unguarded(self, taskSpec: JediTaskSpec, jediTaskID, taskStatus):
+        taskSpec.status = taskStatus
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID, oldStatus=[taskStatus])
+        self.taskBufferIF.updateTaskOld_JEDI(taskSpec, jediTaskID)
+"""
+    rel = "pandajedi/jediorder/Agent.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path,
+        {
+            "pandaserver/taskbuffer/Specs.py": _SPECS,
+            "pandaserver/taskbuffer/db_proxy_mods/task_module.py": _FLUSH_PROXY,
+            "pandaserver/taskbuffer/db_proxy_mods/job_module.py": _FLUSH_MORE,
+            rel: caller,
+        },
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    with sql.across_calls(calls), _records_held(modules, calls, record):
+        flush.attach(arms, modules, attributor)
+
+    status = {
+        junction.owner.rpartition("::")[2]: junction.branches
+        for junction in arms
+        if junction.owner.startswith(rel) and junction.subject == "JediTaskSpec.status"
+    }
+    (keep,) = status["keep"]
+    lines = caller.splitlines()
+    assert keep.unchanged == Unchanged(
+        name="taskStatus",
+        calls=[
+            next(n for n, line in enumerate(lines, 1) if f"# keep's {how}" in line)
+            for how in ("list", "value")
+        ],
+        terms=["status IN (:old___in)", "status=:preStatus"],
+    )
+    assert not writes_its_value(keep)
+    assert {
+        owner: [branch.unchanged for branch in branches]
+        for owner, branches in status.items()
+        if owner != "keep"
+    } == {"move": [None], "rebound": [None], "unguarded": [None]}
+
+
+def test_a_precondition_says_whether_it_holds_on_a_list_or_on_one_value():
+    assert sql.tests_list("status IN (:old___in)") is True
+    assert sql.tests_list("status=:preStatus") is False
+    assert (
+        sql.tests_list("(jobStatus=:oldJobStatus1 OR jobStatus=:oldJobStatus2)") is True
+    )
+    # One that holds where the column is not that value, or no test of a bind, says neither.
+    assert sql.tests_list("status<>:status") is None
+    assert sql.tests_list("NOT status IN (:old___in)") is None
+    assert sql.tests_list("lockedBy IS NULL") is None
 
 
 _UNSAVED = '''

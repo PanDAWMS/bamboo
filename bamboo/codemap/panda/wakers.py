@@ -19,7 +19,8 @@ the trees alone, and missed 88 such terms on 56 statements).  Each branch that c
 ``T`` is a :class:`~bamboo.codemap.models.Waker`: one whose outcome states it, or a run-time one whose own frames
 do not rule it out (:func:`~bamboo.codemap.models.branch_excludes`, the rule ``strategy._reaching`` reads an
 observed value by), and
-none whose object no row is written from (:attr:`~bamboo.codemap.models.Branch.off_row`).  Its ``keyed_by`` are the
+none whose object no row is written from (:attr:`~bamboo.codemap.models.Branch.off_row`) or whose writes leave its
+column as it was (:attr:`~bamboo.codemap.models.Branch.unchanged`).  Its ``keyed_by`` are the
 statements whose rows fill a key of the write holding the branch -- the KeyFroms with a ``rows`` source, and the
 branches at their ``writes`` lines, as the KeyFrom's docstring reads them -- and ``keyed_at`` the pairs one of those
 other than the statement itself selects as well, read through its ``crossing_selects`` for the write's function: the
@@ -65,6 +66,7 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     Waker,
     branch_excludes,
+    writes_its_value,
 )
 
 if TYPE_CHECKING:
@@ -84,7 +86,7 @@ def attach(fragment: MapFragment, calls: Optional["Calls"] = None) -> int:
     writes: dict[str, list[tuple[str, Branch]]] = defaultdict(list)
     for junction in fragment.junctions:
         for branch in junction.branches:
-            if branch.off_row is None:
+            if writes_its_value(branch):
                 writes[junction.subject].append((junction.owner, branch))
     keyed: dict[tuple[str, int], set[str]] = defaultdict(set)
     for key_from in fragment.key_froms:

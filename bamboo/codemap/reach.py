@@ -54,6 +54,7 @@ from bamboo.codemap.models import (
     ReachNode,
     ReachWrite,
     required_values,
+    writes_its_value,
 )
 from bamboo.codemap.reaching import reaching
 
@@ -3215,13 +3216,14 @@ def moving_off(
     the row to hold something else (:func:`models.required_values`).  An arm
     whose outcome is decided at run time, or passed through, writes another
     value as far as this can say, and is kept.  An arm whose object the
-    records prove is written to no row (:attr:`models.Branch.off_row`) moves
-    nothing.
+    records prove is written to no row (:attr:`models.Branch.off_row`), or
+    whose writes take the row only where it holds the arm's value already
+    (:attr:`models.Branch.unchanged`), moves nothing.
     """
     column = subject.rsplit(".", 1)[-1].lower()
 
     def on_the_row(branch: Branch) -> bool:
-        return branch.off_row is None and not any(
+        return writes_its_value(branch) and not any(
             (required := required_values(term)) is not None and required[0] == column and value not in required[1]
             for term in branch.row_precondition
         )

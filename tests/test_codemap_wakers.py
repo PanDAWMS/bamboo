@@ -16,6 +16,7 @@ from bamboo.codemap.models import (
     MapFragment,
     OffRow,
     ReadSiteNode,
+    Unchanged,
 )
 from bamboo.codemap.panda import wakers
 
@@ -217,6 +218,18 @@ def test_a_run_time_writer_its_frames_do_not_rule_out_is_kept_unstated_and_one_o
                 off_row=OffRow(why=OFF_ROW_NO_WRITE, functions=["ask"]),
             ),
         ),
+        _writer(
+            "keep",
+            "JediDatasetSpec.status",
+            Branch(
+                outcome="runtime(datasetStatus)",
+                line=500,
+                tier=2,
+                unchanged=Unchanged(
+                    name="datasetStatus", calls=[501], terms=["status IN (:old___in)"]
+                ),
+            ),
+        ),
     )
     wakers.attach(fragment)
     found = {
@@ -226,7 +239,8 @@ def test_a_run_time_writer_its_frames_do_not_rule_out_is_kept_unstated_and_one_o
         )
     }
     assert ("update_status", 300, False) in found
-    assert not {line for _, line, _ in found} & {310, 400}
+    # Nor one whose every write asks the row for the value it sets: it leaves the column as it was.
+    assert not {line for _, line, _ in found} & {310, 400, 500}
 
 
 def test_the_statements_own_rows_wake_nothing_it_refused() -> None:

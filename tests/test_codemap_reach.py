@@ -7,7 +7,14 @@ from pathlib import Path
 
 from bamboo.codemap import callfacts, reach
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap.models import OFF_ROW_NO_WRITE, Anchor, Branch, JunctionNode, OffRow
+from bamboo.codemap.models import (
+    OFF_ROW_NO_WRITE,
+    Anchor,
+    Branch,
+    JunctionNode,
+    OffRow,
+    Unchanged,
+)
 
 PACKAGE = "pkg"
 
@@ -1018,6 +1025,12 @@ def test_in_memory_the_arms_that_move_a_subject_off_a_value_leave_out_only_the_o
     assert on_the_row.arms == {"pkg/mod.py::update": ["finished@2"]}
     assert in_memory.arms == {"pkg/mod.py::update": ["failed@2", "finished@2", "cancelled@2"]}
     assert in_memory.unmatched == ["pkg/gone.py::vanished"]
+    # An arm whose every write asks the row for the value it sets leaves the row as it was: it moves nothing either.
+    junctions[0].branches[2].unchanged = Unchanged(
+        name="taskStatus", calls=[3], terms=["jobStatus IN (:old___in)"]
+    )
+    again = reach.moving_off(junctions, record, "JobSpec.jobStatus", "running")
+    assert again.arms == {}
 
 
 def test_a_write_the_record_has_no_function_for_leaves_no_answer(tmp_path):
