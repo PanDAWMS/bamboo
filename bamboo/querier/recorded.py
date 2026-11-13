@@ -108,6 +108,7 @@ from bamboo.querier.records import (
     keyed,
     log_name,
     runs_into,
+    unmarked,
 )
 
 EDGE = datetime.timedelta(minutes=10)
@@ -613,12 +614,16 @@ class RecordedLogs:
         # functions' runs alone, a DB proxy method's mark is asked only where it is one of theirs and its run can be made
         # whole by it (_partial), and for the method's own rows and every line at WARNING and above where its rows below
         # WARNING all start with fixed text (_narrowed); for one that reads a run at a row's moment (*whole*), each of
-        # theirs whole
+        # theirs whole.  A line its logger writes with no mark (records.unmarked, by the map's rows with no prefix) has
+        # no mark to ask: its first word only looks like one, and runs_for reads the line as a run of its own (K70), so
+        # the other lines starting with that word are no part of it -- copyArchive's module logger, "reassignJobs for
+        # JEDI at Nq/Nr overshoot site ..." (633), whose ask, unanswered, kept the whole log from MJE-7398283030 (UMK)
         pattern = keyed(key)
         lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
-            if r.token and pattern.search(r.message) and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w:
+            if (r.token and pattern.search(r.message) and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w
+                    and not unmarked(name, r.token, r.text)):
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners, whole)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}

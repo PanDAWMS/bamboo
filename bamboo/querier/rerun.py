@@ -4087,28 +4087,44 @@ class Rerun:
         """Whether the caller's own run shows the call *w* comes by ran (:meth:`_call_shown`).  A way that came across a
         send (the map's ``HeldSource.sent``, SND) is asked as HOP's reader asks it (out/gm/qk-design.md, HOP (2)): the
         caller is a client in another process, so on every machine, over the arm's window opened windows.SLACK earlier
-        and closed at the first line of the endpoint's pass the send entered (:meth:`_entry_first`) -- what the
-        caller printed after its send is not of this call -- else at the window's end."""
+        and closed at the first line of the endpoint's pass the send entered (:meth:`_entry_pass`) -- what the caller
+        printed after its send is not of this call -- else at the window's end.  A caller that prints after its call
+        prints once the call has returned, after the endpoint's pass: copyArchive 881 ``Client.kill_jobs(jobs, 2)``,
+        882 ``killJobs for Anal Active (...)`` at 15:14:55,289, after kill Done at 15:14:55,287 (MJE-7383377087).
+        Where the window before the send shows no call, the caller's rows after its call are asked from the pass's
+        first line to its last and windows.SLACK more, and count only where every row that shows the call follows it
+        (HOP (a′): each row read on the side of the send its code puts it on)."""
         machine = getattr(run, "machine", None)
         if not w.sent or window is None:
             return self._call_shown(w.route[0], window, machine)
         start = f"{W.when(window[0]) - W.SLACK:%Y-%m-%d %H:%M:%S}"
-        # one entry's run is asked once per window, and its window said once, however many calls send into it
-        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str]] = self.__dict__.setdefault("_send_windows", {})
+        # one entry's run is asked once per window, and its windows said once, however many calls send into it
+        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str, str | None]] = self.__dict__.setdefault("_send_windows", {})
         key = (w.sent_into, w.sent, (start, window[1]))
         if key not in said:
-            first = self._entry_first(w, (start, window[1]))
-            said[key] = (start, first or window[1])
-            closed = ("the first line of the entry's pass that holds the key" if first
+            entry = self._entry_pass(w, (start, window[1]))
+            said[key] = (start, entry[0], entry[1]) if entry else (start, window[1], None)
+            closed = ("the first line of the entry's pass that holds the key" if entry
                       else "the window's end: no pass of the entry holding the key began in it")
             self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
                      f"{said[key][0]} to {said[key][1]} ({closed}), on every machine")
-        return self._call_shown(w.route[0], said[key], None, "for-a-call-across-a-send", {"send": w.sent})
+            if entry:
+                self.say(f"    and a caller's rows after its call from {entry[0]} to "
+                         f"{W.when(entry[1]) + W.SLACK:%Y-%m-%d %H:%M:%S} (the pass's last line, {entry[1]}, and "
+                         f"{int(W.SLACK.total_seconds() // 60)} min more), where the window before shows no call")
+        start, first, last = said[key]
+        if self._call_shown(w.route[0], (start, first), None, "for-a-call-across-a-send", {"send": w.sent}):
+            return True
+        if last is None:
+            return False
+        after = (first, f"{W.when(last) + W.SLACK:%Y-%m-%d %H:%M:%S}")
+        return self._call_shown(w.route[0], after, None, "for-the-rows-after-a-call-across-a-send", {"send": w.sent},
+                                after_call=True)
 
-    def _entry_first(self, w: SR.Way, window: tuple[str, str]) -> str | None:
-        """The first line of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key and began
-        last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before killJobs ran --
-        or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
+    def _entry_pass(self, w: SR.Way, window: tuple[str, str]) -> tuple[str, str] | None:
+        """The first and last lines of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key
+        and began last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before
+        killJobs ran -- or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
         endpoint's entry row whole (``rows.entries``): a mark many calls share makes one run of hours -- job_api's
         ``kill``, a day's 198 lines on one machine -- whose first line, or its first inside the window, is another
         call's (MJE-7395160958's 16:34:40,732, a kill of other jobs).  A run with no record read so begins no pass here:
@@ -4129,7 +4145,7 @@ class Rerun:
         except LookupError:
             self.say(f"    {name}: not found in {rel}, so no pass of it begins")
             return None
-        firsts = []
+        passes = []
         for r in (r for rs in runs.values() for r in rs if of_mover(r, entry)):
             starts = R.entries(fn, r, self.mode)
             if not starts:
@@ -4137,15 +4153,16 @@ class Rerun:
             for a, b in zip(starts, [*starts[1:], len(r.records)], strict=True):
                 p = r.part(a, b)
                 if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]:
-                    firsts.append(p.first)
-        return max(firsts) if firsts else None
+                    passes.append((p.first, p.last))
+        return max(passes) if passes else None
 
     def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",
-                    facts: dict[str, Any] | None = None) -> bool:
+                    facts: dict[str, Any] | None = None, after_call: bool = False) -> bool:
         """Whether the caller's own run shows the call at *site* (``file:line``) ran: H2's judgement of that line as a
         candidate, on the key's runs of the caller's logs over *window* on *machine* (the arm's run's: the call ran it in
         the caller's process) -- its must rows printed (positive).  *why* says what the ask is for, *facts* what more
-        it names."""
+        it names.  *after_call*: *window* lies after the call returned (:meth:`_caller_shows`), so only must rows the
+        call's block prints after it show it there; one before it printed then is a later call's."""
         crel, _, ln = site.rpartition(":")
         node = R.def_holding(crel, int(ln))
         if node is None:
@@ -4163,7 +4180,17 @@ class Rerun:
         j = judge([Candidate(crel, node.name, [int(ln)], log_files=files)], runs, mode=self.mode, decide=self.decide, window=window)
         v = j.verdicts[0] if j.verdicts else None
         self.say(f"    {site}: {v.describe() if v is not None else 'no verdict'}")
-        return v is not None and v.kind == "positive"
+        if not after_call or v is None or v.kind != "positive":
+            return v is not None and v.kind == "positive"
+        # the rows of the call's own block (rows.implying_rows) lie before the call or after it, as its statements run
+        call = R.statement_at(node, int(ln))
+        end = getattr(call, "end_lineno", None) or int(ln)
+        before = [x for x in v.proven if x <= end]
+        if v.proven and not before:
+            return True
+        self.say(f"    {site}: not read after its call: "
+                 + (f"row(s) {before} print before the call, ending at {end}" if before else "shown by no row printed after it"))
+        return False
 
     @staticmethod
     def _bindings_in_caller(consts: list[SR.Way]) -> tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, list[int]] | None:

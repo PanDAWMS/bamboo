@@ -325,6 +325,9 @@ class Verdict:
     line: int
     kind: str  # excluded | positive | unexamined | kept
     reasons: list[str] = field(default_factory=list)
+    #: the must rows a positive verdict was shown by (``rows.implying_rows`` printed), none for another proof: a reader
+    #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a′))
+    proven: list[int] = field(default_factory=list)
 
     def describe(self) -> str:
         return f"{self.kind:10s} {Path(self.candidate.rel).name}::{self.candidate.func}:{self.line}  " + "; ".join(self.reasons)
@@ -1741,6 +1744,7 @@ def judge(
                 if proven:
                     v.kind = "positive"
                     v.reasons.append(f"row(s) {proven} print only on a path through it")
+                    v.proven = proven
                 elif proof.kind == "positive":
                     v.kind = "positive"
                     v.reasons.append(proof.reason)
