@@ -89,6 +89,7 @@ from typing import Callable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.pathcond import positive
 
 HOLE = "\x00"
 MAX_ENVS = 512
@@ -1453,26 +1454,7 @@ def _spelled(test: ast.expr) -> str:
     return text
 
 
-#: A comparison and the one it is the negation of, for every value: ``a not in b`` is ``not (a in b)``.  Not ``<``
-#: and ``>=``, which are not (a set's order, a NaN).
-_OPPOSITES = {ast.NotIn: ast.In, ast.NotEq: ast.Eq, ast.IsNot: ast.Is}
 _FACT_KEYS: dict[int, tuple[ast.AST, tuple[str, bool]]] = {}
-
-
-def positive(test: ast.expr) -> tuple[ast.expr, bool]:
-    """*test* as the comparison it is the negation of, and True -- ``a in b`` for ``a not in b`` -- else *test* and
-    False.  Read by :func:`_fact_key` and by :func:`bamboo.codemap.panda.pathcond.negates`."""
-    if (
-        isinstance(test, ast.Compare)
-        and len(test.ops) == 1
-        and type(test.ops[0]) in _OPPOSITES
-    ):
-        return ast.Compare(
-            left=test.left,
-            ops=[_OPPOSITES[type(test.ops[0])]()],
-            comparators=test.comparators,
-        ), True
-    return test, False
 
 
 def _fact_key(test: ast.expr) -> tuple[str, bool]:

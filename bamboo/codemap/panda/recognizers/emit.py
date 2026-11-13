@@ -47,6 +47,7 @@ import ast
 import re
 from typing import Optional
 
+from bamboo.codemap import values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     REPORTS_DECISION,
@@ -55,9 +56,11 @@ from bamboo.codemap.models import (
     JunctionNode,
     SourceModule,
 )
-from bamboo.codemap.panda import values
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import SpecAttributor
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.panda.recognizers import logfile
+from bamboo.codemap.panda.recognizers.selection import log_level
+from bamboo.codemap.pathcond import (
     ancestors,
     assigned_expressions,
     attach_parents,
@@ -68,8 +71,6 @@ from bamboo.codemap.panda.pathcond import (
     targets_of,
     written_value,
 )
-from bamboo.codemap.panda.recognizers import logfile
-from bamboo.codemap.panda.recognizers.selection import log_level
 
 #: ``runtime(<expr>)`` -- how a branch records an outcome it cannot value.
 #: The expression is the connection to a line that interpolates the same one.
@@ -300,7 +301,7 @@ def attach(
     """
     declared = logfile.declared_files(modules)
     inherited = logfile.inherited_files(modules, declared)
-    settle = values.resolver()
+    settle = values.resolver(sql._CALLS)
 
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in fragment.junctions:

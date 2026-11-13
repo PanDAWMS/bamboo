@@ -40,7 +40,7 @@ import re
 from collections import Counter, deque
 from typing import Callable, Iterable, Iterator, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap import calls as C
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.lowlink import Lowlink
@@ -55,8 +55,7 @@ from bamboo.codemap.models import (
     ReachWrite,
     required_values,
 )
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.reaching import reaching
 
 #: What every answer rests on.  Said once, to every reader, rather than
 #: counted per answer: no answer could be given without them.

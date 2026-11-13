@@ -35,9 +35,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable
 
-from bamboo.codemap import trace
+from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import PrintRow
-from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level

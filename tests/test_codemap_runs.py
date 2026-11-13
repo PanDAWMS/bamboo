@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach, trace
+from bamboo.codemap import pathcond, reach, trace
 from bamboo.codemap.gates import history_pairs_resolve
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
@@ -39,7 +39,7 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, pathcond, rewrites, runs, sql
+from bamboo.codemap.panda import keycolumns, rewrites, runs, sql
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite

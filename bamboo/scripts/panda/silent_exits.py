@@ -33,9 +33,8 @@ from typing import Optional
 
 import click
 
-from bamboo.codemap import trace
+from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import STOP_CONFIG, STOP_EXTERNAL, STOP_UPSTREAM
-from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.emit import logging_arguments

@@ -384,8 +384,8 @@ def test_every_reader_of_a_print_reads_its_level_from_one_table(method, level):
     selection's log_level (emit's prints, the selection and progress slices), loopcut's logging calls and
     score_trace's audit read the one table -- ``exception`` writes at ``error``, ``warn`` is ``warning``.  ``log``
     takes its level as an argument, and ``sendMsg`` sends to the HTTP logger: no print here."""
-    from bamboo.codemap.panda.pathcond import attach_parents
     from bamboo.codemap.panda.recognizers import emit, loopcut, selection
+    from bamboo.codemap.pathcond import attach_parents
     from bamboo.scripts.panda import score_trace
 
     tree = ast.parse(f"def f(log, rows):\n    for row in rows:\n        log.{method}('skip ' + row)\n        continue")
@@ -635,8 +635,8 @@ def test_the_rest_of_the_library_facts_are_said_once():
     """The copy module, the calls reading a value again, the computing modules, the iterator helpers, the catch-all
     exceptions and the dunders are callfacts', and sqleval's changing methods are the containers' (callfacts.CHANGING)
     -- a set's ``add`` and ``discard`` among them, which its own list had not."""
-    from bamboo.codemap import calls, reach
-    from bamboo.codemap.panda import reaching, sqleval
+    from bamboo.codemap import calls, reach, reaching
+    from bamboo.codemap.panda import sqleval
     from bamboo.codemap.panda.recognizers import sqlwrite
 
     assert calls._COPIES == callfacts.COPIES and sqlwrite._COPIES == {"copy", "deepcopy"}

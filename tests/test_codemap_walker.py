@@ -8,10 +8,11 @@ from dataclasses import dataclass
 
 import pytest
 
+from bamboo.codemap import evaluate, pathcond
 from bamboo.codemap.calls import Calls
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import evaluate, pathcond, walker
+from bamboo.codemap.panda import walker
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"

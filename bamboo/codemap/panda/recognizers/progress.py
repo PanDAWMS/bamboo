@@ -39,7 +39,7 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
@@ -51,14 +51,16 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import values
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import (
     NOT_A_SPEC,
     UNRESOLVED_CLASS,
     SpecAttributor,
     class_bases,
 )
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.panda.recognizers.alias import find_aliases, setters_of
+from bamboo.codemap.panda.recognizers.selection import log_level
+from bamboo.codemap.pathcond import (
     arm_condition,
     assigned_expressions,
     assigned_targets,
@@ -75,8 +77,6 @@ from bamboo.codemap.panda.pathcond import (
     reaching_values,
     targets_of,
 )
-from bamboo.codemap.panda.recognizers.alias import find_aliases, setters_of
-from bamboo.codemap.panda.recognizers.selection import log_level
 
 SLICE_NAME = "progress"
 
@@ -641,7 +641,7 @@ def _resolve(
     The rung that needs stating is the one for a bare name.  A local is resolved
     by reaching definitions -- every one that reaches the write, a binding that
     settles nothing read as the right-hand side it binds is read
-    (:func:`~bamboo.codemap.panda.pathcond.reaching_values`) -- and, where none
+    (:func:`~bamboo.codemap.pathcond.reaching_values`) -- and, where none
     settles, becomes ``runtime(<name>)`` -- **not** ``passthrough(<name>)``.  ``passthrough(X)`` claims the value lives
     in X and the backward walk continues there, which is only true when X is a
     qualified field name: a spec attribute, or a table column.  A local variable
@@ -929,7 +929,7 @@ def extract(
     attributor.learn_self_attributes(modules)
     attributor.learn_return_types(modules)
     attributor.learn_import_aliases(modules)
-    settle = values.resolver()
+    settle = values.resolver(sql._CALLS)
     aliases = find_aliases(modules, declarations)
     memo: dict = {}
 

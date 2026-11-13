@@ -13,8 +13,8 @@ import re
 
 import pytest
 
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import reaching, reaching_end, reaching_exit
+from bamboo.codemap import pathcond
+from bamboo.codemap.reaching import reaching, reaching_end, reaching_exit
 
 SHAPES = '''
 def s1_if_else_cover(c):

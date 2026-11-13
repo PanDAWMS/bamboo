@@ -2530,8 +2530,8 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[ReaderGap]:
     from bamboo.codemap.calls import Calls, Types, parsed
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.panda import sql
-    from bamboo.codemap.panda.pathcond import functions_with_owner
     from bamboo.codemap.panda.recognizers import sqlwrite
+    from bamboo.codemap.pathcond import functions_with_owner
 
     file, sha = follow.mover_files.get(owner, (owner.partition("::")[0], ""))
     package, _sep, relative = file.partition("/")

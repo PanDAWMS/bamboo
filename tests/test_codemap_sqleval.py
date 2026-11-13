@@ -14,7 +14,8 @@ import textwrap
 
 import pytest
 
-from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext
+from bamboo.codemap import pathcond
+from bamboo.codemap.panda import sql, sqleval, sqltext
 
 
 @pytest.fixture(autouse=True)

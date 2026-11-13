@@ -1441,7 +1441,7 @@ def test_unread_columns_are_stops_on_the_statement_and_not_on_the_rows_it_picks(
         "    self.cur.execute(sqlA, job.valuesMap())\n"
     )
     tree = ast.parse(source)
-    from bamboo.codemap.panda.pathcond import attach_parents
+    from bamboo.codemap.pathcond import attach_parents
 
     attach_parents(tree)
     func = tree.body[0]

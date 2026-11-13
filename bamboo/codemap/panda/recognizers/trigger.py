@@ -74,13 +74,9 @@ from bamboo.codemap.panda.attribution import (
     class_bases,
     class_type_arguments,
 )
-from bamboo.codemap.panda.pathcond import (
-    functions_with_owner,
-    targets_of,
-    written_value,
-)
 from bamboo.codemap.panda.provenance import borrowed_proxies
 from bamboo.codemap.panda.recognizers.boundary import endpoint_decorator
+from bamboo.codemap.pathcond import functions_with_owner, targets_of, written_value
 
 # The trigger vocabulary is imported rather than declared here.  It lives with
 # the field that carries it because both halves of the map read it: this one to
