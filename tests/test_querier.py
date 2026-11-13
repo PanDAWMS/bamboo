@@ -13429,3 +13429,46 @@ def test_u2x_reads_a_caller_across_a_send_and_sets_aside_by_its_way_the_pass_tha
     for kept in ("across, before the span", "no send"):
         assert got[kept][0] == "stop" and got[kept][1].startswith("U2: killJob's pass on the row inside main's call at 4"), got
         assert got[kept + ": set aside"] == [], got
+
+
+def test_the_record_door_asks_no_mark_for_a_line_its_logger_writes_with_no_mark(tmp_path):
+    # UMK (out/gm/qk-design.md): copyArchive's module logger writes no mark, so the first word of "reassignJobs for JEDI
+    # at Nq/Nr overshoot site ... ([...])" (copyArchive.py:633) is cut as the mark; runs_for reads such a line as a run
+    # of its own (K70), so asking that "mark" whole brings nothing its run reads -- and unanswered, the ask kept the
+    # whole log from the reader (MJE-7398283030).  A mark its logger writes (LogWrapper's "kill") is asked as before
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            import re
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+
+            bare = re.escape("reassignJobs for JEDI at site ") + "[^ ]*" + re.escape(" (") + ".*" + re.escape(")")
+            mapdump._FRAGMENT[:] = [N(function_prints=[N(owner="p/c.py::main", runs=[], statements=[
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"], rows=[N(pattern=bare, prefix="")]),
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
+                  rows=[N(pattern=re.escape("Start job_ids: ") + ".*", prefix="kill ")]),
+            ])])]
+            W = ("2026-09-28 08:30:00", "2026-09-28 08:40:00")
+            bare_line = {**line("08:35:00", "for JEDI at site S1 ([5, 777])", "reassignJobs"), "offset": 10}
+            kill_line = {**line("08:35:01", "Start job_ids: [777]", "kill"), "offset": 20}
+            got = {}
+            for name, recs in (("bare", [bare_line]), ("kill", [kill_line])):
+                log, asks = ask_of([record(Ask("panda-x.log", ("777",), W), {M1: answered({**TODAY, "records": recs})})],
+                                   "panda-x.log", "777", W)
+                got[name] = [asks, None if log is None else
+                             [[r.token, r.alone, [x.stamp for x in r.records]] for r in runs_for(log, "777")]]
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the line with no mark: no ask, the log answered from the key's record, the line a run of its own
+    assert got["bare"] == [[], [["reassignJobs", True, ["2026-09-28 08:35:00,000"]]]], got
+    # a mark its logger writes: asked whole on its machine, and the log unanswered until then, as before
+    asks, log = got["kill"]
+    assert log is None, got
+    assert [(a["strings"], a["machine"], why) for a, why in asks] == [
+        (["kill"], "aipanda093.cern.ch", "the records of the key's runs whose mark does not hold the key")], got
