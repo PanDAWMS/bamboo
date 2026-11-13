@@ -7,6 +7,7 @@ import ast
 
 import pytest
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.calls import Calls
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
@@ -16,7 +17,7 @@ from bamboo.codemap.models import (
     HANDLER_UNPLACED,
     SourceModule,
 )
-from bamboo.codemap.panda import handlermarks, pathcond
+from bamboo.codemap.panda import handlermarks
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"

@@ -55,7 +55,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from bamboo.codemap.panda import flow, pathcond
+from bamboo.codemap import pathcond
+from bamboo.codemap.panda import flow
 from bamboo.querier import printed as PR
 from bamboo.querier import rows as R
 from bamboo.querier.records import Run

@@ -56,11 +56,7 @@ from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import changing, walk
 from bamboo.codemap.models import SourceModule
 from bamboo.codemap.panda import sql, sqltext
-from bamboo.codemap.panda.pathcond import (
-    attach_parents,
-    functions_with_owner,
-    targets_of,
-)
+from bamboo.codemap.pathcond import attach_parents, functions_with_owner, targets_of
 
 CERTAIN = "certain"
 # One hop through the adder idiom: what the code put into the container.

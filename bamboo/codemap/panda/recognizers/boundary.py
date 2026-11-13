@@ -40,11 +40,7 @@ from typing import Any, Iterable, Optional
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, BoundaryNode, CoverageStat, SourceModule
 from bamboo.codemap.panda import sql, sqltext
-from bamboo.codemap.panda.pathcond import (
-    functions_with_owner,
-    targets_of,
-    written_value,
-)
+from bamboo.codemap.pathcond import functions_with_owner, targets_of, written_value
 
 SLICE_NAME = "boundary"
 CHANNEL_SLICE_NAME = "db-channel"

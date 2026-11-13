@@ -39,7 +39,7 @@ from typing import Iterable, Optional
 
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, SourceModule, ValueEnumNode
-from bamboo.codemap.panda.pathcond import targets_of
+from bamboo.codemap.pathcond import targets_of
 
 SLICE_NAME = "value-enum"
 

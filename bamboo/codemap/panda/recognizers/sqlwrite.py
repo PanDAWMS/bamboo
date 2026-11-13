@@ -63,7 +63,7 @@ from typing import (
     Optional,
 )
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     UNSET,
@@ -147,9 +147,17 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
+from bamboo.codemap.panda import sql, sqleval, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
-from bamboo.codemap.panda.pathcond import (
+
+# The block a decision records about itself reads the same way whichever slice
+# found the write, so it is read in one place and imported rather than copied.
+# Both halves of the map disagreeing about a fact is the failure this codebase
+# has spent the most effort undoing.
+from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.panda.recognizers import tables as table_records
+from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
+from bamboo.codemap.pathcond import (
     ancestors,
     arm_condition,
     attach_parents,
@@ -167,14 +175,6 @@ from bamboo.codemap.panda.pathcond import (
     surviving_writes,
     targets_of,
 )
-
-# The block a decision records about itself reads the same way whichever slice
-# found the write, so it is read in one place and imported rather than copied.
-# Both halves of the map disagreeing about a fact is the failure this codebase
-# has spent the most effort undoing.
-from bamboo.codemap.panda.recognizers import progress
-from bamboo.codemap.panda.recognizers import tables as table_records
-from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
 
 if TYPE_CHECKING:
     from bamboo.codemap.reach import ReachGraph
@@ -1225,7 +1225,7 @@ def extract(
     uncovered: set[str] = set()
     diagnostics: list[DiagnosticTemplate] = []
     unexplained: list[Unexplained] = []
-    settle = values.resolver()
+    settle = values.resolver(sql._CALLS)
     # A guard's binds as the read side settles its own (values.bind_settler): a list's members, what a parameter's
     # callers hand it, all of them or none.
     guard_settle = values.bind_settler(sql._CALLS)
@@ -3401,7 +3401,7 @@ def read_side(
     not among the values reported as written-but-unselected for this subject,
     so nothing is hidden by it.
     """
-    handed = values.handed(values.resolver(), calls)
+    handed = values.handed(values.resolver(sql._CALLS), calls)
     # Every caller of a parameter is read now, however many: how long that
     # takes, and the function with the most routes, go to the build's report.
     watch: dict[str, object] = {"settle_seconds": 0.0, "most_routes": ("", 0)}

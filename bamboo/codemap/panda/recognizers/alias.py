@@ -62,7 +62,7 @@ from bamboo.codemap.models import (
 )
 from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import CERTAIN, SpecAttributor
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.pathcond import (
     Callee,
     Replacement,
     additions,

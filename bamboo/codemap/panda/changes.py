@@ -93,7 +93,7 @@ import weakref
 from collections import deque
 from typing import TYPE_CHECKING, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.calls import BUILTIN as BUILTIN_CLASS
 from bamboo.codemap.calls import (
     UNPLACED_FORWARDED,
@@ -117,7 +117,7 @@ from bamboo.codemap.models import (
     CHANGE_STORE,
     CHANGE_UNREAD,
 )
-from bamboo.codemap.panda import flow, pathcond, sql
+from bamboo.codemap.panda import flow, sql
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls, Placed

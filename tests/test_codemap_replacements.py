@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import ast
 
-from bamboo.codemap.panda import pathcond, sql
+from bamboo.codemap import pathcond
+from bamboo.codemap.panda import sql
 
 
 def _func(source: str, name: str = "f"):

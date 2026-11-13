@@ -12,6 +12,7 @@ import ast
 import functools
 from typing import Callable, Iterable, Optional
 
+from bamboo.codemap import values
 from bamboo.codemap.models import (
     EntityNode,
     KeyFrom,
@@ -19,10 +20,10 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import sql, sqltext, values
+from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor
-from bamboo.codemap.panda.pathcond import functions_with_owner
 from bamboo.codemap.panda.runs import HISTORY_TABLES
+from bamboo.codemap.pathcond import functions_with_owner
 
 #: The database's clocks a statement can write.
 _DATABASE_CLOCKS = sqltext.DATABASE_CLOCKS

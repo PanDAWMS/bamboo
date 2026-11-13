@@ -33,7 +33,7 @@ import functools
 from collections.abc import Iterable
 from typing import Any
 
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap import pathcond
 from bamboo.querier import mapdump
 from bamboo.querier import rows as R
 

@@ -39,9 +39,8 @@ import weakref
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.panda import pathcond
 
 #: Why a call could not be placed.  Each is a class of the census, so the
 #: count of calls the walk could not enter says what would enter them.
@@ -246,7 +245,7 @@ class Displayed(list):
     ``simTasks=[tmpTaskItem]`` (TaskBroker 259) under ``if simTasks is not None``.  An item read as a value is
     unknown (:func:`~bamboo.codemap.panda.sqleval.from_py` reads one so).  Equal to no string, number or ``None``;
     against a container its items would decide, so it raises the ``TypeError``
-    :func:`~bamboo.codemap.panda.pathcond.decided` reads as undecided.  Spelled as a list of as many ``...``: a
+    :func:`~bamboo.codemap.pathcond.decided` reads as undecided.  Spelled as a list of as many ``...``: a
     route's constants are kept as their reprs, a record, not words.
     """
 

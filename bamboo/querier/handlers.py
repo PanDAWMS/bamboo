@@ -51,7 +51,7 @@ import ast
 import functools
 import re
 
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap import pathcond
 
 from . import rows as R
 

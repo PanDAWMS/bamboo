@@ -7,9 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import fills, pathcond, sql
+from bamboo.codemap.panda import fills, sql
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"

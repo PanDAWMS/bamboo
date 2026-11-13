@@ -825,8 +825,8 @@ async def test_the_gaps_are_the_gates_own_judgement(tmp_path):
     import ast as ast_mod
 
     from bamboo.codemap import gates
-    from bamboo.codemap.panda.pathcond import attach_parents
     from bamboo.codemap.panda.recognizers import sqlwrite
+    from bamboo.codemap.pathcond import attach_parents
 
     strategy = await _gaps_answer(tmp_path)
     tree = ast_mod.parse(_GET_JOBS_SOURCE)

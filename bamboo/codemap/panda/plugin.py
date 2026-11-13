@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from bamboo.codemap import callfacts, reach, reading, trace
+from bamboo.codemap import callfacts, pathcond, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.base import CodeMapPlugin
@@ -53,7 +53,6 @@ from bamboo.codemap.panda import (
     mustprints,
     objects,
     offrow,
-    pathcond,
     promotion,
     runnable,
     runs,
@@ -66,11 +65,6 @@ from bamboo.codemap.panda.attribution import (
     annotation_readings,
     class_bases,
     spec_annotation_forms,
-)
-from bamboo.codemap.panda.pathcond import (
-    attach_parents,
-    functions_with_owner,
-    qualified_name,
 )
 from bamboo.codemap.panda.recognizers import (
     alias,
@@ -87,6 +81,7 @@ from bamboo.codemap.panda.recognizers import (
     tables,
     trigger,
 )
+from bamboo.codemap.pathcond import attach_parents, functions_with_owner, qualified_name
 
 logger = logging.getLogger(__name__)
 

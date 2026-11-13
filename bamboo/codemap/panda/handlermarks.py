@@ -1,13 +1,13 @@
 """What each ``except`` handler prints when it is entered, and the handlers a run entered by the marks it shows.
 
 A reader of a run hands the map's flow and walker *raised*, the handlers the run entered
-(:func:`~bamboo.codemap.panda.reaching.catching_try`): a statement raises only where its raise reaches one of
+(:func:`~bamboo.codemap.reaching.catching_try`): a statement raises only where its raise reaches one of
 them, and a ``try`` whose handlers the run shows no mark of ran its body to the end.  It knows them by their
 marks (:class:`~bamboo.codemap.models.HandlerMark`): a statement of the handler that prints, a row of the
 owner's :class:`~bamboo.codemap.models.FunctionPrintsNode`, or a call each of whose placed definitions passes
 one of its own prints on every way -- ``self.dump_error_message(tmp_log)`` in a DB proxy's method.
 
-*Every way* is read by :func:`~bamboo.codemap.panda.reaching.reaching_each`, from the handler's entry (or the
+*Every way* is read by :func:`~bamboo.codemap.reaching.reaching_each`, from the handler's entry (or the
 callee's) to its exits: a ``return`` or ``raise`` of its own, a ``break`` or ``continue`` of no loop inside it,
 and the end of its body.  The end is a statement a reader can reach only if one is put there, so the function
 is read on a copy from a parse of its own, a ``pass`` after the last statement of each handler; the build's
@@ -31,6 +31,7 @@ from collections.abc import Collection, Iterator, Sequence
 from typing import Optional, TypeVar
 
 from bamboo.codemap import calls as C
+from bamboo.codemap import pathcond
 from bamboo.codemap.models import (
     HANDLER_CONDITIONAL,
     HANDLER_MARKED,
@@ -42,9 +43,8 @@ from bamboo.codemap.models import (
     MarkCallee,
     SourceModule,
 )
-from bamboo.codemap.panda import pathcond
-from bamboo.codemap.panda.reaching import catches_all, catching_try, reaching_each
 from bamboo.codemap.panda.walker import is_log_call
+from bamboo.codemap.reaching import catches_all, catching_try, reaching_each
 
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -111,7 +111,7 @@ def entered(
 
     *seen*: the lines of the handlers whose marks the run shows.  *marks*: the records of *func*'s handlers.
     To those seen, each handler that passes a raise on without a mark (:attr:`HandlerMark.reraises`) is added
-    where a ``raise`` of its own reaches one of them (:func:`~bamboo.codemap.panda.reaching.catching_try`),
+    where a ``raise`` of its own reaches one of them (:func:`~bamboo.codemap.reaching.catching_try`),
     until none is added.
     """
     handlers = {

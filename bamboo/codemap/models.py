@@ -504,7 +504,7 @@ class HistoryPair(BaseModel):
     on the way to the arm.  The call at ``call`` is in one pass with the
     point: one runs after the other with no run started between them and no
     turn of a loop holding both, read by
-    :func:`~bamboo.codemap.panda.reaching.reaching`.  The walk up stops on
+    :func:`~bamboo.codemap.reaching.reaching`.  The walk up stops on
     each way at the first level with a pair, and does not take a way the
     values its calls hand rule out (``setErrDiag(diag)`` leaves ``append``
     False, so its append arm pairs only with callers handing it True); the
@@ -856,10 +856,10 @@ class Branch(BaseModel):
     dominating the write, of what each early exit above it says (``not (X)``
     under an ``if X: return``, ``continue``, ``break`` or ``raise``; ending in
     ``  [at <its line>]`` where a name it reads is given a new value before the
-    write -- :func:`~bamboo.codemap.panda.pathcond.arm_condition`), the same of
+    write -- :func:`~bamboo.codemap.pathcond.arm_condition`), the same of
     the binding the value comes from, and of one entry for every other write of the same
     place that can replace the value before it is read
-    (:func:`~bamboo.codemap.panda.pathcond.replacements`): ``not (<the tests
+    (:func:`~bamboo.codemap.pathcond.replacements`): ``not (<the tests
     that write is under and this one is not>)``, ``not any(<them> for <target>
     in <iter>)`` where it sits in a loop this one is not in, ending in ``  [in
     <method>()]`` where a setter's own tests decide it, or in ``  [at <line>]``
@@ -2913,7 +2913,7 @@ class CallStop(BaseModel):
 class SwallowingManager(BaseModel):
     """A context manager of the corpus that may swallow what its ``with`` body raised.
 
-    The map's flow (:mod:`bamboo.codemap.panda.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
+    The map's flow (:mod:`bamboo.codemap.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
     way on: a raise in a ``with`` body goes to the handlers around the ``with``, never past it.  So one such
     manager makes the flow's "no way" answers unsafe -- a reader would rule out a statement that ran -- and the
     ``with-exits-are-read`` gate fails on each.  Not a node: a check of the flow's premise over the corpus.
@@ -2964,7 +2964,7 @@ class HandlerMark(BaseModel):
     """What one ``except`` handler prints when it is entered: the marks a run's log shows it was entered by.
 
     A reader of a run hands the map's flow and walker the handlers the run entered
-    (:func:`bamboo.codemap.panda.reaching.catching_try`), and it knows them by these marks: a statement of
+    (:func:`bamboo.codemap.reaching.catching_try`), and it knows them by these marks: a statement of
     the handler that prints (:attr:`prints`, rows of the owner's :class:`FunctionPrintsNode`) or a call that
     prints on every way (:attr:`calls`).  Any of them in the run says the handler was entered, since they
     are in its body.  Where every way from the handler's entry to its exits -- a ``return`` or ``raise`` of
@@ -3405,7 +3405,7 @@ class HeldSource(KeySource):
             "On a GuardFrom's or ParameterFrom's way: each call outside the corpus the value went through as its one "
             "positional argument, in the order run (``json.loads`` at ``pandajedi/jedirefine/RefinerUtils.py:34``), "
             "with what its value is of the value.  A literal that one of the standard functions the map runs raises "
-            "on (:data:`bamboo.codemap.panda.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
+            "on (:data:`bamboo.codemap.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
             "not a way, a stop (``raises``)."
         ),
     )
@@ -6321,7 +6321,7 @@ class EnteredSite(BaseModel):
     conditions: list[str] = Field(
         default_factory=list,
         description=(
-            ":func:`~bamboo.codemap.panda.pathcond.arm_condition` of that statement's node in the caller: the caller's "
+            ":func:`~bamboo.codemap.pathcond.arm_condition` of that statement's node in the caller: the caller's "
             "tests, its marks the caller's lines.  They hold when that statement runs -- a hand-off's when it hands, "
             "not when what it handed runs."
         ),
@@ -6856,7 +6856,7 @@ class LineOrder(BaseModel):
 
     Before on one run: on one pass, by a way through the function with no
     jump away from the second line (``continue``, ``return``, ``break``) and
-    no test parting the two (:func:`bamboo.codemap.panda.pathcond.parted`);
+    no test parting the two (:func:`bamboo.codemap.pathcond.parted`);
     or on a later pass of a loop holding both, by a way round it whose
     passes no test parts.  Most of it the lines' order says, and only the
     rest is here.  A line can run before another on one pass where its

@@ -1,6 +1,6 @@
 """What one run knows at a decision, for the map's evaluator; the binding that took effect; values written after it.
 
-The evaluator is the map's (:mod:`bamboo.codemap.panda.evaluate`): three values, literals folded, a call the
+The evaluator is the map's (:mod:`bamboo.codemap.evaluate`): three values, literals folded, a call the
 reader's, solving backwards.  The querier reads it as ``E.ev``, ``E.solve`` and the like, and hands it what a run
 says:
 
@@ -27,8 +27,8 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from bamboo.codemap.panda import evaluate as shared
-from bamboo.codemap.panda.evaluate import (  # noqa: F401 -- the evaluator, read here as E.<name>
+from bamboo.codemap import evaluate as shared
+from bamboo.codemap.evaluate import (  # noqa: F401 -- the evaluator, read here as E.<name>
     UNKNOWN,
     Solved,
     Value,
