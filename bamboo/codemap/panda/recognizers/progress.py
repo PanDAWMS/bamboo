@@ -793,6 +793,10 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
     type (``attributes: str | None``) without assigning anything.  Requiring a
     value keeps that statement out, whatever the aggregation upstream happens
     to do with an empty result.
+
+    **An empty literal declares no column.**  ``SpecBase``'s ``attributes:
+    tuple[str, ...] = ()`` is read, and holds none: the base its specs declare
+    theirs over.  It is left off the list, as a class with nothing to declare.
     """
     found: list[tuple[str, str, set[str]]] = []
     for module in modules:
@@ -800,6 +804,9 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
             for stmt in cls.body:
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & callfacts.SPEC_DECLARATION_NAMES:
+                    continue
+                value = getattr(stmt, "value", None)
+                if isinstance(value, (ast.Tuple, ast.List)) and not value.elts:
                     continue
                 found.append((cls.name, module.rel_path, _declared_names(stmt.value)))
     return found

@@ -4779,7 +4779,7 @@ _COPIES = frozenset(name for _module, name in callfacts.COPIES)
 #: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
 #: (:data:`callfacts.TEXT`).
 _SERIALIZING = callfacts.SERIALIZING
-#: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
+#: Iterator helpers outside the corpus (itertools'; pandacommon's ``batched``, read so: callfacts.READ_OUTSIDE)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
 _CHUNKING, _SLICING, _CHAINING = callfacts.CHUNKING, callfacts.SLICING, callfacts.CHAINING
@@ -5196,8 +5196,9 @@ class _PathCarry:
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
     *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.  So
-    does a method the object's class gets from a base outside the corpus, with all it is handed:
-    ``dc_req_spec.pack(row)`` on pandacommon's ``SpecBase`` fills ``dc_req_spec``.
+    does a method the object's class gets from a base outside the corpus, or one read as outside it
+    (:data:`callfacts.READ_OUTSIDE`), with all it is handed: ``dc_req_spec.pack(row)`` on pandacommon's
+    ``SpecBase`` fills ``dc_req_spec``.
 
     With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
     not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.

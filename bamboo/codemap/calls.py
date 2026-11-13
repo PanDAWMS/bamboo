@@ -508,6 +508,22 @@ def _function_binding(defs: Iterable[ast.stmt], name: str) -> Optional[ast.Funct
     return found if isinstance(found, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
 
 
+def module_of(file: str) -> str:
+    """The module *file* of the corpus is: ``pandacommon/pandautils/base.py`` is ``pandacommon.pandautils.base``."""
+    return file.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+
+
+def read_outside(module: str, *names: str) -> bool:
+    """Whether the definition *names* of *module* -- a function or a class, or a class and its method -- is one the
+    corpus holds and the map reads as outside it (:data:`callfacts.READ_OUTSIDE`): ``naive_utcnow`` of
+    ``pandacommon.pandautils.PandaUtils``, ``SpecBase``, ``pack`` of ``pandacommon.pandautils.base``.  A method of a
+    class read so is too."""
+    return any(
+        ".".join((module, *names[:end])) in callfacts.READ_OUTSIDE
+        for end in range(1, len(names) + 1)
+    )
+
+
 def returns(func: ast.AST) -> list[ast.expr]:
     """The values *func* hands back, in source order; a bare ``return`` is ``None``."""
     return [
@@ -931,7 +947,9 @@ class Calls:
 
     def _declared_in(self, file: str, cls: ast.ClassDef, name: str) -> Optional[Target]:
         node = _function_binding(cls.body, name)
-        return Target(file, node, cls) if node is not None else None
+        if node is None or read_outside(module_of(file), cls.name, name):
+            return None
+        return Target(file, node, cls)
 
     def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
         """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order."""
@@ -1452,7 +1470,7 @@ class Calls:
 
     def _module_member(self, file: str, name: str) -> Placed:
         tree = self.types.tree(file)
-        if tree is None:
+        if tree is None or read_outside(module_of(file), name):
             return Placed((), UNPLACED_OUTSIDE)
         node = binding(tree.body, name)
         if isinstance(node, ast.ClassDef):
@@ -2722,12 +2740,15 @@ class Types:
         return None
 
     def imported_from_outside(self, file: str, name: str) -> bool:
-        """Whether *name* in *file* is imported from a module this corpus does not hold."""
+        """Whether *name* in *file* is imported from a module this corpus does not hold, or is a definition it holds
+        and reads as outside (:func:`read_outside`)."""
         held = self.imports(file).get(name)
         if held is None:
             return False
-        module = held[0]
-        return module.split(".")[0] not in self.roots
+        module, attribute = held
+        return module.split(".")[0] not in self.roots or (
+            bool(attribute) and read_outside(module, attribute)
+        )
 
     def module_named(self, file: str, expression: ast.expr) -> Optional[str]:
         """The file of the module *expression* names in *file*, when it names one."""
@@ -2833,7 +2854,10 @@ class Types:
                 scope = self.enclosing_function(file, scope)
             node = binding((one for one in tree.body if isinstance(one, ast.ClassDef)), expression.id)
             if isinstance(node, ast.ClassDef):
-                return file, node
+                # ``WeightedLists``: the corpus holds it and reads it as a class outside it.
+                return (
+                    None if read_outside(module_of(file), node.name) else (file, node)
+                )
             held = self.imports(file).get(expression.id)
             if held is None:
                 return self._aliased(file, expression.id, depth)
@@ -3181,6 +3205,14 @@ class Types:
                 return True
         return False
 
+    def outside_method(self, file: str, cls: ast.ClassDef, name: str) -> bool:
+        """Whether *name* on an object of *cls* is, first in its order, a method the map reads as outside the corpus
+        (:func:`read_outside`): ``pack`` on a ``DataCarouselRequestSpec``, ``SpecBase``'s."""
+        for where, holder in self.mro(file, cls):
+            if _function_binding(holder.body, name) is not None:
+                return read_outside(module_of(where), holder.name, name)
+        return False
+
     def outside_bases(self, file: str, cls: ast.ClassDef) -> Optional[frozenset[tuple[str, str]]]:
         """``(module, name)`` of each base outside the corpus in *cls*'s order (:meth:`built_outside`'s), read through
         the imports (:meth:`library_class`); ``None`` where one cannot be read so -- ``class MySMTP(smtplib.SMTP)``
@@ -3235,8 +3267,11 @@ class Types:
         return frozenset(found)
 
     def _library(self, library: tuple[str, str]) -> bool:
+        """Whether *library*, ``(module, name)``, is a class outside the corpus -- or one it holds and reads as outside
+        (:func:`read_outside`: ``WeightedLists``) -- and none of typing's, collections' or the builtins'."""
         top = library[0].split(".")[0]
-        return top not in self.roots and top not in ("typing", "collections", "builtins")
+        outside = top not in self.roots or read_outside(*library)
+        return outside and top not in ("typing", "collections", "builtins")
 
     def annotated_libraries(self) -> frozenset[tuple[str, str]]:
         """``(module, name)`` of each name outside the corpus the corpus uses in an annotation: a parameter's, a
