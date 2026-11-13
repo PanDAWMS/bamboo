@@ -4086,7 +4086,7 @@ class Rerun:
         """Whether the caller's own run shows the call *w* comes by ran (:meth:`_call_shown`).  A way that came across a
         send (the map's ``HeldSource.sent``, SND) is asked as HOP's reader asks it (out/gm/qk-design.md, HOP (2)): the
         caller is a client in another process, so on every machine, over the arm's window opened windows.SLACK earlier
-        and closed at the first line of the run of the endpoint the send entered (:meth:`_entry_first`) -- what the
+        and closed at the first line of the endpoint's pass the send entered (:meth:`_entry_first`) -- what the
         caller printed after its send is not of this call -- else at the window's end."""
         machine = getattr(run, "machine", None)
         if not w.sent or window is None:
@@ -4098,15 +4098,19 @@ class Rerun:
         if key not in said:
             first = self._entry_first(w, (start, window[1]))
             said[key] = (start, first or window[1])
-            closed = "the first line of the run the send entered" if first else "the window's end: no run of the entry found"
+            closed = ("the first line of the entry's pass that holds the key" if first
+                      else "the window's end: no pass of the entry holding the key began in it")
             self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
                      f"{said[key][0]} to {said[key][1]} ({closed}), on every machine")
         return self._call_shown(w.route[0], said[key], None, "for-a-call-across-a-send", {"send": w.sent})
 
     def _entry_first(self, w: SR.Way, window: tuple[str, str]) -> str | None:
-        """The first line of the run of the endpoint *w*'s send entered (``w.sent_into``) that began last by *window*'s
-        end -- job_api's kill ``kill Start`` at 15:51:58,491, before killJob ran at 15:51:59 -- or None where its logs are
-        not to hand or hold no run of the key there."""
+        """The first line of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key and began
+        last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before killJobs ran --
+        or None where its logs are not to hand or hold no such pass.  A run is cut into the endpoint's passes
+        (:func:`passes_of`): a mark many calls share makes one run of hours -- job_api's ``kill``, a day's 198 lines on
+        one machine -- whose first line, or its first inside the window, is another call's (MJE-7395160958's
+        16:34:40,732, a kill of other jobs)."""
         entry = w.sent_into
         lines = [n] if (n := SR.def_line(entry)) else []
         today = sorted({f for st in getattr(R._prints_of(entry, lines), "statements", None) or [] for f in st.log_files})
@@ -4117,8 +4121,17 @@ class Rerun:
         asking = W.Asking(window, None, T.Said("for-the-entry-a-send-entered", {"entry": entry.split("::")[-1], "send": w.sent}))
         runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([entry]), whole=True)
         self._keep_unanswered(unanswered)
-        firsts = sorted(r.first for rs in runs.values() for r in rs if of_mover(r, entry) and r.first[:19] <= window[1][:19])
-        return firsts[-1] if firsts else None
+        rel, _, name = entry.partition("::")
+        try:
+            fn: R.Function | None = R.function(rel, name.rpartition(".")[2], within=lines)
+        except LookupError:
+            fn = None
+            self.say(f"    {name}: not found in {rel}, its runs not cut into its passes")
+        # a run kept whole is a pass only where its first line is in the window: a shared mark's is not
+        firsts = [p.first for rs in runs.values() for r in rs if of_mover(r, entry)
+                  for p in (passes_of(fn, r, self.mode)[0] if fn is not None else [r])
+                  if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]]
+        return max(firsts) if firsts else None
 
     def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",
                     facts: dict[str, Any] | None = None) -> bool:
