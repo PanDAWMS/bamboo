@@ -13215,7 +13215,8 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     # machine; one across a send on every machine, from windows.SLACK before the arm's window to the first line of the
     # endpoint's pass that holds the key and began last in that window, else to the window's end; the endpoint asked
     # once per window.  A mark many calls share is one run of the day, cut into the endpoint's passes: a pass of other
-    # jobs in the window, or of the key outside it, closes nothing
+    # jobs in the window, or of the key outside it, closes nothing.  Where the window before the send shows no call, the
+    # caller's rows after its call are asked from the pass's first line to its last and windows.SLACK more (HOP (a′))
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(textwrap.dedent('''
         def kill(req, job_ids):
             tmp_logger = LogWrapper(_logger, "kill")
@@ -13253,9 +13254,11 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         rerun.owners_of = lambda ids: {}
         shown, asked = [], []
 
-        def call_shown(site, window, machine, why="for-a-call-handing-a-value", facts=None):
-            shown.append([site, list(window), machine, why, facts])
-            return True
+        shows = {"before": True}
+
+        def call_shown(site, window, machine, why="for-a-call-handing-a-value", facts=None, after_call=False):
+            shown.append([site, list(window), machine, why, facts, after_call])
+            return True if after_call else shows["before"]
 
         r._call_shown = call_shown
         rerun.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["panda-api_job.log"])])
@@ -13276,6 +13279,10 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         r._caller_shows(SR.Way("constant", "'60'", "constant", ("pandaserver/g.py:9",)), window, arm)
         r._caller_shows(sent, window, arm)
         r._caller_shows(replace(sent, route=("pandaserver/d.py:904", *sent.route[1:])), window, arm)
+        # the window before the send shows no call: its rows after the call, asked after the pass (no new ask of the entry)
+        shows["before"] = False
+        r._caller_shows(sent, window, arm)
+        shows["before"] = True
         # in this window only a pass of other jobs began (15:45); the key's pass at 08:00 is outside it
         r._caller_shows(sent, ("2026-11-02 15:50:00", "2026-11-02 15:50:00"), arm)
         entry = {"panda-api_job.log": runs_for(read_log("one.log"), "777")}
@@ -13283,6 +13290,8 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         entry = {"panda-api_job.log": runs_for(read_log("done.log"), "777")}
         r._caller_shows(sent, ("2026-11-02 15:52:01", "2026-11-02 15:52:01"), arm)
         entry = {}
+        # no pass of the entry: nothing after it to ask
+        shows["before"] = False
         r._caller_shows(sent, ("2026-11-02 16:34:45", "2026-11-02 16:34:45"), arm)
         print(json.dumps({"whole": whole, "shown": shown, "asked": asked, "lines": r.lines}))
     """))
@@ -13290,14 +13299,17 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     assert got["whole"] == [[8, 3]], got
     across = ["2026-11-02 15:41:59", "2026-11-02 15:51:58,491"]
     send = {"send": "pandaserver/c.py:7"}
+    after = ["2026-11-02 15:51:58,491", "2026-11-02 16:01:58"]
     assert got["shown"] == [
-        ["pandaserver/g.py:9", ["2026-11-02 15:51:59", "2026-11-02 15:51:59"], "aipanda090", "for-a-call-handing-a-value", None],
-        ["pandaserver/d.py:634", across, None, "for-a-call-across-a-send", send],
-        ["pandaserver/d.py:904", across, None, "for-a-call-across-a-send", send],
-        ["pandaserver/d.py:634", ["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, "for-a-call-across-a-send", send],
-        ["pandaserver/d.py:634", ["2026-11-02 15:42:00", "2026-11-02 15:51:58,491"], None, "for-a-call-across-a-send", send],
-        ["pandaserver/d.py:634", ["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, "for-a-call-across-a-send", send],
-        ["pandaserver/d.py:634", ["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/g.py:9", ["2026-11-02 15:51:59", "2026-11-02 15:51:59"], "aipanda090", "for-a-call-handing-a-value", None, False],
+        ["pandaserver/d.py:634", across, None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:904", across, None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:634", across, None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:634", after, None, "for-the-rows-after-a-call-across-a-send", send, True],
+        ["pandaserver/d.py:634", ["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:00", "2026-11-02 15:51:58,491"], None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, "for-a-call-across-a-send", send, False],
+        ["pandaserver/d.py:634", ["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, "for-a-call-across-a-send", send, False],
     ], got
     why = "for the run of kill the send at pandaserver/c.py:7 entered, its first line closing the caller's window"
     assert got["asked"] == [[["2026-11-02 15:41:59", "2026-11-02 15:51:59"], None, why],
@@ -13309,10 +13321,14 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     assert got["lines"] == [
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:41:59 to "
         "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
+        "    and a caller's rows after its call from 2026-11-02 15:51:58,491 to 2026-11-02 16:01:58 (the pass's last line, "
+        "2026-11-02 15:51:58,900, and 10 min more), where the window before shows no call",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:40:00 to "
         f"2026-11-02 15:50:00 ({none}), on every machine",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:00 to "
         "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
+        "    and a caller's rows after its call from 2026-11-02 15:51:58,491 to 2026-11-02 16:01:58 (the pass's last line, "
+        "2026-11-02 15:51:58,491, and 10 min more), where the window before shows no call",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:01 to "
         f"2026-11-02 15:52:01 ({none}), on every machine",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 16:24:45 to "
@@ -13429,3 +13445,106 @@ def test_u2x_reads_a_caller_across_a_send_and_sets_aside_by_its_way_the_pass_tha
     for kept in ("across, before the span", "no send"):
         assert got[kept][0] == "stop" and got[kept][1].startswith("U2: killJob's pass on the row inside main's call at 4"), got
         assert got[kept + ": set aside"] == [], got
+
+
+def test_the_record_door_asks_no_mark_for_a_line_its_logger_writes_with_no_mark(tmp_path):
+    # UMK (out/gm/qk-design.md): copyArchive's module logger writes no mark, so the first word of "reassignJobs for JEDI
+    # at Nq/Nr overshoot site ... ([...])" (copyArchive.py:633) is cut as the mark; runs_for reads such a line as a run
+    # of its own (K70), so asking that "mark" whole brings nothing its run reads -- and unanswered, the ask kept the
+    # whole log from the reader (MJE-7398283030).  A mark its logger writes (LogWrapper's "kill") is asked as before
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            import re
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+
+            bare = re.escape("reassignJobs for JEDI at site ") + "[^ ]*" + re.escape(" (") + ".*" + re.escape(")")
+            mapdump._FRAGMENT[:] = [N(function_prints=[N(owner="p/c.py::main", runs=[], statements=[
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"], rows=[N(pattern=bare, prefix="")]),
+                N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
+                  rows=[N(pattern=re.escape("Start job_ids: ") + ".*", prefix="kill ")]),
+            ])])]
+            W = ("2026-09-28 08:30:00", "2026-09-28 08:40:00")
+            bare_line = {**line("08:35:00", "for JEDI at site S1 ([5, 777])", "reassignJobs"), "offset": 10}
+            kill_line = {**line("08:35:01", "Start job_ids: [777]", "kill"), "offset": 20}
+            got = {}
+            for name, recs in (("bare", [bare_line]), ("kill", [kill_line])):
+                log, asks = ask_of([record(Ask("panda-x.log", ("777",), W), {M1: answered({**TODAY, "records": recs})})],
+                                   "panda-x.log", "777", W)
+                got[name] = [asks, None if log is None else
+                             [[r.token, r.alone, [x.stamp for x in r.records]] for r in runs_for(log, "777")]]
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the line with no mark: no ask, the log answered from the key's record, the line a run of its own
+    assert got["bare"] == [[], [["reassignJobs", True, ["2026-09-28 08:35:00,000"]]]], got
+    # a mark its logger writes: asked whole on its machine, and the log unanswered until then, as before
+    asks, log = got["kill"]
+    assert log is None, got
+    assert [(a["strings"], a["machine"], why) for a, why in asks] == [
+        (["kill"], "aipanda093.cern.ch", "the records of the key's runs whose mark does not hold the key")], got
+
+
+def test_a_callers_rows_after_its_call_show_it_after_the_send_and_rows_before_it_do_not(tmp_path):
+    # HOP (a′) (out/gm/qk-design.md): copyArchive 881 calls Client.kill_jobs(jobs, 2) and prints 882 "killJobs for Anal
+    # Active (...)" once it returns, after the endpoint's pass (MJE-7383377087).  Over a window after the send, a must
+    # row after the call shows it ran; one before its call printed then is a later call's, and does not
+    (_corpus(tmp_path) / "pandaserver" / "c.py").write_text(textwrap.dedent('''
+        def main(jobs, other, n):
+            tmp_log = LogWrapper(_logger, f"main <{n}>")
+            if jobs:
+                tmp_log.debug(f"killJobs for Pending ({jobs})")
+                Client.kill_jobs(jobs, 4)
+            if other:
+                Client.kill_jobs(other, 2)
+                tmp_log.debug(f"killJobs for Anal Active ({other})")
+    ''').lstrip())
+    # the call's pass, printing after 7's call; and a later pass, printing before it calls 5
+    line = "2026-11-02 {} panda.log.c: DEBUG    main <{}> {}\n"
+    (tmp_path / "after.log").write_text(line.format("15:14:55,289", 1, "killJobs for Anal Active ([777])"))
+    (tmp_path / "later.log").write_text(line.format("15:14:56,000", 2, "killJobs for Pending ([777])"))
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        r.say = r.lines.append
+        r.args = N(key="777")
+        r.mode, r.decide = "outside", "positive"
+        r.logs = N(names=lambda files: list(files))
+        r.files_of = lambda owner, today, lines: today
+        r._keep_unanswered = lambda unanswered: None
+        rerun.owners_of = lambda ids: {}
+        rerun.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["panda-c.log"])])
+        runs = {}
+        r._ask = lambda key, names, asking, owners=None, whole=False: (runs, [], {})
+        after = ("2026-11-02 15:14:54,493", "2026-11-02 15:24:55")
+        send = {"send": "pandaserver/userinterface/Client.py:273"}
+        why = "for-the-rows-after-a-call-across-a-send"
+        got = {}
+        runs["panda-c.log"] = runs_for(read_log("after.log"), "777")
+        got["after the call"] = r._call_shown("pandaserver/c.py:7", after, None, why, send, after_call=True)
+        runs["panda-c.log"] = runs_for(read_log("later.log"), "777")
+        got["before the call"] = r._call_shown("pandaserver/c.py:5", after, None, why, send, after_call=True)
+        got["as before"] = r._call_shown("pandaserver/c.py:5", after, None, "for-a-call-across-a-send", send)
+        got["lines"] = r.lines
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # 8 prints only after 7's call returned: shown
+    assert got["after the call"] is True, got
+    # 4 prints before 5's call: printed after the send, it is a later call's
+    assert got["before the call"] is False, got
+    assert "    pandaserver/c.py:5: not read after its call: row(s) [4] print before the call, ending at 5" in got["lines"], got
+    # the same verdict where the window is not after the call: positive, as H2 reads it
+    assert got["as before"] is True, got

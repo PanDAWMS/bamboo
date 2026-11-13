@@ -2043,6 +2043,14 @@ A line that starts with the word but does not match the row's pattern stays unde
 asks for the "mark" `failed` over the window (`recorded`: the key's records under a mark not holding it), which a new
 record round would change; it is not changed here.
 
+*Changed (UMK, 2026-11-13):* the door no longer asks for it.  A key record `records.unmarked` reads as a line its logger
+writes with no mark has no mark to ask whole: the other lines starting with its first word are no part of its run.
+The ask was not only idle but blocking: unanswered, it kept the whole log from the reader.  copyArchive's module logger
+prints `reassignJobs for JEDI at Nq/Nr overshoot site ... ([...])` (633) before its kill at 634; MJE-7398283030's line
+(16:34:42,640) was in the record, yet the log was "no log to hand" until a round asked `reassignJobs` on aipanda094.  On
+the 8 gaps MJE cases of the r27 records, END 4 -> 6 (7398283030 and 7395160958, by 633's and 860's lines), with no
+second-stage ask left of that kind.
+
 Measured with K69 as u70n against u69o and u69n (querier-v cac0bf1 with K69 alone; xxix's dump 5c1172d, pin m), every
 set: no run crashed; against u69n, past K69's new wording, only the three outputs holding ContentsFeeder's lines move,
 and xi's copy of one.  Tr: the 6 run lines are 11 runs of one line; 07:25:50 and 07:26:06 are passes 9 and 10, 158
