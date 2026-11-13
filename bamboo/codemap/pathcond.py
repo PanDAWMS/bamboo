@@ -1187,7 +1187,7 @@ def _exits_rendered(node: ast.AST) -> dict[str, list[ast.stmt]]:
         return {}
     found: dict[str, list[ast.stmt]] = {}
     for implied, exit_if in sorted(_early_exit_ifs(node), key=lambda one: one[1].lineno):
-        if _given_between(func, exit_if, node):  # type: ignore[arg-type]
+        if _given_between(func, exit_if, node):
             implied = f"{implied}  [at {exit_if.lineno}]"
         else:
             implied = _substitute_bare_name(implied, exit_if.test, func)  # type: ignore[attr-defined]
@@ -1375,7 +1375,7 @@ def _apart(one: ast.AST, other: ast.AST) -> bool:
 
 
 def _given_between(
-    func: ast.AST, earlier: ast.stmt, later: ast.stmt, ends: tuple[ast.AST, ...] = ()
+    func: ast.AST, earlier: ast.stmt, later: ast.AST, ends: tuple[ast.AST, ...] = ()
 ) -> bool:
     """Whether a name *earlier*'s test reads is given a new value on the way to *later*'s test.
 
@@ -1394,6 +1394,21 @@ def _given_between(
         for name in _names_in(earlier.test)  # type: ignore[attr-defined]
         for site in rebinds.get(name, ())
     )
+
+
+def given_between(func: ast.AST, earlier: ast.If, later: ast.AST) -> bool:
+    """Whether a name *earlier*'s test reads is given a new value in *func* on the way from that test to *later*.
+
+    Asked of an early exit :func:`early_exit_ifs` gives: where it is, the exit's test describes its names as they
+    were when it ran, not as they are at *later*, and :func:`exits_above` reads it ``  [at <the exit's line>]``.
+    A new value is a binding, ``x[k] = v`` or a call of a method on the name (``x.add(v)``), as :func:`_rebinds`
+    reads them, below the end of the test and above *later* by line, in no arm a pass through the test or *later*
+    cannot enter.  Wide on purpose: every name the test reads counts (``self`` in ``name not in self.allowed``, and
+    so ``self.log(name)``), and a call counts whether it changes the name or not.  By line, so not across the
+    passes of a loop: ``name = self.next_one()`` below *later* in a ``while`` holding *later* but not the exit
+    gives ``name`` a new value for the next pass, and is not counted.
+    """
+    return _given_between(func, earlier, later)
 
 
 def parted(

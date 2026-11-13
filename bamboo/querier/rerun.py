@@ -1488,6 +1488,9 @@ class Caller:
     how: str
     marks: tuple[str, ...] = ()
     between: list[str] = field(default_factory=list)
+    #: U2X (A): the lines of *lines* whose call reaches the mover across a send (SND), and the sends (``file:line``)
+    across: list[int] = field(default_factory=list)
+    sent: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2336,9 +2339,11 @@ def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> lis
     that its runs print no key.  A facade or a plugin's dispatch prints nothing or marks no key, and the caller behind
     it is the one a run shows: feed_contents_to_tasks, behind JediTaskBuffer's updateTaskStatusByContFeeder_JEDI.  An
     entry the map cut (``… N more``) names no site.  A caller is one def, not one name: datasetManager.py has seven
-    ``run``, two of them (ActivatorThr's, ActivatorWithRuleThr's) calling activateJobs."""
+    ``run``, two of them (ActivatorThr's, ActivatorWithRuleThr's) calling activateJobs.  U2X (A): an entry whose
+    outermost hop is an endpoint a send enters goes on once past the send (:func:`across_sends`)."""
     out: dict[tuple[str, int], Caller] = {}
-    for entry in entries:
+    sends = across_sends(entries)
+    for entry in [*entries, *sends]:
         hops = []
         for rel, line in reversed([(f, int(n)) for f, n in re.findall(r"([\w./-]+\.py):(\d+)", entry)]):
             node = R.def_holding(rel, line)
@@ -2358,7 +2363,39 @@ def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> lis
         c.lines = sorted({*c.lines, line})
         c.marks = tuple(sorted({*c.marks, *marks}))
         c.between = sorted({*c.between, *(f"{r}:{n_}" for _, r, n_, _, _, _ in hops[:n])})
+        if (send := sends.get(entry)) and send in {f"{r}:{n_}" for _, r, n_, _, _, _ in hops[:n]}:
+            c.across = sorted({*c.across, line})
+            c.sent = sorted({*c.sent, send})
     return list(out.values())
+
+
+def across_sends(entries: list[str]) -> dict[str, str]:
+    """U2X (A) (out/gm/qk-design.md U2X): the ``called_from`` *entries* go on once past a send.  Where an entry's
+    outermost hop is in an endpoint function a send enters (a source of its ``ParameterFrom`` the map marks sent, SND),
+    each call into the sender -- the def holding the send, the client's call last on that source's route -- is a hop
+    further out (the map's ``ReachNode.calls``): ``job_api.py:572 -> TaskBuffer.py:1190`` goes on to
+    ``copyArchive.py:904 -> Client.py:273 -> job_api.py:572 -> TaskBuffer.py:1190``.  Once: the sender's callers'
+    callers are not read.  Each new entry with its send."""
+    out: dict[str, str] = {}
+    for entry in entries:
+        sites = re.findall(r"([\w./-]+\.py):(\d+)", entry)
+        if not sites:
+            continue
+        node = R.def_holding(sites[0][0], int(sites[0][1]))
+        if node is None:
+            continue
+        for send in SR.sends_into(f"{sites[0][0]}::{node.name}"):
+            srel, _, sln = send.rpartition(":")
+            sender = R.def_holding(srel, int(sln))
+            if sender is None:
+                continue
+            # the sender as the map names it: its class's name before its own, a module function's alone
+            cls = next((o for f, o in pathcond.functions_with_owner(R.tree(srel)) if f is sender), None)
+            for caller, lines in SR.calls_into(srel, f"{cls}.{sender.name}" if cls else sender.name):
+                crel = caller.partition("::")[0]
+                for n in lines:
+                    out.setdefault(f"{crel}:{n} -> {send} -> {entry}", send)
+    return out
 
 
 def _f3(state: dict | None) -> str:
@@ -3951,8 +3988,7 @@ class Rerun:
                  + (f"; the read takes {''.join(steps)} off it" if steps else ""))
         if traced:
             self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
-        shown = traced or ([] if one_call or not ask else [
-            w for w in alone if self._call_shown(w.route[0], window, getattr(run, "machine", None))])
+        shown = traced or ([] if one_call or not ask else [w for w in alone if self._caller_shows(w, window, run)])
         if len(shown) == 1:
             # a constant-through keeps its why: its value is not the literal's
             return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)
@@ -4047,10 +4083,69 @@ class Rerun:
                   for i, *_ in sn.hits.get(row.line, ()) if param in row.capture(run.records[i])}
         return values.pop() if len(values) == 1 else None
 
-    def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value") -> bool:
+    def _caller_shows(self, w: SR.Way, window: tuple[str, str] | None, run: Any) -> bool:
+        """Whether the caller's own run shows the call *w* comes by ran (:meth:`_call_shown`).  A way that came across a
+        send (the map's ``HeldSource.sent``, SND) is asked as HOP's reader asks it (out/gm/qk-design.md, HOP (2)): the
+        caller is a client in another process, so on every machine, over the arm's window opened windows.SLACK earlier
+        and closed at the first line of the endpoint's pass the send entered (:meth:`_entry_first`) -- what the
+        caller printed after its send is not of this call -- else at the window's end."""
+        machine = getattr(run, "machine", None)
+        if not w.sent or window is None:
+            return self._call_shown(w.route[0], window, machine)
+        start = f"{W.when(window[0]) - W.SLACK:%Y-%m-%d %H:%M:%S}"
+        # one entry's run is asked once per window, and its window said once, however many calls send into it
+        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str]] = self.__dict__.setdefault("_send_windows", {})
+        key = (w.sent_into, w.sent, (start, window[1]))
+        if key not in said:
+            first = self._entry_first(w, (start, window[1]))
+            said[key] = (start, first or window[1])
+            closed = ("the first line of the entry's pass that holds the key" if first
+                      else "the window's end: no pass of the entry holding the key began in it")
+            self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
+                     f"{said[key][0]} to {said[key][1]} ({closed}), on every machine")
+        return self._call_shown(w.route[0], said[key], None, "for-a-call-across-a-send", {"send": w.sent})
+
+    def _entry_first(self, w: SR.Way, window: tuple[str, str]) -> str | None:
+        """The first line of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key and began
+        last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before killJobs ran --
+        or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
+        endpoint's entry row whole (``rows.entries``): a mark many calls share makes one run of hours -- job_api's
+        ``kill``, a day's 198 lines on one machine -- whose first line, or its first inside the window, is another
+        call's (MJE-7395160958's 16:34:40,732, a kill of other jobs).  A run with no record read so begins no pass here:
+        kept whole, its first line may be another call's, or one printed after the call began."""
+        entry = w.sent_into
+        lines = [n] if (n := SR.def_line(entry)) else []
+        today = sorted({f for st in getattr(R._prints_of(entry, lines), "statements", None) or [] for f in st.log_files})
+        files = self.files_of(entry, today, lines)
+        if not files or not self.logs.names(files):
+            self.say(f"    {entry.split('::')[-1]}: no log of it to hand ({', '.join(files) or 'none'})")
+            return None
+        asking = W.Asking(window, None, T.Said("for-the-entry-a-send-entered", {"entry": entry.split("::")[-1], "send": w.sent}))
+        runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([entry]), whole=True)
+        self._keep_unanswered(unanswered)
+        rel, _, name = entry.partition("::")
+        try:
+            fn = R.function(rel, name.rpartition(".")[2], within=lines)
+        except LookupError:
+            self.say(f"    {name}: not found in {rel}, so no pass of it begins")
+            return None
+        firsts = []
+        for r in (r for rs in runs.values() for r in rs if of_mover(r, entry)):
+            starts = R.entries(fn, r, self.mode)
+            if not starts:
+                continue
+            for a, b in zip(starts, [*starts[1:], len(r.records)], strict=True):
+                p = r.part(a, b)
+                if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]:
+                    firsts.append(p.first)
+        return max(firsts) if firsts else None
+
+    def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",
+                    facts: dict[str, Any] | None = None) -> bool:
         """Whether the caller's own run shows the call at *site* (``file:line``) ran: H2's judgement of that line as a
         candidate, on the key's runs of the caller's logs over *window* on *machine* (the arm's run's: the call ran it in
-        the caller's process) -- its must rows printed (positive).  *why* says what the ask is for."""
+        the caller's process) -- its must rows printed (positive).  *why* says what the ask is for, *facts* what more
+        it names."""
         crel, _, ln = site.rpartition(":")
         node = R.def_holding(crel, int(ln))
         if node is None:
@@ -4061,7 +4156,7 @@ class Rerun:
         if not files or not self.logs.names(files):
             self.say(f"    {site} ({node.name}): no log of it to hand ({', '.join(files) or 'none'})")
             return False
-        asking = W.Asking(window, machine, T.Said(why, {"site": site}))
+        asking = W.Asking(window, machine, T.Said(why, {"site": site, **(facts or {})}))
         # asked as H2 asks a candidate's logs: by its function's service, its marks whole
         runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([cowner]), whole=True)
         self._keep_unanswered(unanswered)
@@ -5936,7 +6031,8 @@ class Rerun:
                 "none": "its runs print no key"}
         for c in found:
             through = f", through {', '.join(c.between)}" if c.between else ""
-            self.say(f"  {c.owner.split('::')[-1]} at {c.lines} (hop {c.hop}{through}): {ways[c.how]}")
+            across = f"; across the send at {', '.join(c.sent)}: {c.across}" if c.sent else ""
+            self.say(f"  {c.owner.split('::')[-1]} at {c.lines} (hop {c.hop}{through}{across}): {ways[c.how]}")
         asks = [CallerPasses(c, q) for c in found]
         if len(asks) == 1:
             return asks[0]
@@ -5977,6 +6073,11 @@ class Rerun:
             moving = [p for p in keyed if p.last[:19] >= up.before]
             keyed = [p for p in keyed if p.last[:19] < up.before]
             self.say(f"{len(moving)} pass(es) ending at {up.before} or later, the one that called {mover} to move it on among them, not read")
+            if c.across and keyed:
+                keyed, moved = self._moved_across(fn, rel, func, keyed, c, up.before)
+                if moved and not keyed:
+                    # no pass before the one that moved it: the caller is read as absent up to that pass
+                    up = replace(up, window=(start, moved[0].first))
         if not keyed:
             return self._caller_absent(c, up, to_hand, asking, holes)
         outcomes = sorted({o for a in up.arms for o in a.outcomes})
@@ -5985,6 +6086,34 @@ class Rerun:
         self.need(T.Said("caller-called-mover-not-found", {"caller": func, "line": blocked.exit_line, "mover": mover}),
                   blocked.exit_line not in c.lines, "K55")
         return blocked
+
+    def _moved_across(self, fn: R.Function, rel: str, func: str, keyed: list, c: Caller, before: str) -> tuple[list, list]:
+        """U2X (B) (out/gm/qk-design.md U2X): a caller across a send (:func:`across_sends`) whose call moved the row ends
+        its pass before the move, by the send's time (copyArchive's pass at 10:33:04,808, killJob's at 10:33:15,725), so
+        ending before *before* does not make a pass one before the move.  Of *keyed*, a pass ending within windows.SLACK
+        of *before* whose way (S2's judgement over the caller's calls into the mover and its exits) is a call across the
+        send is the one that moved it on: set aside, and said.  By its way, not its time alone: a pass in that span that
+        took another way is still read as one before the move.  The passes kept and the ones set aside."""
+        edge = W.when(before) - W.SLACK
+        exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
+        lines = sorted(set(c.lines) | set(exits))
+        kept, moved = [], []
+        for p in keyed:
+            if W.when(p.last) < edge:
+                kept.append(p)
+                continue
+            env = self.base_env(at=p.first)
+            stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
+            j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
+            took = j.chosen if j.chosen is not None else _the_arm_taken(j, set(c.lines))
+            line = took.line if took is not None else None
+            if line in c.across:
+                self.say(f"pass {p.first} .. {p.last} took {func}:{line} ({took.kind}), a call across the send at {', '.join(c.sent)}, and ended "
+                         f"within {int(W.SLACK.total_seconds() // 60)} min of the move at {before}: the one that moved it on, not read as a pass before it")
+                moved.append(p)
+            else:
+                kept.append(p)
+        return kept, moved
 
     def _call_guards(self, rel: str, line: int) -> list[str]:
         """The tests reaching the call at *rel*:*line* runs under (``pathcond.arm_condition``: its ``if``s and the early

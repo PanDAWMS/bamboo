@@ -13154,3 +13154,278 @@ def test_q7_an_object_filled_from_a_row_ends_at_the_row_where_its_held_test_rule
                for x in got["lines"]), got["lines"]
     assert got["arm"] == {"ends": True, "a term stops": False, "its entry stops": False, "its entry not read": False,
                           "a raise": False, "none": True}, got
+
+
+def test_snd_a_way_across_a_send_carries_the_send_and_the_endpoint_it_entered(tmp_path):
+    # SND: an endpoint's parameter the map marks sent (the client's call last on its route) marks every way read up
+    # through it with that send and the endpoint; a way not across a send is not marked.  The sends into an endpoint,
+    # the calls into a function by its qualified name (a method of the same bare name is another function), and a
+    # def's line by its ParameterFrom records
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        A, C, T = "pandaserver/a.py::kill", "pandaserver/c.py::kill_jobs", "pandaserver/t.py::killJobs"
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[], runnables=[], field_froms=[], entered_froms=[], tables=[],
+            parameter_froms=[
+                N(owner=T, parameter="code", line=3, stops=[], sources=[
+                    M.HeldSource(kind="parameter", name="code", line=10, site_owner=A, route=["pandaserver/a.py:12"]),
+                    M.HeldSource(kind="constant", name="'60'", line=9, route=["pandaserver/g.py:9"])]),
+                N(owner=A, parameter="code", line=10, stops=[], sources=[
+                    M.HeldSource(kind="parameter", name="code", line=5, site_owner=C, route=["pandaserver/c.py:7"], sent=True),
+                    M.HeldSource(kind="constant", name="None", line=10, route=["pandaserver/c.py:7"], sent=True,
+                                 at=["pandaserver/a.py:10"])]),
+                N(owner=C, parameter="code", line=5, stops=[], sources=[
+                    M.HeldSource(kind="constant", name="'4'", line=20, route=["pandaserver/d.py:20"])]),
+            ],
+            reach_graph=[N(owner="pandaserver/d.py::main", calls=[N(to=C, line=20, lines=[20, 30])]),
+                         N(owner="pandaserver/d.py::Daemon.run#2", calls=[N(to="pandaserver/c.py::Client.kill_jobs", line=40, lines=[])]),
+                         N(owner="pandaserver/e.py::other", calls=[N(to="pandaserver/z.py::f", line=1, lines=[])])])]
+        SR._calls_in.cache_clear()
+        SR._sends_in.cache_clear()
+        got = {
+            "ways": sorted([w.value, list(w.route), w.sent, w.sent_into] for w in SR.param_ways(T, "code")),
+            "sends into the endpoint": list(SR.sends_into(A)),
+            "sends into the mover's caller": list(SR.sends_into(T)),
+            "calls into the client": [[o, list(n)] for o, n in SR.calls_into("pandaserver/c.py", "kill_jobs")],
+            "calls into the method": [[o, list(n)] for o, n in SR.calls_into("pandaserver/c.py", "Client.kill_jobs")],
+            "def line": [SR.def_line(A), SR.def_line("pandaserver/z.py::f")],
+        }
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["ways"] == [
+        ["'4'", ["pandaserver/d.py:20", "pandaserver/c.py:7", "pandaserver/a.py:12"], "pandaserver/c.py:7", "pandaserver/a.py::kill"],
+        ["'60'", ["pandaserver/g.py:9"], "", ""],
+        ["None", ["pandaserver/c.py:7", "pandaserver/a.py:12"], "pandaserver/c.py:7", "pandaserver/a.py::kill"],
+    ], got
+    assert got["sends into the endpoint"] == ["pandaserver/c.py:7"]
+    assert got["sends into the mover's caller"] == []
+    assert got["calls into the client"] == [["pandaserver/d.py::main", [20, 30]]]
+    assert got["calls into the method"] == [["pandaserver/d.py::Daemon.run", [40]]]
+    assert got["def line"] == [10, 0]
+
+
+def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_before_to_the_entrys_first_line(tmp_path):
+    # HOP's reader (out/gm/qk-design.md HOP (2)): a way not across a send is asked as before, on the arm's window and
+    # machine; one across a send on every machine, from windows.SLACK before the arm's window to the first line of the
+    # endpoint's pass that holds the key and began last in that window, else to the window's end; the endpoint asked
+    # once per window.  A mark many calls share is one run of the day, cut into the endpoint's passes: a pass of other
+    # jobs in the window, or of the key outside it, closes nothing
+    (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(textwrap.dedent('''
+        def kill(req, job_ids):
+            tmp_logger = LogWrapper(_logger, "kill")
+            tmp_logger.debug(f"Start job_ids: {job_ids}")
+            ret = global_task_buffer.killJobs(job_ids)
+            tmp_logger.debug(f"Done with ret: {ret}")
+            return ret
+    ''').lstrip())
+    line = "2026-11-02 {} panda.log.api_job: DEBUG    kill {}\n"
+    calls = [("08:00:00,000", "[777]"), ("15:45:00,000", "[5]"), ("15:51:58,491", "[777, 8]"), ("15:52:30,000", "[777]")]
+    (tmp_path / "panda-api_job.log").write_text("".join(
+        line.format(at, f"Start job_ids: {ids}") + line.format(at[:-3] + "900", "Done with ret: [True]") for at, ids in calls))
+    # a run of the key's one line, as an ask by the key alone finds it: one pass, begun at its entry row
+    (tmp_path / "one.log").write_text(line.format("15:51:58,491", "Start job_ids: [777, 8]"))
+    # a run of the key with no entry row: no pass of it begins in these records
+    (tmp_path / "done.log").write_text(line.format("15:51:58,900", "Done with ret: [True] job_ids: [777]"))
+    out = _ok(_run(tmp_path, """
+        import json
+        from dataclasses import replace
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import rows as R
+        from bamboo.querier import sources as SR
+        from bamboo.querier.records import read_log, runs_for
+
+        R.ROWS_FROM = "walk"
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        r.say = r.lines.append
+        r.args = N(key="777")
+        r.mode = "outside"
+        r.logs = N(names=lambda files: list(files))
+        r.files_of = lambda owner, today, lines: today
+        r._keep_unanswered = lambda unanswered: None
+        rerun.owners_of = lambda ids: {}
+        shown, asked = [], []
+
+        def call_shown(site, window, machine, why="for-a-call-handing-a-value", facts=None):
+            shown.append([site, list(window), machine, why, facts])
+            return True
+
+        r._call_shown = call_shown
+        rerun.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["panda-api_job.log"])])
+        SR.def_line = lambda owner: 1
+        # one run of the mark's day on the machine, the key on three of its lines
+        entry = {"panda-api_job.log": runs_for(read_log("panda-api_job.log"), "777")}
+        whole = [[len(x.records), len(x.found_by)] for x in entry["panda-api_job.log"]]
+
+        def ask(key, names, asking, owners=None, whole=False):
+            asked.append([list(asking.window), asking.machine, str(asking.why)])
+            return entry, [], {}
+
+        r._ask = ask
+        arm = N(machine="aipanda090")
+        window = ("2026-11-02 15:51:59", "2026-11-02 15:51:59")
+        sent = SR.Way("constant", "'10'", "constant", ("pandaserver/d.py:634", "pandaserver/c.py:7", "pandaserver/a.py:4"),
+                      sent="pandaserver/c.py:7", sent_into="pandaserver/a.py::kill")
+        r._caller_shows(SR.Way("constant", "'60'", "constant", ("pandaserver/g.py:9",)), window, arm)
+        r._caller_shows(sent, window, arm)
+        r._caller_shows(replace(sent, route=("pandaserver/d.py:904", *sent.route[1:])), window, arm)
+        # in this window only a pass of other jobs began (15:45); the key's pass at 08:00 is outside it
+        r._caller_shows(sent, ("2026-11-02 15:50:00", "2026-11-02 15:50:00"), arm)
+        entry = {"panda-api_job.log": runs_for(read_log("one.log"), "777")}
+        r._caller_shows(sent, ("2026-11-02 15:52:00", "2026-11-02 15:52:00"), arm)
+        entry = {"panda-api_job.log": runs_for(read_log("done.log"), "777")}
+        r._caller_shows(sent, ("2026-11-02 15:52:01", "2026-11-02 15:52:01"), arm)
+        entry = {}
+        r._caller_shows(sent, ("2026-11-02 16:34:45", "2026-11-02 16:34:45"), arm)
+        print(json.dumps({"whole": whole, "shown": shown, "asked": asked, "lines": r.lines}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["whole"] == [[8, 3]], got
+    across = ["2026-11-02 15:41:59", "2026-11-02 15:51:58,491"]
+    send = {"send": "pandaserver/c.py:7"}
+    assert got["shown"] == [
+        ["pandaserver/g.py:9", ["2026-11-02 15:51:59", "2026-11-02 15:51:59"], "aipanda090", "for-a-call-handing-a-value", None],
+        ["pandaserver/d.py:634", across, None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:904", across, None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:00", "2026-11-02 15:51:58,491"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, "for-a-call-across-a-send", send],
+        ["pandaserver/d.py:634", ["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, "for-a-call-across-a-send", send],
+    ], got
+    why = "for the run of kill the send at pandaserver/c.py:7 entered, its first line closing the caller's window"
+    assert got["asked"] == [[["2026-11-02 15:41:59", "2026-11-02 15:51:59"], None, why],
+                            [["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, why],
+                            [["2026-11-02 15:42:00", "2026-11-02 15:52:00"], None, why],
+                            [["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, why],
+                            [["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, why]], got
+    none = "the window's end: no pass of the entry holding the key began in it"
+    assert got["lines"] == [
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:41:59 to "
+        "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:40:00 to "
+        f"2026-11-02 15:50:00 ({none}), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:00 to "
+        "2026-11-02 15:51:58,491 (the first line of the entry's pass that holds the key), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:42:01 to "
+        f"2026-11-02 15:52:01 ({none}), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 16:24:45 to "
+        f"2026-11-02 16:34:45 ({none}), on every machine",
+    ], got
+
+
+def test_u2x_reads_a_caller_across_a_send_and_sets_aside_by_its_way_the_pass_that_moved_it(tmp_path):
+    # U2X (out/gm/qk-design.md U2X): (A) an entry whose outermost hop is an endpoint a send enters goes on once to the
+    # sender's callers, the lines across the send named; (B) a pass of such a caller ending within windows.SLACK of the
+    # move that took a call across the send moved it on: set aside, and with no pass before it the caller is read as
+    # absent up to it.  Not by time alone: a pass in that span that went another way, or one before the span that took
+    # the call, is read as before; a caller with no send is read as before
+    corpus = _corpus(tmp_path)
+    files = {
+        "t.py": "class TaskBuffer:\n    def killJobs(self, ids, code):\n        return proxy.killJob(ids, code)\n",
+        "a.py": "def kill(req, job_ids, code=None):\n    tb = TaskBuffer()\n    return tb.killJobs(job_ids, code)\n",
+        "c.py": "def kill_jobs(ids, code=None):\n    data = {'job_ids': ids, 'code': code}\n    return HttpClient().post(url, data)\n",
+        "d.py": ("def main():\n    if pending:\n        log('killJobs for Pending')\n        Client.kill_jobs(jobs, 4)\n"
+                 "    taskBuffer.killJobs(others, 2)\n    return 0\n"),
+    }
+    for name, text in files.items():
+        (corpus / "pandaserver" / name).write_text(text)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump, rerun, which_ran
+        from bamboo.querier import render as T
+        from bamboo.querier import sources as SR
+
+        P = "pandaserver/"
+        mapdump._FRAGMENT[:] = [N(
+            guard_froms=[], runnables=[], field_froms=[], entered_froms=[], tables=[],
+            parameter_froms=[N(owner=P + "a.py::kill", parameter="code", line=1, stops=[], sources=[
+                M.HeldSource(kind="parameter", name="code", line=1, site_owner=P + "c.py::kill_jobs", route=[P + "c.py:3"], sent=True)])],
+            reach_graph=[N(owner=P + "d.py::main", calls=[N(to=P + "c.py::kill_jobs", line=4, lines=[4])]),
+                         N(owner=P + "x.py::Other.run", calls=[N(to=P + "c.py::Other.kill_jobs", line=9, lines=[9])])])]
+        SR._calls_in.cache_clear()
+        SR._sends_in.cache_clear()
+        rerun.prints_nothing = lambda owner, lines: False
+        rerun.key_marks = lambda owner, line, cls, key: ()
+        rerun.prints_key = lambda owner, lines, columns: owner.endswith("d.py::main")
+        entries = [P + "t.py:3", P + "a.py:3 -> " + P + "t.py:3", P + "d.py:5 -> " + P + "t.py:3"]
+        got = {"across": rerun.across_sends(entries),
+               "callers_of": [[c.owner, c.lines, c.hop, c.how, c.between, c.across, c.sent]
+                              for c in rerun.callers_of(entries, "JobSpec", "1", {"JobSpec.PandaID"})]}
+
+        def rerun_(passes, chosen):
+            r = object.__new__(rerun.Rerun)
+            r.lines, r.hop, r.hand, r.hand_used, r.unanswered = [], "U2", {}, [], []
+            r.opened, r.ends, r.branches = [], [], []
+            r.mode, r.decide = "map", "positive"
+            r.data, r.args = {"statuslog": {"states": []}}, N(observed="pending", key="1", asks="asks.jsonl", subject="JobSpec.jobStatus")
+            r.logs = N(needs_window=True, names=lambda files: list(files))
+            r.files_of = lambda owner, today, lines: today
+            r._key_columns = lambda subject, key: {"JobSpec.PandaID"}
+            run = N(token="killJobs for Pending", first="2026-10-29 09:31:36,000", last="2026-10-29 10:33:15,000",
+                    describe=lambda: "the run", machine="aipanda093", found_by=[0])
+            r._ask = lambda key, names, asking, owners=None: ({"a.log": [run]}, [], {})
+            rerun.R.passes = lambda fn, run, mode: (passes, f"{len(passes)} pass(es)")
+            r.base_env = lambda at=None: N(values={})
+            verdict = which_ran.Verdict(which_ran.Candidate(P + "d.py", "main", [chosen]), chosen, "positive")
+            rerun.judge = lambda cands, runs, **k: which_ran.Judgement([verdict], verdict, "positive evidence", None)
+            return r
+
+        rerun.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["a.log"])])
+        functions = rerun.R.functions
+        rerun.R.function = lambda rel, func, lines: N(node=functions(rel, func)[0], owner=f"{rel}::{func}", name=func, rel=rel)
+        rerun.R.seen = lambda fn, run, mode: None
+        rerun.stable_holes = lambda *a, **k: None
+        rerun.class_of = lambda fn: None
+        rerun.holds_key = lambda fn, p, runs, mode, called_at: True
+        rerun.every_log_asked = lambda owner, lines, asked: {"held": True, "why": T.Said("logs-every-file-asked", {"files": asked})}
+
+        def pas(first, last):
+            return N(first=first, last=last, records=[0], log=N(name="a.log"))
+
+        up = rerun.Callers(P + "p.py::killJob", [rerun.Arm(9, ["closed"], [])], "JobSpec.jobStatus", "1",
+                           ("2026-10-29 09:31:36", "2026-10-29 10:33:15"), "before", entries, before="2026-10-29 10:33:15")
+        main = rerun.Caller(P + "d.py::main", [4, 5], 2, "key", (), [], [4], [P + "c.py:3"])
+        moved = pas("2026-10-29 10:33:04,808", "2026-10-29 10:33:04,808")
+
+        def u2(name, caller, passes, chosen):
+            r = rerun_(passes, chosen)
+            try:
+                q = r.caller(rerun.CallerPasses(caller, up))
+                got[name] = ["blocked", q.exit_line] if isinstance(q, rerun.Blocked) else ["callers", list(q.window)]
+            except rerun.Stop as e:
+                got[name] = ["stop", str(e), e.code]
+            got[name + ": set aside"] = [x for x in r.lines if "the one that moved it on, not read as a pass before it" in x]
+
+        u2("moved across", main, [moved], 4)
+        u2("another way in the span", main, [moved], 6)
+        u2("across, before the span", main, [pas("2026-10-29 10:00:00,000", "2026-10-29 10:00:01,000")], 4)
+        u2("no send", rerun.Caller(P + "d.py::main", [4, 5], 2, "key"), [moved], 4)
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    p = "pandaserver/"
+    assert got["across"] == {f"{p}d.py:4 -> {p}c.py:3 -> {p}a.py:3 -> {p}t.py:3": f"{p}c.py:3"}, got
+    assert got["callers_of"] == [
+        [f"{p}t.py::killJobs", [3], 1, "none", [], [], []],
+        [f"{p}d.py::main", [4, 5], 2, "key", [f"{p}a.py:3", f"{p}c.py:3", f"{p}t.py:3"], [4], [f"{p}c.py:3"]],
+    ], got
+    assert got["moved across"][0] == "stop" and got["moved across"][2] == "K55", got
+    assert got["moved across"][1].startswith(
+        "U2: a pass of main on the row from 2026-10-29 09:31:36 to 2026-10-29 10:33:04,808: none found"), got
+    assert got["moved across: set aside"] == [
+        f"pass 2026-10-29 10:33:04,808 .. 2026-10-29 10:33:04,808 took main:4 (positive), a call across the send at {p}c.py:3, "
+        "and ended within 10 min of the move at 2026-10-29 10:33:15: the one that moved it on, not read as a pass before it"]
+    assert got["another way in the span"] == ["blocked", 6], got
+    assert got["another way in the span: set aside"] == []
+    for kept in ("across, before the span", "no send"):
+        assert got[kept][0] == "stop" and got[kept][1].startswith("U2: killJob's pass on the row inside main's call at 4"), got
+        assert got[kept + ": set aside"] == [], got

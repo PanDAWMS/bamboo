@@ -47,6 +47,9 @@ from bamboo.codemap.models import (
     KEY_PARAMETER,
     KEY_ROWS,
     KEY_SELF_FIELD,
+    THROUGH_CONVERTED,
+    THROUGH_DECODED,
+    THROUGH_UNKNOWN,
     Endpoint,
     EndpointChange,
     EndpointFill,
@@ -80,29 +83,58 @@ HANDLERS = "HANDLERS"
 ASYNC = "async"
 
 
+#: The corpus's client of the API: the class and what each of its methods sends, as the server reads it back
+#: (:attr:`~bamboo.codemap.models.HeldThrough.gives`).  ``post``'s body is JSON, read back as it was sent but a tuple
+#: a list; ``get``'s query is text, cast to the parameter's annotated type; ``post_files`` sends a file's contents,
+#: not the value it is handed (a path).
+HTTP_CLIENT = "pandaserver/api/v1/http_client.py"
+HTTP_CLIENT_CLASS = "HttpClient"
+SENDS = {"get": THROUGH_CONVERTED, "post": THROUGH_DECODED, "post_files": THROUGH_UNKNOWN}
+#: A sent URL's last literal part, naming the route: ``f"{api_url_ssl_v1}/job/kill"`` is ``job/kill``.
+_ROUTE_TAIL = re.compile(r"/([A-Za-z_]\w*)/([A-Za-z_]\w*)$")
+
+
 def routes(modules: list[SourceModule]) -> list[tuple[str, str, str]]:
     """``(version, route, owner)`` per endpoint, ``route`` ``<module>/<method>``; none where :data:`SERVER`'s
     routing table is not read."""
-    by_path = {module.rel_path: module for module in modules}
-    server = by_path.get(SERVER)
-    if server is None:
+    return routes_in({module.rel_path: module.tree for module in modules})
+
+
+def routes_in(trees: dict[str, ast.AST]) -> list[tuple[str, str, str]]:
+    """:func:`routes` of the trees of a corpus, by their files."""
+    server = trees.get(SERVER)
+    if not isinstance(server, ast.Module):
         return []
-    imported = _imported(server.tree)
+    imported = _imported(server)
     found = []
-    for version, name, held in _table(server.tree):
-        module = by_path.get(imported.get(held, ""))
-        if module is None:
+    for version, name, held in _table(server):
+        rel = imported.get(held, "")
+        module = trees.get(rel)
+        if not isinstance(module, ast.Module):
             continue
-        for node in module.tree.body:
+        for node in module.body:
             if (
                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and not node.name.startswith("_")
                 and node.name not in NOT_ROUTED
             ):
-                found.append(
-                    (version, f"{name}/{node.name}", f"{module.rel_path}::{node.name}")
-                )
+                found.append((version, f"{name}/{node.name}", f"{rel}::{node.name}"))
     return list(dict.fromkeys(found))
+
+
+def sent_route(url: Optional[ast.expr], func: ast.AST) -> Optional[str]:
+    """The route a URL the corpus sends to names, ``<module>/<method>``: an f-string's -- or the one f-string a name
+    of *func* is bound to -- last literal part ending ``/<module>/<method>`` (:data:`_ROUTE_TAIL`).  ``None`` for a
+    URL whose end is not a literal (``f"{api_url_ssl}/{mod_name}/{func.__name__}"``), which may be any route."""
+    if isinstance(url, ast.Name) and isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        url = pathcond.single_definition(func, url.id)
+    if not isinstance(url, ast.JoinedStr) or not url.values:
+        return None
+    last = url.values[-1]
+    if not (isinstance(last, ast.Constant) and isinstance(last.value, str)):
+        return None
+    tail = _ROUTE_TAIL.search(last.value)
+    return f"{tail.group(1)}/{tail.group(2)}" if tail else None
 
 
 def _imported(tree: ast.Module) -> dict[str, str]:

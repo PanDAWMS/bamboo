@@ -4779,7 +4779,7 @@ _COPIES = frozenset(name for _module, name in callfacts.COPIES)
 #: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
 #: (:data:`callfacts.TEXT`).
 _SERIALIZING = callfacts.SERIALIZING
-#: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
+#: Iterator helpers outside the corpus (itertools'; pandacommon's ``batched``, read so: callfacts.READ_OUTSIDE)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
 _CHUNKING, _SLICING, _CHAINING = callfacts.CHUNKING, callfacts.SLICING, callfacts.CHAINING
@@ -5196,8 +5196,9 @@ class _PathCarry:
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
     *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.  So
-    does a method the object's class gets from a base outside the corpus, with all it is handed:
-    ``dc_req_spec.pack(row)`` on pandacommon's ``SpecBase`` fills ``dc_req_spec``.
+    does a method the object's class gets from a base outside the corpus, or one read as outside it
+    (:data:`callfacts.READ_OUTSIDE`), with all it is handed: ``dc_req_spec.pack(row)`` on pandacommon's
+    ``SpecBase`` fills ``dc_req_spec``.
 
     With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
     not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.
@@ -7336,11 +7337,14 @@ def unspelled_path(spelled: str) -> tuple[str, ...]:
     return steps
 
 
-def paths_under(step: str, spelled: Iterable[str], element: bool = False) -> list[str]:
+def paths_under(step: str, spelled: Iterable[str], element: bool = False, keys: bool = False) -> list[str]:
     """Where what a value holds at *spelled* (:attr:`KeySource.paths`) sits in its part *step*, spelled so: ``()``
     where the part is it or a part of it, none where the part holds none of it (:func:`_under`).  *element*: the
-    part is the element a loop over the value takes -- a dict's key too (:func:`_elements`)."""
+    part is the element a loop over the value takes -- a dict's key too (:func:`_elements`).  *keys*: the value is
+    known as a dict, so that element is its key alone, not what its values hold (:func:`_keys`)."""
     paths = frozenset(unspelled_path(one) for one in spelled)
+    if keys:
+        return _spelled_paths(_keys(paths))
     return _spelled_paths(_elements(paths) if element else _under(step, paths))
 
 

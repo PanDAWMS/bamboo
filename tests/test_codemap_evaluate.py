@@ -1,4 +1,4 @@
-"""A test's value from what is known, and what a local holds where it is read -- ``codemap.panda.evaluate`` and
+"""A test's value from what is known, and what a local holds where it is read -- ``codemap.evaluate`` and
 ``pathcond.decided`` / ``pathcond.held_at``."""
 
 from __future__ import annotations
