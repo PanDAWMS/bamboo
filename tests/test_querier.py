@@ -4734,7 +4734,7 @@ def test_a_late_value_s_mover_that_ran_in_the_stay_goes_on_alone_and_one_whose_r
             def fresh():
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.lines, r.opened, r.hand, r.hand_used, r.hop, r.mode, r.decide = [], [], {}, [], "L2", "outside", "positive"
-                r.args = N(observed="transferring", key="7")
+                r.args = N(observed="transferring", key="7", subject="JobSpec.jobStatus")
                 r.data = {"statuslog": {"states": []}}
                 r.logs = N(needs_window=True)
                 r._called_at = lambda fn, c: []
@@ -4783,6 +4783,97 @@ def test_a_late_value_s_mover_that_ran_in_the_stay_goes_on_alone_and_one_whose_r
     assert got["before the stay"] == ["excluded", "S2: no pass of run with the key in the stay (2026-01-01 00:10:00 .. "
                                                   "2026-01-01 01:00:00): its runs fall outside it, so it did not take the row "
                                                   "there (KNOWN_ISSUES.md K15)"]
+
+
+
+def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_and_the_edges_compare_to_the_microsecond(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+
+            def row(status, t, ext):
+                return {"status": status, "time": t, "time_extended": ext, "host": "h1"}
+
+            def pas(name, first, last):
+                return N(name=name, first=first, last=last, log=N(name="a.log"), machine="h1",
+                         records=[N(stamp=first), N(stamp=last)])
+
+            moved_in = [row("running", "2026-01-01 00:00:01", "2026-01-01 00:00:01.000000"),
+                        row("transferring", "2026-01-01 00:00:05", "2026-01-01 00:00:05.500000"),
+                        row("finished", "2026-01-01 01:00:00", "2026-01-01 01:00:00.300000")]
+            # the same value written again over itself (activateJob's 'defined' over 'defined'): no edge there
+            again = [row("transferring", "2026-01-01 00:00:01", "2026-01-01 00:00:01.000000"), *moved_in[1:]]
+            got = {}
+            for label, states in (("moved in", moved_in), ("written again", again), ("not cut", moved_in)):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines = []
+                r.args = N(observed="transferring", since="2026-01-01 00:00:05.500000")
+                r.data = {"statuslog": {"states": states}}
+                asked = []
+
+                def recording(owner, arms, subject, key, edge, found, asked=asked):
+                    asked.append(edge["status"])
+                    by = {"transferring": "birth", "finished": "moving"}
+                    p = next((x for x in found if x.name == by[edge["status"]]), None)
+                    return (p, "a call of it recorded the row") if p is not None else None
+
+                r._recording_pass = recording
+                found = [pas("over before", "2026-01-01 00:00:05,100", "2026-01-01 00:00:05,400"),
+                         pas("birth", "2026-01-01 00:00:04,900", "2026-01-01 00:00:05,600"),
+                         pas("in its time", "2026-01-01 00:30:00,000", "2026-01-01 00:30:01,000"),
+                         pas("moving", "2026-01-01 00:59:59,900", "2026-01-01 01:00:00,400"),
+                         pas("begun after", "2026-01-01 01:00:00,350", "2026-01-01 01:00:00,500")]
+                # a run its function's entry row did not cut may hold several executions: not decided (fix 2 (ii))
+                whole = {id(p) for p in found if p.name == "birth"} if label == "not cut" else set()
+                kept, moving = r._stay_edges(None, "a.py::f", [1], "JobSpec.jobStatus", "7", found, "2026-01-01 00:00:05", whole)
+                got[label] = [[p.name for p in kept], [p.name for p in moving], asked]
+            # a row the window cannot place: the passes ending in or after its second, as before
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.args, r.data = [], N(observed="transferring", since=None), {"statuslog": {"states": []}}
+            kept, moving = r._stay_edges(None, "a.py::f", [1], "JobSpec.jobStatus", "7",
+                                         [pas("over before", "2026-01-01 00:00:05,100", "2026-01-01 00:00:05,400")], "2026-01-01 00:00:05")
+            got["no row"] = [[p.name for p in kept], moving]
+            # the pass the recorder's pass holds: the mover's own pass inside the caller's whose call recorded the row
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.logs, r.unanswered = [], N(needs_window=True), []
+            RR.recorders = lambda subject, owner, line: ["the caller's call"]
+            caller = N(log=N(name="a.log"), machine="h1", first="2026-01-01 00:00:04,000", last="2026-01-01 00:00:06,000")
+            call = N(token="m < 7 >", machine="h1", first="2026-01-01 00:00:05,450", last="2026-01-01 00:00:05,550")
+            r._recorder_read = lambda rec, subject, key, state, asking: ("pass", "its pass recorded the row", caller, [call])
+            found = [pas("before it", "2026-01-01 00:00:01,000", "2026-01-01 00:00:02,000"),
+                     pas("inside it", "2026-01-01 00:00:04,900", "2026-01-01 00:00:05,600")]
+            hit = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            elsewhere = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", {**moved_in[1], "host": None}, found)
+            # the call's prints cannot bracket it: the recorder's call at the row inside the pass's own records
+            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (), ())]
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [call])
+            placed = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [N(**{**vars(call), "machine": "h2"})])
+            other_host = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            # a call of the method inside the pass begun after the row: not the one that recorded it
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [N(**{**vars(call), "first": "2026-01-01 00:00:05,520"})])
+            later_call = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            got["recorded"] = [hit[0].name, hit[1], elsewhere, placed[0].name, placed[1], other_host, later_call]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # over before the row in its second, and begun after the move in its second: outside the value's time.  The pass
+    # whose call recorded the value's row moved it in; the one whose call recorded the next row moved it on
+    assert got["moved in"] == [["in its time"], ["moving"], ["transferring", "finished"]]
+    # a row writing the value again over the same value is no edge: the pass that wrote it is read
+    assert got["written again"] == [["birth", "in its time"], ["moving"], ["finished"]]
+    # a run not cut into passes that holds the row is read as before, the recorder not looked for in it
+    assert got["not cut"] == [["birth", "in its time"], ["moving"], ["transferring", "finished"]]
+    assert got["no row"] == [["over before"], []]
+    # a row with no host names no machine to read its recorder on
+    assert got["recorded"] == ["inside it", "its pass recorded the row", None, "inside it",
+                               "m < 7 > recorded it inside the pass, C.g:9 recording it after the arm", None, None]
 
 
 _PASSES = textwrap.dedent("""

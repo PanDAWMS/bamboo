@@ -2549,3 +2549,46 @@ from ..." names every plugin class and "the call may also land somewhere this re
 *Revisit:* when the census gives a mover in a plugin's file an arm, the record holds more than `g_pluginMap`, or a
 case's answer rests on such a binding: the map would put the record's values in the dump, and `asked._types()` would
 hand them to `Types`.
+
+### K76. A pass whose calls recorded the row at an edge of the value's time moved it there, and the edges compare to the microsecond
+
+S2 (and U2) read a mover's passes in the value's time: a stuck value's window, a late value's stay, judgement 4's
+passes before the move, a mover L2 follows (K15).  The window kept every pass whose last record fell in or after the
+second the time opened, by the mover's own log alone.  So it read as one of the value's time the pass that wrote it:
+MT-passed-late's TaskCommando pass (23:53:06.836 .. 08.976) set `tmpTaskSpec.status` to 'passed' and called
+updateTask_JEDI at 201, whose run in JediDBProxy.log (08.967 .. 08.976) recorded the statuslog row 23:53:08.970163; S2
+stopped on which way that pass went, and the case lost its END.  The second kept a pass over 0.08 s before the row
+(MT-scouted-late's setScoutJobData_JEDI) and two begun 4 and 6 ms after the move (MT-exhausted-late's runImpl and
+retryTask_JEDI).  In the hm2 measure 16 live cases read such a pass (the analyzer handover's out/gm/hm2-predictions.txt).
+
+Now (`Rerun._stay_edges`, the analyzer handover's out/gm/qk-design.md "BP'", tmaeno "OK" 2026-11-13):
+- the time opens at the value's statuslog row the window's start names (the one --since names, else the last of that
+  second) and ends at the next row; a row with its time_extended is compared to the microsecond: a pass over before
+  it, or begun after the move, is not read, and said;
+- a pass whose calls recorded the row at an edge is the pass the value moved in, or moved on in, and is not read as
+  one of its time: the run of a method that records the row, near the row on the row's host, inside a call of a pass
+  of the function the map's history pair names after one of the mover's arms (K67's `_recorder_read`), the mover's
+  pass being that one or inside it (`Rerun._recording_pass`).  A method's run under its own mark holds every call of
+  it (updateTask_JEDI's 21 records over 15 hours): it is cut at its entry rows to the call at the row, for H2's K67
+  reading too.  Where the pass's prints cannot bracket the call (TaskCommando's "done with" after it is printed by
+  rows 202, 217 and 232 alike), the call is placed inside the pass's own first and last records, the history pair
+  saying it records the row after the arm; either way the call was running at the row's time, from its first record
+  to the pass's next record after it (updateJob's call at 'transferring', 08:25:56.779 .. 56.863, the row 56.844,
+  printing nothing after its UPDATE).  The asks for the caller's pass are then not kept.  Judgement 4 takes the one
+  that recorded the move as the pass that moved it on, where the records show it; else, as before, the passes ending
+  at the move's second or later;
+- a row that writes the value again over the same value is no edge (MJ-defined-late's activateJob, 'defined' over
+  'defined' at 08:28:36.007): its pass is read, the reason the value stayed.
+
+Premises not read:
+- *The host's log clock is the database's to the millisecond.*  The rows above fell inside their recorders' runs to
+  the millisecond on the same host; elsewhere it is measured to the second only (recorded.py, JEDI_CLOCKS).
+- *The recorder's runs are in the records.*  Its methods' logs are asked on the row's host near the row, whole, as
+  K67 asks them; where they are not answered the asks are kept and the pass is read as before.
+- *The row's recorder is called after one of the mover's own arms.*  The history pairs are read after the mover's arms
+  only: TaskCommando's pass that wrote 'exhausted' through retryTask_JEDI (MT-exhausted-late, 09:33:01.716) has none
+  after its arms 181 and 197 (those name updateTask_JEDI at 201), so it is read as one of the value's time.
+- *A pass is one execution.*  A run with no entry row is not cut (JobGenerator's `<jediTaskID=... datasetID=...>` on
+  aipanda081, 51 records in 9 bursts over two days, MT-throttled-stuck), and is read whole as before: not decided here.
+- *Between the first row of the value and a row writing it again, nothing is read.*  The window opens at the second
+  row; a pass wholly between the two is not read.  None of the live cases has one.
