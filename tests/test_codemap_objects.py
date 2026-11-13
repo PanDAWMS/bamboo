@@ -2210,3 +2210,111 @@ def test_a_set_naming_its_columns_by_a_mapping_s_keys_writes_each_key_its_caller
         assert [site.how for site in unread.open] == [
             objects.NAMED_AT_RUN_TIME.format(column="modificationTime")
         ], name
+
+
+REACHING = """\
+from pkg.spec import JobSpec
+from pkg.ordered import DBProxy
+
+
+class Holder:
+    def __init__(self, job: JobSpec):
+        self.job = job
+
+    def keep(self, job: JobSpec):
+        self.job = job
+
+
+class Refiner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def hold(self) -> Holder:
+        return Holder(JobSpec())
+
+    def named(self, job: JobSpec):
+        same = job
+        same.jobStatus = "named"  # by another name
+        job.ddmErrorCode = 1  # before the update
+        self.proxy.updateJob(job)  # named's update
+        job.jobMetrics = "late"  # after the update
+
+    def unknown(self, job: JobSpec, keeper):
+        keeper.keep(job)  # into a hole
+        job.jobStatus = "kept"  # on the job the hole took
+        holder = self.hold()
+        self.proxy.updateJob(holder.job)  # unknown's update
+
+    def unplaced(self, job: JobSpec, other):
+        job.jobStatus = "first"  # set before the unplaced update
+        job.jobStatus = "again"  # set again before it
+        other.proxy.updateJob(job)  # an update the record cannot place
+"""
+
+
+def test_the_assignments_a_write_takes_are_read_on_its_object_whatever_their_spelling(
+    tmp_path,
+):
+    """named's update takes jobStatus assigned on its job by another name, and ddmErrorCode assigned before it, but not
+    jobMetrics, assigned after; unknown's update writes a job that came out of a call, and the job unknown assigns
+    jobStatus on went into a call the record cannot place: perhaps the same job, kept with the hole; unplaced's
+    update, a call the record cannot place, takes jobStatus as set the second time, not the first."""
+    fragment = _build(
+        tmp_path,
+        entities=JOB_TABLES,
+        spec=RESETS_SPEC,
+        ordered=ORDERED,
+        reaching=REACHING,
+    )
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def reaching(owner: str, marker: str, root: str, attribute: str):
+        line = _line(REACHING, marker)
+        made = [
+            one
+            for one in objects.line_paths(rows[owner])[line]
+            if objects.root_name(one) == root
+        ]
+        assert made, (owner, marker)
+        return objects.assigns_reaching(rows, owner, line, made, attribute, True)
+
+    named = "pkg/reaching.py::Refiner.named"
+    assert reaching(named, "# named's update", "job", "jobStatus") == objects.Reaching(
+        [_line(REACHING, "# by another name")], {}
+    )
+    assert reaching(
+        named, "# named's update", "job", "ddmErrorCode"
+    ) == objects.Reaching([_line(REACHING, "# before the update")], {})
+    assert reaching(named, "# named's update", "job", "jobMetrics") == objects.Reaching(
+        [], {}
+    )
+    unknown = "pkg/reaching.py::Refiner.unknown"
+    kept, hole = (
+        _line(REACHING, "# on the job the hole took"),
+        _line(REACHING, "# into a hole"),
+    )
+    assert reaching(
+        unknown, "# unknown's update", "holder", "jobStatus"
+    ) == objects.Reaching(
+        [kept],
+        {
+            kept: [
+                f"{unknown}:{hole} the receiver's class is not declared: nothing declares it"
+            ]
+        },
+    )
+    # A call the record cannot place is a call line all the same: what is set again before it is what it takes.
+    unplaced = "pkg/reaching.py::Refiner.unplaced"
+    first, again, update = (
+        _line(REACHING, "# set before the unplaced update"),
+        _line(REACHING, "# set again before it"),
+        _line(REACHING, "# an update the record cannot place"),
+    )
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["jobStatus"], first)
+        and update in one.lines
+        for one in rows[unplaced].overwritten
+    )
+    assert reaching(
+        unplaced, "# an update the record cannot place", "job", "jobStatus"
+    ) == objects.Reaching([again], {})

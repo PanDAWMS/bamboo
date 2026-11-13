@@ -178,9 +178,7 @@ class _Reader:
                 continue
             objects_seen = True
             for path in paths:
-                w, ls = self._no_row_yet(
-                    owner, row, path, branch.line, cls, attr, tables
-                )
+                w, ls = self._no_row_yet(owner, row, path, branch.line, cls, tables)
                 why |= w
                 lines |= ls
         if objects_seen and sql_rows:
@@ -232,7 +230,6 @@ class _Reader:
         path: str,
         line: int,
         cls: str,
-        attr: str,
         tables: set[str],
     ) -> tuple[set[str], set[int]]:
         """The reasons the object at *path* of *owner* may have a row at *line* -- empty where it has none yet."""
@@ -279,11 +276,13 @@ class _Reader:
         if making:
             order = objects._Order(self.rows, [owner])
             held = {owner: list(own.held.get(owner, [path]))}
+            # Order only: a place that may make the row is no change of the arm's column, so a later assignment of
+            # the column does not take it back (clonePandaJob's getFileLocality, a hole, before its jumbo status arm).
             met = [
                 one
                 for one in sorted(making)
                 if order.meets(
-                    objects.Site(owner, one, "make"), owner, [line], held, attr, False
+                    objects.Site(owner, one, "make"), owner, [line], held, "", False
                 )
             ]
             if met:

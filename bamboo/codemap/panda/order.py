@@ -143,10 +143,18 @@ def statements(func: ast.AST) -> dict[int, ast.AST]:
     return found
 
 
+def call_lines(row: ReachNode) -> set[int]:
+    """The lines *row* makes a call at: one the record places (:attr:`ReachNode.calls`), or one it could not -- a
+    hole -- that hands a path (:attr:`ReachNode.call_bindings`): a call all the same, to a write or not."""
+    return {line for call in row.calls for line in (call.lines or [call.line])} | {
+        call.line for call in row.call_bindings
+    }
+
+
 def changes_and_writes(row: ReachNode) -> tuple[set[int], set[int]]:
     """The lines a change can be made at -- an assignment, a call -- and those a write can be made at -- a write,
-    a call."""
-    called = {line for call in row.calls for line in (call.lines or [call.line])}
+    a call (:func:`call_lines`)."""
+    called = call_lines(row)
     return {one.line for one in row.assigns} | called, {
         line for write in row.writes for line in write.lines
     } | called
@@ -516,10 +524,11 @@ def overwritten(
     what is there, nor a computed name, which may set another column; and on a path with no ``[]``, an element at a
     position not known, which names no one object.  So it is also a change, and a source like any other.
 
-    A call line is kept, as a change or as a write's way, only where it takes a path from the overwrite's root name
-    (:func:`line_paths`): a call is a way for the object only where it takes it (:class:`objects._Order` reads no
-    other), and ``doGenerate``'s hundreds of calls each to each are most of what the record would hold.  A call
-    taking the object by another name is left out, and the change through it read as not overwritten.
+    A call line (:func:`call_lines`) is kept, as a change or as a write's way, only where it takes a path from the
+    overwrite's root name (:func:`line_paths`): a call is a way for the object only where it takes it
+    (:class:`objects._Order` reads no other), and ``doGenerate``'s hundreds of calls each to each are most of what
+    the record would hold.  A call taking the object by another name is left out, and the change through it read as
+    not overwritten.
     """
     killers: dict[tuple[str, str], list[ast.AST]] = defaultdict(list)
     assigned: dict[int, set[str]] = defaultdict(set)
@@ -536,7 +545,7 @@ def overwritten(
     if not killers:
         return []
     changes, _writes = changes_and_writes(row)
-    called = {line for call in row.calls for line in (call.lines or [call.line])}
+    called = call_lines(row)
     written = {line for write in row.writes for line in write.lines}
     roots = {
         line: {root_name(one) for one in taken}

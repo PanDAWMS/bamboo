@@ -56,10 +56,12 @@ is read at ``varMap[':PandaID']`` and ``varMap[]``, not at
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import re
 from collections import defaultdict
 from functools import lru_cache, partial
-from typing import NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -1591,6 +1593,132 @@ class _Order:
         if found is None:
             found = self._lines[frame] = _Lines(self.rows[frame])
         return found
+
+
+class Reaching(NamedTuple):
+    """What :func:`assigns_reaching` answers."""
+
+    #: the lines of the assignments whose value the made can take
+    lines: list[int]
+    #: each line of *lines* whose assignment is on the made's object only perhaps, with the holes its object's
+    #: follow met (``owner:line why``) and where it stopped, the made's object having come out of a call
+    perhaps: dict[int, list[str]]
+
+
+class Records(NamedTuple):
+    """The records a build's readers answer from once they are made (:func:`across_records`)."""
+
+    rows: dict[str, ReachNode]
+    #: the owner a function of the corpus is in *rows*; ``None`` for one they do not name
+    owner_of: Callable[[ast.AST], Optional[str]]
+    #: the follows read on *rows*, by (owner, path)
+    follows: dict[_State, ObjectReach]
+
+
+_RECORDS: Optional[Records] = None
+
+
+@contextlib.contextmanager
+def across_records(
+    rows: dict[str, ReachNode], owner_of: Callable[[ast.AST], Optional[str]]
+) -> Iterator[None]:
+    """Hand *rows* to :func:`records` for the length of the block.
+
+    Set for a build's stages rather than passed to each reader, as
+    ``sql.across_calls`` is: a value a write takes is read from the same
+    records wherever a stage asks it.  *rows* may be filled after the block
+    starts, before the first reader asks.
+    """
+    global _RECORDS
+    previous, _RECORDS = _RECORDS, Records(rows, owner_of, {})
+    try:
+        yield
+    finally:
+        _RECORDS = previous
+
+
+def records() -> Optional[Records]:
+    """The records a build answers from; ``None`` outside :func:`across_records`."""
+    return _RECORDS
+
+
+def _followed(
+    rows: dict[str, ReachNode],
+    owner: str,
+    path: str,
+    follows: dict[_State, ObjectReach],
+) -> ObjectReach:
+    """:func:`follow`, kept in *follows*, the follows read on one set of *rows*."""
+    found = follows.get((owner, path))
+    if found is None:
+        found = follows[(owner, path)] = follow(rows, owner, path)
+    return found
+
+
+def assigns_reaching(
+    rows: dict[str, ReachNode],
+    owner: str,
+    made_line: int,
+    made_paths: Sequence[str],
+    attribute: str,
+    changed: bool,
+    follows: Optional[dict[_State, ObjectReach]] = None,
+) -> Reaching:
+    """The assignments of *attribute* in *owner* whose value the object *made_paths* name at *made_line* can take --
+    a ``valuesMap()`` made of it, or a call handing it to a write --, however either is spelled.
+
+    An assignment is on the made's object where the made's path is the
+    assignment's, or one the assignment's object is held by
+    (:func:`follow`).  It is in what is made where it can run before the
+    made (:meth:`_Order.meets`): not after it, nor on a pass the loop
+    renews the name on, nor overwritten on every way between, nor, for a
+    write of the changed attributes (*changed*), reset on every way between.
+    One whose object follow could not take to the made's -- it met a hole or
+    stopped -- where the made's object came out of a call may be the same
+    object through them: it is kept, with them (:attr:`Reaching.perhaps`).
+    *follows* keeps the follows read on one set of *rows*.
+    """
+    row = rows.get(owner)
+    if row is None or not made_paths:
+        return Reaching([], {})
+    kept: dict[_State, ObjectReach] = {} if follows is None else follows
+    order = _Order(rows, [owner])
+    known: set[int] = set()
+    perhaps: dict[int, dict[str, None]] = defaultdict(dict)
+    for one in row.assigns:
+        if attribute not in one.attrs:
+            continue
+        reach = _followed(rows, owner, one.path, kept)
+        here = set(reach.held.get(owner, ()))
+        for made in sorted(made_paths):
+            if made == one.path or made in here:
+                through: Optional[list[str]] = None
+            elif (reach.holes or reach.cut) and _followed(
+                rows, owner, made, kept
+            ).came_from:
+                through = [
+                    f"{site.owner}:{site.line} {site.how}" for site in reach.holes
+                ]
+                through += [reach.cut] if reach.cut else []
+            else:
+                continue
+            site = Site(owner, one.line, one.how)
+            if not order.meets(
+                site, owner, [made_line], reach.held, attribute, changed
+            ):
+                continue
+            if through is None:
+                known.add(one.line)
+            else:
+                perhaps[one.line].update(dict.fromkeys(through))
+    return Reaching(
+        sorted(known | perhaps.keys()),
+        {
+            line: sorted(held)
+            for line, held in sorted(perhaps.items())
+            if line not in known
+        },
+    )
 
 
 def _function_names(rows: dict[str, ReachNode]) -> dict[str, set[str]]:

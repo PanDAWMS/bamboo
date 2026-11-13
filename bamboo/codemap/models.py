@@ -3608,6 +3608,14 @@ class KeyFrom(BaseModel):
             "statement writing it, and these say which are this statement's."
         ),
     )
+    through_holes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where an assignment *writes* or the binds hold is on *object* only perhaps: the holes its object met "
+            "(``owner:line why``) and where it stopped, *object* having come out of a call "
+            "(:func:`bamboo.codemap.objects.assigns_reaching`).  Empty where each is known to be on it."
+        ),
+    )
     unread: str = Field(
         default="",
         description=(
