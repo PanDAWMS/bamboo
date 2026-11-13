@@ -72,12 +72,46 @@ from bamboo.querier.records import Run  # noqa: E402
 
 def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
     """``rows.once_loops`` of *fn* in one call's run *run*: a row is not printed where rule 4 would read it as
-    missing -- at a level the run prints, its absence trusted."""
+    missing -- at a level the run prints, its absence trusted.  And the loops over objects one of whose rows in the
+    run printed the run's mark as the element's (:func:`keyed_loops`)."""
     def absent(stmt: ast.stmt) -> bool:
         row = fn.row_at(stmt)
         return (row is not None and not sn.present(row) and R.absence_trusted(row, run.log, mode)[0]
                 and run.would_print(row.level, row.func))
-    return R.once_loops(fn.node, absent) if sn.single_call() else {}
+    if not sn.single_call():
+        return {}
+    return R.once_loops(fn.node, absent) | keyed_loops(fn, sn, run)
+
+
+def _names_key(token: str, value: str) -> bool:
+    """Whether the mark *token* is the value *value*: the whole mark (the adder's and datasetManager's PandaID), or one
+    of its ``name=value`` fields (``< jediTaskID=7 >``) -- not a digit of a time token."""
+    value = value.strip()
+    return bool(value) and (token.strip().strip("<>").strip() == value
+                            or re.search(rf"\b\w+={re.escape(value)}(?![\w.])", token) is not None)
+
+
+def keyed_loops(fn, sn, run: Run) -> dict[int, str]:
+    """``{id(loop): why}``: the loops over objects (``for job in jobs``) that went round once for the run's object.  In
+    one call's run (every row printed once) of the records of a key, a row inside the loop printed an attribute of the
+    loop's element whose value is the run's mark: those records are of the round on that object.  It rests on the
+    object being once in what the loop goes over.  datasetManager's FinisherThr.run 662, whose rows print
+    ``job.PandaID``: the pass printed 696 and later rows, so it did not take 664's ``continue`` on that job."""
+    out = {}
+    for loop in R.own_nodes(fn.node):
+        if not isinstance(loop, (ast.For, ast.AsyncFor)) or not isinstance(loop.target, ast.Name):
+            continue
+        element = loop.target.id + "."
+        for row in fn.rows:
+            if not loop.lineno <= row.line <= (loop.end_lineno or loop.lineno) or not sn.present(row):
+                continue
+            named = next((expr for i, _, _ in sn.hits.get(row.line, []) for expr, value in row.capture(run.records[i]).items()
+                          if expr.startswith(element) and _names_key(run.token, value)), None)
+            if named is not None:
+                out[id(loop)] = (f"the loop at {loop.lineno} went round once for the run's object: row {row.line} "
+                                 f"printed {named} as the run's mark (the object once in what it goes over)")
+                break
+    return out
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:

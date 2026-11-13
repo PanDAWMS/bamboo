@@ -587,7 +587,7 @@ value"; else stopped, with what is not read.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
-### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is not read
+### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is followed alone
 
 Every writer with an arm that can move the value (`arms_of`) gets judgement 3, S1's part (K19), over the stay
 (`Rerun._late_absence`; tmaeno, 2026-11-01).  The window is S1's rule with the move for as_of: from the stay's row
@@ -604,15 +604,21 @@ its runs bound to name the key.
   nothing is ruled out there.
 - An ask no record answers is kept for the asks file and the walk goes on: L2's movers are the answer's context, so a
   late case ENDs with asks.
-- A writer that ran on the key in the stay is said, not followed: which way its passes went -- why it passed the row
-  over -- is not read for late.
+- A writer that ran on the key in the window goes on alone, beside the mover that moved the value (`Rerun.missed`'s
+  Fork; analyzer handover qk-design.md (M), M3): S2 reads its passes in the stay (`Passes.stay`), and S3 why they did
+  not move the value -- datasetManager's finisher cycles on MJ-transferring-late, each "Finisher : Wait" with
+  'endTime < timeOut' false.  One whose runs all fall outside the stay (in the window's SLACK before the row) is
+  excluded: it did not take the row there.
 
 *Shows:* said ("by key -- ...; its logs are not asked: a run not found would not rule it out (...)", "ran -- ...; ran: a
-run of the key in [...] between ... and ..., and L1 names another mover", "asks unanswered -- ...; N ask(s) of its logs
+run of the key in [...] between ... and ..., and L1 names another mover: followed on its own, which way its passes in the
+stay went", "==== n of k: mover <owner>, which moved it on" and "mover <owner>" per branch, "no pass of <func> with the
+key in the stay (...): its runs fall outside it, so it did not take the row there", "asks unanswered -- ...; N ask(s) of its logs
 not in the records (...)", "did not run", "no run found", "not searched", "prints nothing"); result.json's movers'
 `verdict` and `premises`; "did not run" is not counted among "not ruled out".
-*Revisit:* S2-S4 over the stay for a writer that ran (the writer that moved a late value on is read so, judgement 4,
-K45); a stay longer than six hours asked whole; the logs narrowed by the callers' processes.
+*Revisit:* a stay longer than six hours asked whole; the logs narrowed by the callers' processes; a daemon's
+executions glued into one run under the key's token, its start and end lines not asked (MJ-transferring-stuck's
+datasetManager, three executions on aipanda094: todo 2026-11-13 17:24).
 
 ### K18. "Could have" needs every term known true
 
@@ -1640,7 +1646,16 @@ pass did not print, went round once in that pass (`rows.once_loops`, `which_ran.
 - the DB proxy's retry, `for iTry in range(nTry)`, with no "retry: {iTry}" in the run (on pin m: activateJob,
   updateJobStatus, updateJob, retryJob, keepJob, peekJob, peekJobLog, addMetadata, countFilesWithMap; and
   workflow_core's process_step_checking);
-- a loop whose body always breaks (`for (clob,) in self.cur: ... break`).
+- a loop whose body always breaks (`for (clob,) in self.cur: ... break`);
+- a loop over objects one of whose rows in the run printed an attribute of the element whose value is the run's mark
+  (`which_ran.keyed_loops`; the mark whole, or a `name=value` field of it): the records are of the round on that
+  object, resting on the object being once in what the loop goes over (datasetManager's `for job in jobs`, rows
+  printing `job.PandaID`: the pass printed 696 and later rows, so it did not take 664's `continue`).
+
+S2 (`Rerun._which_way`) reads a pass whose candidates left, kept, are all `continue`s or `break`s of loops that hold no
+arm (`rows.free_jumps`), even one the judgement chose by elimination, as taking none (`took_none_but`): such a jump
+keeps a pass from no arm (datasetManager's 688 and 690, in the loop over a job's files).  One chosen on positive
+evidence stays the way the pass went (MT-ready-stuck's 646, row 645 printing only on its path).
 
 S3 (`Rerun.blocked`) also reads the path condition of each row the pass printed outside any other loop
 (`Rerun._ways_printed`), beside the exit's.  MJ-defined-late's activateJob row 111, in the else of 70, says
@@ -1650,7 +1665,8 @@ What is still read as a loop that may go round:
 - a loop that goes round by running off the end of its body: getJobs 2378 (a retry over candidates, which breaks
   when it got one), and the retries of updateInFilesReturnPandaIDs, updateOutFilesReturnPandaIDs and setGUIDs,
   whose handlers end with neither a `continue` nor a `return`;
-- a loop over items (`for file in job.Files`), which prints nothing on its way back;
+- a loop over items (`for file in job.Files`), which prints nothing on its way back, unless its rows print the run's
+  mark;
 - any loop in a run of several calls.  S3 reads no row's path condition in such a run either.
 
 *Shows:* "row N printed and its arms [...] leave L out (the loop at M went round once: its way back prints row(s)

@@ -1453,6 +1453,9 @@ class Passes:
     #: the subject and the mover's ``called_from``: where no pass of it took the row, U1 reads its callers' (K55)
     subject: str | None = None
     entries: list[str] = field(default_factory=list)
+    #: a late value's stay ``(start, move)``, for a mover L2 follows that did not move it (``Rerun._late_absence``): its
+    #: passes in the stay are read, and none there excludes it
+    stay: tuple[str, str] | None = None
 
 
 @dataclass
@@ -2670,6 +2673,17 @@ def took_none(j) -> bool:
     return j.chosen is None and bool(j.verdicts) and all(v.kind == "excluded" for v in j.verdicts)
 
 
+def took_none_but(j, free: set[int]) -> bool:
+    """:func:`took_none`, but with the candidates left all ``continue``s or ``break``s of loops holding no arm (*free*,
+    ``rows.free_jumps``): taken or not, they keep the pass from no arm, so it took none of the arms either (W1,
+    analyzer handover qk-design.md (M) build 1).  One the judgement chose by elimination is no way the pass went --
+    a pass may run on past every exit -- but one it chose on positive evidence stays (MT-ready-stuck's 646, row 645
+    printing only on its path)."""
+    left = [v for v in j.verdicts if v.kind != "excluded"]
+    unshown = j.chosen is None or (j.chosen.line in free and j.chosen.kind != "positive")
+    return unshown and bool(left) and all(v.line in free for v in left)
+
+
 def _number(value):
     try:
         return float(value)
@@ -2732,6 +2746,9 @@ class Rerun:
     #: what the walk took on before its END, which every END line rests on, grown as it walks: the one arm H2 left,
     #: taken by a late question as what moved the value on (``_the_arm_left``)
     rests: tuple[T.Said, ...] = ()
+    #: the movers L2 found ran on the key in a late value's stay, other than the one that moved it, each followed on its
+    #: own (``_late_absence``, ``missed``)
+    _late_ran: tuple[Passes, ...] = ()
 
     def __init__(self, args: argparse.Namespace) -> None:
         mapdump.require("rerun")  # _investigate's walks and _writers_of ask mapdump.code_map
@@ -6011,6 +6028,9 @@ class Rerun:
         unkeyed, found = len(found) - len(keyed), keyed
         if unkeyed:
             self.say(f"{unkeyed} pass(es) of {func} in the window print no record of the key, nor run it inside a call: not read")
+        if q.stay is not None and not found:
+            # a mover L2 follows for a late value whose runs fall outside the stay: it did not take the row there
+            raise Excluded(T.at(self.hop, T.Said("no-pass-of-in-the-stay", {"func": func, "since": q.stay[0], "moved": q.stay[1]})))
         if q.before is not None:
             # judgement 4: the pass that moved the value on is not why it moved only then; the ones before it are
             moving = [p for p in found if p.last[:19] >= q.before]
@@ -6042,6 +6062,8 @@ class Rerun:
         every pass took: S2's reading of a mover's passes, and U2's of a caller's, its calls into the mover the arms."""
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in arms} | set(exits))
+        # the jumps of loops that hold no arm: left kept alone, they keep a pass from no arm (W1)
+        free = R.free_jumps(fn.node, [a.line for a in arms])
         self.say(f"candidates: arms {[a.line for a in arms]}, exits {exits}")
         chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
         envs = []
@@ -6055,7 +6077,12 @@ class Rerun:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
                          f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
-            if took_none(j):
+            if took_none(j) or took_none_but(j, free):
+                if not took_none(j):
+                    kept = sorted(v.line for v in j.verdicts if v.kind != "excluded")
+                    by = f" ({j.chosen.line} chosen by elimination, which no row shows)" if j.chosen is not None else ""
+                    self.say(f"  the candidates pass {n} leaves, {kept}, are continues or breaks of loops that hold no arm{by}: "
+                             "taken, they keep a pass from none")
                 self.say(f"  pass {n} took none of the candidates: no arm of {func} that moves the value ran in it")
                 chosen.append(None)
             else:
@@ -6821,7 +6848,19 @@ class Rerun:
             if (kind in ("not settled", "refused on a call", "refused when") or took) and st.order_by and st.limits:
                 self.say(f"      returns the first rows ({', '.join(st.limits)}) of {st.order_by}")
                 ordered.append(st)
+        self._late_ran = ()
         self._movers_in_window(q, kinds)
+        own = self._why_moved_only_then(q, ordered)
+        if not self._late_ran:
+            return own
+        # every other mover that ran in the stay goes on alone beside it: why its passes did not move the value (M3)
+        ran = list(self._late_ran)
+        return Fork([own, *ran], [T.Said("mover-that-moved-it-label", {"owner": q.mover}),
+                                  *(T.Said("mover-label", {"owner": p.owner}) for p in ran)])
+
+    def _why_moved_only_then(self, q: Missed, ordered: list):
+        """L2's question of the mover that moved the value on: why only then -- its passes before (judgement 4), its
+        callers, or its statement's order."""
         if not any(st.owner == q.mover for st in q.statements):
             # judgement 4: a mover that takes the row by its key moved it only then for what its passes before did
             return self._late_passes(q)
@@ -6990,9 +7029,10 @@ class Rerun:
         the move.  Its logs are asked only where the two premises the map decides hold -- every log its runs print to
         is to hand, and every run that reaches an arm prints the key -- since a run not found rules nothing out
         otherwise; one with no prints of its own says so, as in S1.  The asks no record answers go to the asks file and
-        the walk goes on (tmaeno, 2026-11-01): L2's movers are a late answer's context.  A mover that ran is said, not
-        followed: which way its passes went is not read for late (KNOWN_ISSUES.md K15).  Returns the verdict -- *verdict*
-        where its logs are not asked -- and the premises read."""
+        the walk goes on (tmaeno, 2026-11-01): L2's movers are a late answer's context.  A mover that ran is kept in
+        ``_late_ran``, with the stay, for ``missed`` to follow on its own: which way its passes in the stay went, and why
+        they did not move the value (KNOWN_ISSUES.md K15).  Returns the verdict -- *verdict* where its logs are not
+        asked -- and the premises read."""
         lines, key = list(arms), self.args.key
         today = [f for j in q.writers if j.owner == owner for f in j.log_files] or q.reader_log_files
         way = "select" if q.paths.get(owner) else "guard" if q.movers.get(owner) == GUARDED else "key"
@@ -7011,7 +7051,11 @@ class Rerun:
         self._keep_unanswered(missed)
         reasons += entry["reasons"]
         if passes:
-            said.append(T.Said("ran-not-read-for-late", {"logs": passes.logs, "window": list(passes.asking.window or ())}))
+            # a mover that ran is followed on its own, as S1 follows a stuck value's: why its passes in the stay did not
+            # move the value (analyzer handover qk-design.md (M), M3)
+            stay = (f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}")
+            self._late_ran = (*self._late_ran, replace(passes, since=stay[0], stay=stay))
+            said.append(T.Said("ran-followed-for-late", {"logs": passes.logs, "window": list(passes.asking.window or ())}))
             reasons.append({"code": "K15", "record": said[-1]})
         elif entry["verdict"] == "asks-unanswered":
             said.append(T.Said("asks-of-its-logs-not-recorded", {"n": len({ask.key for ask, _ in missed}), "why": asking.why}))

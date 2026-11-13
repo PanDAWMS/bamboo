@@ -213,6 +213,16 @@ def once_loops(func: ast.AST, absent) -> dict[int, str]:
     return out
 
 
+def free_jumps(func: ast.AST, lines) -> set[int]:
+    """The lines of *func*'s ``continue`` and ``break`` statements whose loop holds none of *lines* (the arms a pass is
+    judged on): taken, such a jump keeps a pass from no arm -- it goes round that loop again, or on past it.
+    datasetManager's FinisherThr.run 688 and 690, in the loop over a job's files, the Kill arm 735 outside it."""
+    holding = [n for n in own_nodes(func)
+               if isinstance(n, LOOPS) and any(n.lineno <= line <= (n.end_lineno or n.lineno) for line in lines)]
+    return {n.lineno for n in own_nodes(func)
+            if isinstance(n, (ast.Continue, ast.Break)) and not any(_loop_of(n, func) is loop for loop in holding)}
+
+
 def _direct_prints(block: list, stop: ast.AST | None = None) -> list[ast.stmt]:
     out = []
     for s in block:

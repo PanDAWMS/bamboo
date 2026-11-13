@@ -617,6 +617,8 @@ TEMPLATES: dict[str, str] = {
     "history-no-column-why": "its status history here holds no {attr}",
     "logs-not-asked-not-ruled-out": "its logs are not asked: a run not found would not rule it out ({failing:join=; }) (KNOWN_ISSUES.md K15)",
     "premise-why": "{premise}: {why}",
-    "ran-not-read-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: which way its passes went is not read for late (KNOWN_ISSUES.md K15)",
+    "ran-followed-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: followed on its own, which way its passes in the stay went (KNOWN_ISSUES.md K15)",
+    "no-pass-of-in-the-stay": "no pass of {func} with the key in the stay ({since} .. {moved}): its runs fall outside it, so it did not take the row there (KNOWN_ISSUES.md K15)",
+    "mover-that-moved-it-label": "mover {owner}, which moved it on",
     "asks-of-its-logs-not-recorded": "{n} ask(s) of its logs not in the records ({why}): whether it ran is not known yet",
 }

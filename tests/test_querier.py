@@ -4607,6 +4607,184 @@ def test_a_loop_whose_way_back_prints_a_row_the_run_lacks_went_round_once_for_s2
     assert once == [] and settled == ["settled by the exit taken: {}"]
 
 
+# datasetManager's FinisherThr.run in small: a loop over jobs whose rows print the job's PandaID, an inner loop over
+# its files with two continues, and the Kill arm (24) or the Wait row (26); no return at the end
+_FINISHER_LOOP = textwrap.dedent("""\
+    import logging
+
+    _logger = logging.getLogger("x")
+
+
+    def run(jobs, timeOut):
+        upJobs = []
+        for job in jobs:
+            if job is None or job.jobStatus == "unknown":
+                continue
+            lfns = []
+            for file in job.Files:
+                if file.status == "nooutput":
+                    continue
+                if file.dispatched:
+                    _logger.debug(f"{job.PandaID} skip {file.lfn}")
+                    continue
+                lfns.append(file.lfn)
+            _logger.debug(f"{job.PandaID} Cloud:{job.cloud}")
+            endTime = job.endTime
+            _logger.debug(f"{job.PandaID} Limit:{timeOut} End:{endTime}")
+            if endTime < timeOut:
+                _logger.debug(f"{job.PandaID} Finisher : Kill")
+                job.jobStatus = "failed"
+            else:
+                _logger.debug(f"{job.PandaID} Finisher : Wait")
+            upJobs.append(job)
+""")
+
+
+def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loop_holding_no_arm_keeps_it_from_none(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "fin.py").write_text(_FINISHER_LOOP)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.datasetManager: DEBUG    {}\n"
+    wait = ["7 Cloud:WORLD", "7 Limit:2025-12-26 End:2026-01-01", "7 Finisher : Wait"]
+    logs = {"wait": wait, "twice": wait * 2, "skip": ["7 skip f.root", *wait], "other": [x.replace("7 ", "8 ") for x in wait]}
+    for name, said in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(said)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import _names_key, once_loops_of
+
+            R.ROWS_FROM = "walk"
+            fn = R.function("pandaserver/fin.py", "run", (24,))
+            arm = RR.Arm(24, ["failed"], ["endTime < timeOut"])
+            got = {"free": sorted(R.free_jumps(fn.node, [24])),
+                   "names": [_names_key("7", "7"), _names_key("< PandaID=7 >", "7"), _names_key("<2026-01-01/00:00:07>", "7"),
+                             _names_key("< PandaID=71 >", "7"), _names_key("7", "")]}
+            for name in ("wait", "twice", "skip", "other"):
+                key = "8" if name == "other" else "7"
+                run, = runs_for(read_log(f"{name}.log"), key)
+                sn = R.claim([R.seen(fn, run, "outside")])[0]
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.opened, r.hand, r.hand_used, r.hop, r.mode, r.decide = [], [], {}, [], "S2", "outside", "positive"
+                r.base_env = lambda at=None, file_row=None: E.Env()
+                r._printed = lambda env: {}
+                try:
+                    b = r._which_way(fn, "pandaserver/fin.py", "run", [run], [arm])
+                    way = b.exit_line
+                    try:
+                        r.blocked(b)
+                    except RR.Stop:
+                        pass
+                except RR.Stop as e:
+                    way = str(e)
+                got[name] = [sorted(once_loops_of(fn, sn, run, "outside").values()), way,
+                             [x for x in r.lines if x.startswith(("  the candidates", "  arm 24"))]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the inner loop's continues hold no arm; the outer loop's continue (10) holds the Kill arm
+    assert got["free"] == [14, 17]
+    # the run's mark is the value, whole or as a name=value field; a time token's digits are not
+    assert got["names"] == [True, True, False, False, False]
+    once = ("the loop at 8 went round once for the run's object: row 19 printed job.PandaID as the run's mark (the object "
+            "once in what it goes over)")
+    killed = "  arm 24 ['failed']: needs ['endTime < timeOut']; false in the passes: ['endTime < timeOut']"
+    # one call's pass on job 7: the loop over jobs went round once for it, so 10's continue is out (row 19 printed); of
+    # the inner loop's continues, 17 is out (its row 16 absent) and 14 is left, which the judgement would choose by
+    # elimination -- but it keeps the pass from no arm: the pass took none, and S3 reads the Wait row's way
+    assert got["wait"] == [[once], None, [
+        "  the candidates pass 1 leaves, [14], are continues or breaks of loops that hold no arm (14 chosen by "
+        "elimination, which no row shows): taken, they keep a pass from none", killed]]
+    # the same rows twice in one run: two calls, no loop read as gone round once, 10 and 14 both left -- undecided
+    assert got["twice"] == [[], "S2: which way pass 1 went", []]
+    # a free jump shown taken (row 16 prints only on 17's path) stays the way the pass went
+    assert got["skip"][1] == 17 and got["skip"][2] == [killed]
+    # another job's run: its own mark, so its loop went round once for job 8 as well
+    assert got["other"][0] == [once] and got["other"][1] is None
+
+
+def test_a_late_value_s_mover_that_ran_in_the_stay_goes_on_alone_and_one_whose_runs_fall_outside_it_is_excluded(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "fin.py").write_text(_FINISHER_LOOP)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.datasetManager: DEBUG    {}\n"
+    (tmp_path / "wait.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(
+        ["7 Cloud:WORLD", "7 Limit:2025-12-26 End:2026-01-01", "7 Finisher : Wait"])))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import dataclasses, datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier import windows as W
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("wait.log"), "7")
+            arm = RR.Arm(24, ["failed"], ["endTime < timeOut"])
+            since, moved = datetime.datetime(2026, 1, 1, 0, 0, 0), datetime.datetime(2026, 1, 1, 1, 0, 0)
+
+            def fresh():
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.opened, r.hand, r.hand_used, r.hop, r.mode, r.decide = [], [], {}, [], "L2", "outside", "positive"
+                r.args = N(observed="transferring", key="7")
+                r.data = {"statuslog": {"states": []}}
+                r.logs = N(needs_window=True)
+                r._called_at = lambda fn, c: []
+                r.runs = lambda key, logs, asking, owners: {"wait.log": [run]}
+                r.base_env = lambda at=None, file_row=None: E.Env()
+                r._printed = lambda env: {}
+                return r
+
+            ran = RR.Passes("pandaserver/fin.py::run", ["wait.log"], [arm], "7",
+                            W.Asking(("2025-12-31 23:50:00", "2026-01-01 01:00:00"), None, "the window"))
+            # as _late_absence hands a mover that ran on: with the stay
+            staying = dataclasses.replace(ran, since="2026-01-01 00:00:00", stay=("2026-01-01 00:00:00", "2026-01-01 01:00:00"))
+            q = RR.Missed("JobSpec.jobStatus", "transferring", "finished", since, moved, [], "pandaserver/a.py::fin", None)
+            got = {}
+            for label, others in (("alone", ()), ("with one that ran", (staying,))):
+                r = fresh()
+                r._row_of = lambda cls: {"jobStatus": {"value": "finished"}}
+                r._movers_in_window = lambda q, kinds, r=r, others=others: setattr(r, "_late_ran", others)
+                r._why_moved_only_then = lambda q, ordered: "the mover's own question"
+                went = r.missed(q)
+                got[label] = went if isinstance(went, str) else [
+                    [b if isinstance(b, str) else [b.owner, b.since, b.stay] for b in went.branches], [str(x) for x in went.labels]]
+            # the stay as _late_absence hands it: a pass in it is read; the same pass outside it excludes the mover
+            for label, start in (("in the stay", "2026-01-01 00:00:00"), ("before the stay", "2026-01-01 00:10:00")):
+                r = fresh()
+                p = RR.Passes(ran.owner, ran.logs, ran.arms, ran.key, ran.asking, since=start, stay=(start, "2026-01-01 01:00:00"))
+                try:
+                    got[label] = ["way", r.passes(p).exit_line]
+                except RR.Excluded as e:
+                    got[label] = ["excluded", str(e)]
+                except RR.Stop as e:
+                    got[label] = ["stop", str(e)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # no other mover ran: the mover's own question, as before
+    assert got["alone"] == "the mover's own question"
+    # one ran: it goes on alone beside the mover that moved the value, its passes read over the stay
+    assert got["with one that ran"] == [
+        ["the mover's own question", ["pandaserver/fin.py::run", "2026-01-01 00:00:00", ["2026-01-01 00:00:00", "2026-01-01 01:00:00"]]],
+        ["mover pandaserver/a.py::fin, which moved it on", "mover pandaserver/fin.py::run"]]
+    # its pass in the stay is read (S2: none of the arms, by the Wait row's way); none in the stay: excluded
+    assert got["in the stay"] == ["way", None]
+    assert got["before the stay"] == ["excluded", "S2: no pass of run with the key in the stay (2026-01-01 00:10:00 .. "
+                                                  "2026-01-01 01:00:00): its runs fall outside it, so it did not take the row "
+                                                  "there (KNOWN_ISSUES.md K15)"]
+
+
 _PASSES = textwrap.dedent("""
     def rescue(self, ids, who):
         tmp_log = MsgWrapper(logger, f"rescue < {who} >")
