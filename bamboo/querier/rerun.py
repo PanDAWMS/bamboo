@@ -113,6 +113,7 @@ from bamboo.codemap.panda import sql as sql_mod
 from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.codemap.reading import containing_function
+from bamboo.querier import agents as AG
 from bamboo.querier import asked as A
 from bamboo.querier import attr_time as AT
 from bamboo.querier import changed as CH
@@ -6095,6 +6096,7 @@ class Rerun:
         keyed = [p for p in found if holds_key(fn, p, runs, self.mode, self._called_at)]
         if len(found) > len(keyed):
             self.say(f"{len(found) - len(keyed)} pass(es) of {func} in the window print no record of the key, nor run it inside a call: not read")
+        moving: list = []
         if up.before is not None:
             moving = [p for p in keyed if p.last[:19] >= up.before]
             keyed = [p for p in keyed if p.last[:19] < up.before]
@@ -6105,7 +6107,7 @@ class Rerun:
                     # no pass before the one that moved it: the caller is read as absent up to that pass
                     up = replace(up, window=(start, moved[0].first))
         if not keyed:
-            return self._caller_absent(c, up, to_hand, asking, holes)
+            return self._caller_absent(c, up, to_hand, asking, holes, moving)
         outcomes = sorted({o for a in up.arms for o in a.outcomes})
         arms = [Arm(line, outcomes, self._call_guards(rel, line)) for line in c.lines]
         blocked = self._which_way(fn, rel, func, keyed, arms)
@@ -6232,10 +6234,12 @@ class Rerun:
                    if of_mover(r, cowner) and r.machine == run.machine and r.first <= run.first and r.last >= run.last]
         return holding, found, missed
 
-    def _caller_absent(self, c: Caller, up: Callers, to_hand: list[str], asking: W.Asking, holes: dict):
+    def _caller_absent(self, c: Caller, up: Callers, to_hand: list[str], asking: W.Asking, holes: dict, moving: list | None = None):
         """U2 where no pass of the caller *c* took the row in the window: judgement 3 for it -- it did not run on the row
         only where the window was searched whole, every log of it was asked and every line of its runs holds the key
-        (its marks do) -- then up once to the callers ``called_from`` lists for it (hop 1's, at hop 2); else it stops."""
+        (its marks do) -- then up once to the callers ``called_from`` lists for it (hop 1's, at hop 2); else, where its
+        passes that moved the row (*moving*) came from an agent's cycles, why they ran when they did ((C),
+        :meth:`_agent_cycles`); else it stops."""
         func = c.owner.split("::")[-1]
         start, end = up.window
         premises: dict[str, dict[str, Any]] = {"window": self._searched_whole(to_hand, asking, asking, [], holes, None),
@@ -6251,8 +6255,143 @@ class Rerun:
         if c.hop == 1 and up.up is None and outer:
             self.say(f"up to {func}'s callers: {outer}")
             return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner)
+        if moving and up.before is not None and self._agent_cycles(c, up, moving):
+            return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
                                                                  "hop": c.hop}), None, "K55")
+
+    def _agent_cycles(self, c: Caller, up: Callers, moving: list) -> bool:
+        """(C) (out/gm/qk-design.md): why the passes of the caller *c* that moved the row on (*moving*) ran when they
+        did, where the parts its worker is handed come from an agent's cycles (:func:`agents.selection_of`).  The
+        agent's lines around its selecting call hold no key: they are asked by the literal they share
+        (:func:`agents.ask_strings`) on every machine, from the row's becoming selectable less windows.SLACK to the
+        move.  Each pass belongs to its machine's last selection for the row's label before it, where that label's
+        cycles there follow one another (one process); the selections between two takes are read against the selecting
+        function's lock (:func:`agents.kept_off`).  An END and True; False where it does not read, said why (the stop
+        K55 stands); asks no record answers stop."""
+        rel, func = c.owner.split("::", 1)
+        try:
+            fn = R.function(rel, func, c.lines)
+        except (LookupError, ValueError, SyntaxError):
+            return False
+        sel, why = AG.selection_of(c.owner, fn.node.lineno)
+        if sel is None:
+            self.say(f"(C) not read: {why}")
+            return False
+        crows = AG.cycle_rows(sel)
+        strings = AG.ask_strings(list(crows.rows)) if crows is not None else ()
+        files = sorted({f for r in (crows.rows if crows is not None else ()) for f in (r.log_files or [])})
+        if crows is None or not strings or not files:
+            self.say(f"(C) not read: {sel.agent_name}'s call to {sel.callee} at {sel.rel}:{sel.call} has no rows around it to ask its cycles by")
+            return False
+        self.say(f"(C) {func} is handed parts of {sel.worker.split('::')[-1]}.{sel.field}, made at {sel.rel}:{sel.made} of what "
+                 f"{sel.agent_name} got from {sel.callee} at {sel.call}")
+        since = up.window[0]
+        assert up.before is not None
+        asking = W.Asking((W._down(W.when(since) - W.SLACK), up.before[:19]), None,
+                          T.Said("for-an-agent-s-cycles", {"agent": sel.agent_name, "callee": sel.callee, "strings": list(strings)}),
+                          strings=strings)
+        unanswered: list = []
+        window = self.window(asking)
+        picks: dict[str, list] = {}
+        spans: dict[str, dict] = {}
+        n_lines = 0
+        for name in self.logs.names(files):
+            try:
+                records = self.logs.log(name, self.args.key, window, machine=None, strings=strings).records
+            except Unrecorded as e:
+                unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
+                continue
+            n_lines += len(records)
+            got, at = AG.selections(records, crows, self.mode, name)
+            for m, qs in got.items():
+                picks.setdefault(m, []).extend(qs)
+                spans.setdefault(m, {}).update(at[m])
+        self._stop_unanswered(unanswered)
+        for qs in picks.values():
+            qs.sort(key=lambda q: q.at)
+        if not picks:
+            self.say(f"(C) not read: of {n_lines} line(s) of {sel.agent_name}'s, none is a cycle's selection under a mark "
+                     "(its logger writes no mark there, or none was searched)")
+            return False
+        label = self._label_of(up.subject, crows.label)
+        takes = []
+        for p in sorted(moving, key=lambda p: p.first):
+            m = p.machine
+            chain = [q for q in picks.get(m, []) if not label or q.label == label]
+            pick, why = AG.batch_of(chain, p.first, label, since)
+            if pick is None:
+                self.say(f"(C) not read: the pass on {m.split('.')[0]} from {p.first}: {why}")
+                return False
+            # a selection whose label line lies outside what was searched may be the label's
+            unknown = [q for q in picks.get(m, []) if label and not q.label and pick.at < q.at <= p.first]
+            if unknown:
+                self.say(f"(C) not read: on {m.split('.')[0]}, {len(unknown)} selection(s) from {pick.at} to {p.first} print "
+                         "no label in what was searched: one may be the row's")
+                return False
+            if not AG.one_process(chain, spans.get(m, {})):
+                self.say(f"(C) not read: {sel.agent_name}'s cycles{' for ' + label if label else ''} on {m.split('.')[0]} overlap: "
+                         "more than one process selects there, and which one took the row is not told by its lines")
+                return False
+            takes.append((pick, p))
+        # the selections that could have taken the row before the first take did and did not: nothing here says why
+        first = min((pick for pick, _ in takes), key=lambda q: q.at)
+        passed = AG.passed_over(picks, first, label, since)
+        if passed:
+            self.say(f"(C) not read: {sel.agent_name}'s cycles took the row first at {first.at} ({first.machine.split('.')[0]}), and "
+                     f"the {len(passed)} selection(s) on {len({q.machine for q in passed})} machine(s) from {since} to "
+                     f"{max(first.after or first.at, since)} did not take it: why ({sel.callee}'s lock by another, its count's "
+                     "cap, a bound on the key) is not read")
+            return False
+        host = self._move_host(up.before)
+        said = [T.Said("an-agent-s-take", {"machine": pick.machine.split(".")[0], "mark": pick.mark, "callee": sel.callee,
+                                           "after": max(pick.after or pick.at, since)[:23], "at": pick.at[:23], "count": pick.count,
+                                           "first": p.first[:23],
+                                           "moved": T.Said("and-it-moved-it-on", {}) if host is not None and p.machine == host else ""})
+                for pick, p in takes]
+        lock = AG.lock_of(sel)
+        kept: T.Said | str = ""
+        ordered = sorted(takes, key=lambda t: t[0].at)
+        for (take, _), (nxt, _) in zip(ordered, ordered[1:], strict=False):
+            between = [q for qs in picks.values() for q in qs if take.at < q.at < (nxt.after or nxt.at)
+                       and (not label or q.label == label) and q is not nxt]
+            if lock is None:
+                self.say(f"(C) {len(between)} selection(s) from {take.at} to {nxt.after or nxt.at} did not take the row; "
+                         f"{sel.callee}'s lock is not read")
+                return False
+            ok, why = AG.kept_off(take, nxt, between, lock, since)
+            if not ok:
+                self.say(f"(C) not read: the selections between the takes at {take.at} and {nxt.at}: {why}")
+                return False
+            kept = T.Said("kept-off-by-the-lock", {"n": len(between), "machines": len({q.machine for q in between}),
+                                                   "start": take.at[:23], "end": (nxt.after or nxt.at)[:23], "callee": sel.callee,
+                                                   "span": str(lock.span), "term": lock.term, "bound": lock.bound, "sets": lock.sets})
+        premises = [T.Said("one-process-a-label", {"agent": sel.agent_name, "label": label or "every label",
+                                                  "machines": sorted({pick.machine.split(".")[0] for pick, _ in takes})})]
+        if sel.others:
+            premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": list(sel.others)}))
+        self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said, "kept": kept,
+                                                             "premises": premises}))
+        return True
+
+    def _label_of(self, subject: str, hole: str) -> str:
+        """The row's value of the column the agent's loop element *hole* names (``prod_source_label`` names
+        ``prodSourceLabel``), from the rows file's row of *subject*'s class; "" where none is."""
+        if not hole:
+            return ""
+        cls = subject.partition(".")[0]
+        entity = next((e for e, k in (self.data.get("classes") or {}).items() if k == cls and e != "about"), None)
+        row = (self.data.get("rows") or {}).get(entity or "", {})
+        want = hole.replace("_", "").lower()
+        held = next((v for col, v in row.items() if col.replace("_", "").lower() == want), None)
+        value = held.get("value") if isinstance(held, dict) else None
+        return "" if value is None else str(value)
+
+    def _move_host(self, before: str) -> str | None:
+        """The host of the statuslog row the move at *before* is, or None."""
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        hosts = {s.get("host") for s in states if str(s.get("time", ""))[:19] == before[:19]}
+        return hosts.pop() if len(hosts) == 1 else None
 
     def _printed_in(self, fn: R.Function, run, expr: str) -> list[str]:
         """``value at record`` for every hole of *expr* the function's rows read in *run*."""

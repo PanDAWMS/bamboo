@@ -418,6 +418,13 @@ TEMPLATES: dict[str, str] = {
     "caller-asked-by-the-key-alone": "asked by the key alone, a pass of it printing no line with the key is not found",
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
+    "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
+    "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{kept}; premises: {premises:join=; }",
+    "an-agent-s-take": "{machine}'s cycle {mark} took it ({callee} ran between {after} and {at} and returned {count} row(s)), and the pass on it began at {first}{moved}",
+    "and-it-moved-it-on": ", the one that moved it on",
+    "kept-off-by-the-lock": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} did not take it: {callee} skips a row locked less than {span} ago ({term}; {bound}) and its take locks it ({sets})",
+    "one-process-a-label": "one process of {agent} selects for {label} on each of {machines:join=, } (no two of its cycles there overlap; two processes taking turns would not show)",
+    "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
     # U3: which call ran an arm with no guard of its own (KNOWN_ISSUES.md K56)
     "the-arm-s-run-mark": "which row {fn}'s call handed it: no mark the map records for {fn} reads a row's identity in its run {token!r} (KNOWN_ISSUES.md K56)",
     "a-call-handing-the-mark-on": "a call of {fn}'s whose caller's run marks hold the row its run's mark holds: none of {sites:join=, } does (KNOWN_ISSUES.md K56)",

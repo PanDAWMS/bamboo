@@ -1350,6 +1350,18 @@ caller's passes went on the row", then S2's lines over its passes and S3's over 
 *Revisit:* when the map lists more than two hops, or a facade's guard is read; when a mover's run inside its caller's
 call is read by the caller's pass span (its mark's own strings, no key).
 
+*Changed ((C), 2026-11-13, out/gm/qk-design.md):* where the caller's passes that moved the row are handed parts of a
+worker's list, an agent's own selection is read before the stop (`agents`, `Rerun._agent_cycles`): the map's entry,
+field and parameter records lead from the caller to the selecting call in the agent's loop (PostProcessor.start's
+getTasksToBeFinished_JEDI); the agent's lines around that call hold no key and are asked by the literal they share
+(" tasks") on every machine over the stay; each moving pass belongs to its machine's last selection for the row's
+label before it, and the selections between two takes are read against the selecting function's lock
+(`lockedTime<:timeLimit`).  It stops as before where the selections before the first take did not take the row (why
+is not read: MT-toabort-late), where one machine's cycles overlap (TaskRefiner's on aipanda084), where the cycle
+lines carry no mark (ContentsFeeder's, K70), or where the list is not made of a local.  One process per machine and
+label is a premise its lines cannot show (two whose short cycles take turns overlap nowhere), and a message
+processor's way in is named, not read.
+
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
 A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's

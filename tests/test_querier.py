@@ -13563,3 +13563,159 @@ def test_a_callers_rows_after_its_call_show_it_after_the_send_and_rows_before_it
     assert "    pandaserver/c.py:5: not read after its call: row(s) [4] print before the call, ending at 5" in got["lines"], got
     # the same verdict where the window is not after the call: positive, as H2 reads it
     assert got["as before"] is True, got
+
+
+def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the_other_selections(tmp_path):
+    # (C) out/gm/qk-design.md: the caller process() is handed parts of Worker.taskList (runImpl), given at __init__ by a
+    # ListWithLock made in Agent.start of what getTasks returned.  Its cycles (MsgWrapper time tokens): the row became
+    # selectable at 00:00:10; m1's user cycle took it (got 6 at 00:00:20) and its pass on it began at 00:15:00; m2's
+    # selections went on every minute and took it after the 10-min lock, at 00:10:30, its pass beginning at 00:12:00
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "jediorder").mkdir(parents=True)
+    (corpus / "pandajedi" / "jediorder" / "Agent.py").write_text(textwrap.dedent('''\
+        from pandajedi.jedicore.MsgWrapper import MsgWrapper
+        from pandajedi.jedicore.ThreadUtils import ListWithLock
+
+        logger = None
+
+
+        class Worker:
+            def __init__(self, taskList):
+                self.taskList = taskList
+
+            def runImpl(self):
+                while True:
+                    task_list = self.taskList.get(10)
+                    if not task_list:
+                        return
+                    self.process(task_list)
+
+            def process(self, task_list):
+                for t in task_list:
+                    logger.info(f"done {t}")
+
+
+        class Agent:
+            def start(self):
+                while True:
+                    tmp_log = MsgWrapper(logger)
+                    tmp_log.info("start")
+                    for vo in self.vos:
+                        for prod_source_label in self.labels:
+                            tmp_log.info(f"preparing tasks to be finished for vo={vo} label={prod_source_label}")
+                            tmp_log.info("getting tasks to be finished")
+                            task_list = self.tb.getTasks(vo, prod_source_label)
+                            if task_list is None:
+                                tmp_log.error("failed to get tasks to be finished")
+                                continue
+                            tmp_log.info(f"got {len(task_list)} tasks")
+                            locked = ListWithLock(task_list)
+                            thr = Worker(locked)
+                            thr.start()
+        '''))
+    (corpus / "pandaserver" / "taskbuffer" / "db_proxy_mods").mkdir(parents=True)
+    (corpus / "pandaserver" / "taskbuffer" / "db_proxy_mods" / "mod.py").write_text(textwrap.dedent('''\
+        import datetime
+
+
+        class M:
+            def getTasks(self, vo, label):
+                sql = "SELECT id FROM T WHERE status=:s AND (lockedBy IS NULL OR lockedTime<:timeLimit) "
+                lock = "UPDATE T SET lockedBy=:lockedBy,lockedTime=CURRENT_DATE WHERE id=:id "
+                varMap = {}
+                timeLimit = naive_utcnow() - datetime.timedelta(minutes=10)
+                varMap[":timeLimit"] = timeLimit
+                return self.run(sql, lock, varMap)
+        '''))
+
+    def cycle(mark, label, t, n, getting=None):
+        g = getting or t
+        return (f"2026-01-01 {t[:8]},000 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> preparing tasks to be finished for vo=None label={label}\n"
+                f"2026-01-01 {g[:8]},500 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> getting tasks to be finished\n"
+                f"2026-01-01 {t[9:]},000 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> got {n} tasks\n")
+    m1 = (cycle("00:00:00.000001", "user", "00:00:00 00:00:20", 6, "00:00:01")
+          + cycle("00:00:05.000001", "managed", "00:00:05 00:00:07", 0)
+          + cycle("00:21:00.000001", "user", "00:21:00 00:21:02", 0))
+    m2 = "".join(cycle(f"00:{mm:02d}:30.000001", "user", f"00:{mm:02d}:30 00:{mm:02d}:31", 0) for mm in range(1, 10))
+    m2 += cycle("00:10:29.000001", "user", "00:10:29 00:10:30", 29, "00:10:29")
+    (tmp_path / "m1.log").write_text(m1)
+    (tmp_path / "m2.log").write_text(m2)
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import agents as AG
+        from bamboo.querier import mapdump
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log
+
+        R.ROWS_FROM = "walk"
+        rel = "pandajedi/jediorder/Agent.py"
+        db = "pandaserver/taskbuffer/db_proxy_mods/mod.py::getTasks"
+        mapdump._FRAGMENT[:] = [N(
+            entered_froms=[N(owner=f"{rel}::process", line=18, sites=[N(owner=f"{rel}::runImpl", line=16)], open=[]),
+                           N(owner=db, line=5, sites=[], open=[])],
+            field_froms=[N(owner=f"{rel}::Worker", field="taskList", bindings=[N(sources=[
+                N(kind="parameter", name="taskList", site_owner=f"{rel}::__init__")])])],
+            parameter_froms=[N(owner=f"{rel}::__init__", parameter="taskList", sources=[
+                N(kind="object", name="ListWithLock", at=[f"{rel}:37"], route=[f"{rel}:38"]),
+                N(kind="constant", name="None", at=["pandajedi/jedimsgprocessor/m.py:9"], route=[])])],
+        )]
+        sel, why = AG.selection_of(f"{rel}::process", 18)
+        crows = AG.cycle_rows(sel)
+        records = []
+        for name, machine in (("m1.log", "m1"), ("m2.log", "m2")):
+            for r in read_log(name).records:
+                r.machine = machine
+                records.append(r)
+        picks, spans = AG.selections(records, crows, "outside")
+        since = "2026-01-01 00:00:10"
+        user = {m: [p for p in ps if p.label == "user"] for m, ps in picks.items()}
+        b1, w1 = AG.batch_of(user["m1"], "2026-01-01 00:15:00,000", "user", since)
+        b2, w2 = AG.batch_of(user["m2"], "2026-01-01 00:12:00,000", "user", since)
+        early, why_early = AG.batch_of(user["m1"], "2026-01-01 00:15:00,000", "user", "2026-01-01 00:00:30")
+        lock = AG.lock_of(sel)
+        between = [q for qs in user.values() for q in qs if b1.at < q.at < b2.after]
+        other = lambda minutes: AG.Lock(datetime.timedelta(minutes=minutes), lock.term, lock.bound, lock.sets)
+        print(json.dumps({
+            "sel": [sel.worker, sel.field, sel.agent, sel.made, sel.handed, sel.call, sel.callee, list(sel.others), why],
+            "rows": [[r.line for r in crows.before], [r.line for r in crows.after], crows.label],
+            "literals": AG.literals(crows.after[-1].map_patterns[0]),
+            "strings": AG.ask_strings(list(crows.rows)), "one": AG.ask_strings([crows.after[-1]]),
+            "labels": sorted({(m, p.label, p.count) for m, ps in picks.items() for p in ps if p.count != "0"}),
+            "b1": [b1.mark, b1.after[11:19], b1.at[11:19], b1.count], "b2": [b2.mark, b2.at[11:19], b2.count],
+            "early": [early, why_early],
+            "one_process": [AG.one_process(user["m1"], spans["m1"]), AG.one_process(user["m2"], spans["m2"])],
+            "overlap": AG.one_process(picks["m1"], {**spans["m1"], "<2026-01-01/00:00:05.000001>": ("2026-01-01 00:00:05,000", "2026-01-01 00:21:01,000")}),
+            "lock": [str(lock.span), lock.term, lock.bound, lock.sets],
+            "kept": AG.kept_off(b1, b2, between, lock, since), "n_between": len(between),
+            "short": AG.kept_off(b1, b2, between, other(5), since), "long": AG.kept_off(b1, b2, between, other(15), since),
+        }))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # C1: process() <- runImpl's self.taskList.get <- Worker.__init__'s taskList <- the ListWithLock made at 37 of what
+    # getTasks returned at 32, handed at 38; the message processor's None is another way in, said
+    assert got["sel"] == ["pandajedi/jediorder/Agent.py::Worker", "taskList", "pandajedi/jediorder/Agent.py::Agent.start",
+                          37, 38, 32, "getTasks", ["pandajedi/jedimsgprocessor/m.py:9"], ""], got
+    # C2: the rows in the innermost loop before and after the call, the label the loop's element; the "start" before
+    # the loops is not one; the literal they all hold
+    assert got["rows"] == [[30, 31], [34, 36], "prod_source_label"], got
+    assert got["literals"] == ["got ", " tasks"], got
+    assert got["strings"] == [" tasks"] and got["one"] == [" tasks"], got
+    # C3: each selection carries its cycle's label, the managed one apart; the pass at 00:15 belongs to m1's 00:00:20
+    # selection (its SELECT ran after the row became selectable, 00:00:10), the one at 00:12 to m2's 00:10:30; had the row
+    # become selectable at 00:00:30, after m1's selection ended, the pass would belong to none
+    assert got["labels"] == [["m1", "user", "6"], ["m2", "user", "29"]], got
+    assert got["b1"] == ["<2026-01-01/00:00:00.000001>", "00:00:01", "00:00:20", "6"], got
+    assert got["b2"] == ["<2026-01-01/00:10:29.000001>", "00:10:30", "29"], got
+    assert got["early"][0] is None and "before the row could be selected" in got["early"][1], got
+    # cycles of the label that do not overlap; a cycle spanning another's does
+    assert got["one_process"] == [True, True] and got["overlap"] is False, got
+    # C4: getTasks' lock term, its limit's binding and the take's lock
+    assert got["lock"] == ["0:10:00", "lockedTime<:timeLimit", "timeLimit = naive_utcnow() - datetime.timedelta(minutes=10)",
+                           "lockedTime=CURRENT_DATE"], got
+    # m2's 9 selections between the takes began within the lock from 00:00:20 (to 00:10:20), and the take at 00:10:30
+    # came after its earliest end (00:10:10): kept off; a 5-min lock leaves selections after it, a 15-min one ends
+    # after the next take
+    assert got["n_between"] == 9 and got["kept"] == [True, ""], got
+    assert got["short"][0] is False and "after the lock had ended" in got["short"][1], got
+    assert got["long"][0] is False and "before the lock" in got["long"][1], got
