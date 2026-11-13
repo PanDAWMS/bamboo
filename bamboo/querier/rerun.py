@@ -2729,6 +2729,9 @@ class Rerun:
     #: the arms H2 dropped by a guard read false (``_guard_dropped``, a stand-in's in ``_possibles``), grown as H2 reads: an
     #: arm left alone with one of these is not the only way to the value (KNOWN_ISSUES.md K66)
     _dropped_by_guard: frozenset[str] = frozenset()
+    #: what the walk took on before its END, which every END line rests on, grown as it walks: the one arm H2 left,
+    #: taken by a late question as what moved the value on (``_the_arm_left``)
+    rests: tuple[T.Said, ...] = ()
 
     def __init__(self, args: argparse.Namespace) -> None:
         mapdump.require("rerun")  # _investigate's walks and _writers_of ask mapdump.code_map
@@ -2758,7 +2761,8 @@ class Rerun:
         self.opened: list[str] = []
         self.ends: list[tuple[str, T.Said | str]] = []
         self.branches: list[dict] = []
-        #: result.json's ``outcome.code`` for a run that ends: ``one-of`` where its answer is arms H2 left (``arms_left``)
+        #: result.json's ``outcome.code`` for a run that ends: ``one-of`` where its answer is arms H2 left (``arms_left``,
+        #: or the one a late question took as its mover, ``rests``)
         self.end_code: str | None = None
         #: the arm a branch of ``arms_left`` is walking, at the row it reads (``wrote_by``)
         self._walking: WroteBy | None = None
@@ -2812,7 +2816,11 @@ class Rerun:
         self.say(f"== {hop} {title}")
 
     def end(self, what: T.Said | str) -> None:
-        """An END line: what the run found (result.json's ``outcome.record``)."""
+        """An END line: what the run found (result.json's ``outcome.record``), with what the walk took on before it
+        (``rests``): an answer resting on the one arm H2 left is ``one-of``, as ``arms_left``'s is."""
+        if self.rests:
+            what = T.Said("an-end-resting-on", {"what": what, "rests": T.Said("rests-on", {"premises": list(self.rests)})})
+            self.end_code = self.end_code or "one-of"
         self.ends.append((self.hop, what))
         self.say(f"END {what}")
 
@@ -4842,6 +4850,21 @@ class Rerun:
         said = [T.Said("arm-label", {"arm": arm, "rows": _at_rows(ps)}) for arm, ps in arms.items()]
         return Stop(T.at(self.hop, T.Said("one-arm-that-wrote-last-of-left", {"subject": subject, "value": value, "n_arms": len(arms), "said": said})), "one-of")
 
+    def _the_arm_left(self, subject: str, value: str, one_of: OneOf) -> Wrote:
+        """A late question's mover where H2 leaves one arm that may have written the next value (:class:`OneOf`,
+        KNOWN_ISSUES.md K38): that arm, on the run H2 read it on, with what it rests on -- its conditions not read, its
+        run not showing it ran -- named as what every END after rests on (``rests``).  More than one arm left, or none,
+        stops as before: which of them moved it on is not walked for each."""
+        arms = self._possibilities(one_of.left)
+        branch = next(iter(arms.values()))[0].branch if len(arms) == 1 else None
+        if branch is None:
+            raise self._one_of(subject, value, one_of)
+        (arm, ps), = arms.items()
+        said = T.Said("the-one-arm-left-moved-it-on", {"arm": arm, "premises": [_said(p) for p in ps[0].premises]})
+        self.say(f"{said}: the late question goes on with it")
+        self.rests = (*self.rests, said)
+        return branch
+
     def _writer_logs(self, subject: str, readings: list, cands: list | None = None) -> list[str]:
         """The logs H2 looks for a run of *subject*'s writers in (*cands*, ``_candidates`` of *readings* where not
         given).  A writer that prints nothing of its own, whose reading names no log and whose arm no history pair
@@ -6748,8 +6771,8 @@ class Rerun:
         # mark need not name it (the adder's is the PandaID, one run for every function of a pass)
         w = self._which_wrote(q.subject, after["status"], q.key, after)
         if isinstance(w, OneOf):
-            # what moved it on is not walked for each arm left (K38): asked() forks, L1 does not yet
-            raise self._one_of(q.subject, after["status"], w)
+            # the one arm H2 left goes on as the mover, what every END rests on; several are not walked for each (K38)
+            w = self._the_arm_left(q.subject, after["status"], w)
         owner = w.reading.owner
         if w.question is None:
             # no run to hand: what moved it on is read in the mover's own pass (K47)
@@ -6757,7 +6780,8 @@ class Rerun:
         self.say(f"moved on by {owner}:{w.chosen.line}, in {w.question.describe()}")
         run = w.question
         self.result["moved_by"] = {"owner": owner, "line": w.chosen.line, "run": {
-            "log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last}}
+            "log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last},
+            **({"rests": [T.to_json(s) for s in self.rests]} if self.rests else {})}
         # M2: every mover in the window -- by the statements that select the value, by the writes that require it, and
         # every other writer of another value, which takes a row by its key
         strategy_mod.attach_mover_gaps(inv.hops[0].strategy, R.ROOTS)

@@ -891,8 +891,10 @@ excluded are the answer: one that ended is the END, with what it rests on and th
 instead; else END "written last by one of the N arm(s) left, which the data does not decide", result.json's
 `outcome.code` `one-of` and each arm in `branches` (its row, premises, kind, kinds, text, and what it put in
 result.json, such as H3's `wrote`).  None left: a stop, no arm could have.  An arm stopped on asks or rows stops the
-run on them once every arm is walked, so that one round records them.  L1 (`--late`) does not walk the arms it is left
-with: its stop names them as before.  H2's single window, where the judge chooses no candidate ("which candidate
+run on them once every arm is walked, so that one round records them.  L1 (`--late`) goes on with the one arm left as
+what moved the value on (`Rerun._the_arm_left`; analyzer handover qk-design.md (M), M1), on the run H2 read it on, and
+every END after rests on it (`Rerun.rests`), code `one-of`; with more than one left it does not walk them, and its
+stop names them as before.  H2's single window, where the judge chooses no candidate ("which candidate
 ran"), does not fork either: most of its arms are unexamined (no pass of the key at the window, K47), and are dropped
 only where the logs are searched whole and every way that takes the row prints the key (the map's K19).
 
@@ -910,13 +912,15 @@ loop over tasks) says it only where no loop inside the pass holds both, so it wa
 <time>: no writer's pass of a log that names it" where a writer's log is not shown naming it; "<arm> wrote, read at
 <call>; in the same pass also <calls>, the same arm: which call was last is not read"; a stop "one arm that
 wrote <subject>=<value> last, of k left: <arm> (wrote at 'status' time | may have at ...); ... (KNOWN_ISSUES.md K38)"
-(L1's); "k arm(s) left: each walks on from H3", "==== n of k: <arm> (<rows>)" and "==== n: reached the end | STOP ... |
+(L1's, more than one left); "the one arm H2 left moved it on, <arm> (<premises>; KNOWN_ISSUES.md K38): the late question
+goes on with it", and each END after it "...; it rests on: the one arm H2 left moved it on, ..."; "k arm(s) left: each
+walks on from H3", "==== n of k: <arm> (<rows>)" and "==== n: reached the end | STOP ... |
 excluded ..." per arm, "<arm>'s guard <g> read false in the rows' values at <row>: it did not write there; its next
 row, <row>"; an END "written last by one of the k arm(s) left, which the data does not decide: 1 <arm>: ended; 2 <arm>:
 open (<kinds>); ... (KNOWN_ISSUES.md K38)", or the one arm's END "...; it rests on: <premises>; or at an older row it may
 have written at: <rows>"; a stop "an arm that could have written ...: each of the k left is excluded".
 *Revisit:* with the second stage's second half (H2's single window's "which candidate ran", after the map's K19) and
-L1's arms; when the map says what fills a print's prefix (then ask a writer's log by its mark's key).
+L1's arms where more than one is left; when the map says what fills a print's prefix (then ask a writer's log by its mark's key).
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 

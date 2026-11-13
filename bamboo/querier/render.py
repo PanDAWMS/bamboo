@@ -385,6 +385,8 @@ TEMPLATES: dict[str, str] = {
     "others-excluded": "; the other {n_excluded} arm(s) left excluded ({excluded:join=, })",
     "one-arm-ended": "{ends:join= / }{rests}{older}{others}",
     "rests-on": "; it rests on: {premises:join=; }",
+    "an-end-resting-on": "{what}{rests}",
+    "the-one-arm-left-moved-it-on": "the one arm H2 left moved it on, {arm} ({premises:join=; }; KNOWN_ISSUES.md K38)",
     "or-older": "; or at an older row it may have written at: {older:join=, }",
     "the-one-arm-left": "the one arm left",
     "one-of-the-arms-left": "one of the {n_left} arm(s) left",

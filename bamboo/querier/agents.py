@@ -173,7 +173,8 @@ def selection_of(owner: str, line: int) -> tuple[Selection | None, str]:
                 holder, rel = sfn, srel
                 break
     if took is None:
-        return None, f"{func} takes no part of a list, nor is called with one, by the map's calls into it"
+        return None, (f"{func} takes no part of a worker's list (self.<field>.get()), nor is handed one by the map's "
+                      "calls into it")
     qual = pathcond.qualified_name(holder)
     cls = f"{rel}::{qual.rpartition('.')[0]}" if "." in qual else ""
     ff = SR._field_froms().get((cls, took))

@@ -9849,6 +9849,66 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
                                            "passes can write (none shows a writer's pass: KNOWN_ISSUES.md K38)", "one-of"]
 
 
+def test_a_late_question_goes_on_with_the_one_arm_h2_left_and_every_end_rests_on_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            row = {"status": "finished", "time": "2026-10-29 13:47:28"}
+            readings = [N(file="pandaserver/a.py", owner="pandaserver/a.py::fin"), N(file="pandaserver/b.py", owner="pandaserver/b.py::put")]
+            run = N(log=N(name="a.log"), machine="m", token="7", first="2026-10-29 13:47:26,958", last="2026-10-29 13:47:28,324")
+
+            def may(f, func, line, guard, on_run=True):
+                branch = rerun.Wrote(readings, run if on_run else None, [], None, Verdict(Candidate(f"pandaserver/{f}.py", func, [line]), line, "positive", []),
+                                     row=row, window=(row["time"], row["time"]))
+                said = rerun.T.Said("its-condition-not-read", {"guard": guard})
+                return rerun.Possible(f"{f}.py::{func}:{line}", row, False, [rerun.Premise(said, rerun.NOT_READ)], branch=branch)
+
+            def walk(left):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.ends, r.hop, r.result, r.end_code = [], [], "H2", {}, None
+                try:
+                    got = r._the_arm_left("JobSpec.jobStatus", "finished", rerun.OneOf(left, 1))
+                    said = [got.reading.owner, got.chosen.line, got.question is run]
+                except rerun.Stop as e:
+                    said = ["STOP", str(e), e.code]
+                r.hop = "S2"
+                r.end(rerun.T.Said("ends", {"ends": ["moved on at last"]}))
+                return {"said": said, "lines": r.lines[:-1], "ends": [str(w) for _, w in r.ends], "code": r.end_code,
+                        "rests": [rerun.T.to_json(s) for s in r.rests]}
+
+            one = may("a", "fin", 304, "not (x.failed)")
+            # the same arm called twice in the pass: one arm left
+            twice = may("a", "fin", 304, "not (x.merging)")
+            print(json.dumps({"one": walk([one, twice]), "two": walk([one, may("b", "put", 9, "y")]),
+                              "no branch": walk([rerun.Possible("a.py::fin:304", row, False, [], branch=None)]),
+                              "no run": walk([may("a", "fin", 304, "z", on_run=False)])}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    arm = "the one arm H2 left moved it on, a.py::fin:304 (its condition 'not (x.failed)' not read; KNOWN_ISSUES.md K38)"
+    # one arm left: the walk goes on with it, on the run H2 read it on, and every END after says what it rests on
+    assert got["one"]["said"] == ["pandaserver/a.py::fin", 304, True]
+    assert got["one"]["lines"] == [f"{arm}: the late question goes on with it"]
+    assert got["one"]["ends"] == [f"END moved on at last; it rests on: {arm}"]
+    assert got["one"]["code"] == "one-of" and got["one"]["rests"][0]["kind"] == "the-one-arm-left-moved-it-on"
+    # two arms left: which moved it on is not walked for each -- H2's stop, as before, and an END rests on nothing
+    assert got["two"]["said"] == ["STOP", "H2: one arm that wrote JobSpec.jobStatus='finished' last, of 2 left: a.py::fin:304 (may "
+                                          "have at 'finished' 2026-10-29 13:47:28); b.py::put:9 (may have at 'finished' 2026-10-29 "
+                                          "13:47:28) (KNOWN_ISSUES.md K38)", "one-of"]
+    assert got["two"]["ends"] == ["END moved on at last"] and got["two"]["code"] is None and got["two"]["rests"] == []
+    # an arm with no walk to go on with stops as before
+    assert got["no branch"]["said"][0] == "STOP" and got["no branch"]["rests"] == []
+    # one with no run goes on: L1 says it has no pass to read (K47)
+    assert got["no run"]["said"] == ["pandaserver/a.py::fin", 304, False]
+
+
 def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(tmp_path):
     out = _ok(
         _run(
@@ -13678,6 +13738,7 @@ def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the
         other = lambda minutes: AG.Lock(datetime.timedelta(minutes=minutes), lock.term, lock.bound, lock.sets)
         print(json.dumps({
             "sel": [sel.worker, sel.field, sel.agent, sel.made, sel.handed, sel.call, sel.callee, list(sel.others), why],
+            "not_taken": list(AG.selection_of(f"{rel}::start", 24)),
             "rows": [[r.line for r in crows.before], [r.line for r in crows.after], crows.label],
             "literals": AG.literals(crows.after[-1].map_patterns[0]),
             "strings": AG.ask_strings(list(crows.rows)), "one": AG.ask_strings([crows.after[-1]]),
@@ -13696,6 +13757,9 @@ def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the
     # getTasks returned at 32, handed at 38; the message processor's None is another way in, said
     assert got["sel"] == ["pandajedi/jediorder/Agent.py::Worker", "taskList", "pandajedi/jediorder/Agent.py::Agent.start",
                           37, 38, 32, "getTasks", ["pandajedi/jedimsgprocessor/m.py:9"], ""], got
+    # a function that takes no part of a worker's list, and no call into it hands one: C1 says what it looked for
+    assert got["not_taken"] == [None, "start takes no part of a worker's list (self.<field>.get()), nor is handed one by the "
+                                      "map's calls into it"], got
     # C2: the rows in the innermost loop before and after the call, the label the loop's element; the "start" before
     # the loops is not one; the literal they all hold
     assert got["rows"] == [[30, 31], [34, 36], "prod_source_label"], got
