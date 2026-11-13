@@ -1674,8 +1674,10 @@ def assigns_reaching(
     renews the name on, nor overwritten on every way between, nor, for a
     write of the changed attributes (*changed*), reset on every way between.
     One whose object follow could not take to the made's -- it met a hole or
-    stopped -- where the made's object came out of a call may be the same
-    object through them: it is kept, with them (:attr:`Reaching.perhaps`).
+    stopped -- where the made's object may be one made before it
+    (:func:`_made_before`: it came out of a call that is no constructor, or
+    it meets a hole or stops itself) may be the same object through them: it
+    is kept, with them (:attr:`Reaching.perhaps`).
     *follows* keeps the follows read on one set of *rows*.
     """
     row = rows.get(owner)
@@ -1693,9 +1695,9 @@ def assigns_reaching(
         for made in sorted(made_paths):
             if made == one.path or made in here:
                 through: Optional[list[str]] = None
-            elif (reach.holes or reach.cut) and _followed(
-                rows, owner, made, kept
-            ).came_from:
+            elif (reach.holes or reach.cut) and _made_before(
+                rows, _followed(rows, owner, made, kept)
+            ):
                 through = [
                     f"{site.owner}:{site.line} {site.how}" for site in reach.holes
                 ]
@@ -1718,6 +1720,31 @@ def assigns_reaching(
             for line, held in sorted(perhaps.items())
             if line not in known
         },
+    )
+
+
+def _made_before(rows: dict[str, ReachNode], reach: ObjectReach) -> bool:
+    """Whether the object *reach* follows may be one made before: it came out of a call that is no constructor, or,
+    new from a constructor, it meets a hole or stops itself (a hole may keep it and hand it back by another name)."""
+    if not reach.came_from:
+        return False
+    if reach.holes or reach.cut:
+        return True
+    return not all(_constructed(rows, site) for site in reach.came_from)
+
+
+def _constructed(rows: dict[str, ReachNode], site: Site) -> bool:
+    """Whether *site*, where a name is bound to what a call returns, binds it to a new object: every call it may
+    be is a class's ``__init__``.  A call whose callee is not known is not one."""
+    row = rows.get(site.owner)
+    tos = [
+        one.to
+        for one in (row.bindings if row is not None else ())
+        if one.line == site.line and one.name == site.how and one.how == BIND_RESULT
+    ]
+    return bool(tos) and all(
+        to and all(callee.rsplit(".", 1)[-1] == "__init__" for callee in to)
+        for to in tos
     )
 
 

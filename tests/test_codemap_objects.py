@@ -2249,6 +2249,20 @@ class Refiner:
         job.jobStatus = "first"  # set before the unplaced update
         job.jobStatus = "again"  # set again before it
         other.proxy.updateJob(job)  # an update the record cannot place
+
+    def fresh(self, job: JobSpec, keeper):
+        keeper.keep(job)  # the job into a hole
+        job.jobStatus = "old"  # on the job kept, not a new one
+        made = JobSpec()
+        self.proxy.updateJob(made)  # fresh's update
+
+    def handed(self, keeper):
+        made = JobSpec()
+        keeper.keep(made)  # a new job into a hole
+        back = keeper.job
+        back.jobStatus = "back"  # on what the hole may hand back
+        keeper.keep(back)  # back into the hole
+        self.proxy.updateJob(made)  # handed's update
 """
 
 
@@ -2318,3 +2332,48 @@ def test_the_assignments_a_write_takes_are_read_on_its_object_whatever_their_spe
     assert reaching(
         unplaced, "# an update the record cannot place", "job", "jobStatus"
     ) == objects.Reaching([again], {})
+
+
+def test_a_new_object_is_perhaps_one_beyond_a_hole_only_where_it_meets_a_hole_itself(
+    tmp_path,
+):
+    """fresh's update writes a job its constructor made after the job fresh assigns jobStatus on went into a hole: a
+    new object, not the one the hole took, so the assignment is not taken; handed's update writes a new job that went
+    into a hole itself, and the job handed assigns jobStatus on came from that hole: perhaps the same, kept with it."""
+    fragment = _build(
+        tmp_path,
+        entities=JOB_TABLES,
+        spec=RESETS_SPEC,
+        ordered=ORDERED,
+        reaching=REACHING,
+    )
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def reaching(owner: str, marker: str):
+        line = _line(REACHING, marker)
+        made = [
+            one
+            for one in objects.line_paths(rows[owner])[line]
+            if objects.root_name(one) == "made"
+        ]
+        assert made, (owner, marker)
+        return objects.assigns_reaching(rows, owner, line, made, "jobStatus", True)
+
+    fresh = "pkg/reaching.py::Refiner.fresh"
+    assert reaching(fresh, "# fresh's update") == objects.Reaching([], {})
+    handed = "pkg/reaching.py::Refiner.handed"
+    # back is the keeper's field, so both calls on the keeper are holes on its way.
+    back = _line(REACHING, "# on what the hole may hand back")
+    holes = [
+        _line(REACHING, "# a new job into a hole"),
+        _line(REACHING, "# back into the hole"),
+    ]
+    assert reaching(handed, "# handed's update") == objects.Reaching(
+        [back],
+        {
+            back: [
+                f"{handed}:{hole} the receiver's class is not declared: nothing declares it"
+                for hole in holes
+            ]
+        },
+    )
