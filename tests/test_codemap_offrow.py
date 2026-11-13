@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from bamboo.codemap import reach
+from bamboo.codemap import pathcond, reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     OFF_ROW_NO_WRITE,
@@ -19,7 +19,7 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import objects as panda_objects
-from bamboo.codemap.panda import offrow, pathcond, sql
+from bamboo.codemap.panda import offrow, sql
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
 from bamboo.codemap.strategy import _candidate, _reaching

@@ -34,7 +34,7 @@ and how it left.
   reader reads are joined into one that knows only what all of them knew (:func:`widen`): joining can lose a
   verdict, never make one.  Beyond :data:`MAX_PATHS` the walk stops (:class:`TooMany`).
 
-Values are read with :mod:`bamboo.codemap.panda.evaluate`.  A reader adds its own rules by subclassing
+Values are read with :mod:`bamboo.codemap.evaluate`.  A reader adds its own rules by subclassing
 :class:`Walker` and :class:`Path` at the methods marked as hooks: the querier adds its printed holes, a target
 held as an expression, rows rendered by the path and the calls it reads against a run.  A value a path knows only
 in part is a :class:`Partial`.
@@ -54,7 +54,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, evaluate, pathcond, reaching
 from bamboo.codemap.callfacts import LOG_LEVELS
 from bamboo.codemap.models import (
     CHANGE_DELETE,
@@ -62,7 +62,7 @@ from bamboo.codemap.models import (
     CHANGE_STORE,
     CHANGE_UNREAD,
 )
-from bamboo.codemap.panda import changes, evaluate, pathcond, reaching
+from bamboo.codemap.panda import changes
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 if TYPE_CHECKING:
@@ -112,7 +112,7 @@ READERS = frozenset(
         "frozenset",
     }
 )
-#: The source of a value the path bound itself, in the walk's :class:`~bamboo.codemap.panda.evaluate.Env`.
+#: The source of a value the path bound itself, in the walk's :class:`~bamboo.codemap.evaluate.Env`.
 BOUND_ON_PATH = "bound on the path"
 #: How a test reads a chain (:func:`readings`): by its identity -- ``is``, against a literal, its type, as a key --,
 #: which only binding the chain anew changes; or by what it holds, which a change in place changes too.
@@ -686,7 +686,7 @@ def target_of(stmt: ast.stmt) -> str:
 
 def unbound_before(func: ast.AST, s_star: ast.stmt, name: str) -> bool:
     """Whether a bare local can hold nothing at S*: only the function's entry reaches it, and the name is no
-    parameter (:func:`~bamboo.codemap.panda.pathcond.held_at`)."""
+    parameter (:func:`~bamboo.codemap.pathcond.held_at`)."""
     if not name.isidentifier():
         return False
     held = pathcond.held_at(func, name, s_star)  # type: ignore[arg-type]
@@ -695,7 +695,7 @@ def unbound_before(func: ast.AST, s_star: ast.stmt, name: str) -> bool:
 
 def entry_state(func: ast.AST, s_star: ast.stmt, names: set[str]) -> dict[str, Any]:
     """Constants bare locals hold at S*: the one literal every way to it binds last
-    (:func:`~bamboo.codemap.panda.pathcond.held_at`).
+    (:func:`~bamboo.codemap.pathcond.held_at`).
 
     ``isOK = True`` four lines above ``if not toSkip: if isOK:`` holds at the
     inner ``if`` whatever ran before, and a binding before a loop around S*
@@ -718,7 +718,7 @@ class Path:
     """One way through the region and what it knows.  A reader holding more on a path subclasses it, and extends
     :meth:`key`'s, :meth:`agree`'s and :meth:`join`'s readings with what it adds."""
 
-    #: texts bound on the path -> value (:data:`~bamboo.codemap.panda.evaluate.UNKNOWN` when not known)
+    #: texts bound on the path -> value (:data:`~bamboo.codemap.evaluate.UNKNOWN` when not known)
     state: dict[str, Any] = field(default_factory=dict)
     arm: bool = False
     left: str = ""

@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import models
+from bamboo.codemap import models, pathcond
 from bamboo.codemap import trace as trace_mod
 from bamboo.codemap.models import (
     STOP_CONFIG,
@@ -32,7 +32,7 @@ from bamboo.codemap.models import (
     TRACE_WRITE,
     Handover,
 )
-from bamboo.codemap.panda import pathcond, provenance
+from bamboo.codemap.panda import provenance
 
 PACKAGE = "pandajedi"
 

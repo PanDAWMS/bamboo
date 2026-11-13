@@ -5,10 +5,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.calls import UNPLACED_DYNAMIC, Calls, Types
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import SourceModule
-from bamboo.codemap.panda import changes, pathcond
+from bamboo.codemap.panda import changes
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"

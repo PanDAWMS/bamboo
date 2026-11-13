@@ -12,6 +12,7 @@ import textwrap
 
 import pytest
 
+from bamboo.codemap import pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Branch,
@@ -20,7 +21,6 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import pathcond, values
 from bamboo.codemap.panda.recognizers import progress
 
 

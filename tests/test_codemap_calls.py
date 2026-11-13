@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap import pathcond
 
 PACKAGE = "pkg"
 
@@ -1182,7 +1182,7 @@ def test_an_in_list_helper_is_read_as_one_bind_holding_the_list(tmp_path):
 
 
 def test_a_value_is_settled_through_the_list_a_caller_hands_the_parameter(tmp_path):
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     roots = _tree(
         tmp_path,
@@ -1202,7 +1202,7 @@ def test_a_value_is_settled_through_the_list_a_caller_hands_the_parameter(tmp_pa
 
 def test_a_value_a_test_around_the_read_rules_out_is_not_handed_there(tmp_path):
     """``getEventRanges`` binds ``:datasetID`` under ``if segment_id is not None:``; a call handing None never runs it."""
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     roots = _tree(
         tmp_path,
@@ -1413,7 +1413,7 @@ def test_a_callee_building_two_statements_hands_over_two_alternatives_not_one(tm
 
 def test_a_local_name_settles_only_where_every_binding_of_it_does(tmp_path):
     """``pandaID = 0`` before the loop that rebinds it from the rows is no value asked by."""
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     roots = _tree(
         tmp_path,
@@ -1440,7 +1440,8 @@ def test_a_local_name_settles_only_where_every_binding_of_it_does(tmp_path):
 
 
 def test_an_imported_in_list_is_read_with_the_values_its_module_builds_it_from(tmp_path):
-    from bamboo.codemap.panda import sql, values
+    from bamboo.codemap import values
+    from bamboo.codemap.panda import sql
 
     roots = _tree(
         tmp_path,
@@ -2670,7 +2671,7 @@ def test_a_statement_says_no_value_where_one_of_its_calls_hands_one_not_known(tm
 
 def test_a_value_settles_from_callers_only_where_every_call_is_known(tmp_path):
     """Handed marks, not silence: a call by the name placed nowhere, a value passed through ``*``, a value not settled."""
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     roots = _tree(
         tmp_path,
@@ -3040,7 +3041,7 @@ def test_a_function_whose_calls_by_name_all_land_outside_says_so_and_not_that_no
 
 def test_a_list_with_one_element_unsettled_settles_to_no_value_not_to_the_rest(tmp_path):
     """``[a, b]`` with ``b`` unknown is not ``{a}`` -- as a name with one unsettled write is not its other writes."""
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     roots = _tree(
         tmp_path,

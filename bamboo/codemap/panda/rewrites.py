@@ -75,7 +75,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Optional
 
 from bamboo.codemap import calls as C
-from bamboo.codemap import objects
+from bamboo.codemap import objects, pathcond, values
 from bamboo.codemap.models import (
     REWRITE_CALL,
     REWRITE_COLUMNS_UNRECORDED,
@@ -99,7 +99,7 @@ from bamboo.codemap.models import (
     SamePassWrite,
     SourceModule,
 )
-from bamboo.codemap.panda import mustprints, pathcond, runs, values
+from bamboo.codemap.panda import mustprints, runs
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.recognizers import progress
 

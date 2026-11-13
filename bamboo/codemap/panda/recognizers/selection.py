@@ -38,11 +38,10 @@ import hashlib
 import re
 from typing import Iterator, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
-from bamboo.codemap.panda import values
-from bamboo.codemap.panda.pathcond import (
+from bamboo.codemap.pathcond import (
     attach_parents,
     enclosing_function,
     functions_with_owner,

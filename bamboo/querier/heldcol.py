@@ -32,7 +32,7 @@ import ast
 import functools
 from dataclasses import dataclass, field
 
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap import pathcond
 from bamboo.codemap.reading import containing_function
 from bamboo.querier import evaluate as E
 from bamboo.querier import mapdump

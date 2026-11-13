@@ -300,7 +300,7 @@ def test_the_evaluator_is_the_maps_and_the_querier_hands_it_the_rows_a_run_read(
             """
             import ast
             import json
-            from bamboo.codemap.panda import evaluate as shared
+            from bamboo.codemap import evaluate as shared
             from bamboo.querier import evaluate as E
 
             E.PURE["twice"] = lambda x: 2 * x  # PURE not empty: no panda-server import
@@ -340,7 +340,7 @@ def test_what_a_local_holds_at_s_star_and_what_holes_decide_are_the_maps_reading
             import ast
             import json
             import textwrap
-            from bamboo.codemap.panda import pathcond
+            from bamboo.codemap import pathcond
             from bamboo.querier import evaluate as E, printed as P
 
             E.PURE["twice"] = lambda x: 2 * x  # PURE not empty: no panda-server import
@@ -2718,7 +2718,7 @@ def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guar
             """
     import ast, json
     from types import SimpleNamespace as N
-    from bamboo.codemap.panda import pathcond
+    from bamboo.codemap import pathcond
     from bamboo.querier import evaluate as E
     from bamboo.querier import rerun as RR
 
@@ -4096,7 +4096,7 @@ def test_the_statement_at_a_line_is_the_innermost_the_first_of_equal_depth_and_t
             tmp_path,
             """
             import ast, json
-            from bamboo.codemap.panda import pathcond
+            from bamboo.codemap import pathcond
             from bamboo.querier import rows as R
 
             fn = ast.parse("def f(x):\\n    a = 1; b = 2\\n    if x: y = 3\\n    return a\\n").body[0]
@@ -4329,7 +4329,7 @@ def test_a_print_nested_in_an_earlier_statement_implies_the_site_when_nothing_on
             tmp_path,
             """
             import ast, json
-            from bamboo.codemap.panda import pathcond
+            from bamboo.codemap import pathcond
             from bamboo.querier import rows as R
 
             tree = ast.parse(open("f.py").read())
@@ -4435,8 +4435,8 @@ def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_
             """
             import ast, json, textwrap
             from types import SimpleNamespace as N
-            from bamboo.codemap.panda import pathcond
-            from bamboo.codemap.panda.pathcond import attach_parents
+            from bamboo.codemap import pathcond
+            from bamboo.codemap.pathcond import attach_parents
             from bamboo.querier import evaluate as E
             from bamboo.querier import rerun as RR
             from bamboo.querier.rerun import Arm, arm_guards, early_exit_if, guard_if
@@ -8447,7 +8447,7 @@ def test_a_status_arm_its_run_shows_ran_names_the_values_its_guards_held_on_wher
         (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
     code = """
         import json
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import render as T
         from bamboo.querier import rerun
         from bamboo.querier import rows as R
@@ -8522,7 +8522,7 @@ def test_h3_reads_an_arms_early_exits_as_its_guards_each_at_its_own_if(tmp_path)
         (tmp_path / f"{name}.log").write_text("".join(stamp.format(n, t) for n, t in enumerate(text)))
     code = """
         import json
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import render as T
         from bamboo.querier import rerun
         from bamboo.querier import rows as R
@@ -9941,7 +9941,7 @@ def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_r
                 self.cur.execute(sql, varMap)
             '''
             import textwrap
-            from bamboo.codemap.panda import pathcond
+            from bamboo.codemap import pathcond
             tree = ast.parse(textwrap.dedent(src))
             pathcond.attach_parents(tree)
             fns = {f.name: N(node=f, name=f.name) for f in tree.body}
@@ -10355,7 +10355,7 @@ def test_s_ends_each_guard_term_where_the_maps_ways_end_and_a_call_by_its_runnab
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -10408,7 +10408,7 @@ def test_a_row_fill_is_not_a_change_on_the_way_it_ends(tmp_path):
     out = _ok(_run(tmp_path, """
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -10661,7 +10661,7 @@ def test_s4a_reads_a_field_of_self_on_through_the_maps_field_records(tmp_path):
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -10747,7 +10747,7 @@ def test_g2_a_way_end_keeps_a_changes_calls_and_a_returned_values_route_and_line
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import render as T
         from bamboo.querier import rows as R
@@ -10863,7 +10863,7 @@ def test_g4_a_change_is_on_the_way_it_changes_at_the_level_of_the_object_it_chan
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -10992,7 +10992,7 @@ def test_s4c_reads_the_change_a_runs_print_and_must_rows_choose_as_an_arm(tmp_pa
         import json
         from dataclasses import replace
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import render as T
         from bamboo.querier import rows as R
@@ -11138,7 +11138,7 @@ def test_a_way_ending_at_a_call_the_map_reads_as_a_clock_ends_at_the_clock(tmp_p
     out = _ok(_run(tmp_path, """
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -11438,7 +11438,7 @@ def test_a_field_record_with_no_way_stops_its_term_rather_than_drops_it(tmp_path
     out = _ok(_run(tmp_path, """
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -11473,7 +11473,7 @@ def test_a_guards_local_item_of_a_literal_ends_at_the_literal_not_as_its_value(t
     out = _ok(_run(tmp_path, """
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -12288,7 +12288,7 @@ def test_q1_an_element_the_test_takes_is_read_by_s4c_on_the_arms_run_and_by_its_
         import ast, json
         from types import SimpleNamespace as N
         from bamboo.codemap import models as M
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -12460,7 +12460,7 @@ def test_k_a_field_of_the_exception_a_handler_names_is_read_up_the_raise_its_run
         import json
         from types import SimpleNamespace as N
         from bamboo.codemap import models as M
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import records as REC
         from bamboo.querier import rows as R
@@ -12621,7 +12621,7 @@ def test_q6_a_test_reading_a_container_made_empty_for_its_truth_alone_reads_its_
         import ast, json
         from types import SimpleNamespace as N
         from bamboo.codemap import models as M
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR
@@ -12791,7 +12791,7 @@ def test_q7_a_part_the_test_takes_ends_at_the_change_left_where_the_objects_star
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import render as T
         from bamboo.querier import rows as R
@@ -12903,7 +12903,7 @@ def test_q7_an_object_filled_from_a_row_ends_at_the_row_where_its_held_test_rule
         import json
         from dataclasses import replace
         from types import SimpleNamespace as N
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
         from bamboo.querier import mapdump, rerun
         from bamboo.querier import rows as R
         from bamboo.querier import sources as SR

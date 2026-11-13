@@ -49,10 +49,9 @@ import itertools
 import operator
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import BUILTIN, Types, own_nodes
-from bamboo.codemap.panda import pathcond
 from bamboo.codemap.panda.recognizers.progress import _declared_names
 
 MECHANISM = "mechanism"

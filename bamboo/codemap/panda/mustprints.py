@@ -9,7 +9,7 @@ lacks it.
 **The rule.**  P must precede arm A when no path from the function's entry
 reaches A without passing P: ``reaching(A, [func.args], killers=[P])`` is
 empty while ``reaching(A, [func.args])`` is not.  The flow is
-:func:`~bamboo.codemap.panda.reaching.reaching`'s -- both ways at every
+:func:`~bamboo.codemap.reaching.reaching`'s -- both ways at every
 branch, every loop any number of times including none, the state at every
 statement that can raise to its handlers, ``finally`` on every way out -- so
 a print inside a ``try`` whose handler goes on to the arm is not one, nor is
@@ -63,6 +63,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.callfacts import LOG_METHODS
 from bamboo.codemap.models import (
@@ -79,8 +80,8 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import changes, mapentries, pathcond
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda import changes, mapentries
+from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls

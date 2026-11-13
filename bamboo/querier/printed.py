@@ -99,7 +99,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, cast
 
-from bamboo.codemap.panda import pathcond  # noqa: E402
+from bamboo.codemap import pathcond  # noqa: E402
 from bamboo.codemap.panda import walker as W
 from bamboo.codemap.panda.walker import (  # noqa: F401 -- read as printed.<name> by the querier's modules
     MAX_PATHS,
