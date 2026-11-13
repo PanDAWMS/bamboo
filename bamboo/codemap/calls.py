@@ -2353,9 +2353,18 @@ def _unquoted(annotation: ast.expr) -> ast.expr:
             return annotation
     return annotation
 
+
+def _container(annotation: ast.expr) -> ast.expr:
+    """*annotation* unquoted, and ``None`` left out where one other member is left: ``list[A] | None`` and
+    ``Optional[list[A]]`` are ``list[A]``, since a loop over it or a subscript of it is on the container."""
+    members = _members(annotation)
+    return members[0] if len(members) == 1 else _unquoted(annotation)
+
+
 def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
-    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``."""
-    annotation = _unquoted(annotation)
+    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``, ``None`` left
+    out of a union (:func:`_container`)."""
+    annotation = _container(annotation)
     if not isinstance(annotation, ast.Subscript):
         return None
     wrapper = annotation.value
@@ -3737,7 +3746,8 @@ class Types:
         ``list(x)``, ``sorted(x)``, ``reversed(x)`` iterate what ``x`` does;
         ``enumerate(x)``'s second slot is ``x``'s element.  ``d.items()``,
         ``.values()`` and ``.keys()`` on a ``dict[K, V]`` are ``(K, V)``,
-        ``V`` and ``K``; a container is its element, a mapping its key.
+        ``V`` and ``K``; a container is its element, a mapping its key; ``None``
+        is left out of a union (:func:`_container`).
         """
         if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and len(iterable.args) == 1:
             if iterable.func.id in ("list", "sorted", "reversed", "tuple", "set", "frozenset") and not unpacked:
@@ -3766,7 +3776,7 @@ class Types:
         if declared is None:
             return None
         where, annotation = declared
-        annotation = _unquoted(annotation)
+        annotation = _container(annotation)
         if not isinstance(annotation, ast.Subscript):
             return None
         wrapper = annotation.value
