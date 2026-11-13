@@ -9540,6 +9540,15 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
                   rows=[N(pattern=marked, prefix="<jediTaskID={} gshare={}>")]),
             ])])]
             runs = runs_for(read_log("panda-x.log"), "5")
+            # as a recorded search reads them: on a machine, with ends of what was searched for each mark
+            log = runs[0].log
+            for x in log.records:
+                x.machine = "m.cern.ch"
+            log.edges = lambda machine, token, first, last: "its records lie outside what was searched on m"
+            with_edges = [[r.alone, r.describe()] for r in runs]
+            log.edges = None
+            for x in log.records:
+                x.machine = ""
             cut = runs[0].records[0]
             stmt = ast.parse("pass").body[0]
             row = R.Row("p/f.py", "feed", stmt, "DEBUG", 'f"failed to get taskSpec for jediTaskID={jediTaskID}"',
@@ -9549,6 +9558,7 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
             print(json.dumps({
                 "runs": [[r.token, [x.stamp[11:19] for x in r.records], r.alone, r.would_print("DEBUG")] for r in runs],
                 "said": runs[0].describe(),
+                "with_edges": with_edges,
                 "cut": [cut.token, cut.message],
                 "writers": sorted(R.line_writers(cut, "panda-x.log")),
                 "matches": row.matches(cut, "outside")[0] > 0,
@@ -9569,6 +9579,11 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
         ["failed", ["01:00:01"], False, True],
     ], got
     assert "read alone: its logger writes no mark, so the token is the line's first word" in got["said"], got
+    # a line read alone is all its run: what was searched for its first word cuts nothing of it, while a marked run
+    # near an end of what was searched is read as cut there
+    assert [[alone, "read as cut" in said] for alone, said in got["with_edges"]] == [
+        [True, False], [False, True], [True, False], [False, True]], got
+    assert all("read alone" in said for alone, said in got["with_edges"] if alone), got
     # the cut is the parser's still; the row and the map's writers read the line as written
     assert got["cut"] == ["failed", "to get taskSpec for jediTaskID=5"], got
     assert got["writers"] == ["p/f.py::Feeder.feed"], got
