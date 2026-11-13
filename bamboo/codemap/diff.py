@@ -210,6 +210,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "writes",
         "order",
         "cleared",
+        "overwritten",
     ),
 }
 

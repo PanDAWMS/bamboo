@@ -1326,7 +1326,8 @@ def root_name(path: str) -> str:
 
 
 class _Lines:
-    """One function's :attr:`ReachNode.order` and :attr:`ReachNode.cleared`, read for :class:`_Order`."""
+    """One function's :attr:`ReachNode.order`, :attr:`ReachNode.cleared` and :attr:`ReachNode.overwritten`, read for
+    :class:`_Order`."""
 
     def __init__(self, row: ReachNode):
         order = row.order
@@ -1353,6 +1354,16 @@ class _Lines:
             tables[(one.path, tuple(one.columns))][one.line] = set(one.lines)
         self.cleared = [
             (path, set(columns), table) for (path, columns), table in tables.items()
+        ]
+        given: dict[tuple[str, tuple[str, ...]], dict[int, set[int]]] = defaultdict(
+            dict
+        )
+        for overwrite in row.overwritten:
+            given[(overwrite.path, tuple(overwrite.columns))][overwrite.line] = set(
+                overwrite.lines
+            )
+        self.overwritten = [
+            (path, set(columns), table) for (path, columns), table in given.items()
         ]
 
     def kind(self, one: int, other: int) -> str:
@@ -1396,7 +1407,9 @@ class _Order:
     a later pass of a loop, not where every path the second line takes the
     object by is rooted at a name the loop binds to another object between
     (:class:`~bamboo.codemap.models.Renewed`; ``for job in jobs`` holds the
-    object as ``jobs[]`` too, which names no one element); and, for a
+    object as ``jobs[]`` too, which names no one element); no other
+    assignment of the column on a path the object is held by stands on every
+    way between (:attr:`ReachNode.overwritten`); and, for a
     write of the changed attributes, no reset of the column on a path holding
     the object stands on every way between (:attr:`ReachNode.cleared`).  One
     line going down to the same functions both ways is read further down.  A
@@ -1482,12 +1495,9 @@ class _Order:
             found[start][line].add("")
 
         def passes(frame: str, line: int) -> bool:
-            if not changed:
-                return True
             paths = set(held.get(frame, ()))
-            if up:
-                return not self._is_cleared(frame, line, EXIT_LINE, paths, column)
-            return not self._is_cleared(frame, ENTRY_LINE, line, paths, column)
+            one, other = (line, EXIT_LINE) if up else (ENTRY_LINE, line)
+            return not self._taken_back(frame, one, other, paths, column, changed)
 
         live = [start] if any(passes(start, line) for line in lines) else []
         seen = set(live)
@@ -1537,7 +1547,32 @@ class _Order:
                 lines.renewed_between(one, other, root_name(path)) for path in taken
             ):
                 return False
-        return not (changed and self._is_cleared(frame, one, other, paths, column))
+        return not self._taken_back(frame, one, other, paths, column, changed)
+
+    def _taken_back(
+        self,
+        frame: str,
+        one: int,
+        other: int,
+        paths: set[str],
+        column: str,
+        changed: bool,
+    ) -> bool:
+        """Whether what a change at *one* of *frame* gave *column* is gone at *other*: overwritten on every way
+        between, or, for a write of the changed attributes, reset on every way between."""
+        if changed and self._is_cleared(frame, one, other, paths, column):
+            return True
+        return self._is_overwritten(frame, one, other, paths, column)
+
+    def _is_overwritten(
+        self, frame: str, one: int, other: int, paths: set[str], column: str
+    ) -> bool:
+        # The path as it is: an overwrite names one object, and ``[]`` read as ``[0]`` (``_holds``) would let one
+        # element's overwrite stand for another's.
+        return any(
+            column in columns and other in table.get(one, ()) and path in paths
+            for path, columns, table in self._lines_of(frame).overwritten
+        )
 
     def _is_cleared(
         self, frame: str, one: int, other: int, paths: set[str], column: str

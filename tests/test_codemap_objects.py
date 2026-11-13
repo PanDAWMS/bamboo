@@ -338,16 +338,17 @@ def test_a_class_held_in_a_field_builds_an_object_it_has_no_receiver(tmp_path):
 
 
 def test_a_column_changes_by_the_object_written_back_or_by_a_key_of_its_row(tmp_path):
-    """close(): modificationTime assigned and written by archiveJob; jobMetrics written by killJob on self.job_id's row."""
+    """close(): modificationTime assigned, then assigned again and written by archiveJob, so the row takes
+    archiveJob's; jobMetrics written by killJob on self.job_id's row."""
     rows = _adder(tmp_path)
     close = "pkg/adder.py::Adder.close"
 
     written = objects.may_change(rows, close, "self.job", "modificationTime")
     assert written.verdict is True
     assert {site.owner.split("::")[1] for site in written.because} == {
-        "Adder.close",
-        "DBProxy.archiveJob",
+        "DBProxy.archiveJob"
     }
+    assert [site.owner.split("::")[1] for site in written.unwritten] == ["Adder.close"]
     assert "written_back_as_read" in written.premises
 
     by_key = objects.may_change(
@@ -1700,6 +1701,19 @@ class Runner:
                 self.proxy.updateJob(job)  # fresh's update
             else:
                 job.ddmErrorCode = 6  # another job each pass
+
+    def stamp(self, job: JobSpec, flag):
+        job.modificationTime = 1  # stamped first
+        job.jobMetrics = "a"  # kept on one arm
+        if flag:
+            job.jobMetrics = "b"  # overwritten on one arm
+        job.modificationTime = 2  # stamped again
+        self.proxy.updateJob(job)  # stamp's update
+
+    def elements(self, jobs: list[JobSpec], i, j):
+        jobs[i].ddmErrorCode = 8  # some job's
+        jobs[j].ddmErrorCode = 9  # maybe another job's
+        self.proxy.updateJob(jobs[i])  # elements' update
 """
 
 
@@ -1810,6 +1824,47 @@ def test_a_change_writes_the_row_only_where_it_can_run_before_the_write_and_no_r
         rows, "pkg/ordered.py::Runner.other", "job", "ddmErrorCode"
     )
     assert (other.verdict, other.because) == (False, [])
+
+
+def test_a_change_its_column_is_assigned_again_after_on_every_way_is_not_what_the_write_writes(
+    tmp_path,
+):
+    """stamp sets modificationTime again before its update, so the first value is gone on every way, whatever the
+    update writes; jobMetrics is set again on one arm only, and the first value is written on the other; an element
+    at a position not known names no one job, so what jobs[j] is given does not overwrite what jobs[i] was."""
+    rows = _ordered(tmp_path)
+    stamp = "pkg/ordered.py::Runner.stamp"
+    first, again, update = (
+        _line(ORDERED, "# stamped first"),
+        _line(ORDERED, "# stamped again"),
+        _line(ORDERED, "# stamp's update"),
+    )
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["modificationTime"], first)
+        and update in one.lines
+        for one in rows[stamp].overwritten
+    )
+
+    def own(sites, owner=stamp):
+        # The changes: ``because`` holds the write's site as well.
+        return [site.line for site in sites if site.owner == owner]
+
+    stamped = objects.may_change(rows, stamp, "job", "modificationTime")
+    assert stamped.verdict is True
+    assert own(stamped.because) == [again]
+    assert own(stamped.unwritten) == [first]
+    kept = objects.may_change(rows, stamp, "job", "jobMetrics")
+    assert own(kept.because) == [
+        _line(ORDERED, "# kept on one arm"),
+        _line(ORDERED, "# overwritten on one arm"),
+    ]
+    elements = "pkg/ordered.py::Runner.elements"
+    assert rows[elements].overwritten == []
+    either = objects.may_change(rows, elements, "jobs[]", "ddmErrorCode")
+    assert own(either.because, elements) == [
+        _line(ORDERED, "# some job's"),
+        _line(ORDERED, "# maybe another job's"),
+    ]
 
 
 def test_an_object_not_read_from_its_row_is_open_only_where_a_change_it_came_with_reaches_the_write(

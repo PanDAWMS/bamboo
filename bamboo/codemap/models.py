@@ -6906,6 +6906,34 @@ class ClearedLines(BaseModel):
     lines: list[int] = Field(description=f"Each line, or {EXIT_LINE} for its normal exit, every way to which from :attr:`line` passes the reset.")
 
 
+class OverwrittenLines(BaseModel):
+    """Lines of a function every way between which passes another assignment of a column on an object.
+
+    ``updateWorkers`` sets the worker's attributes from what the harvester sent
+    at 860 (``setattr(worker_spec, key, val)``) and ``worker_spec.lastUpdate``
+    at 861, before its ``INSERT`` or ``UPDATE``: what 860 gave ``lastUpdate``
+    is not what either writes.  An overwrite is ``path.column = value``: one
+    column, assigned, on a path naming one object (no ``[]``).
+    """
+
+    path: str = Field(description="The object assigned on, as a path of the function.")
+    columns: list[str] = Field(
+        description="The attributes assigned, each by these overwrites."
+    )
+    line: int = Field(
+        description=(
+            f"Where the change was made: a line, or {ENTRY_LINE} for before the "
+            "function was entered."
+        )
+    )
+    lines: list[int] = Field(
+        description=(
+            f"Each line, or {EXIT_LINE} for its normal exit, every way to which from "
+            ":attr:`line` passes an overwrite."
+        )
+    )
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -7002,6 +7030,10 @@ class ReachNode(BaseNode):
     cleared: list[ClearedLines] = Field(
         default_factory=list,
         description="The lines every way between which passes a reset of an object's changed attributes.",
+    )
+    overwritten: list[OverwrittenLines] = Field(
+        default_factory=list,
+        description="The lines every way between which passes another assignment of a column on an object.",
     )
     anchor: Optional[Anchor] = None
 

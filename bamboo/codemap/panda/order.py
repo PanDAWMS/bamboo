@@ -1,9 +1,10 @@
-"""Which lines of a function can run before which, and between which a reset takes a change back.
+"""Which lines of a function can run before which, and between which a reset or an overwrite takes a change back.
 
 :func:`bamboo.codemap.objects.may_change` says an assignment of a column on
 an object changes the row a write of the object lands on.  It changes it
 only where it can run before that write on one run, on the same object,
-and -- for a write of the object's changed attributes
+where no other assignment of the column on the object stands on every way
+between, and -- for a write of the object's changed attributes
 (``bindUpdateChangesExpression``, ``valuesMap(onlyChanged=True)``) -- where
 no reset of the change (``resetChangedAttr``, ``resetChangedList``) stands
 on every way between.  ``retryJob`` writes the job back at 4146 under ``if
@@ -31,7 +32,12 @@ order is read here, once per function, into its
   is handed on every way from its entry to its normal exit is a reset where
   it is called -- ``resetRefinedAttrs`` resets ``splitRule`` and
   ``eventService``, and ``reserve_old_attributes``' names, by its call of it
-  --, found to a fixed point (:func:`attach`).
+  --, found to a fixed point (:func:`attach`);
+* :attr:`~bamboo.codemap.models.ReachNode.overwritten` -- for each object and
+  the columns a set of assignments sets outright, the lines every way
+  between which passes one, read as ``cleared`` is (:func:`overwritten`):
+  what a change gave a column there is not what a write after writes,
+  whether or not it writes the changed attributes.
 
 A line is the statement starting there, the innermost, or else the statement
 holding an expression starting there; lines in one statement are not
@@ -55,6 +61,7 @@ from bamboo.codemap.models import (
     LinesApart,
     LineStart,
     LoopLines,
+    OverwrittenLines,
     ReachNode,
     Renewed,
 )
@@ -73,6 +80,8 @@ RESET_ONE = "resetChangedAttr"
 RESET_ALL = "resetChangedList"
 #: The column :class:`ClearedLines` says all of them by.
 ALL_COLUMNS = "*"
+#: The :attr:`PathAssign.how` of an assignment that sets its column outright, not adding to it.
+OVERWRITE = "="
 
 
 class Reset(NamedTuple):
@@ -496,6 +505,104 @@ def _cleared_by(
     ]
 
 
+def overwritten(
+    func: ast.AST, row: ReachNode, at: dict[int, ast.AST]
+) -> list[OverwrittenLines]:
+    """:attr:`ReachNode.overwritten` of *row*: for each object and the columns one set of overwrites assigns, the
+    lines every way between which passes one -- from the entry and each line that can change one of the columns (an
+    assignment of it or of any column, or a call), to each write or call line or the normal exit.
+
+    An overwrite is ``path.column = value`` (:attr:`PathAssign.how` ``=``, one column): not ``+=``, which adds to
+    what is there, nor a computed name, which may set another column; and on a path with no ``[]``, an element at a
+    position not known, which names no one object.  So it is also a change, and a source like any other.
+
+    A call line is kept, as a change or as a write's way, only where it takes a path from the overwrite's root name
+    (:func:`line_paths`): a call is a way for the object only where it takes it (:class:`objects._Order` reads no
+    other), and ``doGenerate``'s hundreds of calls each to each are most of what the record would hold.  A call
+    taking the object by another name is left out, and the change through it read as not overwritten.
+    """
+    killers: dict[tuple[str, str], list[ast.AST]] = defaultdict(list)
+    assigned: dict[int, set[str]] = defaultdict(set)
+    for one in row.assigns:
+        assigned[one.line].update(one.attrs)
+        if (
+            one.how == OVERWRITE
+            and len(one.attrs) == 1
+            and one.attrs[0] != ALL_COLUMNS
+            and "[]" not in one.path
+            and one.line in at
+        ):
+            killers[(one.path, one.attrs[0])].append(at[one.line])
+    if not killers:
+        return []
+    changes, _writes = changes_and_writes(row)
+    called = {line for call in row.calls for line in (call.lines or [call.line])}
+    written = {line for write in row.writes for line in write.lines}
+    roots = {
+        line: {root_name(one) for one in taken}
+        for line, taken in line_paths(row).items()
+    }
+    groups: dict[tuple[str, tuple[int, ...]], tuple[list[str], list[ast.AST]]] = {}
+    for (path, column), statements in sorted(killers.items()):
+        key = (path, tuple(sorted({id(one) for one in statements})))
+        groups.setdefault(key, ([], statements))[0].append(column)
+    found: list[OverwrittenLines] = []
+    for (path, _killed), (columns, statements) in groups.items():
+        can, root = {*columns, ALL_COLUMNS}, root_name(path)
+        takes = {line for line in called if root in roots.get(line, ())}
+        sources = [
+            line
+            for line in sorted(changes)
+            if line in takes or assigned.get(line, set()) & can
+        ]
+        targets = written | takes
+        found.extend(
+            _overwritten_by(func, path, columns, statements, sources, targets, at)
+        )
+    return found
+
+
+def _overwritten_by(
+    func: ast.AST,
+    path: str,
+    columns: list[str],
+    killers: list[ast.AST],
+    sources: list[int],
+    writes: set[int],
+    at: dict[int, ast.AST],
+) -> list[OverwrittenLines]:
+    """:func:`overwritten` for one object and the columns *killers* overwrite: from *sources* and the entry to
+    *writes* and the normal exit."""
+    entry = func.args  # type: ignore[attr-defined]
+    statements = {line: at[line] for line in sources if line in at}
+    sites = [entry, *statements.values()]
+    lines = {id(entry): ENTRY_LINE}
+    for line, statement in statements.items():
+        lines.setdefault(id(statement), line)
+    killed = {id(one) for one in killers}
+    adds = [site for site in sites if id(site) not in killed]
+    targets = [(line, at[line]) for line in sorted(writes) if line in at]
+    gone: dict[int, list[int]] = defaultdict(list)
+    everywhere = reaching_each([one for _line, one in targets], sites, (), sites)
+    passing = reaching_each([one for _line, one in targets], sites, killers, adds)
+    for (line, _statement), any_way, past_one in zip(
+        targets, everywhere, passing, strict=True
+    ):
+        for key in {id(one) for one in any_way} - {id(one) for one in past_one}:
+            if lines[key] != line:
+                gone[lines[key]].append(line)
+    free = {id(one) for one in reaching_exit(func, sites, (), sites)}
+    kept = {id(one) for one in reaching_exit(func, sites, killers, adds)}
+    for key in free - kept:
+        gone[lines[key]].append(EXIT_LINE)
+    return [
+        OverwrittenLines(
+            path=path, columns=columns, line=line, lines=sorted(set(others))
+        )
+        for line, others in sorted(gone.items())
+    ]
+
+
 def clears(func: ast.AST, found: list[ClearedLines]) -> dict[str, set[str]]:
     """What a function resets on every way from its entry to its normal exit: each parameter (``self`` too), as it
     was handed, with the columns."""
@@ -546,6 +653,7 @@ def attach(
         row = rows[owner]
         row.order = line_order(func, row, places[owner])
         row.cleared = found.get(owner, [])
+        row.overwritten = overwritten(func, row, places[owner])
 
 
 def _resets(
