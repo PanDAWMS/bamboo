@@ -16740,6 +16740,41 @@ def test_an_early_exit_says_which_side_leaves():
     ]
 
 
+def test_an_early_exits_test_is_given_between_where_a_name_it_reads_changes():
+    # Whether the exit's test still describes its names at the node: a binding or a
+    # call on a name it reads, the container's too, changes it on the way; one in an
+    # arm the way to the node cannot enter does not.
+    def given(body: str) -> list[tuple[str, bool]]:
+        func = _func(
+            "def f(self, name, fallback):\n"
+            "    if name not in ALLOWED:\n"
+            "        raise ValueError(name)\n" + body
+        )
+        node = next(
+            n
+            for n in ast.walk(func)
+            if isinstance(n, ast.Assign) and ast.unparse(n) == "self.kind = name"
+        )
+        return [
+            (ast.unparse(one.test), pathcond.given_between(func, one, node))
+            for one, _body_leaves in pathcond.early_exit_ifs(node)
+        ]
+
+    assert given("    self.kind = name\n") == [("name not in ALLOWED", False)]
+    assert given("    name = name.lower()\n    self.kind = name\n") == [
+        ("name not in ALLOWED", True)
+    ]
+    assert given("    ALLOWED.add(name)\n    self.kind = name\n") == [
+        ("name not in ALLOWED", True)
+    ]
+    assert given(
+        "    if fallback:\n"
+        "        name = DEFAULT\n"
+        "    else:\n"
+        "        self.kind = name\n"
+    ) == [("name not in ALLOWED", False)]
+
+
 def test_a_branch_that_falls_through_is_not_an_early_exit():
     node = _write_in(
         "def f(self, specs):\n"
