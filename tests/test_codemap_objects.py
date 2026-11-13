@@ -148,7 +148,20 @@ class Adder:
 """
 
 
-def _build(tmp_path: Path, entities: tuple = (), **files: str) -> MapFragment:
+#: The table the fixtures' spec class is held in: the record keeps the assignments of a class a table holds
+#: (panda_objects.column_classes).
+_SPEC_TABLES = (
+    EntityNode(
+        name="jobsactive4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsActive4"],
+    ),
+)
+
+
+def _build(tmp_path: Path, entities: tuple = _SPEC_TABLES, **files: str) -> MapFragment:
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -1311,6 +1324,44 @@ def test_the_gate_reads_keys_positions_and_a_calls_own_result(tmp_path):
     fragment, _rows = _forms(tmp_path)
     result = object_records_resolve(fragment)
     assert result.passed, result.failures
+
+
+_WORKERS = """\
+class WorkerSpec:
+    _attributes = ("workerID", "status")
+
+
+class SiteSpec:
+    _attributes = ("sitename",)
+
+
+def mark(worker: WorkerSpec, site: SiteSpec):
+    worker.status = "running"
+    site.sitename = "CERN"
+"""
+
+
+def test_the_record_keeps_the_assignments_of_each_spec_class_a_table_holds(tmp_path):
+    # WorkerSpec is held by a table and SiteSpec by none: the first's assignment is kept, though it is not one of
+    # the three classes once named by hand.
+    tables = (
+        EntityNode(
+            name="harvester_workers",
+            map_id="m",
+            derived_from="v",
+            spec_class="WorkerSpec",
+            tables=["Harvester_Workers"],
+        ),
+    )
+    fragment = _build(tmp_path, entities=tables, workers=_WORKERS)
+    (row,) = [
+        row
+        for row in fragment.reach_graph
+        if row.owner == f"{PACKAGE}/workers.py::mark"
+    ]
+    assert {(one.path, *one.attrs) for one in row.assigns} == {("worker", "status")}
+    classes = panda_objects.column_classes(objects.table_classes(fragment.entities))
+    assert classes == {"WorkerSpec"}
 
 
 #: The tables JobSpec is held in, as the build learns them (EntityNode.spec_class).

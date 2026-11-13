@@ -34,10 +34,9 @@ one of these; every other arm read is counted, with its reasons:
 * **Same value** (:data:`~bamboo.codemap.models.AFTER_MADE_SAME_VALUE_WHERE`): the branch's row precondition asks the
   column for the very value the arm sets.
 
-An arm ``off_row`` holds for is not read (its row is never written from it).  Nor is an arm of a class outside
-:data:`~bamboo.codemap.panda.objects.COLUMN_CLASSES`: the reach record keeps no assignments of it, and "no key is set"
-cannot be seen -- ``updateWorkers`` gives the ``WorkerSpec()`` it makes an existing worker's key and ``pack``\\ s it
-from the row before writing it.
+An arm ``off_row`` holds for is not read (its row is never written from it).  Nor is an arm of a class no table holds
+(:func:`~bamboo.codemap.panda.objects.column_classes`): the reach record keeps no assignments of it, so "no key is
+set" cannot be seen.
 
 **What it rests on.**  What :mod:`bamboo.codemap.panda.offrow` and :func:`bamboo.codemap.objects.follow` rest on; and
 that a value written after the arm on a row made after it is the object's value then, which differs from the arm's
@@ -74,7 +73,6 @@ from bamboo.codemap.models import (
     SourceModule,
 )
 from bamboo.codemap.panda import mustprints, offrow
-from bamboo.codemap.panda.objects import COLUMN_CLASSES
 
 if TYPE_CHECKING:
     from bamboo.codemap.reach import ReachGraph
@@ -91,13 +89,13 @@ def attach(
     calls: C.Calls,
     record: Optional[ReachGraph],
 ) -> int:
-    """Set :attr:`Branch.after_made` on every branch of *fragment* of a class of
-    :data:`~bamboo.codemap.panda.objects.COLUMN_CLASSES` that ``off_row`` does not hold for; returns how many."""
+    """Set :attr:`Branch.after_made` on every branch of *fragment* of a class a table holds
+    (:func:`~bamboo.codemap.panda.objects.column_classes`) that ``off_row`` does not hold for; returns how many."""
     reader = _Reader(fragment, modules, calls, record)
     read = 0
     for junction in fragment.junctions:
         cls = junction.subject.rpartition(".")[0]
-        if cls not in COLUMN_CLASSES or not reader.tables_of(cls):
+        if not reader.tables_of(cls):
             continue
         for branch in junction.branches:
             if branch.off_row is not None:

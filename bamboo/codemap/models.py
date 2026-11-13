@@ -738,7 +738,7 @@ REWRITE_ROW = "row"
 #: attribute on an object -- an SQL arm's bind or text, a method run on the object, a value carried -- and its later
 #: writes are not read.
 REWRITE_NOT_ATTRIBUTE = "not_an_attribute_arm"
-#: The column is not one the reach record keeps assignments of (:data:`bamboo.codemap.panda.objects.COLUMN_CLASSES`).
+#: The column is not one the reach record keeps assignments of (:func:`bamboo.codemap.panda.objects.column_classes`).
 REWRITE_COLUMNS_UNRECORDED = "columns_unrecorded"
 #: A way up reached :data:`bamboo.codemap.panda.runs.MAX_DEPTH`, or met :data:`~bamboo.codemap.panda.runs.MAX_FUNCTIONS`
 #: functions.
