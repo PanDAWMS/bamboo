@@ -1207,15 +1207,23 @@ class _Reader:
         self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()
     ) -> Optional[list[_Way]]:
         """The ways of a literal holding values -- a list's, a tuple's or a set's elements, a dict's values and keys,
-        no ``*`` or ``**`` among them -- or of an ``if`` expression, read here, not asked of the carry, which says
-        only where a source or a part of it sits: each element's ways at its place (:func:`_at`) -- ``[i]`` of a list
-        or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key at ``[key]`` --;
-        either branch's of an ``if`` expression.  ``[taskSpec.site]`` holds ``taskSpec.site``, not ``taskSpec``.
-        ``None`` for another expression, an empty literal too (:func:`_empty_literal`)."""
+        no ``*`` or ``**`` among them -- or of an ``if`` expression or an ``or`` / ``and``, read here, not asked of the
+        carry, which says only where a source or a part of it sits: each element's ways at its place (:func:`_at`) --
+        ``[i]`` of a list or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key
+        at ``[key]`` --; either branch's of an ``if`` expression; each operand's of an ``or`` or an ``and``, whose
+        value is one of them (``spec.nFiles or 0`` holds ``spec.nFiles`` or ``0``).  ``[taskSpec.site]`` holds
+        ``taskSpec.site``, not ``taskSpec``.  ``None`` for another expression, an empty literal too
+        (:func:`_empty_literal`)."""
         if isinstance(expr, ast.IfExp):
             return self.read(expr.body, at, file, func, selves=selves) + self.read(
                 expr.orelse, at, file, func, selves=selves
             )
+        if isinstance(expr, ast.BoolOp):
+            return [
+                way
+                for one in expr.values
+                for way in self.read(one, at, file, func, selves=selves)
+            ]
         if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
             if not expr.elts or any(isinstance(one, ast.Starred) for one in expr.elts):
                 return None

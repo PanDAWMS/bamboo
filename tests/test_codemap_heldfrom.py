@@ -445,6 +445,17 @@ PLACED = {
                 spec = self.specs["a"]
                 if spec == "i":  # T9
                     self.i = 1  # R9
+                count = taskSpec.nFiles or 0
+                if count == 2:  # T10
+                    self.j = 1  # R10
+                both = taskSpec.first and jobSpec.PandaID
+                if both == 3:  # T11
+                    self.k = 1  # R11
+                total = 0
+                for f in jobSpec.Files:
+                    total += f.fsize or 0
+                if total == 4:  # T12
+                    self.m = 1  # R12
 
             def pseudo(self, jobSpec):
                 made = []
@@ -458,10 +469,14 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
     tmp_path: Path,
 ) -> None:
     """The shapes the carry answered with a source or a part of it: a list, a tuple and a dict literal, an ``if``
-    expression, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it sits; what the carry
-    alone says sits at a field's element (T7) is a value not read, not the task.  A field read as itself holds its
-    own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them."""
-    arms = tuple(("extractCommon", f"R{n}") for n in (1, 2, 4, 5, 6, 7, 8, 9))
+    expression, an ``or`` and an ``and``, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it
+    sits; what the carry alone says sits at a field's element (T7) is a value not read, not the task.  A field read
+    as itself holds its own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them.  An
+    ``or`` or an ``and`` is one of its operands (T10, T11), also where a ``+=`` adds it (T12,
+    ``nFiles += datasetSpec.nFiles or 0``)."""
+    arms = tuple(
+        ("extractCommon", f"R{n}") for n in (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    )
     fragment = _build(tmp_path, PLACED, arms)
 
     def held(marker: str, name: str) -> set[tuple]:
@@ -502,6 +517,17 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
         ("parameter", "jobSpec", (".PandaID",), ()),
     }
     assert held("T9", "spec") == {("self_field", "self.specs", ("['a']",), ())}
+    assert held("T10", "count") == {
+        ("parameter", "taskSpec", (".nFiles",), ()),
+        ("constant", "0", (), ()),
+    }
+    assert held("T11", "both") == {
+        ("parameter", "taskSpec", (".first",), ()),
+        ("parameter", "jobSpec", (".PandaID",), ()),
+    }
+    assert ("parameter", "jobSpec", (".Files", "[*]", ".fsize"), ()) in held(
+        "T12", "total"
+    )
 
 
 DICT_KEYS = {
