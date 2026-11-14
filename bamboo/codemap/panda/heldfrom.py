@@ -110,7 +110,7 @@ from bamboo.codemap.models import (
     WriteFrom,
 )
 from bamboo.codemap.panda import changes as changes_mod
-from bamboo.codemap.panda import flow, sqltext
+from bamboo.codemap.panda import flow, specwrites, sqltext
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 #: The classes ``self`` can be in the function a reading is in, where the call entering it says
@@ -2111,7 +2111,8 @@ class _Reader:
 
     def _stores(self) -> dict[str, list[tuple[str, str]]]:
         """``{field: [(file:line, class)]}``: each store of a field of the corpus -- ``class`` the method's whose
-        ``self`` it is stored on, empty for another object (``x.f = v``, ``setattr(x, "f", v)``)."""
+        ``self`` it is stored on, empty for another object (``x.f = v``, ``setattr(x, "f", v)``,
+        ``object.__setattr__(x, "f", v)``: :func:`callfacts.named_write`)."""
         if self._stored is None:
             self._stored = {}
             for file, tree in self.trees.items():
@@ -2123,14 +2124,13 @@ class _Reader:
                     elif isinstance(node, ast.AugAssign):
                         stored = [(node.target, "")]
                     elif (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "setattr"
-                        and len(node.args) == 3
-                        and isinstance(node.args[1], ast.Constant)
-                        and isinstance(node.args[1].value, str)
+                        (written := callfacts.named_write(node, me)) is not None
+                        and written.value is not None
+                        and written.holder is not None
+                        and isinstance(written.name, ast.Constant)
+                        and isinstance(written.name.value, str)
                     ):
-                        stored = [(node.args[0], node.args[1].value)]
+                        stored = [(written.holder, written.name.value)]
                     for target, named in stored:
                         if named:
                             holder, field = target, named
@@ -2209,26 +2209,38 @@ class _Reader:
                             stops.append(
                                 KeyStop(kind="bound", name=field, what="a loop's or a with's target", at=[f"{file}:{node.lineno}"])
                             )
-                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setattr":
-                        if len(node.args) == 3 and isinstance(node.args[0], ast.Name) and node.args[0].id == me:
-                            name = node.args[1]
+                    elif (written := callfacts.named_write(node, me)) is not None:
+                        if (
+                            written.value is not None
+                            and isinstance(written.holder, ast.Name)
+                            and written.holder.id == me
+                        ):
+                            name = written.name
                             if isinstance(name, ast.Constant):
                                 if name.value == field:
                                     bindings.append(
                                         self._binding(
-                                            file, node, owner_of(file, method), FIELD_SETATTR, node.args[2], inner, immutable
+                                            file,
+                                            node,
+                                            owner_of(file, method),
+                                            FIELD_SETATTR,
+                                            written.value,
+                                            inner,
+                                            immutable,
                                         )
                                     )
                             else:
-                                keyed = self._set_by_keyword(file, method, inner, node, field, family)
-                                if keyed is None:
-                                    stops.append(
-                                        KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
-                                    )
-                                elif keyed:
-                                    bindings.append(
-                                        _field_binding(file, node, owner_of(file, method), FIELD_SETATTR, keyed, inner, immutable)
-                                    )
+                                bound_by, stopped_by = self._set_by_name(
+                                    file,
+                                    method,
+                                    inner,
+                                    written,
+                                    field,
+                                    family,
+                                    immutable,
+                                )
+                                bindings += bound_by
+                                stops += stopped_by
                     elif isinstance(node, ast.Attribute) and node.attr == "__dict__" and isinstance(node.value, ast.Name) and node.value.id == me:
                         through_dict = True
                 if through_dict:
@@ -2316,6 +2328,72 @@ class _Reader:
         if handed is None:
             return None
         return self._keywords_handed(file, method, handed, field, family, 1)
+
+    def _set_by_name(
+        self,
+        file: str,
+        method: ast.AST,
+        inner: ast.AST,
+        written: callfacts.NamedWrite,
+        field: str,
+        family: list[tuple[str, ast.ClassDef]],
+        immutable: list[bool],
+    ) -> tuple[list[FieldBinding], list[KeyStop]]:
+        """What a write of ``self``'s attribute by a computed name binds *field* to: over a parameter's ``P.items()``,
+        each caller's keyword (:meth:`_set_by_keyword`); on a spec, as its role says (:func:`specwrites.write_at`) --
+        a ``__setattr__``'s write is its caller's assignment, binding nothing here; one in ``__init__``, in
+        ``__setstate__`` or over names read binds the value it writes; a copy read off the other object by the name it
+        sets binds that object's field of the name; a field the names leave out is not bound.  Else, or where the
+        names are not read and leave the field out, a stop: the name may be any."""
+        call, owner = written.call, owner_of(file, method)
+        stop = KeyStop(
+            kind="computed",
+            name=field,
+            what=ast.unparse(call),
+            at=[f"{file}:{call.lineno}"],
+        )
+        keyed = self._set_by_keyword(file, method, inner, call, field, family)
+        if keyed is not None:
+            return (
+                [
+                    _field_binding(
+                        file, call, owner, FIELD_SETATTR, keyed, inner, immutable
+                    )
+                ]
+                if keyed
+                else []
+            ), []
+        spec = specwrites.write_at(self.calls.types, file, inner, call)
+        if spec is not None and spec.role == specwrites.MECHANISM:
+            return [], []
+        if spec is None or spec.names is None:
+            return [], [stop]
+        if field not in spec.names:
+            return [], ([stop] if spec.reason else [])
+        assert written.value is not None
+        if spec.role in (specwrites.CONSTRUCT, specwrites.RESTORE, specwrites.NAMES):
+            return [
+                self._binding(
+                    file, call, owner, FIELD_SETATTR, written.value, inner, immutable
+                )
+            ], []
+        copies = (
+            _copied_values(inner, written.value) if spec.role == specwrites.COPY else []
+        )
+        if copies and all(
+            len(one.args) > 1 and ast.dump(one.args[1]) == ast.dump(written.name)
+            for one in copies
+        ):
+            # Read off the other object by the name it is set by: that object's field of the name.
+            ways: list[_Way] = []
+            for copied in copies:
+                ways += self._of_field(
+                    self._safely(copied.args[0], call, file, inner), field
+                )
+            return [
+                _field_binding(file, call, owner, FIELD_SETATTR, ways, inner, immutable)
+            ], []
+        return [], [stop]
 
     def _keywords_handed(
         self,
@@ -2674,6 +2752,25 @@ def _items_of_parameter(method: ast.AST, call: ast.Call) -> Optional[str]:
     if held is None or held.id not in _parameters(method) or _rebinds(method, held.id):
         return None
     return held.id
+
+
+def _copied_values(func: ast.AST, value: ast.expr) -> list[ast.Call]:
+    """The ``getattr(other, name)`` calls a copy by name writes (:data:`specwrites.COPY`): *value* itself, or each
+    binding of the local it names in *func* (``pack_gs``' ``val = getattr(gshare, attr)``)."""
+    if not isinstance(value, ast.Name):
+        values = [value]
+    elif isinstance(func, _FUNCTIONS):
+        values = list(pathcond.assigned_expressions(func).get(value.id, []))
+    else:
+        values = []
+    return [
+        one
+        for one in values
+        if isinstance(one, ast.Call)
+        and isinstance(one.func, ast.Name)
+        and one.func.id == "getattr"
+        and one.args
+    ]
 
 
 def _immutable(func: ast.AST, ways: list[_Way]) -> bool:

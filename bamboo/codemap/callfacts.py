@@ -1282,6 +1282,107 @@ def builtin_function_at(call: ast.Call) -> Optional[Function]:
     return BUILTIN_FUNCTIONS[called.id] if is_builtin_at(call, called.id) else None
 
 
+#: How a call writes an attribute by a name it is handed (:class:`NamedWrite`): the builtin function
+#: (``setattr(x, n, v)``, ``delattr(x, n)``), the method on the object (``x.__setattr__(n, v)``), read off a class
+#: (``object.__setattr__(x, n, v)``, ``C.__setattr__(x, n, v)``), or the next class's past the method's own
+#: (``super().__setattr__(n, v)``).
+NAMED_BUILTIN, NAMED_BOUND, NAMED_OFF_CLASS, NAMED_SUPER = (
+    "builtin",
+    "bound",
+    "off_class",
+    "super",
+)
+
+
+class NamedWrite(NamedTuple):
+    """A call setting or deleting an attribute of an object by a name it is handed -- the one reading of every reader
+    that asks which attribute a call writes: the field records, the stores of a field, the reach record's stores,
+    what may change an object, and a spec's writes by a computed name.
+
+    Which ``__setattr__`` runs is the reader's to say from *form*: the object's class's for :data:`NAMED_BUILTIN` and
+    :data:`NAMED_BOUND`, ``object``'s where :data:`NAMED_OFF_CLASS` reads it off ``object`` -- around a spec's own
+    ``__setattr__``, which records what changed -- the named class's for another class, and the next class's past
+    the method's own for :data:`NAMED_SUPER`.  Whether ``setattr`` is the builtin there is the reader's too
+    (:meth:`calls.Types.is_builtin`)."""
+
+    call: ast.Call
+    form: str
+    #: The object written: the method's first parameter for ``super()`` where the reader names it, else ``None``.
+    holder: Optional[ast.expr]
+    name: ast.expr
+    #: The value set; ``None`` for a delete.
+    value: Optional[ast.expr]
+    #: Where *name* is among the call's arguments.
+    position: int
+    #: The class it is read off, for :data:`NAMED_OFF_CLASS` (``object``, ``JobSpec``, ``type(x)``).
+    off: Optional[ast.expr] = None
+
+    @property
+    def deletes(self) -> bool:
+        return self.value is None
+
+    @property
+    def around_own(self) -> bool:
+        """Whether it runs ``object.__setattr__``, not the one the object's class may define."""
+        return isinstance(self.off, ast.Name) and self.off.id == "object"
+
+
+def named_write(call: ast.AST, me: Optional[str] = None) -> Optional[NamedWrite]:
+    """The attribute *call* sets or deletes by a name it is handed (:class:`NamedWrite`), if it is such a call, with
+    exactly the arguments the write takes, none spread and no keywords.  *me*, the first parameter of the method the
+    call is in, is the object ``super().__setattr__`` writes."""
+    if (
+        not isinstance(call, ast.Call)
+        or call.keywords
+        or any(isinstance(one, ast.Starred) for one in call.args)
+    ):
+        return None
+    called, args = call.func, call.args
+    if isinstance(called, ast.Name) and called.id in ("setattr", "delattr"):
+        sets = called.id == "setattr"
+        if len(args) != (3 if sets else 2):
+            return None
+        return NamedWrite(
+            call, NAMED_BUILTIN, args[0], args[1], args[2] if sets else None, 1
+        )
+    if not isinstance(called, ast.Attribute) or called.attr not in (
+        "__setattr__",
+        "__delattr__",
+    ):
+        return None
+    sets = called.attr == "__setattr__"
+    taken = 2 if sets else 1
+    receiver = called.value
+    if (
+        isinstance(receiver, ast.Call)
+        and isinstance(receiver.func, ast.Name)
+        and receiver.func.id == "super"
+        and not receiver.args
+    ):
+        if len(args) != taken:
+            return None
+        holder = ast.Name(id=me, ctx=ast.Load()) if me else None
+        return NamedWrite(
+            call, NAMED_SUPER, holder, args[0], args[1] if sets else None, 0
+        )
+    if len(args) == taken + 1:
+        # One argument more than the method on an object takes: read off a class, the object handed first.
+        return NamedWrite(
+            call,
+            NAMED_OFF_CLASS,
+            args[0],
+            args[1],
+            args[2] if sets else None,
+            1,
+            receiver,
+        )
+    if len(args) == taken:
+        return NamedWrite(
+            call, NAMED_BOUND, receiver, args[0], args[1] if sets else None, 0
+        )
+    return None
+
+
 def picked(function: Function, call: ast.Call) -> tuple[list[ast.expr], list[ast.expr]]:
     """For a :data:`ONE` call: the arguments whose element the value may be, and the arguments it may be itself --
     ``([it], [default])`` for ``next(it, default)``, ``([xs], [])`` for ``max(xs)``, ``([], [a, b])`` for ``max(a,

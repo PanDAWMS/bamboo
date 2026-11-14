@@ -2487,7 +2487,9 @@ def _calls_in(func: ast.AST) -> Iterator[tuple[ast.Call, str]]:
 def _stores_in(func: ast.AST) -> Iterator[tuple[ast.Attribute | ast.Call, ast.expr, Optional[ast.expr]]]:
     """``(store, name, value)`` for each attribute *func* stores itself -- ``x.a = v``, ``x.a += v``, ``x.a: T = v``,
     an ``x.a`` an unpacking or a ``for`` binds (*value* ``None``), and ``setattr(x, name, v)``: where Python calls
-    ``type(x).__setattr__`` (:meth:`calls.Calls.stored`)."""
+    ``type(x).__setattr__`` (:meth:`calls.Calls.stored`) with no call naming it.  A ``__setattr__`` the code calls
+    itself (:func:`callfacts.named_write`'s other forms) is a call the placing reads: ``object.__setattr__(self, a,
+    v)`` runs ``object``'s, around a spec's own."""
     for node in C.own_nodes(func):
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
             statement = getattr(node, "parent", None)
@@ -2498,13 +2500,11 @@ def _stores_in(func: ast.AST) -> Iterator[tuple[ast.Attribute | ast.Call, ast.ex
             )
             yield node, ast.Constant(value=node.attr), value
         elif (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "setattr"
-            and len(node.args) == 3
-            and not node.keywords
+            (written := callfacts.named_write(node)) is not None
+            and written.form == callfacts.NAMED_BUILTIN
+            and written.value is not None
         ):
-            yield node, node.args[1], node.args[2]
+            yield written.call, written.name, written.value
 
 
 def _operations_in(

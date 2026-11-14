@@ -6117,8 +6117,11 @@ WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
 
 
 #: How a :class:`FieldBinding` binds the field: ``self.f = v`` (with a tuple target at any depth), ``self.f: T = v``,
-#: ``self.f += v``, ``setattr(self, "f", v)`` -- or ``setattr(self, key, value)`` in a ``for key, value in
-#: P.items()`` where a caller hands ``f`` among P's keywords -- ``f = v`` in the class's body.
+#: ``self.f += v``, ``setattr(self, "f", v)`` in any spelling (``object.__setattr__(self, "f", v)``,
+#: :func:`bamboo.codemap.callfacts.named_write`) -- or by a computed name: ``setattr(self, key, value)`` in a ``for
+#: key, value in P.items()`` where a caller hands ``f`` among P's keywords, a spec's write the names of which hold
+#: ``f`` (:mod:`bamboo.codemap.panda.specwrites`: ``__init__``'s first value, a copy of another object's ``f``) --
+#: ``f = v`` in the class's body.
 FIELD_ASSIGN = "assign"
 FIELD_ANNOTATED = "annotated"
 FIELD_AUGMENTED = "augmented"

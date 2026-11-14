@@ -17,6 +17,7 @@ from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
     Branch,
+    FieldFrom,
     GuardFrom,
     HeldSource,
     JunctionNode,
@@ -2294,3 +2295,112 @@ def test_a_way_through_a_factory_reads_the_changes_of_the_family_the_factory_han
     }
     assert changed("brokered") == {store["# B"]}
     assert changed("watched") == {store["# D"]}
+
+
+FIELDS_SPEC = "pandaserver/taskbuffer/JediTaskSpec.py"
+
+FIELDS = {
+    FIELDS_SPEC: """\
+        class JediTaskSpec(object):
+            _attributes = ("jediTaskID", "status")
+            _renames = {"jediTaskID": "status", "status": "jediTaskID"}
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)  # INIT
+                object.__setattr__(self, "datasetSpecList", [])  # LIST
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)  # MECHANISM
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    attr = self._attributes[i]
+                    val = values[i]
+                    object.__setattr__(self, attr, val)  # PACK
+
+            def copyAttributes(self, oldTaskSpec):
+                for attr in self._attributes:
+                    self.__setattr__(attr, getattr(oldTaskSpec, attr))  # COPY
+
+            def copyRenamed(self, other):
+                for attr in self._attributes:
+                    renamed = self._renames[attr]
+                    val = getattr(other, attr)
+                    setattr(self, renamed, val)  # RENAMED
+        """,
+}
+
+
+@pytest.fixture(scope="module")
+def spec_fields(tmp_path_factory: pytest.TempPathFactory) -> dict[str, FieldFrom]:
+    """The FieldFroms of the spec's fields, read as the build reads them."""
+    tmp_path: Path = tmp_path_factory.mktemp("fields")
+    modules = []
+    for rel, text in FIELDS.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(text))
+        parsed = calls_mod.parsed(path)
+        assert parsed is not None
+        _source, tree = parsed
+        modules.append(
+            SourceModule(
+                package="pandaserver",
+                rel_path=rel,
+                tree=tree,
+                source=textwrap.dedent(text),
+                blob_sha=blob_sha(text),
+            )
+        )
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    assert calls is not None
+    trees = {module.rel_path: module.tree for module in modules}
+    with sql.across_calls(calls):
+        attributor = attribution.SpecAttributor(
+            progress.spec_attributes(modules), attribution.class_bases(modules)
+        )
+        sites = sqlwrite.read_site_nodes(
+            sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+        )
+        record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        reader = heldfrom._Reader(calls, record, sites, set(), trees)
+        return {
+            field: reader._field_from(f"{FIELDS_SPEC}::JediTaskSpec", field)
+            for field in ("status", "datasetSpecList")
+        }
+
+
+def test_a_field_a_spec_sets_around_its_own_setattr_is_bound(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``object.__setattr__(self, "datasetSpecList", [])`` binds the field as ``setattr`` does
+    (:func:`callfacts.named_write`); a computed name binds as the spec's write of it says (:mod:`specwrites`):
+    ``__init__``'s first value, a copy's other object's field of the name, nothing for ``__setattr__``'s own write
+    -- its caller's assignment -- and a field the names leave out is not bound by them."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_SPEC}:{_line(FIELDS_SPEC, marker, FIELDS)}"
+
+    listed = spec_fields["datasetSpecList"]
+    assert [(one.at, one.how) for one in listed.bindings] == [(at("LIST"), "setattr")]
+    assert listed.stops == []
+    status = spec_fields["status"]
+    assert [(one.at, one.how) for one in status.bindings] == [
+        (at("INIT"), "setattr"),
+        (at("COPY"), "setattr"),
+    ]
+    (first,), (copied,) = (one.sources for one in status.bindings)
+    assert (first.kind, first.name) == ("constant", "None")
+    assert (copied.kind, copied.name, copied.steps) == (
+        "parameter",
+        "oldTaskSpec",
+        [".status"],
+    )
+    # ``pack`` sets every column from the row: not read here yet, the name may be any.
+    # A copy read off the other object by another name than it sets (``WorkQueue``'s ``attr_wq``): the name may be
+    # any of the other object's.
+    assert [(stop.kind, stop.at) for stop in status.stops] == [
+        ("computed", [at("PACK")]),
+        ("computed", [at("RENAMED")]),
+    ]

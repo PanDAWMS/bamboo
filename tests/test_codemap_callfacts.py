@@ -915,3 +915,76 @@ def test_object_getattribute_on_the_class_is_read_as_getattr_where_object_is_the
         function = callfacts.builtin_function(types, file, func, call)
         assert (function.gives if function is not None else None) == expected
         assert callfacts.builtin_function_at(call) == function
+
+
+def _named(text: str, me: str | None = None) -> tuple | None:
+    written = callfacts.named_write(ast.parse(text, mode="eval").body, me)
+    if written is None:
+        return None
+    return (
+        written.form,
+        ast.unparse(written.holder) if written.holder is not None else None,
+        ast.unparse(written.name),
+        ast.unparse(written.value) if written.value is not None else None,
+        written.position,
+        written.around_own,
+    )
+
+
+def test_a_named_write_is_each_spelling_of_setting_an_attribute_by_a_name() -> None:
+    """One reading for every reader asking which attribute a call writes: the builtin, the method on the object, the
+    method read off a class -- ``object``'s goes around a spec's own -- and ``super()``'s, whose object is the
+    method's first parameter where the reader names it."""
+    assert _named("setattr(x, 'a', v)") == ("builtin", "x", "'a'", "v", 1, False)
+    assert _named("delattr(x, n)") == ("builtin", "x", "n", None, 1, False)
+    assert _named("x.__setattr__('a', v)") == ("bound", "x", "'a'", "v", 0, False)
+    assert _named("x.__delattr__('a')") == ("bound", "x", "'a'", None, 0, False)
+    assert _named("object.__setattr__(self, attr, val)") == (
+        "off_class",
+        "self",
+        "attr",
+        "val",
+        1,
+        True,
+    )
+    assert _named("JobSpec.__setattr__(job, 'a', v)") == (
+        "off_class",
+        "job",
+        "'a'",
+        "v",
+        1,
+        False,
+    )
+    assert _named("type(job).__setattr__(job, 'a', v)") == (
+        "off_class",
+        "job",
+        "'a'",
+        "v",
+        1,
+        False,
+    )
+    assert _named("super().__setattr__(name, value)", "self") == (
+        "super",
+        "self",
+        "name",
+        "value",
+        0,
+        False,
+    )
+    assert _named("super().__setattr__(name, value)") == (
+        "super",
+        None,
+        "name",
+        "value",
+        0,
+        False,
+    )
+    # Not a write the call can be: a missing value, a keyword, a spread, another method's name.
+    for text in (
+        "setattr(x, 'a')",
+        "setattr(x, 'a', value=v)",
+        "setattr(*args)",
+        "x.setattr('a', v)",
+        "f(x, 'a', v)",
+    ):
+        assert _named(text) is None

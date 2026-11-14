@@ -125,13 +125,27 @@ def writes_in(types: Types, file: str, func: ast.AST) -> list[NameWrite]:
     """The writes of a computed attribute name *func* makes itself on an object that may be a spec."""
     found: list[NameWrite] = []
     for node in own_nodes(func):
-        write = _write_of(node)
-        if write is None:
-            continue
-        read = _read(types, file, func, write)
+        read = write_at(types, file, func, node)
         if read is not None:
             found.append(read)
     return found
+
+
+def write_at(
+    types: Types, file: str, func: ast.AST, node: ast.AST
+) -> Optional[NameWrite]:
+    """The write of a computed attribute name *node*, in *func*'s own body, makes on an object that may be a spec;
+    ``None`` where it makes none."""
+    write = _write_of(node, _first_parameter(func))
+    return _read(types, file, func, write) if write is not None else None
+
+
+def _first_parameter(func: ast.AST) -> Optional[str]:
+    arguments = getattr(func, "args", None)
+    positional = (
+        [*arguments.posonlyargs, *arguments.args] if arguments is not None else []
+    )
+    return positional[0].arg if positional else None
 
 
 def columns_of(types: Types, file: str, cls: ast.ClassDef) -> frozenset[str]:
@@ -165,26 +179,16 @@ def _is_dict(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "__dict__"
 
 
-def _write_of(node: ast.AST) -> Optional[_Write]:
-    """The write *node* makes of an attribute by a name it is handed, if it is one."""
+def _write_of(node: ast.AST, me: Optional[str] = None) -> Optional[_Write]:
+    """The write *node* makes of an attribute by a name it is handed, if it is one: a call setting it
+    (:func:`callfacts.named_write`, *me* the object ``super()`` writes), or the object's ``__dict__``'s."""
+    named = callfacts.named_write(node, me)
+    if named is not None:
+        if named.value is None or named.holder is None:
+            return None
+        return _Write(node, named.holder, named.name, named.value, not named.around_own)
     if isinstance(node, ast.Call) and not node.keywords:
         called = node.func
-        if (
-            isinstance(called, ast.Name)
-            and called.id == "setattr"
-            and len(node.args) == 3
-        ):
-            return _Write(node, node.args[0], node.args[1], node.args[2], True)
-        if isinstance(called, ast.Attribute) and called.attr == "__setattr__":
-            if len(node.args) == 3:
-                untracked = (
-                    isinstance(called.value, ast.Name) and called.value.id == "object"
-                )
-                return _Write(
-                    node, node.args[0], node.args[1], node.args[2], not untracked
-                )
-            if len(node.args) == 2:
-                return _Write(node, called.value, node.args[0], node.args[1], True)
         if (
             isinstance(called, ast.Attribute)
             and called.attr == "update"
