@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from bamboo.codemap import reach
+from bamboo.codemap import pathcond, reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     AFTER_MADE_KEY_ELSEWHERE,
@@ -25,7 +25,7 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import aftermade, offrow, pathcond, sql
+from bamboo.codemap.panda import aftermade, offrow, sql
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import sqlwrite
@@ -61,6 +61,11 @@ class JobSpec:
 
 PROXY = """\
 from pkg.spec import JobSpec
+
+
+class Keeper:
+    def keep(self, job):
+        self.kept = job
 
 
 class DBProxy:
@@ -116,6 +121,16 @@ class DBProxy:
 
     def rekey(self, job, panda_id):
         job.PandaID = panda_id  # K_OLD
+
+    def handed_then_set(self, name, keeper):
+        job = JobSpec()
+        job.jobName = name
+        keeper.keep(job)  # H_KEEP
+        job.jobStatus = "first"
+        job.jobStatus = self.next_status()  # A_AGAIN
+
+    def next_status(self):
+        return "again"
 """
 
 ENTITIES = [
@@ -259,6 +274,19 @@ def test_a_row_object_a_packed_one_and_one_made_before_are_counted(
     late = _made(fragment, "A_LATE")
     assert late is not None and late.counted and late.why == [AFTER_MADE_MADE_BEFORE]
     assert late.lines == [_line("A_LATE") - 1]
+
+
+def test_a_place_that_may_make_the_row_comes_before_an_arm_whatever_is_assigned_between(
+    tmp_path: Path,
+) -> None:
+    # The hole may write the job's row; that the status is set again between does not unmake it.  The arm's line is a
+    # call's too (clonePandaJob's FileSpec defines __setattr__), so the record says the status is overwritten between.
+    arms = [*ARMS, ("DBProxy.handed_then_set", "A_AGAIN", "JobSpec.jobStatus")]
+    fragment = _build(tmp_path, arms, [_update_key("update_status", "A_ROW")])
+
+    again = _made(fragment, "A_AGAIN")
+    assert again is not None and again.counted and AFTER_MADE_MADE_BEFORE in again.why
+    assert again.lines == [_line("H_KEEP")]
 
 
 def test_an_sql_arm_is_counted_by_its_update_unless_its_where_asks_the_same_value(

@@ -18,7 +18,6 @@ import pytest
 
 from bamboo.codemap import reach
 from bamboo.codemap.calls import Calls, Types
-from bamboo.codemap.panda.pathcond import attach_parents
 from bamboo.codemap.panda.recognizers.sqlwrite import (
     _PathCarry,
     _Reading,
@@ -26,6 +25,7 @@ from bamboo.codemap.panda.recognizers.sqlwrite import (
     paths_under,
     unspelled_path,
 )
+from bamboo.codemap.pathcond import attach_parents
 
 SHAPES = {
     "a link written before the rows arrived": """

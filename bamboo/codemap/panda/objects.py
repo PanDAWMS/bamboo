@@ -108,7 +108,7 @@ import ast
 import re
 from typing import NamedTuple, Optional
 
-from bamboo.codemap import callfacts, reach
+from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -126,11 +126,16 @@ from bamboo.codemap.models import (
     WrittenValue,
 )
 from bamboo.codemap.objects import RETURN, ObjectReach, _under, follow, table_classes
-from bamboo.codemap.panda import mapentries, order, pathcond, specwrites, sql, sqltext
+from bamboo.codemap.panda import mapentries, order, specwrites, sql, sqltext
 from bamboo.codemap.panda.recognizers import progress
 
-#: The classes whose columns an assignment is kept for (tmaeno, 10-18: D1).
-COLUMN_CLASSES = ("JobSpec", "JediTaskSpec", "FileSpec")
+
+def column_classes(tables: dict[str, Optional[str]]) -> frozenset[str]:
+    """The classes whose columns an assignment is kept for: each spec class a table holds (*tables*, as
+    :func:`~bamboo.codemap.objects.table_classes` reads them).  Until RNW it was JobSpec, JediTaskSpec and FileSpec
+    by hand (tmaeno, 10-18: D1), so a made of another spec class found no assignment in the record."""
+    return frozenset(cls for cls in tables.values() if cls)
+
 
 #: How :func:`callfacts.meaning` reads a call that puts into its object (:meth:`_Values._fill`).
 _FILLING = (callfacts.LIBRARY, callfacts.BUILTIN, callfacts.ASSUMED)
@@ -447,12 +452,12 @@ class _Reader:
         self.names = reach._Names(calls.types)
         #: What a mapping holds, read from every name holding it (:meth:`reach._Receivers.keys`).
         self.receivers = reach._Receivers(calls, None)
-        declared = progress.spec_attributes(modules)
-        self.columns: frozenset[str] = frozenset().union(
-            *(declared.get(name, set()) for name in COLUMN_CLASSES)
-        )
         #: Each table, folded to lower case, and the spec class it holds (:func:`table_classes`).
         self.tables = tables or {}
+        declared = progress.spec_attributes(modules)
+        self.columns: frozenset[str] = frozenset().union(
+            *(declared.get(name, set()) for name in column_classes(self.tables))
+        )
         #: Each spec class's attributes by their lower-case spelling: a statement's column, case aside.
         self.attributes = {
             cls: {name.lower(): name for name in names}

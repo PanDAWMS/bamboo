@@ -50,7 +50,7 @@ import ast
 import re
 from typing import Iterable, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, evaluate, pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     Calls,
@@ -110,7 +110,7 @@ from bamboo.codemap.models import (
     WriteFrom,
 )
 from bamboo.codemap.panda import changes as changes_mod
-from bamboo.codemap.panda import evaluate, flow, pathcond, sqltext
+from bamboo.codemap.panda import flow, sqltext
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 #: The classes ``self`` can be in the function a reading is in, where the call entering it says

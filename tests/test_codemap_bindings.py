@@ -16,8 +16,8 @@ import textwrap
 
 import pytest
 
-from bamboo.codemap import calls, trace
-from bamboo.codemap.panda import pathcond, sql
+from bamboo.codemap import calls, pathcond, trace
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.recognizers import sqlwrite
 from bamboo.scripts.panda import score_trace
 

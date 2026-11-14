@@ -55,11 +55,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from bamboo.codemap import trace  # noqa: E402
+from bamboo.codemap import evaluate as SE  # noqa: E402
+from bamboo.codemap import (  # noqa: E402
+    pathcond,
+    reaching,
+    trace,  # noqa: E402
+)
 from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
-from bamboo.codemap.panda import evaluate as SE  # noqa: E402
-from bamboo.codemap.panda import fills, flow, pathcond, reaching  # noqa: E402
+from bamboo.codemap.panda import fills, flow  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402

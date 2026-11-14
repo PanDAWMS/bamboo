@@ -39,9 +39,8 @@ import weakref
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.panda import pathcond
 
 #: Why a call could not be placed.  Each is a class of the census, so the
 #: count of calls the walk could not enter says what would enter them.
@@ -230,6 +229,14 @@ def is_test_module(rel_path: str) -> bool:
     return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
 
 
+def left_out(rel_path: str) -> bool:
+    """True when *rel_path* is a file of a package the corpus reads only in part and not one of the files it reads
+    (:data:`callfacts.PACKAGE_FILES`): the corpus walks past it and a reading finds no tree for it, as though the pin
+    did not hold it."""
+    files = callfacts.PACKAGE_FILES.get(rel_path.partition("/")[0])
+    return files is not None and rel_path not in files
+
+
 def _roots_key(roots: dict[str, Path]) -> tuple:
     return tuple(sorted((package, str(root)) for package, root in roots.items()))
 
@@ -246,7 +253,7 @@ class Displayed(list):
     ``simTasks=[tmpTaskItem]`` (TaskBroker 259) under ``if simTasks is not None``.  An item read as a value is
     unknown (:func:`~bamboo.codemap.panda.sqleval.from_py` reads one so).  Equal to no string, number or ``None``;
     against a container its items would decide, so it raises the ``TypeError``
-    :func:`~bamboo.codemap.panda.pathcond.decided` reads as undecided.  Spelled as a list of as many ``...``: a
+    :func:`~bamboo.codemap.pathcond.decided` reads as undecided.  Spelled as a list of as many ``...``: a
     route's constants are kept as their reprs, a record, not words.
     """
 
@@ -506,6 +513,40 @@ def _function_binding(defs: Iterable[ast.stmt], name: str) -> Optional[ast.Funct
     """:func:`binding` among the function definitions of *defs*."""
     found = binding((node for node in defs if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), name)
     return found if isinstance(found, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+
+
+def module_of(file: str) -> str:
+    """The module *file* of the corpus is: ``pandacommon/pandautils/base.py`` is ``pandacommon.pandautils.base``."""
+    return file.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+
+
+def read_outside(module: str, *names: str) -> bool:
+    """Whether the definition *names* of *module* -- a function or a class, or a class and its method -- is one the
+    corpus holds and the map reads as outside it (:data:`callfacts.READ_OUTSIDE`): ``naive_utcnow`` of
+    ``pandacommon.pandautils.PandaUtils``, ``SpecBase``, ``pack`` of ``pandacommon.pandautils.base``.  A method of a
+    class read so is too, and so is all of a module the corpus does not read of a package it reads in part
+    (:func:`left_out`: ``pandacommon.pandalogger``), as it was before the package was in the corpus."""
+    held = [".".join((module, *names[:end])) for end in range(len(names) + 1)]
+    if any(one in callfacts.READ_OUTSIDE for one in held):
+        return True
+    return _in_module_left_out(held[-1])
+
+
+def _in_module_left_out(dotted: str) -> bool:
+    """Whether *dotted* lies in a module the corpus does not read of a package it reads in part.  Walked from the
+    package down, a module it reads holds definitions, a package it reads holds modules, and the first part that is
+    neither is a module left out; the packages the read files of panda-common sit in define nothing themselves."""
+    parts = dotted.split(".")
+    files = callfacts.PACKAGE_FILES.get(parts[0])
+    if files is None:
+        return False
+    for end in range(1, len(parts) + 1):
+        path = "/".join(parts[:end])
+        if f"{path}.py" in files:
+            return False
+        if f"{path}/__init__.py" not in files:
+            return True
+    return False
 
 
 def returns(func: ast.AST) -> list[ast.expr]:
@@ -931,7 +972,9 @@ class Calls:
 
     def _declared_in(self, file: str, cls: ast.ClassDef, name: str) -> Optional[Target]:
         node = _function_binding(cls.body, name)
-        return Target(file, node, cls) if node is not None else None
+        if node is None or read_outside(module_of(file), cls.name, name):
+            return None
+        return Target(file, node, cls)
 
     def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
         """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order."""
@@ -1452,7 +1495,7 @@ class Calls:
 
     def _module_member(self, file: str, name: str) -> Placed:
         tree = self.types.tree(file)
-        if tree is None:
+        if tree is None or read_outside(module_of(file), name):
             return Placed((), UNPLACED_OUTSIDE)
         node = binding(tree.body, name)
         if isinstance(node, ast.ClassDef):
@@ -2336,9 +2379,18 @@ def _unquoted(annotation: ast.expr) -> ast.expr:
             return annotation
     return annotation
 
+
+def _container(annotation: ast.expr) -> ast.expr:
+    """*annotation* unquoted, and ``None`` left out where one other member is left: ``list[A] | None`` and
+    ``Optional[list[A]]`` are ``list[A]``, since a loop over it or a subscript of it is on the container."""
+    members = _members(annotation)
+    return members[0] if len(members) == 1 else _unquoted(annotation)
+
+
 def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
-    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``."""
-    annotation = _unquoted(annotation)
+    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``, ``None`` left
+    out of a union (:func:`_container`)."""
+    annotation = _container(annotation)
     if not isinstance(annotation, ast.Subscript):
         return None
     wrapper = annotation.value
@@ -2655,7 +2707,7 @@ class Types:
             return self.walked[file][1]
         if file not in self.parsed:
             package, _, relative = file.partition("/")
-            root = self.roots.get(package)
+            root = None if left_out(file) else self.roots.get(package)
             held = parsed(root / relative) if root is not None and relative else None
             self.parsed[file] = held[1] if held is not None else None
         return self.parsed[file]
@@ -2673,12 +2725,13 @@ class Types:
         return self._files.get(id(module))
 
     def corpus_files(self) -> list[str]:
-        """Every module of the corpus, as the map spells a file; tests left out, by the build's rule (:func:`is_test_module`)."""
+        """Every module of the corpus, as the map spells a file; tests left out, by the build's rule (:func:`is_test_module`),
+        and the files of a package read in part that it does not read (:func:`left_out`)."""
         found: list[str] = []
         for package, root in sorted(self.roots.items()):
             for path in sorted(root.rglob("*.py")):
                 file = f"{package}/{path.relative_to(root)}"
-                if not is_test_module(file):
+                if not is_test_module(file) and not left_out(file):
                     found.append(file)
         return found
 
@@ -2722,12 +2775,14 @@ class Types:
         return None
 
     def imported_from_outside(self, file: str, name: str) -> bool:
-        """Whether *name* in *file* is imported from a module this corpus does not hold."""
+        """Whether *name* in *file* is imported from a module this corpus does not hold, or is a definition it holds
+        and reads as outside (:func:`read_outside`)."""
         held = self.imports(file).get(name)
         if held is None:
             return False
-        module = held[0]
-        return module.split(".")[0] not in self.roots
+        module, attribute = held
+        names = (attribute,) if attribute else ()
+        return module.split(".")[0] not in self.roots or read_outside(module, *names)
 
     def module_named(self, file: str, expression: ast.expr) -> Optional[str]:
         """The file of the module *expression* names in *file*, when it names one."""
@@ -2833,7 +2888,10 @@ class Types:
                 scope = self.enclosing_function(file, scope)
             node = binding((one for one in tree.body if isinstance(one, ast.ClassDef)), expression.id)
             if isinstance(node, ast.ClassDef):
-                return file, node
+                # ``WeightedLists``: the corpus holds it and reads it as a class outside it.
+                return (
+                    None if read_outside(module_of(file), node.name) else (file, node)
+                )
             held = self.imports(file).get(expression.id)
             if held is None:
                 return self._aliased(file, expression.id, depth)
@@ -3181,6 +3239,14 @@ class Types:
                 return True
         return False
 
+    def outside_method(self, file: str, cls: ast.ClassDef, name: str) -> bool:
+        """Whether *name* on an object of *cls* is, first in its order, a method the map reads as outside the corpus
+        (:func:`read_outside`): ``pack`` on a ``DataCarouselRequestSpec``, ``SpecBase``'s."""
+        for where, holder in self.mro(file, cls):
+            if _function_binding(holder.body, name) is not None:
+                return read_outside(module_of(where), holder.name, name)
+        return False
+
     def outside_bases(self, file: str, cls: ast.ClassDef) -> Optional[frozenset[tuple[str, str]]]:
         """``(module, name)`` of each base outside the corpus in *cls*'s order (:meth:`built_outside`'s), read through
         the imports (:meth:`library_class`); ``None`` where one cannot be read so -- ``class MySMTP(smtplib.SMTP)``
@@ -3235,8 +3301,11 @@ class Types:
         return frozenset(found)
 
     def _library(self, library: tuple[str, str]) -> bool:
+        """Whether *library*, ``(module, name)``, is a class outside the corpus -- or one it holds and reads as outside
+        (:func:`read_outside`: ``WeightedLists``) -- and none of typing's, collections' or the builtins'."""
         top = library[0].split(".")[0]
-        return top not in self.roots and top not in ("typing", "collections", "builtins")
+        outside = top not in self.roots or read_outside(*library)
+        return outside and top not in ("typing", "collections", "builtins")
 
     def annotated_libraries(self) -> frozenset[tuple[str, str]]:
         """``(module, name)`` of each name outside the corpus the corpus uses in an annotation: a parameter's, a
@@ -3703,7 +3772,8 @@ class Types:
         ``list(x)``, ``sorted(x)``, ``reversed(x)`` iterate what ``x`` does;
         ``enumerate(x)``'s second slot is ``x``'s element.  ``d.items()``,
         ``.values()`` and ``.keys()`` on a ``dict[K, V]`` are ``(K, V)``,
-        ``V`` and ``K``; a container is its element, a mapping its key.
+        ``V`` and ``K``; a container is its element, a mapping its key; ``None``
+        is left out of a union (:func:`_container`).
         """
         if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and len(iterable.args) == 1:
             if iterable.func.id in ("list", "sorted", "reversed", "tuple", "set", "frozenset") and not unpacked:
@@ -3732,7 +3802,7 @@ class Types:
         if declared is None:
             return None
         where, annotation = declared
-        annotation = _unquoted(annotation)
+        annotation = _container(annotation)
         if not isinstance(annotation, ast.Subscript):
             return None
         wrapper = annotation.value

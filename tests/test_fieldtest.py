@@ -602,6 +602,38 @@ def test_a_case_of_another_pin_does_not_run(tmp_path):
         F.run_case(home, _case(tmp_path, pin="other"), tmp_path / "batch", "P")
 
 
+def _pins(tmp_path: Path) -> tuple[Path, Path]:
+    """A case's own pin and a pin holding its files and one more package."""
+    own = tmp_path / "pin-own"
+    (own / "server").mkdir(parents=True)
+    (own / "server" / "a.py").write_text("x = 1\n")
+    (own / "server" / "b.py").write_text("y = 2\n")
+    pin = tmp_path / "pin-own-more"
+    (pin / "server").mkdir(parents=True)
+    (pin / "server" / "a.py").write_text("x = 1\n")
+    (pin / "server" / "b.py").write_text("y = 2\n")
+    (pin / "common").mkdir()
+    (pin / "common" / "c.py").write_text("z = 3\n")
+    return own, pin
+
+
+def test_a_pin_holding_every_file_of_the_case_pin_and_more_misses_none(tmp_path):
+    own, pin = _pins(tmp_path)
+    assert F.pin_misses(own, pin) == ()
+
+
+def test_a_pin_changing_a_file_of_the_case_pin_misses_it(tmp_path):
+    own, pin = _pins(tmp_path)
+    (pin / "server" / "a.py").write_text("x = 2\n")
+    assert F.pin_misses(own, pin) == ("server/a.py differs",)
+
+
+def test_a_pin_dropping_a_file_of_the_case_pin_misses_it(tmp_path):
+    own, pin = _pins(tmp_path)
+    (pin / "server" / "b.py").unlink()
+    assert F.pin_misses(own, pin) == ("server/b.py missing",)
+
+
 def test_a_case_whose_pin_is_unsettled_runs_only_on_a_pair_named_for_it(tmp_path):
     home = _home(tmp_path)
     _querier_tree(_pair(tmp_path, home))

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import ast
 
-from bamboo.codemap.panda import pathcond, values
+from bamboo.codemap import pathcond, values
 
 _SOURCE = '''
 import datetime

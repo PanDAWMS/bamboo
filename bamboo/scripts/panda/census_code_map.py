@@ -45,8 +45,8 @@ from typing import Any, Iterator, Optional
 import click
 
 from bamboo.codemap import callfacts
-from bamboo.codemap.panda.pathcond import targets_of
 from bamboo.codemap.panda.plugin import PACKAGES
+from bamboo.codemap.pathcond import targets_of
 
 # Packages that make up the PanDA map.  Both ship in one distribution
 # (``panda-server-source``), so a single version stamps the whole census.

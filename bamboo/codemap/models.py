@@ -504,7 +504,7 @@ class HistoryPair(BaseModel):
     on the way to the arm.  The call at ``call`` is in one pass with the
     point: one runs after the other with no run started between them and no
     turn of a loop holding both, read by
-    :func:`~bamboo.codemap.panda.reaching.reaching`.  The walk up stops on
+    :func:`~bamboo.codemap.reaching.reaching`.  The walk up stops on
     each way at the first level with a pair, and does not take a way the
     values its calls hand rule out (``setErrDiag(diag)`` leaves ``append``
     False, so its append arm pairs only with callers handing it True); the
@@ -675,6 +675,26 @@ class OffRow(BaseModel):
     )
 
 
+class Unchanged(BaseModel):
+    """What shows an arm leaves its column as the row held it -- see :attr:`Branch.unchanged`."""
+
+    name: str = Field(
+        description=(
+            "The name the arm's value is (``runtime(taskStatus)``), bound at one place in its function: within one run "
+            "of that place it holds one value."
+        )
+    )
+    calls: list[int] = Field(
+        description=(
+            "The line of each flush call the arm's assignment reaches, sorted: each hands ``name`` to a precondition "
+            "on the column it has on every way, so it writes the row only where the column holds that value already."
+        )
+    )
+    terms: list[str] = Field(
+        description="Those preconditions, as their methods spell them (``status IN (:old___in)``), sorted.",
+    )
+
+
 #: Why an arm cannot leave its value on a row made before it (:attr:`AfterMade.by`): its object has no row yet; the
 #: statement makes the row it writes; the statement's own test asks the row for the value it sets.
 AFTER_MADE_NO_ROW_YET = "no_row_yet"
@@ -738,7 +758,7 @@ REWRITE_ROW = "row"
 #: attribute on an object -- an SQL arm's bind or text, a method run on the object, a value carried -- and its later
 #: writes are not read.
 REWRITE_NOT_ATTRIBUTE = "not_an_attribute_arm"
-#: The column is not one the reach record keeps assignments of (:data:`bamboo.codemap.panda.objects.COLUMN_CLASSES`).
+#: The column is not one the reach record keeps assignments of (:func:`bamboo.codemap.panda.objects.column_classes`).
 REWRITE_COLUMNS_UNRECORDED = "columns_unrecorded"
 #: A way up reached :data:`bamboo.codemap.panda.runs.MAX_DEPTH`, or met :data:`~bamboo.codemap.panda.runs.MAX_FUNCTIONS`
 #: functions.
@@ -856,10 +876,10 @@ class Branch(BaseModel):
     dominating the write, of what each early exit above it says (``not (X)``
     under an ``if X: return``, ``continue``, ``break`` or ``raise``; ending in
     ``  [at <its line>]`` where a name it reads is given a new value before the
-    write -- :func:`~bamboo.codemap.panda.pathcond.arm_condition`), the same of
+    write -- :func:`~bamboo.codemap.pathcond.arm_condition`), the same of
     the binding the value comes from, and of one entry for every other write of the same
     place that can replace the value before it is read
-    (:func:`~bamboo.codemap.panda.pathcond.replacements`): ``not (<the tests
+    (:func:`~bamboo.codemap.pathcond.replacements`): ``not (<the tests
     that write is under and this one is not>)``, ``not any(<them> for <target>
     in <iter>)`` where it sits in a loop this one is not in, ending in ``  [in
     <method>()]`` where a setter's own tests decide it, or in ``  [at <line>]``
@@ -1102,6 +1122,17 @@ class Branch(BaseModel):
             "where not proven: the arm may write its row, as every arm is read."
         ),
     )
+    unchanged: Optional[Unchanged] = Field(
+        default=None,
+        description=(
+            "Where every flush call the arm's assignment reaches writes the row only where the column already holds "
+            "the arm's value: the arm writes its row and leaves the column as it was "
+            "(:mod:`bamboo.codemap.panda.recognizers.flush`).  Only flush calls are read: a write the arm's object "
+            "reaches by another way is not.  A reader of a value the row holds skips the arm "
+            "(:func:`writes_its_value`).  ``None`` where not shown: the arm may change the column, as every arm is "
+            "read."
+        ),
+    )
     after_made: Optional[AfterMade] = Field(
         default=None,
         description=(
@@ -1110,6 +1141,13 @@ class Branch(BaseModel):
             "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
+
+
+def writes_its_value(branch: Branch) -> bool:
+    """Whether the arm may leave its value in its column where the row held another: neither is its object written to
+    no row (:attr:`Branch.off_row`), nor does every write it reaches take the row only where the column holds its
+    value already (:attr:`Branch.unchanged`).  What a reader of a value the row holds reads an arm by."""
+    return branch.off_row is None and branch.unchanged is None
 
 
 #: A hole in a frame -- see :attr:`Branch.value_frames`.
@@ -2913,7 +2951,7 @@ class CallStop(BaseModel):
 class SwallowingManager(BaseModel):
     """A context manager of the corpus that may swallow what its ``with`` body raised.
 
-    The map's flow (:mod:`bamboo.codemap.panda.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
+    The map's flow (:mod:`bamboo.codemap.reaching`, :mod:`~bamboo.codemap.panda.flow`) does not read that
     way on: a raise in a ``with`` body goes to the handlers around the ``with``, never past it.  So one such
     manager makes the flow's "no way" answers unsafe -- a reader would rule out a statement that ran -- and the
     ``with-exits-are-read`` gate fails on each.  Not a node: a check of the flow's premise over the corpus.
@@ -2964,7 +3002,7 @@ class HandlerMark(BaseModel):
     """What one ``except`` handler prints when it is entered: the marks a run's log shows it was entered by.
 
     A reader of a run hands the map's flow and walker the handlers the run entered
-    (:func:`bamboo.codemap.panda.reaching.catching_try`), and it knows them by these marks: a statement of
+    (:func:`bamboo.codemap.reaching.catching_try`), and it knows them by these marks: a statement of
     the handler that prints (:attr:`prints`, rows of the owner's :class:`FunctionPrintsNode`) or a call that
     prints on every way (:attr:`calls`).  Any of them in the run says the handler was entered, since they
     are in its body.  Where every way from the handler's entry to its exits -- a ``return`` or ``raise`` of
@@ -3405,7 +3443,7 @@ class HeldSource(KeySource):
             "On a GuardFrom's or ParameterFrom's way: each call outside the corpus the value went through as its one "
             "positional argument, in the order run (``json.loads`` at ``pandajedi/jedirefine/RefinerUtils.py:34``), "
             "with what its value is of the value.  A literal that one of the standard functions the map runs raises "
-            "on (:data:`bamboo.codemap.panda.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
+            "on (:data:`bamboo.codemap.evaluate.RUNS`: ``json.loads('')``, ``int(None)``) goes no further: "
             "not a way, a stop (``raises``)."
         ),
     )
@@ -3606,6 +3644,14 @@ class KeyFrom(BaseModel):
             "writes that subject's values on -- a junction's :attr:`Branch.line` or one of its "
             ":attr:`Branch.other_lines`: a junction is one per subject and owner, its branches gathered from every "
             "statement writing it, and these say which are this statement's."
+        ),
+    )
+    through_holes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where an assignment *writes* or the binds hold is on *object* only perhaps: the holes its object met "
+            "(``owner:line why``) and where it stopped, *object* having come out of a call "
+            "(:func:`bamboo.codemap.objects.assigns_reaching`).  Empty where each is known to be on it."
         ),
     )
     unread: str = Field(
@@ -6321,7 +6367,7 @@ class EnteredSite(BaseModel):
     conditions: list[str] = Field(
         default_factory=list,
         description=(
-            ":func:`~bamboo.codemap.panda.pathcond.arm_condition` of that statement's node in the caller: the caller's "
+            ":func:`~bamboo.codemap.pathcond.arm_condition` of that statement's node in the caller: the caller's "
             "tests, its marks the caller's lines.  They hold when that statement runs -- a hand-off's when it hands, "
             "not when what it handed runs."
         ),
@@ -6856,7 +6902,7 @@ class LineOrder(BaseModel):
 
     Before on one run: on one pass, by a way through the function with no
     jump away from the second line (``continue``, ``return``, ``break``) and
-    no test parting the two (:func:`bamboo.codemap.panda.pathcond.parted`);
+    no test parting the two (:func:`bamboo.codemap.pathcond.parted`);
     or on a later pass of a loop holding both, by a way round it whose
     passes no test parts.  Most of it the lines' order says, and only the
     rest is here.  A line can run before another on one pass where its
@@ -6904,6 +6950,34 @@ class ClearedLines(BaseModel):
     )
     line: int = Field(description=f"Where the change was made: a line, or {ENTRY_LINE} for before the function was entered.")
     lines: list[int] = Field(description=f"Each line, or {EXIT_LINE} for its normal exit, every way to which from :attr:`line` passes the reset.")
+
+
+class OverwrittenLines(BaseModel):
+    """Lines of a function every way between which passes another assignment of a column on an object.
+
+    ``updateWorkers`` sets the worker's attributes from what the harvester sent
+    at 860 (``setattr(worker_spec, key, val)``) and ``worker_spec.lastUpdate``
+    at 861, before its ``INSERT`` or ``UPDATE``: what 860 gave ``lastUpdate``
+    is not what either writes.  An overwrite is ``path.column = value``: one
+    column, assigned, on a path naming one object (no ``[]``).
+    """
+
+    path: str = Field(description="The object assigned on, as a path of the function.")
+    columns: list[str] = Field(
+        description="The attributes assigned, each by these overwrites."
+    )
+    line: int = Field(
+        description=(
+            f"Where the change was made: a line, or {ENTRY_LINE} for before the "
+            "function was entered."
+        )
+    )
+    lines: list[int] = Field(
+        description=(
+            f"Each line, or {EXIT_LINE} for its normal exit, every way to which from "
+            ":attr:`line` passes an overwrite."
+        )
+    )
 
 
 class ReachNode(BaseNode):
@@ -7002,6 +7076,10 @@ class ReachNode(BaseNode):
     cleared: list[ClearedLines] = Field(
         default_factory=list,
         description="The lines every way between which passes a reset of an object's changed attributes.",
+    )
+    overwritten: list[OverwrittenLines] = Field(
+        default_factory=list,
+        description="The lines every way between which passes another assignment of a column on an object.",
     )
     anchor: Optional[Anchor] = None
 

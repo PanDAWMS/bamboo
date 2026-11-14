@@ -21,9 +21,9 @@ import builtins
 import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
+from bamboo.codemap import evaluate
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.panda import evaluate, sqleval
-from bamboo.codemap.panda.reaching import reaching, reaching_exit
+from bamboo.codemap.reaching import reaching, reaching_exit
 
 
 def functions_with_owner(
@@ -798,7 +798,7 @@ def negates(test: str, other: str) -> bool:
     (noNewJob)  [noNewJob := ...]`` are one negation of ``noNewJob``: a bare
     name's annotation (:func:`_substitute_bare_name`) says what the name is
     bound to and is left out.  A comparison is the negation of its opposite
-    (:func:`sqleval.positive`): ``setNumSlotsForWP`` builds its ``DELETE``
+    (:func:`positive`): ``setNumSlotsForWP`` builds its ``DELETE``
     under ``if numSlots == -1`` and runs it under the ``else`` of ``if
     numSlots != -1``.  A condition that does not parse is compared as written.
     """
@@ -814,9 +814,30 @@ def _read_test(condition: str) -> str:
         return text
 
 
+#: A comparison and the one it is the negation of, for every value: ``a not in b`` is ``not (a in b)``.  Not ``<``
+#: and ``>=``, which are not (a set's order, a NaN).
+_OPPOSITES = {ast.NotIn: ast.In, ast.NotEq: ast.Eq, ast.IsNot: ast.Is}
+
+
+def positive(test: ast.expr) -> tuple[ast.expr, bool]:
+    """*test* as the comparison it is the negation of, and True -- ``a in b`` for ``a not in b`` -- else *test* and
+    False.  Read by :func:`negates` and by :func:`bamboo.codemap.panda.sqleval._fact_key`."""
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and type(test.ops[0]) in _OPPOSITES
+    ):
+        return ast.Compare(
+            left=test.left,
+            ops=[_OPPOSITES[type(test.ops[0])]()],
+            comparators=test.comparators,
+        ), True
+    return test, False
+
+
 def _negations_read(test: ast.expr) -> ast.expr:
     """*test* with a comparison's opposite read as ``not`` of it, and ``not not`` as nothing."""
-    form, opposite = sqleval.positive(test)
+    form, opposite = positive(test)
     if opposite:
         return ast.UnaryOp(op=ast.Not(), operand=form)
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
@@ -844,7 +865,7 @@ def decided(test: ast.expr, values: dict[str, object]) -> object:
     """``True`` or ``False`` where *values* settle *test*, else :data:`UNDECIDED`.
 
     The test read by the one evaluator a run's reader reads it by
-    (:func:`bamboo.codemap.panda.evaluate.truth`), its names holding *values*
+    (:func:`bamboo.codemap.evaluate.truth`), its names holding *values*
     -- the constants a caller hands a flag parameter, by its bare name.
 
     A test that reads none of those names is decided by its literals alone,
@@ -1166,7 +1187,7 @@ def _exits_rendered(node: ast.AST) -> dict[str, list[ast.stmt]]:
         return {}
     found: dict[str, list[ast.stmt]] = {}
     for implied, exit_if in sorted(_early_exit_ifs(node), key=lambda one: one[1].lineno):
-        if _given_between(func, exit_if, node):  # type: ignore[arg-type]
+        if _given_between(func, exit_if, node):
             implied = f"{implied}  [at {exit_if.lineno}]"
         else:
             implied = _substitute_bare_name(implied, exit_if.test, func)  # type: ignore[attr-defined]
@@ -1288,6 +1309,18 @@ def _early_exit_ifs(node: ast.AST) -> list[tuple[str, ast.stmt]]:
     return found
 
 
+def early_exit_ifs(node: ast.AST) -> list[tuple[ast.If, bool]]:
+    """The ``if`` statements before *node*, in its blocks out to its function, that leave on one side
+    (:func:`enclosing_guards`' early exits), each with the side that leaves: ``True`` where its body does, so *node*
+    runs only where the test is false (``if not job: continue``), ``False`` where its ``else`` does, so *node* runs
+    only where the test is true."""
+    return [
+        (statement, _jumps(statement.body))
+        for _implied, statement in _early_exit_ifs(node)
+        if isinstance(statement, ast.If)
+    ]
+
+
 def _tested_by(node: ast.AST, exits: bool) -> list[tuple[str, Optional[ast.stmt]]]:
     """*node*'s conditions, each with the statement whose test it renders.
 
@@ -1342,7 +1375,7 @@ def _apart(one: ast.AST, other: ast.AST) -> bool:
 
 
 def _given_between(
-    func: ast.AST, earlier: ast.stmt, later: ast.stmt, ends: tuple[ast.AST, ...] = ()
+    func: ast.AST, earlier: ast.stmt, later: ast.AST, ends: tuple[ast.AST, ...] = ()
 ) -> bool:
     """Whether a name *earlier*'s test reads is given a new value on the way to *later*'s test.
 
@@ -1361,6 +1394,21 @@ def _given_between(
         for name in _names_in(earlier.test)  # type: ignore[attr-defined]
         for site in rebinds.get(name, ())
     )
+
+
+def given_between(func: ast.AST, earlier: ast.If, later: ast.AST) -> bool:
+    """Whether a name *earlier*'s test reads is given a new value in *func* on the way from that test to *later*.
+
+    Asked of an early exit :func:`early_exit_ifs` gives: where it is, the exit's test describes its names as they
+    were when it ran, not as they are at *later*, and :func:`exits_above` reads it ``  [at <the exit's line>]``.
+    A new value is a binding, ``x[k] = v`` or a call of a method on the name (``x.add(v)``), as :func:`_rebinds`
+    reads them, below the end of the test and above *later* by line, in no arm a pass through the test or *later*
+    cannot enter.  Wide on purpose: every name the test reads counts (``self`` in ``name not in self.allowed``, and
+    so ``self.log(name)``), and a call counts whether it changes the name or not.  By line, so not across the
+    passes of a loop: ``name = self.next_one()`` below *later* in a ``while`` holding *later* but not the exit
+    gives ``name`` a new value for the next pass, and is not counted.
+    """
+    return _given_between(func, earlier, later)
 
 
 def parted(
@@ -1605,7 +1653,7 @@ def clause_binding(clause: ast.comprehension, name: str) -> Optional[Binding]:
 
 def held_at(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, at: ast.AST) -> Held:
     """What the local *name* holds where *at* reads it -- an ``if`` or ``while`` at its test: the bindings of it
-    that can reach the read (:func:`bamboo.codemap.panda.reaching.reaching`, the function's entry among them).
+    that can reach the read (:func:`bamboo.codemap.reaching.reaching`, the function's entry among them).
 
     One binding of a literal reaching it is the value whatever ran before: ``isOK = True`` four lines above
     ``if not toSkip: if isOK:``.  A binding outside a loop around *at* is the value as long as nothing in the loop
@@ -1803,7 +1851,7 @@ def surviving_writes(
     within one of those shapes would keep a tuple-bound ``res`` alive against
     the assignment that replaced it.
 
-    Two steps.  :func:`~bamboo.codemap.panda.reaching.reaching` follows the
+    Two steps.  :func:`~bamboo.codemap.reaching.reaching` follows the
     function the way it runs and keeps the writes that some path brings to
     the read with nothing overwriting them on the way; *rereads* add to what
     is there and overwrite nothing, *killers* overwrite and are never an

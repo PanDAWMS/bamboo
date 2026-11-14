@@ -27,7 +27,7 @@ from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
-from bamboo.codemap import evidence
+from bamboo.codemap import evidence, values
 from bamboo.codemap.models import (
     BIND_ALIAS,
     BIND_RESULT,
@@ -50,7 +50,7 @@ from bamboo.codemap.models import (
     required_values,
 )
 from bamboo.codemap.objects import STEPPED, _under
-from bamboo.codemap.panda import sql, values
+from bamboo.codemap.panda import sql
 from bamboo.codemap.panda.attribution import AMBIGUOUS_FORM
 from bamboo.codemap.panda.runs import HISTORY_KEYS
 
@@ -1833,7 +1833,7 @@ def implicit_dunders_reach_no_write(fragment: MapFragment) -> GateResult:
 def with_exits_are_read(fragment: MapFragment) -> GateResult:
     """(i) No context manager of the corpus swallows what its ``with`` body raised.
 
-    The premise of the map's flow (:mod:`bamboo.codemap.panda.flow`, :mod:`~bamboo.codemap.panda.reaching`): a
+    The premise of the map's flow (:mod:`bamboo.codemap.panda.flow`, :mod:`~bamboo.codemap.reaching`): a
     raise in a ``with`` body goes to the handlers around the ``with``, never on past it.  A manager that swallows
     -- a ``contextmanager`` handler around its ``yield`` that does not raise again, an ``__exit__`` that may
     return true, ``contextlib.suppress`` -- opens that way, and a reader asking whether one call can run two

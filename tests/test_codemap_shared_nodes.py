@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import ast
 
-from bamboo.codemap.panda import pathcond, sql
+from bamboo.codemap import pathcond
+from bamboo.codemap.panda import sql
 
 
 def test_a_parent_is_not_written_on_a_node_every_tree_shares() -> None:

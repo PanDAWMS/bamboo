@@ -650,7 +650,7 @@ def fields_read(test: ast.expr, source: Any, own: set[str]) -> list[str]:
 
 def _clock_at(at: str, text: str) -> bool:
     """Whether the call *text* at *at* (``file:line``) reads a clock, by the map's :func:`values.clock_of`."""
-    from bamboo.codemap.panda import values
+    from bamboo.codemap import values
 
     rel, _, line = at.rpartition(":")
     try:
@@ -1008,8 +1008,8 @@ def _cut(s: Any) -> str:
     fragment = mapdump.fragment()
     if not route or not at or fragment is None:
         return ""
-    from bamboo.codemap.panda import evaluate as EV
-    from bamboo.codemap.panda import pathcond
+    from bamboo.codemap import evaluate as EV
+    from bamboo.codemap import pathcond
 
     guarded = _guarded(id(fragment))
     for k, place in enumerate((at, *route[:-1])):
@@ -1072,7 +1072,7 @@ def _returned_row(s: Any, keys: frozenset[str] | None) -> tuple[Changed, ...] | 
     attrs = sorted(keys) or [a.partition(".")[2] for a in identity_attrs((getattr(s, "site_owner", "") or "").rpartition("::")[2])]
     if not attrs:
         return None
-    from bamboo.codemap.panda import pathcond
+    from bamboo.codemap import pathcond
 
     try:
         types = asked._types()
@@ -1292,7 +1292,7 @@ def _row_fills(fn: R.Function, name: str, line: int, others: bool = False) -> fr
         tree = types.tree(fn.rel)
         if tree is None:
             return None
-        from bamboo.codemap.panda import pathcond
+        from bamboo.codemap import pathcond
 
         func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
         node = R.statement_at(func, line)

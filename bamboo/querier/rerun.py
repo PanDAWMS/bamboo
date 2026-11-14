@@ -91,6 +91,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
+from bamboo.codemap import pathcond
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types, call_statements
 from bamboo.codemap.models import (
@@ -108,8 +109,8 @@ from bamboo.codemap.models import (
     Symptom,
     required_values,
 )
-from bamboo.codemap.panda import pathcond, sqltext
 from bamboo.codemap.panda import sql as sql_mod
+from bamboo.codemap.panda import sqltext
 from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.codemap.reading import containing_function

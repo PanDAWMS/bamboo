@@ -357,6 +357,199 @@ def test_a_call_is_read_in_one_order(tmp_path, callee, kind, assumption):
         assert ast.unparse(meant.copied_from) == "other"
 
 
+#: pandacommon's pandautils as the corpus holds it (panda-common 0.1.11's shapes): ``pack`` sets each attribute
+#: through a method of its own, ``naive_utcnow`` returns a call on ``aware_utcnow()``'s value.
+_PANDAUTILS = {
+    "__init__": "",
+    "base": (
+        "class SpecBase(object):\n"
+        "    attributes: tuple[str, ...] = ()\n\n"
+        "    def __setattr__(self, name, value):\n"
+        "        self._orig_setattr(name, value)\n\n"
+        "    def _orig_setattr(self, name, value):\n"
+        "        super().__setattr__(name, value)\n\n"
+        "    def pack(self, values):\n"
+        "        for i in range(len(self.attributes)):\n"
+        "            self._orig_setattr(self.attributes[i], values[i])\n\n"
+        "    def valuesMap(self):\n"
+        "        return {}\n"
+    ),
+    "thread_utils": (
+        "class WeightedLists(object):\n"
+        "    def __init__(self, lock):\n"
+        "        self.data = {}\n\n"
+        "    def add(self, weight, list_data):\n"
+        "        self.data.setdefault(weight, []).extend(list_data)\n\n\n"
+        "class LockPool(object):\n"
+        "    def get(self, key):\n"
+        "        return key\n"
+    ),
+    "PandaUtils": (
+        "import datetime\n\n\n"
+        "def aware_utcnow():\n"
+        "    return datetime.datetime.now(datetime.timezone.utc)\n\n\n"
+        "def naive_utcnow():\n"
+        "    return aware_utcnow().replace(tzinfo=None)\n"
+    ),
+}
+_CLOCKS = (
+    "from pandacommon.pandautils.PandaUtils import naive_utcnow\n"
+    "from pandacommon.pandautils import PandaUtils\n\n\n"
+    "def stamps():\n"
+    "    naive_utcnow()\n"
+    "    PandaUtils.naive_utcnow()\n"
+    "    PandaUtils.aware_utcnow()\n"
+)
+
+
+def _with_pandautils(tmp_path: Path) -> calls_mod.Calls:
+    roots = _tree(tmp_path, mod=_MODULE + "    spec.valuesMap()\n", clocks=_CLOCKS)
+    common = tmp_path / "pandacommon"
+    (common / "pandautils").mkdir(parents=True)
+    (common / "__init__.py").write_text("")
+    for name, text in _PANDAUTILS.items():
+        (common / "pandautils" / f"{name}.py").write_text(text)
+    return calls_mod.Calls(calls_mod.Types({**roots, "pandacommon": common}, {}))
+
+
+@pytest.mark.parametrize(
+    ("callee", "kind", "assumption"),
+    [
+        ("lists.add", callfacts.LIBRARY, None),
+        ("spec.pack", callfacts.LIBRARY, "library_keeps_what_it_is_handed"),
+        ("spec.valuesMap", callfacts.DEFINITION, None),
+        ("pool.get", callfacts.DEFINITION, None),
+    ],
+    ids=[
+        "a-class-read-as-outside",
+        "a-method-read-as-outside",
+        "its-other-method",
+        "a-class-not-read-so",
+    ],
+)
+def test_a_definition_the_corpus_holds_is_read_by_its_fact_where_one_is_stated(
+    tmp_path, callee, kind, assumption
+):
+    """With pandacommon's pandautils in the corpus, a definition callfacts states a fact for is read as it was outside
+    the corpus (:data:`callfacts.READ_OUTSIDE`): ``WeightedLists``' ``add`` is what callfacts says, ``SpecBase``'s
+    ``pack`` keeps all it is handed -- its body sets each attribute through ``_orig_setattr``, which says less.
+    ``SpecBase``'s other methods, and ``LockPool``, of which nothing is stated, are the corpus's definitions."""
+    calls = _with_pandautils(tmp_path)
+    file = f"{PACKAGE}/mod.py"
+    func = next(
+        node
+        for node in ast.walk(calls.types.tree(file))
+        if isinstance(node, ast.FunctionDef) and node.name == "reads"
+    )
+    call = next(
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == callee
+    )
+
+    meant = callfacts.meaning(calls, file, func, call)
+
+    assert (meant.kind, meant.assumption) == (kind, assumption)
+
+
+def test_a_function_the_corpus_holds_and_reads_as_outside_is_a_call_outside_it(
+    tmp_path,
+):
+    """``naive_utcnow`` is the clock (:data:`callfacts.TIME`); its body, ``aware_utcnow().replace(tzinfo=None)``,
+    reads as no clock.  So a call of it lands nowhere, as outside the corpus, imported by name or read off its
+    module, and ``aware_utcnow``, of which nothing is stated, lands at its definition."""
+    calls = _with_pandautils(tmp_path)
+    file = f"{PACKAGE}/clocks.py"
+    func = next(
+        node
+        for node in ast.walk(calls.types.tree(file))
+        if isinstance(node, ast.FunctionDef) and node.name == "stamps"
+    )
+    placed = {
+        ast.unparse(node.func): calls.callees(file, func, node)
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+    }
+
+    assert {
+        name: (one.unplaced, [target.func.name for target in one.targets])
+        for name, one in placed.items()
+    } == {
+        "naive_utcnow": (calls_mod.UNPLACED_OUTSIDE, []),
+        "PandaUtils.naive_utcnow": (calls_mod.UNPLACED_OUTSIDE, []),
+        "PandaUtils.aware_utcnow": ("", ["aware_utcnow"]),
+    }
+    assert calls.types.imported_from_outside(file, "naive_utcnow")
+
+
+_LOGS = """\
+from pandacommon.pandalogger import logger_utils
+from pandacommon.pandalogger.PandaLogger import PandaLogger
+
+
+def logs():
+    PandaLogger().getLogger("x")
+    tmp_log = logger_utils.make_logger(None, "y")
+    tmp_log.info("z")
+"""
+
+_PANDA_LOGGER = """\
+class PandaLogger:
+    def getLogger(self, name):
+        return name
+"""
+
+_LOGGER_UTILS = """\
+def make_logger(base, token):
+    return base
+"""
+
+#: The files of pandacommon the fixture's corpus reads.
+_COMMON_READ = ["pandacommon/__init__.py", "pandacommon/pandautils/__init__.py"]
+
+
+def test_a_pandacommon_module_the_corpus_does_not_read_is_outside_as_before(tmp_path):
+    # The pin holds panda-common whole, so the code run from it imports; the corpus reads of it only
+    # callfacts.PACKAGE_FILES.  The logger reads as it did when pandacommon was no package of the corpus, whether
+    # the pin holds the logger or not: make_logger is a call outside it, not a hole.
+    read = {}
+    for name in ("no_package", "without_logger", "with_logger"):
+        roots = _tree(tmp_path / name, mod=_LOGS)
+        if name != "no_package":
+            common = tmp_path / name / "pandacommon"
+            (common / "pandautils").mkdir(parents=True)
+            (common / "__init__.py").write_text("")
+            (common / "pandautils" / "__init__.py").write_text("")
+            if name == "with_logger":
+                (common / "pandalogger").mkdir()
+                (common / "pandalogger" / "__init__.py").write_text("")
+                (common / "pandalogger" / "PandaLogger.py").write_text(_PANDA_LOGGER)
+                (common / "pandalogger" / "logger_utils.py").write_text(_LOGGER_UTILS)
+            roots = {**roots, "pandacommon": common}
+        calls = calls_mod.Calls(calls_mod.Types(roots, {}))
+        file = f"{PACKAGE}/mod.py"
+        func = next(
+            node
+            for node in ast.walk(calls.types.tree(file))
+            if isinstance(node, ast.FunctionDef) and node.name == "logs"
+        )
+        read[name] = {
+            ast.unparse(node.func): (
+                (placed := calls.callees(file, func, node)).unplaced,
+                [one.func.name for one in placed.targets],
+            )
+            for node in ast.walk(func)
+            if isinstance(node, ast.Call)
+        }
+        corpus = calls.types.corpus_files()
+        files = [one for one in corpus if one.startswith("pandacommon/")]
+        assert files in ([], _COMMON_READ), name
+    assert read["without_logger"] == read["no_package"]
+    assert read["with_logger"] == read["no_package"]
+    outside = (calls_mod.UNPLACED_OUTSIDE, [])
+    assert read["no_package"]["logger_utils.make_logger"] == outside
+
+
 @pytest.mark.parametrize("callee", ["', '.join", "f'{text}'.format", "sep.join"])
 def test_a_text_s_method_keeps_nothing_it_is_handed(tmp_path, callee):
     """A text's method makes a new text: ``', '.join(v)`` keeps nothing of ``v``, on a literal, a formatted text or a
@@ -384,8 +577,8 @@ def test_every_reader_of_a_print_reads_its_level_from_one_table(method, level):
     selection's log_level (emit's prints, the selection and progress slices), loopcut's logging calls and
     score_trace's audit read the one table -- ``exception`` writes at ``error``, ``warn`` is ``warning``.  ``log``
     takes its level as an argument, and ``sendMsg`` sends to the HTTP logger: no print here."""
-    from bamboo.codemap.panda.pathcond import attach_parents
     from bamboo.codemap.panda.recognizers import emit, loopcut, selection
+    from bamboo.codemap.pathcond import attach_parents
     from bamboo.scripts.panda import score_trace
 
     tree = ast.parse(f"def f(log, rows):\n    for row in rows:\n        log.{method}('skip ' + row)\n        continue")
@@ -635,8 +828,8 @@ def test_the_rest_of_the_library_facts_are_said_once():
     """The copy module, the calls reading a value again, the computing modules, the iterator helpers, the catch-all
     exceptions and the dunders are callfacts', and sqleval's changing methods are the containers' (callfacts.CHANGING)
     -- a set's ``add`` and ``discard`` among them, which its own list had not."""
-    from bamboo.codemap import calls, reach
-    from bamboo.codemap.panda import reaching, sqleval
+    from bamboo.codemap import calls, reach, reaching
+    from bamboo.codemap.panda import sqleval
     from bamboo.codemap.panda.recognizers import sqlwrite
 
     assert calls._COPIES == callfacts.COPIES and sqlwrite._COPIES == {"copy", "deepcopy"}

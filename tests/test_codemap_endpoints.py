@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from bamboo.codemap import reach
+from bamboo.codemap import pathcond, reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     FILL_CONSTANT,
@@ -21,7 +21,7 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     SourceModule,
 )
-from bamboo.codemap.panda import attribution, endpoints, pathcond, sql, sqltext
+from bamboo.codemap.panda import attribution, endpoints, sql, sqltext
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import progress, sqlwrite

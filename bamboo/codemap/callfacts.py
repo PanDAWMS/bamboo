@@ -415,7 +415,8 @@ QUEUE_PUTS, QUEUE_GETS = (
 )
 #: The standard library's classes whose ``start()`` has the object's ``run`` called on a new thread, or in a new
 #: process, and returns -- Python's rule, as ``C(...)`` runs ``C.__init__`` -- and whose ``join()`` waits for it, by
-#: ``(module, name)``.  ``pandacommon``'s ``GenericThread`` is one too, but outside the corpus nothing says so.
+#: ``(module, name)``.  ``pandacommon``'s ``GenericThread`` is one too, a class of the corpus built on
+#: ``threading.Thread``.
 STARTERS = frozenset({("threading", "Thread"), ("multiprocessing", "Process")})
 #: The standard library's classes whose object holds a function it is handed only to call it, on a thread or in a
 #: process -- ``Thread(target=f)``, ``Timer(interval, f)``, ``Process(target=f)`` --: their methods hand back nothing
@@ -448,9 +449,9 @@ READ_AGAIN = frozenset(
 SERIALIZING = "dumps"
 #: Modules computing a number from what they are handed, as a builtin does (:data:`COMPUTED`).
 COMPUTING_MODULES = frozenset({"math", "statistics", "numpy", "np"})
-#: Iterator helpers outside the corpus (``itertools``', ``pandacommon``'s ``batched``) whose value is made of the first
-#: argument's elements -- in chunks (``batched(items, chunk_size)``), or as they come (``islice``) -- and, for
-#: ``chain``, of every argument's; a count handed beside them makes nothing.
+#: Iterator helpers outside the corpus (``itertools``'; ``pandacommon``'s ``batched``, read so: :data:`READ_OUTSIDE`)
+#: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they come
+#: (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
 CHUNKING, SLICING, CHAINING = (
     frozenset({"batched"}),
     frozenset({"islice"}),
@@ -458,6 +459,40 @@ CHUNKING, SLICING, CHAINING = (
 )
 #: The exception classes a handler catching every exception names: ``except Exception``.
 CATCH_ALL = frozenset({"Exception", "BaseException"})
+#: Definitions the corpus holds that are read by the facts stated here, as they were read when the corpus did not hold
+#: them, ``module.name`` or ``module.Class.method``: pandacommon's ``pandautils``, in the corpus for the classes the
+#: corpus's specs are built on (``SpecBase``).  A call landing on one is a call outside the corpus -- ``naive_utcnow``
+#: the clock (:data:`TIME`), ``batched`` (:data:`CHUNKING`), the IN-list helper the SQL reading spells binds by --; a
+#: class is a class outside it, its methods with it (``WeightedLists``, :data:`LIBRARY_CONTAINERS`); a method keeps
+#: what it is handed, as a library's does (``dc_req_spec.pack(row)`` fills ``dc_req_spec``).  Their bodies say less:
+#: ``naive_utcnow`` returns ``aware_utcnow().replace(tzinfo=None)``, ``pack`` sets each attribute through a method of
+#: its own.
+READ_OUTSIDE = frozenset(
+    {
+        "pandacommon.pandautils.PandaUtils.naive_utcnow",
+        "pandacommon.pandautils.PandaUtils.batched",
+        "pandacommon.pandautils.PandaUtils.get_sql_IN_bind_variables",
+        "pandacommon.pandautils.thread_utils.WeightedLists",
+        "pandacommon.pandautils.base.SpecBase.pack",
+    }
+)
+#: The files of a package the corpus reads only in part, by package.  The pin holds panda-common's whole package, so
+#: the code run from the pin imports it; of it the corpus reads ``pandautils``' ``base``, ``PandaUtils``,
+#: ``thread_utils`` and ``net_utils`` and the package files above them.  It walks past the other files, as though the
+#: pin did not hold them (:func:`bamboo.codemap.calls.left_out`), and reads the logger, broker and configuration
+#: modules they define as outside, as before the package was in the corpus (:func:`bamboo.codemap.calls.read_outside`).
+PACKAGE_FILES: dict[str, frozenset[str]] = {
+    "pandacommon": frozenset(
+        {
+            "pandacommon/__init__.py",
+            "pandacommon/pandautils/__init__.py",
+            "pandacommon/pandautils/base.py",
+            "pandacommon/pandautils/PandaUtils.py",
+            "pandacommon/pandautils/thread_utils.py",
+            "pandacommon/pandautils/net_utils.py",
+        }
+    ),
+}
 
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 OPERATOR_DUNDERS: dict[type, tuple[str, ...]] = {
@@ -1048,7 +1083,7 @@ RUNS_ALIKE = frozenset(
     }
 )
 #: Those whose value is the time the run read the clock at.  PanDA's own ``naive_utcnow`` is ``pandacommon``'s,
-#: outside the corpus.
+#: read as outside the corpus (:data:`READ_OUTSIDE`).
 TIME = frozenset(
     {
         *("datetime.datetime.now", "datetime.datetime.utcnow", "datetime.datetime.today", "datetime.date.today"),
@@ -1422,6 +1457,9 @@ def meaning(
         except Exception:  # noqa: BLE001
             declared = None
         classes = [one for each in declared or () for one in calls.objects_of(each)]
+        if classes and all(types.outside_method(*one, name) for one in classes):
+            # ``dc_req_spec.pack(row)``: SpecBase's, a method read as outside the corpus (:data:`READ_OUTSIDE`).
+            return Meaning(LIBRARY, KEEPS_ALL, "library_keeps_what_it_is_handed")
         if classes and all(types.built_outside(*one) for one in classes):
             bases = [types.outside_bases(*one) for one in classes]
             if all(

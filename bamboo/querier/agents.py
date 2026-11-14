@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from bamboo.codemap.panda import pathcond
+from bamboo.codemap import pathcond
 from bamboo.querier import rows as R
 from bamboo.querier import sources as SR
 from bamboo.querier import windows as W

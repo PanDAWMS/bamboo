@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from bamboo.codemap import callfacts, reach, reading, trace
+from bamboo.codemap import callfacts, pathcond, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.base import CodeMapPlugin
@@ -37,12 +37,14 @@ from bamboo.codemap.models import (
     FunctionPrintsNode,
     JunctionNode,
     MapFragment,
+    ReachNode,
     SetFrom,
     SourceModule,
     SubjectNode,
     pooled_cuts,
     pooled_frames,
 )
+from bamboo.codemap.objects import across_records
 from bamboo.codemap.panda import (
     aftermade,
     endpoints,
@@ -53,7 +55,6 @@ from bamboo.codemap.panda import (
     mustprints,
     objects,
     offrow,
-    pathcond,
     promotion,
     runnable,
     runs,
@@ -66,11 +67,6 @@ from bamboo.codemap.panda.attribution import (
     annotation_readings,
     class_bases,
     spec_annotation_forms,
-)
-from bamboo.codemap.panda.pathcond import (
-    attach_parents,
-    functions_with_owner,
-    qualified_name,
 )
 from bamboo.codemap.panda.recognizers import (
     alias,
@@ -87,6 +83,7 @@ from bamboo.codemap.panda.recognizers import (
     tables,
     trigger,
 )
+from bamboo.codemap.pathcond import attach_parents, functions_with_owner, qualified_name
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +195,13 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
             existing.vocabulary = subject.vocabulary
     return list(merged.values())
 
-PACKAGES = ("pandaserver", "pandajedi")
+#: The packages of the corpus, each a directory of the source root.  ``pandacommon`` is the pin's copy of a
+#: panda-common release, whole, so the code run from the pin imports it; the corpus reads of it ``pandautils``'
+#: ``base``, ``PandaUtils``, ``thread_utils`` and ``net_utils``, the base the specs are built on (``SpecBase``) and the
+#: helpers beside it (:data:`bamboo.codemap.callfacts.PACKAGE_FILES`), and the definitions the map has facts for are
+#: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules stay
+#: outside.
+PACKAGES = ("pandaserver", "pandajedi", "pandacommon")
 
 # Test code is not the system's behaviour: :func:`calls.is_test_module`, the
 # one rule the build and the call index share.
@@ -295,7 +298,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         lap = _Lap()
         self._calls = sqlwrite.corpus_calls(self._modules, self._roots, self._recorded)
         lap("the corpus's calls")
-        with sql.across_calls(self._calls), sqltext.with_schema(self._schema, self._keys, self._dated):
+        # The objects' records, by owner, once :meth:`_run` makes them: what the values a write takes are read on.
+        self._records: dict[str, ReachNode] = {}
+        owner_of = reach._Names(self._calls.types).of if self._calls is not None else (lambda func: None)
+        with (
+            sql.across_calls(self._calls),
+            sqltext.with_schema(self._schema, self._keys, self._dated),
+            across_records(self._records, owner_of),
+        ):
             return self._run()
 
     @property
@@ -486,6 +496,59 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.coverage.extend(returned_coverage)
 
         lap("the alias slices")
+        # The read side of the statements the SQL slice reads the writes of: which values something selects rows on,
+        # and whose rows it selects at all.  The rows become their own nodes, because a pair of class and attribute
+        # can only describe a column.  Before the SQL slice, which reads none of it: the objects' records below are
+        # read on its tables, and the SQL slice reads them.
+        side = sqlwrite.read_side(self._modules, attributor, self._calls)
+        # The read side's denominator.  Without it a query form the slice
+        # does not recognise can go missing without a single number moving.
+        read_cov, self._unexplained_reads = sqlwrite.read_coverage(self._modules)
+        fragment.entities.extend(
+            sqlwrite.entity_nodes(side.entities, self.map_id, self._version, attributor)
+        )
+        # One node per statement, beside the per-function answer the subject
+        # already carries.  A function name says which log to read; the
+        # statement says where in the code, which is what a row that is not
+        # moving needs -- ``copyArchive.main`` asks for ``jobStatus='holding'``
+        # from three statements with three different time limits.
+        fragment.read_sites.extend(
+            sqlwrite.read_site_nodes(side.statements, self.map_id, self._version)
+        )
+        self._unreadable_tables = side.unreadable
+        self.read_watch = side.watch
+        lap("the read side")
+        if self._calls is not None:
+            # Where every function can go on to, for the reach a mover is
+            # answered from (:mod:`bamboo.codemap.reach`): its own record,
+            # because a run asks it of hundreds of movers.
+            fragment.reach_graph.extend(
+                reach.graph(
+                    self._calls,
+                    self.map_id,
+                    self._version,
+                    _DatabaseLeaves(self._calls),
+                    {module.rel_path: module.blob_sha for module in self._modules},
+                )
+            )
+            # Where each function puts the objects it names and which of their
+            # columns it assigns: what bamboo.codemap.objects.follow answers
+            # from, and what a history pair's row below is read with.  On the
+            # read side's tables, whose rows a write's object is of; before
+            # the SQL slice, the flush pass and the key sources, which read
+            # on them the values a write takes (objects.assigns_reaching).
+            assigned, bound, handed, written = objects.attach(
+                fragment, self._modules, self._calls
+            )
+            self._records.update((row.owner, row) for row in fragment.reach_graph)
+            logger.info(
+                "PandaCodeMapPlugin: %d assign(s), %d binding(s), %d call binding(s) of objects, %d write(s)",
+                assigned,
+                bound,
+                handed,
+                written,
+            )
+        lap("the records")
         # What each write gives each column it writes; the ways of the ones a guard's way ends at are read with the
         # guards'.
         writes: list[SetFrom] = []
@@ -519,32 +582,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         fragment.junctions.extend(sql_junctions)
         fragment.coverage.extend(sql_coverage)
         fragment.diagnostics.extend(bound_text)
+        # The read side's denominator after the write side's, as the report lists them.
+        fragment.coverage.extend(read_cov)
 
         lap("the SQL slice")
-        # The read side of the same statements: which values something selects
-        # rows on, and whose rows it selects at all.  The values are attached to
-        # the subject rather than kept apart, so the invariants can compare them
-        # with what the junctions write; the rows become their own nodes,
-        # because a pair of class and attribute can only describe a column.
-        side = sqlwrite.read_side(self._modules, attributor, self._calls)
-        # The read side's denominator.  Without it a query form the slice
-        # does not recognise can go missing without a single number moving.
-        read_cov, self._unexplained_reads = sqlwrite.read_coverage(self._modules)
-        fragment.coverage.extend(read_cov)
+        # The values the read side selects rows on are attached to the subject
+        # rather than kept apart, so the invariants can compare them with what
+        # the junctions write.
         selected = side.values
-        fragment.entities.extend(
-            sqlwrite.entity_nodes(side.entities, self.map_id, self._version, attributor)
-        )
-        # One node per statement, beside the per-function answer the subject
-        # already carries.  A function name says which log to read; the
-        # statement says where in the code, which is what a row that is not
-        # moving needs -- ``copyArchive.main`` asks for ``jobStatus='holding'``
-        # from three statements with three different time limits.
-        fragment.read_sites.extend(
-            sqlwrite.read_site_nodes(side.statements, self.map_id, self._version)
-        )
-        self._unreadable_tables = side.unreadable
-        self.read_watch = side.watch
         gated = sqlwrite.selection_gates(self._modules, attributor, self._never_written)
         for subject in fragment.subjects:
             readers = selected.get(subject.name, {})
@@ -564,7 +609,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # A function that writes a status both ways produces one junction from
         # each recognizer under the same name.  Storage merges on the name, so
         # without this the second silently replaces the first's branches.
-        lap("the read side")
+        lap("the selected values")
         fragment.junctions = _merge_junctions(fragment.junctions)
         fragment.subjects = _unique_subjects(fragment.subjects)
         cut = progress.spec_length_limits(self._modules)
@@ -689,19 +734,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
             fragment.calls_considered, fragment.call_stops, fragment.open_calls = _call_stops(self._calls, self._modules)
-            # Where every function can go on to, for the reach a mover is
-            # answered from (:mod:`bamboo.codemap.reach`): its own record,
-            # because a run asks it of hundreds of movers.
-            fragment.reach_graph.extend(
-                reach.graph(
-                    self._calls,
-                    self.map_id,
-                    self._version,
-                    _DatabaseLeaves(self._calls),
-                    {module.rel_path: module.blob_sha for module in self._modules},
-                )
-            )
-        lap("callers and the reach record")
+        lap("callers")
         # Where a row a statement keeps is carried on to: after the reach
         # record, whose holes and database calls it reads, over every junction
         # the map keeps.
@@ -866,17 +899,6 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")
         if self._calls is not None:
-            # Where each function puts the objects it names and which of their
-            # columns it assigns: what bamboo.codemap.objects.follow answers
-            # from, and what a history pair's row below is read with.
-            assigned, bound, handed, written = objects.attach(fragment, self._modules, self._calls)
-            logger.info(
-                "PandaCodeMapPlugin: %d assign(s), %d binding(s), %d call binding(s) of objects, %d write(s)",
-                assigned,
-                bound,
-                handed,
-                written,
-            )
             # Where each function's runs start, what each call of a history writer
             # can record, and the calls that write a history row in the same pass
             # as an arm: what gives a value the map sees set a time, and the log
@@ -1235,6 +1257,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 rel_path = f"{pkg}/{path.relative_to(root)}"
                 if _is_test_module(rel_path):
                     skipped_tests += 1
+                    continue
+                if calls_mod.left_out(rel_path):
                     continue
                 # The process's one tree for the file, so the build and the
                 # walks it makes hold the same nodes -- see ``calls.parsed``.

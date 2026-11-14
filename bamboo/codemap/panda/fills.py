@@ -57,11 +57,11 @@ from __future__ import annotations
 import ast
 from typing import TYPE_CHECKING, Iterator, NamedTuple, Optional, Sequence
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.calls import CallSite, Target, bind
 from bamboo.codemap.models import CHANGE_STORE
-from bamboo.codemap.panda import changes, objects, pathcond, sql, sqltext
-from bamboo.codemap.panda.reaching import reaching
+from bamboo.codemap.panda import changes, objects, sql, sqltext
+from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls

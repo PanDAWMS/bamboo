@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from bamboo.codemap import pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     KEY_PARAMETER,
@@ -23,7 +24,7 @@ from bamboo.codemap.models import (
     SourceModule,
     WrittenValue,
 )
-from bamboo.codemap.panda import pathcond, sql, values, wakers
+from bamboo.codemap.panda import sql, wakers
 from bamboo.codemap.panda.recognizers import sqlwrite
 
 PACKAGE = "pkg"

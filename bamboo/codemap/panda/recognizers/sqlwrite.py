@@ -63,7 +63,7 @@ from typing import (
     Optional,
 )
 
-from bamboo.codemap import callfacts
+from bamboo.codemap import callfacts, objects, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     UNSET,
@@ -136,6 +136,7 @@ from bamboo.codemap.models import (
     OpenCrossing,
     OrderHole,
     PrintedBy,
+    ReachNode,
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
@@ -147,9 +148,17 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import pathcond, sql, sqleval, sqltext, values
+from bamboo.codemap.panda import sql, sqleval, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
-from bamboo.codemap.panda.pathcond import (
+
+# The block a decision records about itself reads the same way whichever slice
+# found the write, so it is read in one place and imported rather than copied.
+# Both halves of the map disagreeing about a fact is the failure this codebase
+# has spent the most effort undoing.
+from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.panda.recognizers import tables as table_records
+from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
+from bamboo.codemap.pathcond import (
     ancestors,
     arm_condition,
     attach_parents,
@@ -167,14 +176,6 @@ from bamboo.codemap.panda.pathcond import (
     surviving_writes,
     targets_of,
 )
-
-# The block a decision records about itself reads the same way whichever slice
-# found the write, so it is read in one place and imported rather than copied.
-# Both halves of the map disagreeing about a fact is the failure this codebase
-# has spent the most effort undoing.
-from bamboo.codemap.panda.recognizers import progress
-from bamboo.codemap.panda.recognizers import tables as table_records
-from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
 
 if TYPE_CHECKING:
     from bamboo.codemap.reach import ReachGraph
@@ -777,9 +778,9 @@ def _objects_of(run: sql.Execution, func: ast.AST) -> list[tuple[ast.expr, ast.C
 
 
 def _maps_of(found: list[tuple[ast.expr, ast.Call]]) -> list[ast.Call]:
-    """The ``valuesMap`` calls of the first object's spelling among *found*: the maps one record's object is in."""
-    spelled = ast.unparse(found[0][0]) if found else None
-    return [made for obj, made in found if ast.unparse(obj) == spelled]
+    """The ``valuesMap`` calls of *found*: every map a call of the run holds -- registerTaskInOneShot_JEDI runs one
+    INSERT from five places, each with its own spec --, each read on its own object (:func:`_reaching`)."""
+    return [made for _obj, made in found]
 
 
 def _insert_from(
@@ -882,45 +883,104 @@ def _insert_froms(
         _insert_from(keyed, key_froms, func, run, table, term, rel_path, written, insert, binds)
 
 
+#: A path's version, ``@166`` of ``impl@166.taskSpec``.
+_VERSION = re.compile(r"@\d+")
+
+
+class _Reached(NamedTuple):
+    """What :func:`_reaching` answers: the lines the records answer, however they assign (``+=``, a tuple's part); of
+    them the statements a bind takes its value from (an ``=`` of the attribute); and the holes those on the object
+    only perhaps are on it through, by line (:attr:`objects.Reaching.perhaps`)."""
+
+    lines: list[int]
+    nodes: list[ast.stmt]
+    perhaps: dict[int, list[str]]
+
+
+def _made_paths(row: ReachNode, made: ast.Call, obj: ast.expr) -> list[str]:
+    """The paths *made*'s line takes its object by in *row*: a ``valuesMap()``'s own, else *obj*, the object handed
+    to the call, spelled as it is there, versions aside -- one line takes one object by one spelling."""
+    if isinstance(made.func, ast.Attribute) and made.func.attr == "valuesMap":
+        obj = made.func.value
+    spelled = ast.unparse(obj)
+    return sorted(
+        path
+        for path in objects.line_paths(row).get(made.lineno, ())
+        if _VERSION.sub("", path) == spelled
+    )
+
+
+def _changed_only(made: ast.Call) -> bool:
+    """Whether *made* writes only the attributes changed: ``valuesMap(onlyChanged=True)``, or a call handing the
+    object to a write that writes them; a plain ``valuesMap()`` holds every one."""
+    if _callee_name(made) != "valuesMap":
+        return True
+    return any(
+        one.arg == "onlyChanged"
+        and isinstance(one.value, ast.Constant)
+        and one.value.value is True
+        for one in made.keywords
+    )
+
+
+def _reaching(
+    func: ast.AST, obj: ast.expr, attribute: str, mades: list[ast.Call]
+) -> _Reached:
+    """The assignments of *attribute* in *func* whose value one of *mades* -- *obj*'s ``valuesMap()`` calls, or a call
+    handing it to a write -- takes, read on the build's records (:func:`objects.assigns_reaching`); none outside
+    them."""
+    held = objects.records()
+    owner = held.owner_of(func) if held is not None else None
+    row = held.rows.get(owner) if held is not None and owner is not None else None
+    if held is None or owner is None or row is None:
+        return _Reached([], [], {})
+    lines: set[int] = set()
+    known: set[int] = set()
+    perhaps: dict[int, set[str]] = {}
+    for made in mades:
+        answer = objects.assigns_reaching(
+            held.rows,
+            owner,
+            made.lineno,
+            _made_paths(row, made, obj),
+            attribute,
+            _changed_only(made),
+            held.follows,
+        )
+        lines.update(answer.lines)
+        known.update(line for line in answer.lines if line not in answer.perhaps)
+        for line, holes in answer.perhaps.items():
+            perhaps.setdefault(line, set()).update(holes)
+    nodes = [
+        node
+        for node in own_nodes(func)
+        if isinstance(node, ast.stmt)
+        and node.lineno in lines
+        and getattr(node, "value", None) is not None
+        and any(
+            isinstance(target, ast.Attribute) and target.attr == attribute
+            for target in targets_of(node)
+        )
+    ]
+    # A line on the object for one made is on it, whatever another made says.
+    return _Reached(
+        sorted(lines),
+        nodes,
+        {line: sorted(holes) for line, holes in perhaps.items() if line not in known},
+    )
+
+
 def _fields_at(
     func: ast.AST, obj: ast.expr, attribute: str, mades: list[ast.Call], obj_class: Optional[str]
 ) -> list[ast.stmt]:
-    """The assignments of ``obj.<attribute>`` that reach one of *mades*, the object's ``valuesMap()`` calls: one after
+    """The assignments of ``obj.<attribute>`` whose value one of *mades*, the object's ``valuesMap()`` calls or a call
+    handing it to a write, takes (:func:`_reaching`), however the object is spelled where it is assigned: one after
     the map is made is not in it (getRandomSeed_JEDI's ``tmpFileSpec.status = "ready"``), nor one from a pass before
-    where the name is given a new object of its class on the way (``tmpFileSpec = JediFileSpec()``).  The name taken
-    again from a list or a loop may be the same object -- insertFilesForDataset_JEDI fills its specs, keeps them, and
-    inserts them from ``for fileID, fileSpec in zip(newFileIDs, fileSpecsForInsert)`` -- and cancels nothing."""
-    spelled = ast.unparse(obj)
-    assigned = [
-        node
-        for node in own_nodes(func)
-        for target in targets_of(node)
-        if isinstance(target, ast.Attribute)
-        and target.attr == attribute
-        and ast.unparse(target.value) == spelled
-        and getattr(node, "value", None) is not None
-    ]
-    if not assigned or not mades:
-        return []
-    root = _root(obj)
-    renewed: list[ast.AST] = []
-    if root is not None and obj_class is not None:
-        made_anew = obj_class.rsplit(".", 1)[-1]
-        renewed = [
-            node
-            for node in own_nodes(func)
-            if isinstance(node, (ast.Assign, ast.AnnAssign))
-            and isinstance(node.value, ast.Call)
-            and _callee_name(node.value) == made_anew
-            and any(
-                name == root.id for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)
-            )
-        ]
-    found: dict[int, ast.stmt] = {}
-    for made in mades:
-        for node in surviving_writes(assigned, site_of(made), as_run=True, killers=renewed):
-            found[id(node)] = node  # type: ignore[assignment]
-    return [node for node in assigned if id(node) in found]  # type: ignore[misc]
+    where the name is given a new object on the way (``tmpFileSpec = JediFileSpec()``).  The name taken again from a
+    list or a loop may be the same object -- insertFilesForDataset_JEDI fills its specs, keeps them, and inserts them
+    from ``for fileID, fileSpec in zip(newFileIDs, fileSpecsForInsert)`` -- and cancels nothing.  *obj_class* is not
+    read: the records know the object."""
+    return _reaching(func, obj, attribute, mades).nodes
 
 
 def _unspelled_froms(
@@ -976,8 +1036,8 @@ def _unspelled_froms(
     }
     shown = table or named
 
-    def put(term: str, insert: _Insert, binds: list[sql.Bind]) -> None:
-        _insert_from(
+    def put(term: str, insert: _Insert, binds: list[sql.Bind]) -> KeyFrom:
+        return _insert_from(
             keyed, key_froms, func, run, shown, term, rel_path, {}, insert, binds, spelled_obj, obj_class, mades
         )
 
@@ -999,14 +1059,17 @@ def _unspelled_froms(
             # What the function puts in the field where the map is made: insertNewJob's ``file.row_ID = None`` is
             # replaced by ``fileIDPool[...]`` before its valuesMap(), and insertFilesForDataset_JEDI's fileID is a
             # sequence's, read through the name it was assigned from, not the field.
-            assigned = _fields_at(func, obj, attribute, mades, obj_class)
+            reached = _reaching(func, obj, attribute, mades)
+            assigned = reached.nodes
             values = [_bind_value(node.value, node.lineno, func, owner_class, attributor) for node in assigned]
             binds = [sql.Bind(node.value, site_of(node.value)) for node in assigned]
             if not assigned:
                 field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
                 field.parent = getattr(obj, "parent", None)  # type: ignore[attr-defined]
                 values, binds = [("plain", run.call.lineno, obj_class)], [sql.Bind(field, site_of(run.call))]
-            put(term, _Insert(value="object", binds=values, **common), binds)
+            record = put(term, _Insert(value="object", binds=values, **common), binds)
+            through = {hole for holes in reached.perhaps.values() for hole in holes}
+            record.through_holes = sorted({*record.through_holes, *through})
 
 
 def _set_from(
@@ -1225,7 +1288,7 @@ def extract(
     uncovered: set[str] = set()
     diagnostics: list[DiagnosticTemplate] = []
     unexplained: list[Unexplained] = []
-    settle = values.resolver()
+    settle = values.resolver(sql._CALLS)
     # A guard's binds as the read side settles its own (values.bind_settler): a list's members, what a parameter's
     # callers hand it, all of them or none.
     guard_settle = values.bind_settler(sql._CALLS)
@@ -3401,7 +3464,7 @@ def read_side(
     not among the values reported as written-but-unselected for this subject,
     so nothing is hidden by it.
     """
-    handed = values.handed(values.resolver(), calls)
+    handed = values.handed(values.resolver(sql._CALLS), calls)
     # Every caller of a parameter is read now, however many: how long that
     # takes, and the function with the most routes, go to the build's report.
     watch: dict[str, object] = {"settle_seconds": 0.0, "most_routes": ("", 0)}
@@ -4779,7 +4842,7 @@ _COPIES = frozenset(name for _module, name in callfacts.COPIES)
 #: ``json.dumps``: writes a value out whole -- every part of it read -- as a builtin's text of it does
 #: (:data:`callfacts.TEXT`).
 _SERIALIZING = callfacts.SERIALIZING
-#: Iterator helpers outside the corpus (itertools', pandacommon's ``batched``)
+#: Iterator helpers outside the corpus (itertools'; pandacommon's ``batched``, read so: callfacts.READ_OUTSIDE)
 #: whose value is made of the first argument's elements -- in chunks (``batched(items, chunk_size)``), or as they
 #: come (``islice``) -- and, for ``chain``, of every argument's; a count handed beside them makes nothing.
 _CHUNKING, _SLICING, _CHAINING = callfacts.CHUNKING, callfacts.SLICING, callfacts.CHAINING
@@ -5196,8 +5259,9 @@ class _PathCarry:
     statement's rows: its answer is another run's (a call inside it, a bind's ``int(row[0])``, is read as any
     other).  A call placed in the corpus can put what it is handed into an object named here (its summary's
     *kept*): ``fileSpec.pack(row)`` fills ``fileSpec``, ``job.addFile(fileSpec)`` appends it to ``job.Files``.  So
-    does a method the object's class gets from a base outside the corpus, with all it is handed:
-    ``dc_req_spec.pack(row)`` on pandacommon's ``SpecBase`` fills ``dc_req_spec``.
+    does a method the object's class gets from a base outside the corpus, or one read as outside it
+    (:data:`callfacts.READ_OUTSIDE`), with all it is handed: ``dc_req_spec.pack(row)`` on pandacommon's
+    ``SpecBase`` fills ``dc_req_spec``.
 
     With *item*, the statement's seeds hold its select item of that position where it sits in what they are given,
     not the rows whole (:func:`_item_seed`): a value held whole is that column of a row.
@@ -7504,9 +7568,10 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
     """Add to a KeyFrom persisting an object the subjects the function assigns on that object, at the
     assignments' lines -- ``killJob``'s ``job.jobStatus = ...`` written by its ``INSERT`` of ``job.valuesMap()``.
     The assignments are the attribute slice's junctions, so their lines are the branches a reader joins on; only
-    those that reach the object's ``valuesMap()``, or the flush call handed it, are in what it writes
-    (:func:`_fields_at`), and not one the write takes back out (``updateTask_JEDI``'s
-    ``resetChangedAttr("jediTaskID")``)."""
+    those whose value the object's ``valuesMap()``, or the flush call handed it, takes are in what it writes
+    (:func:`_reaching`), however they assign (insertNewJob's ``job.currentPriority += 1`` and
+    ``(job.jobsetID,) = self.cur.fetchone()``), and not one the write takes back out (``updateTask_JEDI``'s
+    ``resetChangedAttr("jediTaskID")``); one on the object only perhaps brings its holes (*through_holes*)."""
     by_owner: dict[str, list[JunctionNode]] = {}
     for junction in junctions:
         by_owner.setdefault(junction.owner, []).append(junction)
@@ -7515,34 +7580,33 @@ def _object_writes(key_froms: list[KeyFrom], junctions: list[JunctionNode]) -> N
             continue
         spelled, obj_class, mades, excluded = key_from._object
         func = key_from._binds[0]
-        statements: dict[int, list[ast.stmt]] = {}
-        for node in own_nodes(func):
-            if isinstance(node, ast.stmt):
-                statements.setdefault(node.lineno, []).append(node)
         obj = ast.parse(spelled, mode="eval").body
         for junction in by_owner.get(key_from.owner, ()):
             spec, _dot, attribute = junction.subject.rpartition(".")
             if spec != obj_class or attribute in excluded:
                 continue
-            reaching = {id(node) for node in _fields_at(func, obj, attribute, mades, obj_class)} if mades else None
+            reached = _reaching(func, obj, attribute, mades)
+            answered = set(reached.lines)
             lines = sorted(
                 {
                     line
                     for branch in junction.branches
                     for line in [branch.line, *branch.other_lines]
-                    if line is not None
-                    and any(
-                        isinstance(target, ast.Attribute)
-                        and target.attr == attribute
-                        and ast.unparse(target.value) == spelled
-                        and (reaching is None or id(statement) in reaching)
-                        for statement in statements.get(line, ())
-                        for target in targets_of(statement)
-                    )
+                    if line in answered
                 }
             )
             if lines:
                 key_from.writes[junction.subject] = sorted({*key_from.writes.get(junction.subject, ()), *lines})
+                key_from.through_holes = sorted(
+                    {
+                        *key_from.through_holes,
+                        *(
+                            hole
+                            for line in lines
+                            for hole in reached.perhaps.get(line, ())
+                        ),
+                    }
+                )
 
 
 def _unpersisted(

@@ -61,7 +61,7 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence
 
-from bamboo.codemap import astwalk, callfacts
+from bamboo.codemap import astwalk, callfacts, pathcond
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap.calls import Types as _Types
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
@@ -92,7 +92,7 @@ from bamboo.codemap.models import (
     StepCall,
     TraceStep,
 )
-from bamboo.codemap.panda import mapentries, pathcond
+from bamboo.codemap.panda import mapentries
 
 # ``logging_arguments`` is the build's own spelling of which calls are log
 # calls, reused rather than restated: the map's question and the trace's
@@ -2587,7 +2587,7 @@ class _Walk:
             return None
         package, _, relative = file.partition("/")
         root = self.roots.get(package)
-        if root is None or not relative:
+        if root is None or not relative or calls_mod.left_out(file):
             # Outside the corpus the map covers, which is the walk's stop rule
             # rather than a failure: a name that comes from somewhere else is
             # exactly what a boundary is for.
