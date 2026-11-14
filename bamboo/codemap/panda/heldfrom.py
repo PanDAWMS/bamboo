@@ -254,11 +254,12 @@ def _without_changes(ways: Iterable[_Way]) -> tuple[_Way, ...]:
 
 def _uncarried(way: _Way) -> tuple[_Way, ...]:
     """A stop naming where *way*'s own changes were made, where a stored value does not carry them and they may have
-    changed it in place: not where it holds nothing that changes in place by itself (:func:`_fixed`)."""
+    changed it in place: not where it holds nothing that changes in place by itself (:func:`_fixed`).  It keeps the
+    calls *way* came back through (its route), so a reader that rules the way out rules the stop out with it."""
     if way.kind == _STOP or not way.changes or _fixed(way):
         return ()
     sites = ", ".join(dict.fromkeys(change.at for change in way.changes))
-    return (_stop("uncarried", way.name, sites),)
+    return (_stop("uncarried", way.name, sites)._replace(route=way.route),)
 
 
 #: A comprehension and the name its value's ``through`` is called by, as Python names its code.

@@ -2399,6 +2399,14 @@ FIELDS = {
                 spec.pack(values)  # SPEC_FILL
                 holder.items.append(spec)  # PUT_SPEC
 
+            def names_of(self, values):
+                names = list(values)
+                names.append(2)  # CALLED_NAMES
+                return names
+
+            def hold_called(self, holder: Holder, values):
+                holder.items.append(self.names_of(values))  # PUT_CALLED
+
 
         class Holder(object):
             def __init__(self):
@@ -2545,6 +2553,24 @@ def test_only_an_object_a_change_stores_carries_its_own_changes(
         [at("SPEC_FILL")]
     ]
     assert spec.value_stops == []
+
+
+def test_the_stop_for_what_a_value_drops_keeps_the_calls_it_came_back_through(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``names_of`` returns a list it changed (CALLED_NAMES), stored at PUT_CALLED: the value carries none of its
+    own changes, and the stop saying so keeps the call the value came back through, as the value's way does -- a
+    reader that rules that call out rules the stop out with it."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, marker, FIELDS)}"
+
+    stored = {one.at: one for one in spec_fields["items"].changes}
+    called = stored[at("PUT_CALLED")]
+    assert [one.route for one in called.value] == [[at("PUT_CALLED")]]
+    assert [(one.kind, one.what, one.at) for one in called.value_stops] == [
+        ("uncarried", at("CALLED_NAMES"), [at("PUT_CALLED")])
+    ]
 
 
 def test_a_column_a_row_read_fills_holds_its_value_nothing_changes_in_place(
