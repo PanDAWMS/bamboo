@@ -37,21 +37,25 @@ class History:
     subject: str  # ``Class.attr`` whose moves it records
     held: frozenset[str]  # the other columns of the row it holds, lower case: what a question may filter on
     created: str = ""  # the class's attribute set once, as its row is made: the earliest the first row's values came
+    #: a row's time is the clock as the history call ran, in the pass that wrote its value (M3(a)-1, ``stay_value``)
+    at_write: bool = False
 
 
 #: the stand-in's knowledge of where each history is kept (base_module.py recordStatusChange and
 #: record_task_status_change) and what orders its rows: the job's modificationTime is CURRENT_DATE, to the second,
 #: so modiftime_extended (CURRENT_TIMESTAMP) breaks ties; the value column is spelled as the subject's attribute.
+#: Both calls write the row's time off the database's clock as they run (CURRENT_DATE, CURRENT_TIMESTAMP), after the
+#: write of the value in the same pass.
 #: A job's creationTime is set only just before its INSERT (job_complex_module.py:3034, 4172, 5490,
 #: task_event_module.py:4493) and no statement updates it; the task's is not checked
 _HISTORIES = {
     "JobSpec.jobStatus": (
-        History("JobSpec.jobStatus", frozenset({"computingsite", "prodsourcelabel", "cloud"}), "creationTime"),
+        History("JobSpec.jobStatus", frozenset({"computingsite", "prodsourcelabel", "cloud"}), "creationTime", True),
         "ATLAS_PANDA.jobs_StatusLog",
         "modificationTime, modiftime_extended",
     ),
     "JediTaskSpec.status": (
-        History("JediTaskSpec.status", frozenset({"attemptnr", "reason"})),
+        History("JediTaskSpec.status", frozenset({"attemptnr", "reason"}), at_write=True),
         "ATLAS_PANDA.TASKS_STATUSLOG",
         "modificationTime",
     ),

@@ -14266,3 +14266,94 @@ def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the
     assert got["n_between"] == 9 and got["kept"] == [True, ""], got
     assert got["short"][0] is False and "after the lock had ended" in got["short"][1], got
     assert got["long"][0] is False and "before the lock" in got["long"][1], got
+
+
+def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
+    """M3(a)-1 (stay_value.before): a time column of the row while its status held the value -- the time of the
+    history row that began the stay where every arm writing the value writes the column the time it runs in the same
+    pass, and no other arm of the column may write it while the value holds; each arm left out says why."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import stay_value as SV
+
+            def pair(caller, call):
+                return N(caller=caller, call=call)
+
+            def br(line, outcome, history=(), pre=()):
+                return N(line=line, other_lines=[], outcome=outcome, history=list(history), row_precondition=list(pre))
+
+            def src(kind, name="", site_owner="", site_line=None):
+                return N(kind=kind, name=name, site_owner=site_owner, site_line=site_line)
+
+            def kf(owner, statement, table, term, writes, sources, routes_open=False):
+                return N(owner=owner, statement=statement, table=table, term=term, writes=writes, sources=sources,
+                         routes_open=routes_open)
+
+            S, C = "JobSpec.jobStatus", "JobSpec.modificationTime"
+            hist = pair("m.py::getJobs", 2910)
+            status = [N(owner="m.py::getJobs", subject=S, branches=[br(2455, "sent", [hist])]),
+                      N(owner="m.py::updateJobStatus", subject=S, branches=[br(242, "runtime(jobStatus)")])]
+            column = [
+                N(owner="m.py::getJobs", subject=C, branches=[br(2452, "runtime(CURRENT_DATE)", [hist])]),
+                N(owner="m.py::lockForFinisher", subject=C, branches=[br(895, "runtime(CURRENT_DATE)")]),
+                N(owner="m.py::forWaiting", subject=C, branches=[br(287, "runtime(CURRENT_DATE)")]),
+                N(owner="m.py::copyMeta", subject=C, branches=[br(1710, "runtime(job.modificationTime)")]),
+                N(owner="m.py::resetDefined", subject=C, branches=[br(396, "runtime(CURRENT_DATE)", pre=["jobStatus IN (assigned,defined)"])]),
+                N(owner="m.py::kill", subject=C, branches=[br(1094, "runtime(job.modificationTime)")]),
+            ]
+            kfs = [
+                kf("m.py::getJobs", 2498, "jobsActive4", "PandaID=:PandaID", {S: [2455], C: [2452]}, [src("parameter")]),
+                kf("m.py::lockForFinisher", 906, "jobsActive4", "PandaID=:PandaID", {C: [895]},
+                   [src("rows", site_owner="m.py::lockForFinisher", site_line=900)]),
+                kf("m.py::forWaiting", 297, "jobsDefined4", "jobStatus=:jobStatus", {C: [287]}, [src("constant", "'waiting'")]),
+                kf("m.py::copyMeta", 1711, "metaTable", "PandaID=:PandaID", {C: [1710]}, [src("parameter")]),
+                # a term whose rows come from another function's statement, the routes into it not all placed
+                kf("m.py::kill", 1096, "jobsActive4", "PandaID=:PandaID", {C: [1094]},
+                   [src("rows", site_owner="m.py::main", site_line=1190)], routes_open=True),
+            ]
+            reads = {("m.py::lockForFinisher", 900): N(restricts=[f"{S}=transferring"]),
+                     ("m.py::main", 1190): N(restricts=[f"{S}=activated"])}
+            got = {}
+
+            def run(column, kfs, value="sent"):
+                b = SV.before(status, column, S, value, C, kfs, lambda k: True, lambda o, line: reads.get((o, line)),
+                              {"jobsactive4", "jobsdefined4"}, lambda o, b: False)
+                return [b.known, list(b.starts), list(b.lacking), list(b.runtime), list(b.left), [list(x) for x in b.out]]
+
+            got["all"] = run(column, kfs)
+            got["kill placed"] = run(column, [*kfs[:4], kf(*[getattr(kfs[4], f) for f in ("owner", "statement", "table", "term", "writes", "sources")])])
+            got["no time"] = SV.before(status, [N(owner="m.py::x", subject=C, branches=[br(1, "runtime(job.gshare)")])], S, "sent", C,
+                                       [], lambda k: True, lambda o, line: None, set(), lambda o, b: False)
+            got["lacking"] = run(column[1:], kfs)
+            got["asked"] = [sorted(SV.asked_values(["jobStatus IN (assigned, defined)"], "jobStatus")),
+                            SV.asked_values(["prodSourceLabel=managed"], "jobStatus")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    known, starts, lacking, runtime, left, out_ = got["all"]
+    # getJobs writes sent and the time it runs in the pass of the same history call; the run-time status write is said
+    assert starts == ["getJobs:2455 with 2452"] and lacking == [] and runtime == ["updateJobStatus:242"], got
+    # every arm but kill's is left out, each with why; kill's term comes from another function's rows through routes
+    # the map does not all place: it may write the column while the value holds, and the value is not known
+    assert known is False and left == ["kill:1094"], got
+    assert dict(map(tuple, out_)) == {
+        "getJobs:2452": "its statement at 2498 writes jobStatus too",
+        "lockForFinisher:895": "its statement at 906 takes the rows of lockForFinisher@900 (jobStatus in ['transferring'])",
+        "forWaiting:287": "its statement at 297 asks jobStatus in ['waiting']",
+        "copyMeta:1710": "it writes ['metaTable'], which hold no row of JobSpec",
+        "resetDefined:396": "its row precondition asks jobStatus in ['assigned', 'defined']",
+    }, got
+    # every route placed: main's rows at activated take no sent row, and the column held the stay's start all the stay
+    assert got["kill placed"][0] is True and got["kill placed"][4] == [], got
+    assert ["kill:1094", "its statement at 1096 takes the rows of main@1190 (jobStatus in ['activated'])"] in got["kill placed"][5], got
+    # a column no arm writes the time it runs is not read here
+    assert got["no time"] is None, got
+    # the value's arm without the column's time in its pass: not known, said
+    assert got["lacking"][0] is False and got["lacking"][1] == [] and got["lacking"][2] == ["getJobs:2455"], got
+    assert got["asked"] == [["assigned", "defined"], None], got
