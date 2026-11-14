@@ -3184,14 +3184,25 @@ KEY_DATABASE = "database"
 HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
 #: How a :class:`HeldChange` changes the object a way holds in place: an item or attribute stored or deleted, one
 #: changed inside (``m["a"]["b"] = v`` changes the item ``"a"``), a method of a builtin container changing it, the
-#: object put where the reading does not follow it, a call the reading cannot follow.
+#: object put where the reading does not follow it, a call the reading cannot follow -- and ``row``: a spec's row
+#: read on it (:data:`bamboo.codemap.callfacts.ROW_READ`, ``datasetSpec.pack(resDs)``) sets every column from the
+#: row it is handed, the *value*: a field ``f`` holds the value with the step ``.f``.
 CHANGE_STORE = "store"
 CHANGE_DELETE = "delete"
 CHANGE_INNER = "inner"
 CHANGE_METHOD = "method"
 CHANGE_ESCAPED = "escaped"
 CHANGE_UNREAD = "unread"
-HELD_CHANGES = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD, CHANGE_ESCAPED, CHANGE_UNREAD)
+CHANGE_ROW = "row"
+HELD_CHANGES = (
+    CHANGE_STORE,
+    CHANGE_DELETE,
+    CHANGE_INNER,
+    CHANGE_METHOD,
+    CHANGE_ESCAPED,
+    CHANGE_UNREAD,
+    CHANGE_ROW,
+)
 #: What a call outside the corpus a way goes through makes of the value it is handed (:attr:`HeldThrough.gives`),
 #: as :mod:`bamboo.codemap.callfacts` says it: the value read again out of a text (``json.loads``), a copy of it
 #: (``copy.copy``, ``list``), the same value as another type (``int``, ``str``), a text of all of it
@@ -6121,13 +6132,23 @@ WRITE_ROLES = (WRITE_OBJECT, WRITE_VALUE)
 #: :func:`bamboo.codemap.callfacts.named_write`) -- or by a computed name: ``setattr(self, key, value)`` in a ``for
 #: key, value in P.items()`` where a caller hands ``f`` among P's keywords, a spec's write the names of which hold
 #: ``f`` (:mod:`bamboo.codemap.panda.specwrites`: ``__init__``'s first value, a copy of another object's ``f``) --
-#: ``f = v`` in the class's body.
+#: ``f = v`` in the class's body, and ``row``: a column ``f`` the spec's row read sets from the row it is handed
+#: (:data:`bamboo.codemap.callfacts.ROW_READ`, ``pack(self, values)``), the row's item of the field's name -- the
+#: way the row parameter's, with the step ``.f``.
 FIELD_ASSIGN = "assign"
 FIELD_ANNOTATED = "annotated"
 FIELD_AUGMENTED = "augmented"
 FIELD_SETATTR = "setattr"
 FIELD_CLASS = "class"
-FIELD_BINDS = (FIELD_ASSIGN, FIELD_ANNOTATED, FIELD_AUGMENTED, FIELD_SETATTR, FIELD_CLASS)
+FIELD_ROW = "row"
+FIELD_BINDS = (
+    FIELD_ASSIGN,
+    FIELD_ANNOTATED,
+    FIELD_AUGMENTED,
+    FIELD_SETATTR,
+    FIELD_CLASS,
+    FIELD_ROW,
+)
 
 
 class FieldBinding(BaseModel):

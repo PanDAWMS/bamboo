@@ -2298,6 +2298,7 @@ def test_a_way_through_a_factory_reads_the_changes_of_the_family_the_factory_han
 
 
 FIELDS_SPEC = "pandaserver/taskbuffer/JediTaskSpec.py"
+FIELDS_PROXY = "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py"
 
 FIELDS = {
     FIELDS_SPEC: """\
@@ -2319,7 +2320,7 @@ FIELDS = {
                     val = values[i]
                     object.__setattr__(self, attr, val)  # PACK
 
-            def copyAttributes(self, oldTaskSpec):
+            def copyAttributes(self, oldTaskSpec: "JediTaskSpec"):
                 for attr in self._attributes:
                     self.__setattr__(attr, getattr(oldTaskSpec, attr))  # COPY
 
@@ -2328,6 +2329,64 @@ FIELDS = {
                     renamed = self._renames[attr]
                     val = getattr(other, attr)
                     setattr(self, renamed, val)  # RENAMED
+        """,
+    FIELDS_PROXY: """\
+        from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+
+        class JediDatasetSpec(object):
+            _attributes = ("datasetID", "nFiles")
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], values[i])
+
+            def __setstate__(self, state):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], state[i])  # RESTORE
+
+            def copyFrom(self, other: "JediDatasetSpec"):
+                for attr in self._attributes:
+                    setattr(self, attr, getattr(other, attr))  # COPIED
+
+
+        class LooseSpec(object):
+            _attributes = ("nFiles",)
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], values[i])
+
+            def copyLoose(self, other):
+                for attr in self._attributes:
+                    setattr(self, attr, getattr(other, attr))  # LOOSE
+
+
+        class TaskModule:
+            def getTasks(self, rows):
+                retTasks = []
+                for res in rows:
+                    taskSpec = JediTaskSpec()
+                    taskSpec.pack(res)
+                    retTasks.append(taskSpec)
+                    datasetSpec = JediDatasetSpec()
+                    taskSpec.datasetSpecList.append(datasetSpec)  # APPEND
+                return retTasks
+
+            def unsaid(self, thing, datasetSpec):
+                thing.datasetSpecList.append(datasetSpec)  # UNSAID
+
+            def leak(self, datasetSpec: JediDatasetSpec, loose: LooseSpec):
+                unknown_function(datasetSpec.nFiles)  # LEAK
+                unknown_function(loose.nFiles)  # LEAK_LOOSE
         """,
 }
 
@@ -2365,10 +2424,15 @@ def spec_fields(tmp_path_factory: pytest.TempPathFactory) -> dict[str, FieldFrom
         )
         record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
         reader = heldfrom._Reader(calls, record, sites, set(), trees)
-        return {
+        made = {
             field: reader._field_from(f"{FIELDS_SPEC}::JediTaskSpec", field)
             for field in ("status", "datasetSpecList")
         }
+        made["nFiles"] = reader._field_from(
+            f"{FIELDS_PROXY}::JediDatasetSpec", "nFiles"
+        )
+        made["loose"] = reader._field_from(f"{FIELDS_PROXY}::LooseSpec", "nFiles")
+        return made
 
 
 def test_a_field_a_spec_sets_around_its_own_setattr_is_bound(
@@ -2377,30 +2441,71 @@ def test_a_field_a_spec_sets_around_its_own_setattr_is_bound(
     """``object.__setattr__(self, "datasetSpecList", [])`` binds the field as ``setattr`` does
     (:func:`callfacts.named_write`); a computed name binds as the spec's write of it says (:mod:`specwrites`):
     ``__init__``'s first value, a copy's other object's field of the name, nothing for ``__setattr__``'s own write
-    -- its caller's assignment -- and a field the names leave out is not bound by them."""
+    -- its caller's assignment -- and a field the names leave out is not bound by them.  ``pack``, the spec's row
+    read (callfacts.ROW_READ), binds each column to the row it is handed, stepped by the field's name."""
 
     def at(marker: str) -> str:
         return f"{FIELDS_SPEC}:{_line(FIELDS_SPEC, marker, FIELDS)}"
 
     listed = spec_fields["datasetSpecList"]
     assert [(one.at, one.how) for one in listed.bindings] == [(at("LIST"), "setattr")]
-    assert listed.stops == []
+    assert [one for one in listed.stops if one.kind == "computed"] == []
     status = spec_fields["status"]
     assert [(one.at, one.how) for one in status.bindings] == [
         (at("INIT"), "setattr"),
+        (at("PACK"), "row"),
         (at("COPY"), "setattr"),
     ]
-    (first,), (copied,) = (one.sources for one in status.bindings)
+    (first,), (row,), (copied,) = (one.sources for one in status.bindings)
     assert (first.kind, first.name) == ("constant", "None")
+    assert (row.kind, row.name, row.steps) == ("parameter", "values", [".status"])
     assert (copied.kind, copied.name, copied.steps) == (
         "parameter",
         "oldTaskSpec",
         [".status"],
     )
-    # ``pack`` sets every column from the row: not read here yet, the name may be any.
     # A copy read off the other object by another name than it sets (``WorkQueue``'s ``attr_wq``): the name may be
     # any of the other object's.
     assert [(stop.kind, stop.at) for stop in status.stops] == [
-        ("computed", [at("PACK")]),
-        ("computed", [at("RENAMED")]),
+        ("computed", [at("RENAMED")])
     ]
+
+
+def test_what_a_field_holds_changed_on_an_object_of_its_class_outside_its_methods_is_a_change(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``taskSpec.datasetSpecList.append(datasetSpec)``, ``taskSpec`` made a ``JediTaskSpec`` in another class's
+    method, changes what the field holds (:func:`changes.class_field_changes`): a change of the record, its value
+    the object put.  Where the object's class is not said, the change is named by the attribute's name: a stop."""
+    listed = spec_fields["datasetSpecList"]
+    proxy = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'APPEND', FIELDS)}"
+    assert [(one.at, one.kind, one.what) for one in listed.changes] == [
+        (proxy, "method", "append")
+    ]
+    ((put,),) = [one.value for one in listed.changes]
+    assert (put.kind, put.name) == ("object", "JediDatasetSpec")
+    assert [(one.kind, one.at) for one in listed.stops] == [
+        ("outside", [f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'UNSAID', FIELDS)}"])
+    ]
+
+
+def test_a_column_a_row_read_fills_holds_its_value_nothing_changes_in_place(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``nFiles`` is bound to ``None`` in ``__init__`` and to the row's item in ``pack``: a column's value, as a rows
+    way's is, which nothing changes in place -- so ``datasetSpec.nFiles`` handed where it is not followed (LEAK)
+    changes nothing it holds.  ``__setstate__`` (RESTORE) and a copy off another ``JediDatasetSpec`` (COPIED) put
+    the field's own value back: the other bindings decide.  A copy off an object whose class is not said (LOOSE) may
+    bring anything, so what ``loose.nFiles`` is handed to may change it."""
+    files = spec_fields["nFiles"]
+    assert [one.how for one in files.bindings] == [
+        "setattr",
+        "row",
+        "setattr",
+        "setattr",
+    ]
+    assert files.changes == []
+    loose = spec_fields["loose"]
+    assert [one.how for one in loose.bindings] == ["setattr", "row", "setattr"]
+    leak = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'LEAK_LOOSE', FIELDS)}"
+    assert [(one.at, one.kind) for one in loose.changes] == [(leak, "unread")]

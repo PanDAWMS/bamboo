@@ -114,10 +114,11 @@ from bamboo.codemap.models import (
     CHANGE_ESCAPED,
     CHANGE_INNER,
     CHANGE_METHOD,
+    CHANGE_ROW,
     CHANGE_STORE,
     CHANGE_UNREAD,
 )
-from bamboo.codemap.panda import flow, sql
+from bamboo.codemap.panda import flow, specwrites, sql
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls, Placed
@@ -311,6 +312,17 @@ def call_changes(
         return isinstance(expression, ast.Name) and expression.id == name
 
     return _reading(calls)._call_changes(file, func, call, holds, bound)
+
+
+def class_field_changes(
+    calls: "Calls", file: str, cls: ast.ClassDef, field: str
+) -> list[ObjectChange]:
+    """Each place the corpus may change in place what *field* holds on an object of *cls* -- ``self`` in a method of
+    its family, or an expression declared one of it anywhere (:meth:`_Reading.by_field`):
+    ``taskSpec.datasetSpecList.append(datasetSpec)`` in ``getTasksToBeFinished_JEDI``, ``taskSpec`` made there a
+    ``JediTaskSpec``.  An object whose class is not said is not taken for it: its reader names those apart."""
+    reading = _reading(calls)
+    return reading.by_field((field, reading.family(((file, cls),))))
 
 
 def chain_steps(chain: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
@@ -1217,6 +1229,19 @@ class _Reading:
             return unread(placed.unplaced or "run apart")
         if _on_driver(placed):
             return self._driver_changes(file, func, call, handed, parts, holds)
+        if on_object and self._reads_row(call, placed):
+            # A spec's row read (callfacts.ROW_READ): every column from the row it is handed, by its name.
+            return [
+                ObjectChange(
+                    file,
+                    line,
+                    CHANGE_ROW,
+                    EVERY,
+                    ast.unparse(called),
+                    func=func,
+                    value=call.args[0],
+                )
+            ]
         targets = list(placed.targets)
         found: list[ObjectChange] = []
         if not targets or placed.unplaced == UNPLACED_OPEN:
@@ -1357,6 +1382,25 @@ class _Reading:
             for one in parts
         ]
         return found
+
+    def _reads_row(self, call: ast.Call, placed: "Placed") -> bool:
+        """Whether *call* hands one row to a spec's row read (:data:`callfacts.ROW_READ`) and lands at nothing
+        else: ``datasetSpec.pack(resDs)``."""
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in callfacts.ROW_READ
+            and len(call.args) == 1
+            and not isinstance(call.args[0], ast.Starred)
+            and not call.keywords
+            and bool(placed.targets)
+            and placed.unplaced != UNPLACED_OPEN
+            and all(
+                getattr(target.func, "name", "") in callfacts.ROW_READ
+                and target.cls is not None
+                and specwrites.is_spec(self.types, target.file, target.cls)
+                for target in placed.targets
+            )
+        )
 
     def _named_change(
         self,
