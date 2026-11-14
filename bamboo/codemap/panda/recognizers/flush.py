@@ -63,6 +63,7 @@ from bamboo.codemap.calls import own_nodes
 from bamboo.codemap.models import (
     KEY_IN_CALLEE,
     KEY_NO_BIND,
+    Branch,
     ConditionalGuard,
     Emit,
     JunctionNode,
@@ -70,6 +71,7 @@ from bamboo.codemap.models import (
     RowKeySource,
     SourceModule,
     SubjectNode,
+    Unchanged,
 )
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor
@@ -84,6 +86,7 @@ from bamboo.codemap.pathcond import (
     site_of,
     targets_of,
 )
+from bamboo.codemap.reaching import bound_once
 
 #: The spec classes declare this to build a ``SET`` clause out of whatever was
 #: assigned to them.  Its presence is the method saying it is a flush.
@@ -672,7 +675,95 @@ def attach(
                             if any(e.template == line.template for e in branch.emits):
                                 continue
                             branch.emits.append(line)
+            # An arm whose every flush call writes the row only where the column holds its value already.
+            reached_at: dict[tuple[int, str], set[tuple[str, int]]] = {}
+            for junction in here:
+                for branch in junction.branches:
+                    unchanged = _unchanged(
+                        junction, branch, func, owner, uses, attributor, reached_at
+                    )
+                    if unchanged is not None:
+                        branch.unchanged = unchanged
     return annotated
+
+
+#: A run-time outcome that is one name: ``runtime(taskStatus)``.
+_RUNTIME_NAME = re.compile(r"runtime\((\w+)\)")
+
+
+def _unchanged(
+    junction: JunctionNode,
+    branch: Branch,
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner: Optional[str],
+    uses: list,
+    attributor: SpecAttributor,
+    reached_at: dict[tuple[int, str], set[tuple[str, int]]],
+) -> Optional[Unchanged]:
+    """What shows *branch* leaves its column as the row held it (:attr:`~bamboo.codemap.models.Branch.unchanged`),
+    or ``None``: its outcome is a name its function binds at one place (:func:`~bamboo.codemap.reaching.bound_once`),
+    its assignment reaches a flush call (:func:`_reached_lines`), and every flush call it reaches hands that name to the
+    precondition on the column the call has on every way it runs the write -- not one left under the call's own tests
+    -- (:func:`_hands`).  ``TaskRefiner.runImpl`` sets ``status = taskStatus``, the status it read off the row, and
+    hands ``updateTask_JEDI`` ``oldStatus=[taskStatus]``: the row is written only where it holds that status.  Within
+    one run of the binding the name holds one value; an assignment reaching a call through a later run of it is not
+    told apart.  *uses* are :func:`attach`'s, the function's flush calls; *reached_at* keeps what each call reaches."""
+    match = _RUNTIME_NAME.fullmatch(branch.outcome)
+    if match is None or not bound_once(func, match.group(1)):
+        return None
+    name = match.group(1)
+    spec, _, attribute = junction.subject.rpartition(".")
+    lines = {line for line in (branch.line, *branch.other_lines) if line is not None}
+    calls: set[int] = set()
+    terms: set[str] = set()
+    for node, flush, one, written, applied, _conditional in uses:
+        if one != spec or attribute not in written:
+            continue
+        key = (id(node), one)
+        if key not in reached_at:
+            reached_at[key] = _reached_lines(
+                node, func, owner, one, written, attributor
+            )
+        if not any((attribute, line) in reached_at[key] for line in lines):
+            continue
+        term = next(
+            (term for column, term, _settled in applied if column == attribute), None
+        )
+        if term is None or not _hands(node, flush, (spec, attribute), name):
+            return None
+        calls.add(node.lineno)
+        terms.add(term)
+    return (
+        Unchanged(name=name, calls=sorted(calls), terms=sorted(terms))
+        if calls
+        else None
+    )
+
+
+def _hands(call: ast.Call, flush: Flush, key: tuple[str, str], name: str) -> bool:
+    """Whether *call* hands *name* to every bind of the flush's precondition on *key*: as the bind itself where the
+    precondition tests one value (``status=:preStatus``), as the one element of a list written into the call where it
+    tests a list (``status IN (:old___in)``, handed ``oldStatus=[taskStatus]``).  A bind is a part of a parameter, read
+    as the same part of what the call hands it (:func:`_rerooted`)."""
+    held = flush.guard_binds.get(key)
+    if held is None:
+        return False
+    raw, _method, binds = held
+    listed = sql.tests_list(raw)
+    names = sql.precondition_binds(raw)
+    if listed is None or not names:
+        return False
+    for bind in (one for bind_name in names for one in binds.get(bind_name) or [None]):
+        root = sqlwrite._root(bind.value) if bind is not None else None
+        if root is None or root.id not in flush.parameters[1:]:
+            return False
+        handed = _argument(call, root.id, flush.parameters)
+        moved = _rerooted(bind.value, root.id, handed) if handed is not None else None
+        if listed and isinstance(moved, (ast.List, ast.Tuple)) and len(moved.elts) == 1:
+            moved = moved.elts[0]
+        if not (isinstance(moved, ast.Name) and moved.id == name):
+            return False
+    return True
 
 
 def _reached_lines(

@@ -77,7 +77,7 @@ swallow (:func:`bamboo.codemap.panda.flow.swallowing_managers`), and the
 from __future__ import annotations
 
 import ast
-from typing import Collection, Optional, Sequence
+from typing import Collection, Iterator, Optional, Sequence
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -469,42 +469,52 @@ def _bound_only_to_one(scope: ast.AST, name: str) -> bool:
     return bool(allowed) and not _binds(scope, name, allowed)
 
 
+def bound_once(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* binds *name* at one place only, its nested scopes counted -- a parameter, an assignment's or a
+    loop's target, an ``except`` or ``with`` name, an import, a ``global`` or ``nonlocal`` saying it is bound
+    elsewhere: within one run of that place the name holds one value."""
+    found = _binders(scope, name)
+    return next(found, None) is not None and next(found, None) is None
+
+
 def _binds(
     scope: ast.AST, name: str, allowed: frozenset[int] | set[int] = frozenset()
 ) -> bool:
     """Whether anything inside *scope* -- its nested scopes too -- binds *name*, besides the nodes in *allowed*."""
+    return any(id(node) not in allowed for node in _binders(scope, name))
+
+
+def _binders(scope: ast.AST, name: str) -> Iterator[ast.AST]:
+    """Each node inside *scope* -- its nested scopes too -- that binds *name*, in :func:`walk`'s order."""
     for node in walk(scope):
-        if id(node) in allowed:
-            continue
         if (
             isinstance(node, ast.Name)
             and node.id == name
             and not isinstance(node.ctx, ast.Load)
         ):
-            return True
+            yield node
         if isinstance(node, ast.arg) and node.arg == name:
-            return True
+            yield node
         if isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
-            return True
+            yield node
         if (
             isinstance(node, ast.alias)
             and (node.asname or node.name.split(".")[0]) == name
         ):
-            return True
+            yield node
         if (
             isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar))
             and node.name == name
         ):
-            return True
+            yield node
         if isinstance(node, ast.MatchMapping) and node.rest == name:
-            return True
+            yield node
         if (
             node is not scope
             and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
             and node.name == name
         ):
-            return True
-    return False
+            yield node
 
 
 #: ``try`` and ``except*``, which hold the same fields.  Python 3.10, which the project still runs on, has no

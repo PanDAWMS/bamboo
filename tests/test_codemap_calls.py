@@ -3833,3 +3833,31 @@ def test_a_loop_takes_a_collections_element_and_a_generators_first_argument(tmp_
     calls = _calls(_tree(tmp_path, m=_CONTAINERS_DECLARED))
     for text in ("spec.check", "one.check", "other.check", "by_name['x'].check"):
         assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text
+
+
+_OPTIONAL_CONTAINERS = """
+from typing import Optional
+
+class Spec:
+    def check(self):
+        pass
+
+def run(specs: list[Spec] | None = None, others: Optional[list[Spec]] = None, by_name: dict[str, Spec] | None = None):
+    if specs:
+        for spec in specs:
+            spec.check()
+    if others:
+        for other in others:
+            other.check()
+        others[0].check()
+    if by_name:
+        by_name["x"].check()
+"""
+
+
+def test_none_is_left_out_of_a_containers_union_for_its_element(tmp_path):
+    """``list[Spec] | None`` and ``Optional[list[Spec]]`` hold ``Spec``s as ``list[Spec]`` does: a loop over one, or a
+    subscript of one, is on the container (upsert_workflow_entities' ``data_specs: list[WFDataSpec] | None``)."""
+    calls = _calls(_tree(tmp_path, m=_OPTIONAL_CONTAINERS))
+    for text in ("spec.check", "other.check", "others[0].check", "by_name['x'].check"):
+        assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text

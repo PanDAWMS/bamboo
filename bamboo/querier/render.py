@@ -237,6 +237,7 @@ TEMPLATES: dict[str, str] = {
     "for-a-binding-a-call-hands": "for which binding the call at {site} hands ran (Q5)",
     "for-a-call-that-may-have-entered-it": "for the call at {site} that may have entered it",
     "for-a-call-across-a-send": "for the call at {site} that may have sent the value across the send at {send}",
+    "for-the-rows-after-a-call-across-a-send": "for the rows the call at {site} prints after it returns, across the send at {send}",
     "for-the-entry-a-send-entered": "for the run of {entry} the send at {send} entered, its first line closing the caller's window",
     "guard-held-on": "{guard!r} held{on}",
     "held-on-values": " on {values:join=, }",

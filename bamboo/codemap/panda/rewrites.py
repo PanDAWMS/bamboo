@@ -191,9 +191,10 @@ class _Later:
         self.rows: dict[str, ReachNode] = reader.rows
         self.tables = objects.table_classes(reader.fragment.entities)
         declared = progress.spec_attributes(modules)
-        #: The columns the reach record keeps assignments of (:data:`panda_objects.COLUMN_CLASSES`).
+        classes = panda_objects.column_classes(self.tables)
+        #: The columns the reach record keeps assignments of (:func:`panda_objects.column_classes`).
         self.recorded: frozenset[str] = frozenset().union(
-            *(declared.get(name, set()) for name in panda_objects.COLUMN_CLASSES)
+            *(declared.get(name, set()) for name in classes)
         )
         self._changes: dict[tuple, "Change"] = {}
         #: The constants a call hands its callee's tested parameters, by (caller, line, callee).

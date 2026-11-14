@@ -148,7 +148,20 @@ class Adder:
 """
 
 
-def _build(tmp_path: Path, entities: tuple = (), **files: str) -> MapFragment:
+#: The table the fixtures' spec class is held in: the record keeps the assignments of a class a table holds
+#: (panda_objects.column_classes).
+_SPEC_TABLES = (
+    EntityNode(
+        name="jobsactive4",
+        map_id="m",
+        derived_from="v",
+        spec_class="JobSpec",
+        tables=["jobsActive4"],
+    ),
+)
+
+
+def _build(tmp_path: Path, entities: tuple = _SPEC_TABLES, **files: str) -> MapFragment:
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -325,16 +338,17 @@ def test_a_class_held_in_a_field_builds_an_object_it_has_no_receiver(tmp_path):
 
 
 def test_a_column_changes_by_the_object_written_back_or_by_a_key_of_its_row(tmp_path):
-    """close(): modificationTime assigned and written by archiveJob; jobMetrics written by killJob on self.job_id's row."""
+    """close(): modificationTime assigned, then assigned again and written by archiveJob, so the row takes
+    archiveJob's; jobMetrics written by killJob on self.job_id's row."""
     rows = _adder(tmp_path)
     close = "pkg/adder.py::Adder.close"
 
     written = objects.may_change(rows, close, "self.job", "modificationTime")
     assert written.verdict is True
     assert {site.owner.split("::")[1] for site in written.because} == {
-        "Adder.close",
-        "DBProxy.archiveJob",
+        "DBProxy.archiveJob"
     }
+    assert [site.owner.split("::")[1] for site in written.unwritten] == ["Adder.close"]
     assert "written_back_as_read" in written.premises
 
     by_key = objects.may_change(
@@ -1313,6 +1327,44 @@ def test_the_gate_reads_keys_positions_and_a_calls_own_result(tmp_path):
     assert result.passed, result.failures
 
 
+_WORKERS = """\
+class WorkerSpec:
+    _attributes = ("workerID", "status")
+
+
+class SiteSpec:
+    _attributes = ("sitename",)
+
+
+def mark(worker: WorkerSpec, site: SiteSpec):
+    worker.status = "running"
+    site.sitename = "CERN"
+"""
+
+
+def test_the_record_keeps_the_assignments_of_each_spec_class_a_table_holds(tmp_path):
+    # WorkerSpec is held by a table and SiteSpec by none: the first's assignment is kept, though it is not one of
+    # the three classes once named by hand.
+    tables = (
+        EntityNode(
+            name="harvester_workers",
+            map_id="m",
+            derived_from="v",
+            spec_class="WorkerSpec",
+            tables=["Harvester_Workers"],
+        ),
+    )
+    fragment = _build(tmp_path, entities=tables, workers=_WORKERS)
+    (row,) = [
+        row
+        for row in fragment.reach_graph
+        if row.owner == f"{PACKAGE}/workers.py::mark"
+    ]
+    assert {(one.path, *one.attrs) for one in row.assigns} == {("worker", "status")}
+    classes = panda_objects.column_classes(objects.table_classes(fragment.entities))
+    assert classes == {"WorkerSpec"}
+
+
 #: The tables JobSpec is held in, as the build learns them (EntityNode.spec_class).
 JOB_TABLES = (
     EntityNode(
@@ -1649,6 +1701,19 @@ class Runner:
                 self.proxy.updateJob(job)  # fresh's update
             else:
                 job.ddmErrorCode = 6  # another job each pass
+
+    def stamp(self, job: JobSpec, flag):
+        job.modificationTime = 1  # stamped first
+        job.jobMetrics = "a"  # kept on one arm
+        if flag:
+            job.jobMetrics = "b"  # overwritten on one arm
+        job.modificationTime = 2  # stamped again
+        self.proxy.updateJob(job)  # stamp's update
+
+    def elements(self, jobs: list[JobSpec], i, j):
+        jobs[i].ddmErrorCode = 8  # some job's
+        jobs[j].ddmErrorCode = 9  # maybe another job's
+        self.proxy.updateJob(jobs[i])  # elements' update
 """
 
 
@@ -1759,6 +1824,47 @@ def test_a_change_writes_the_row_only_where_it_can_run_before_the_write_and_no_r
         rows, "pkg/ordered.py::Runner.other", "job", "ddmErrorCode"
     )
     assert (other.verdict, other.because) == (False, [])
+
+
+def test_a_change_its_column_is_assigned_again_after_on_every_way_is_not_what_the_write_writes(
+    tmp_path,
+):
+    """stamp sets modificationTime again before its update, so the first value is gone on every way, whatever the
+    update writes; jobMetrics is set again on one arm only, and the first value is written on the other; an element
+    at a position not known names no one job, so what jobs[j] is given does not overwrite what jobs[i] was."""
+    rows = _ordered(tmp_path)
+    stamp = "pkg/ordered.py::Runner.stamp"
+    first, again, update = (
+        _line(ORDERED, "# stamped first"),
+        _line(ORDERED, "# stamped again"),
+        _line(ORDERED, "# stamp's update"),
+    )
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["modificationTime"], first)
+        and update in one.lines
+        for one in rows[stamp].overwritten
+    )
+
+    def own(sites, owner=stamp):
+        # The changes: ``because`` holds the write's site as well.
+        return [site.line for site in sites if site.owner == owner]
+
+    stamped = objects.may_change(rows, stamp, "job", "modificationTime")
+    assert stamped.verdict is True
+    assert own(stamped.because) == [again]
+    assert own(stamped.unwritten) == [first]
+    kept = objects.may_change(rows, stamp, "job", "jobMetrics")
+    assert own(kept.because) == [
+        _line(ORDERED, "# kept on one arm"),
+        _line(ORDERED, "# overwritten on one arm"),
+    ]
+    elements = "pkg/ordered.py::Runner.elements"
+    assert rows[elements].overwritten == []
+    either = objects.may_change(rows, elements, "jobs[]", "ddmErrorCode")
+    assert own(either.because, elements) == [
+        _line(ORDERED, "# some job's"),
+        _line(ORDERED, "# maybe another job's"),
+    ]
 
 
 def test_an_object_not_read_from_its_row_is_open_only_where_a_change_it_came_with_reaches_the_write(
@@ -2104,3 +2210,170 @@ def test_a_set_naming_its_columns_by_a_mapping_s_keys_writes_each_key_its_caller
         assert [site.how for site in unread.open] == [
             objects.NAMED_AT_RUN_TIME.format(column="modificationTime")
         ], name
+
+
+REACHING = """\
+from pkg.spec import JobSpec
+from pkg.ordered import DBProxy
+
+
+class Holder:
+    def __init__(self, job: JobSpec):
+        self.job = job
+
+    def keep(self, job: JobSpec):
+        self.job = job
+
+
+class Refiner:
+    def __init__(self, proxy: DBProxy):
+        self.proxy = proxy
+
+    def hold(self) -> Holder:
+        return Holder(JobSpec())
+
+    def named(self, job: JobSpec):
+        same = job
+        same.jobStatus = "named"  # by another name
+        job.ddmErrorCode = 1  # before the update
+        self.proxy.updateJob(job)  # named's update
+        job.jobMetrics = "late"  # after the update
+
+    def unknown(self, job: JobSpec, keeper):
+        keeper.keep(job)  # into a hole
+        job.jobStatus = "kept"  # on the job the hole took
+        holder = self.hold()
+        self.proxy.updateJob(holder.job)  # unknown's update
+
+    def unplaced(self, job: JobSpec, other):
+        job.jobStatus = "first"  # set before the unplaced update
+        job.jobStatus = "again"  # set again before it
+        other.proxy.updateJob(job)  # an update the record cannot place
+
+    def fresh(self, job: JobSpec, keeper):
+        keeper.keep(job)  # the job into a hole
+        job.jobStatus = "old"  # on the job kept, not a new one
+        made = JobSpec()
+        self.proxy.updateJob(made)  # fresh's update
+
+    def handed(self, keeper):
+        made = JobSpec()
+        keeper.keep(made)  # a new job into a hole
+        back = keeper.job
+        back.jobStatus = "back"  # on what the hole may hand back
+        keeper.keep(back)  # back into the hole
+        self.proxy.updateJob(made)  # handed's update
+"""
+
+
+def test_the_assignments_a_write_takes_are_read_on_its_object_whatever_their_spelling(
+    tmp_path,
+):
+    """named's update takes jobStatus assigned on its job by another name, and ddmErrorCode assigned before it, but not
+    jobMetrics, assigned after; unknown's update writes a job that came out of a call, and the job unknown assigns
+    jobStatus on went into a call the record cannot place: perhaps the same job, kept with the hole; unplaced's
+    update, a call the record cannot place, takes jobStatus as set the second time, not the first."""
+    fragment = _build(
+        tmp_path,
+        entities=JOB_TABLES,
+        spec=RESETS_SPEC,
+        ordered=ORDERED,
+        reaching=REACHING,
+    )
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def reaching(owner: str, marker: str, root: str, attribute: str):
+        line = _line(REACHING, marker)
+        made = [
+            one
+            for one in objects.line_paths(rows[owner])[line]
+            if objects.root_name(one) == root
+        ]
+        assert made, (owner, marker)
+        return objects.assigns_reaching(rows, owner, line, made, attribute, True)
+
+    named = "pkg/reaching.py::Refiner.named"
+    assert reaching(named, "# named's update", "job", "jobStatus") == objects.Reaching(
+        [_line(REACHING, "# by another name")], {}
+    )
+    assert reaching(
+        named, "# named's update", "job", "ddmErrorCode"
+    ) == objects.Reaching([_line(REACHING, "# before the update")], {})
+    assert reaching(named, "# named's update", "job", "jobMetrics") == objects.Reaching(
+        [], {}
+    )
+    unknown = "pkg/reaching.py::Refiner.unknown"
+    kept, hole = (
+        _line(REACHING, "# on the job the hole took"),
+        _line(REACHING, "# into a hole"),
+    )
+    assert reaching(
+        unknown, "# unknown's update", "holder", "jobStatus"
+    ) == objects.Reaching(
+        [kept],
+        {
+            kept: [
+                f"{unknown}:{hole} the receiver's class is not declared: nothing declares it"
+            ]
+        },
+    )
+    # A call the record cannot place is a call line all the same: what is set again before it is what it takes.
+    unplaced = "pkg/reaching.py::Refiner.unplaced"
+    first, again, update = (
+        _line(REACHING, "# set before the unplaced update"),
+        _line(REACHING, "# set again before it"),
+        _line(REACHING, "# an update the record cannot place"),
+    )
+    assert any(
+        (one.path, one.columns, one.line) == ("job", ["jobStatus"], first)
+        and update in one.lines
+        for one in rows[unplaced].overwritten
+    )
+    assert reaching(
+        unplaced, "# an update the record cannot place", "job", "jobStatus"
+    ) == objects.Reaching([again], {})
+
+
+def test_a_new_object_is_perhaps_one_beyond_a_hole_only_where_it_meets_a_hole_itself(
+    tmp_path,
+):
+    """fresh's update writes a job its constructor made after the job fresh assigns jobStatus on went into a hole: a
+    new object, not the one the hole took, so the assignment is not taken; handed's update writes a new job that went
+    into a hole itself, and the job handed assigns jobStatus on came from that hole: perhaps the same, kept with it."""
+    fragment = _build(
+        tmp_path,
+        entities=JOB_TABLES,
+        spec=RESETS_SPEC,
+        ordered=ORDERED,
+        reaching=REACHING,
+    )
+    rows = {row.owner: row for row in fragment.reach_graph}
+
+    def reaching(owner: str, marker: str):
+        line = _line(REACHING, marker)
+        made = [
+            one
+            for one in objects.line_paths(rows[owner])[line]
+            if objects.root_name(one) == "made"
+        ]
+        assert made, (owner, marker)
+        return objects.assigns_reaching(rows, owner, line, made, "jobStatus", True)
+
+    fresh = "pkg/reaching.py::Refiner.fresh"
+    assert reaching(fresh, "# fresh's update") == objects.Reaching([], {})
+    handed = "pkg/reaching.py::Refiner.handed"
+    # back is the keeper's field, so both calls on the keeper are holes on its way.
+    back = _line(REACHING, "# on what the hole may hand back")
+    holes = [
+        _line(REACHING, "# a new job into a hole"),
+        _line(REACHING, "# back into the hole"),
+    ]
+    assert reaching(handed, "# handed's update") == objects.Reaching(
+        [back],
+        {
+            back: [
+                f"{handed}:{hole} the receiver's class is not declared: nothing declares it"
+                for hole in holes
+            ]
+        },
+    )
