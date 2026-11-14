@@ -16824,6 +16824,43 @@ def test_an_early_exits_test_is_given_between_where_a_name_it_reads_changes():
         "    else:\n"
         "        self.kind = name\n"
     ) == [("name not in ALLOWED", False)]
+    # A loop holding the node but not the exit gives the name a new value for its next pass, below the node too.
+    assert given(
+        "    while True:\n        self.kind = name\n        name = self.next_one()\n"
+    ) == [("name not in ALLOWED", True)]
+
+
+def test_a_loop_holding_the_node_and_not_the_exit_reads_the_test_where_it_ran():
+    """``doGenerate`` tests ``not readStat or taskParamMap is None`` before its loop and reads the task's parameters
+    again inside it: the loop's next pass reaches its arms with values the test did not see.  An exit inside the loop
+    runs again on each pass, so a new value below the node there is tested before the node."""
+    before = _func(
+        "def f(self, name):\n"
+        "    if name not in ALLOWED:\n"
+        "        return\n"
+        "    while True:\n"
+        "        self.kind = name\n"
+        "        name = self.next_one()\n"
+    )
+    inside = _func(
+        "def f(self, names):\n"
+        "    for name in names:\n"
+        "        if name not in ALLOWED:\n"
+        "            continue\n"
+        "        self.kind = name\n"
+        "        name = name.lower()\n"
+    )
+
+    def exits(func):
+        node = next(
+            n
+            for n in ast.walk(func)
+            if isinstance(n, ast.Assign) and ast.unparse(n) == "self.kind = name"
+        )
+        return pathcond.exits_above(node)
+
+    assert exits(before) == ["not (name not in ALLOWED)  [at 2]"]
+    assert exits(inside) == ["not (name not in ALLOWED)"]
 
 
 def test_a_branch_that_falls_through_is_not_an_early_exit():

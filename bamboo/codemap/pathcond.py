@@ -1385,15 +1385,36 @@ def _given_between(
     ``toSkip = True`` at 4092 in the ``else`` of the ``if`` whose body holds
     4044, and tests ``not toSkip`` again at 4095: a pass that tested 4044 never
     ran 4092.
+
+    And across the passes of a loop whose body holds *later* but not
+    *earlier*: a new value anywhere in it reaches *later* on the next pass
+    without the test running again (:func:`_given_in`, as :func:`parted` reads
+    a loop it is told to read around).  ``doGenerate`` tests ``not readStat or
+    taskParamMap is None`` at 1009 and reads the task's parameters again at
+    1694, in the loop at 1191 that holds its arms from 1198 on.
     """
     start = getattr(earlier.test, "end_lineno", None) or earlier.lineno  # type: ignore[attr-defined]
     rebinds = _rebinds(func)
-    return any(
+    if any(
         start < site.lineno < later.lineno  # type: ignore[attr-defined]
         and not any(_apart(site, on) for on in (earlier, later, *ends))
         for name in _names_in(earlier.test)  # type: ignore[attr-defined]
         for site in rebinds.get(name, ())
-    )
+    ):
+        return True
+    previous = later
+    for ancestor in ancestors(later):
+        if ancestor is func:
+            break
+        if (
+            isinstance(ancestor, (ast.For, ast.AsyncFor, ast.While))
+            and any(previous is one for one in ancestor.body)
+            and not _within(earlier, ancestor)
+            and _given_in(func, ancestor, (earlier,))
+        ):
+            return True
+        previous = ancestor
+    return False
 
 
 def given_between(func: ast.AST, earlier: ast.If, later: ast.AST) -> bool:
@@ -1403,10 +1424,10 @@ def given_between(func: ast.AST, earlier: ast.If, later: ast.AST) -> bool:
     were when it ran, not as they are at *later*, and :func:`exits_above` reads it ``  [at <the exit's line>]``.
     A new value is a binding, ``x[k] = v`` or a call of a method on the name (``x.add(v)``), as :func:`_rebinds`
     reads them, below the end of the test and above *later* by line, in no arm a pass through the test or *later*
-    cannot enter.  Wide on purpose: every name the test reads counts (``self`` in ``name not in self.allowed``, and
-    so ``self.log(name)``), and a call counts whether it changes the name or not.  By line, so not across the
-    passes of a loop: ``name = self.next_one()`` below *later* in a ``while`` holding *later* but not the exit
-    gives ``name`` a new value for the next pass, and is not counted.
+    cannot enter -- or anywhere in a loop whose body holds *later* but not the test: ``name = self.next_one()`` below
+    *later* in a ``while`` holding *later* but not the exit gives ``name`` a new value for the next pass.  Wide on
+    purpose: every name the test reads counts (``self`` in ``name not in self.allowed``, and so ``self.log(name)``),
+    and a call counts whether it changes the name or not.
     """
     return _given_between(func, earlier, later)
 
