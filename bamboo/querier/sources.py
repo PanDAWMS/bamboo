@@ -849,8 +849,9 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
         return (_with_changes(_start(s, (at,), rest), left) + (ways if rest else [as_part(w) for w in ways])
                 + ([Way(STOP, "", CONTAINER, (at,), changes=left, **back)] if stays else []))
     if (made := _returned_row(s, _keys_off(rest, keys))) is not None:
-        # Q4: an object a callee filled from one row and returned
-        return [Way(ROW, "", s.kind, (at,), changes=(*on, *made), **back)]
+        # Q4: an object a callee filled from one row and returned; a change the source's own changes carry too (D3:
+        # the fill's changes ride on the object's value since x13a3D3d) is said once
+        return [Way(ROW, "", s.kind, (at,), changes=tuple(dict.fromkeys((*on, *made))), **back)]
     if s.kind in (M.KEY_SELF_FIELD, M.KEY_OBJECT) and getattr(s, "site_owner", None):
         name = s.name or ""
         if s.kind == M.KEY_SELF_FIELD and name.startswith("self."):
