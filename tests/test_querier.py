@@ -4607,6 +4607,393 @@ def test_a_loop_whose_way_back_prints_a_row_the_run_lacks_went_round_once_for_s2
     assert once == [] and settled == ["settled by the exit taken: {}"]
 
 
+# datasetManager's FinisherThr.run in small: a loop over jobs whose rows print the job's PandaID, an inner loop over
+# its files with two continues, and the Kill arm (24) or the Wait row (26); no return at the end
+_FINISHER_LOOP = textwrap.dedent("""\
+    import logging
+
+    _logger = logging.getLogger("x")
+
+
+    def run(jobs, timeOut):
+        upJobs = []
+        for job in jobs:
+            if job is None or job.jobStatus == "unknown":
+                continue
+            lfns = []
+            for file in job.Files:
+                if file.status == "nooutput":
+                    continue
+                if file.dispatched:
+                    _logger.debug(f"{job.PandaID} skip {file.lfn}")
+                    continue
+                lfns.append(file.lfn)
+            _logger.debug(f"{job.PandaID} Cloud:{job.cloud}")
+            endTime = job.endTime
+            _logger.debug(f"{job.PandaID} Limit:{timeOut} End:{endTime}")
+            if endTime < timeOut:
+                _logger.debug(f"{job.PandaID} Finisher : Kill")
+                job.jobStatus = "failed"
+            else:
+                _logger.debug(f"{job.PandaID} Finisher : Wait")
+            upJobs.append(job)
+""")
+
+
+def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loop_holding_no_arm_keeps_it_from_none(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "fin.py").write_text(_FINISHER_LOOP)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.datasetManager: DEBUG    {}\n"
+    wait = ["7 Cloud:WORLD", "7 Limit:2025-12-26 End:2026-01-01", "7 Finisher : Wait"]
+    logs = {"wait": wait, "twice": wait * 2, "skip": ["7 skip f.root", *wait], "other": [x.replace("7 ", "8 ") for x in wait]}
+    for name, said in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(said)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import _names_key, once_loops_of
+
+            R.ROWS_FROM = "walk"
+            fn = R.function("pandaserver/fin.py", "run", (24,))
+            arm = RR.Arm(24, ["failed"], ["endTime < timeOut"])
+            got = {"free": sorted(R.free_jumps(fn.node, [24])),
+                   "names": [_names_key("7", "7"), _names_key("< PandaID=7 >", "7"), _names_key("<2026-01-01/00:00:07>", "7"),
+                             _names_key("< PandaID=71 >", "7"), _names_key("7", "")]}
+            for name in ("wait", "twice", "skip", "other"):
+                key = "8" if name == "other" else "7"
+                run, = runs_for(read_log(f"{name}.log"), key)
+                sn = R.claim([R.seen(fn, run, "outside")])[0]
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.opened, r.hand, r.hand_used, r.hop, r.mode, r.decide = [], [], {}, [], "S2", "outside", "positive"
+                r.base_env = lambda at=None, file_row=None: E.Env()
+                r._printed = lambda env: {}
+                try:
+                    b = r._which_way(fn, "pandaserver/fin.py", "run", [run], [arm])
+                    way = b.exit_line
+                    try:
+                        r.blocked(b)
+                    except RR.Stop:
+                        pass
+                except RR.Stop as e:
+                    way = str(e)
+                got[name] = [sorted(once_loops_of(fn, sn, run, "outside").values()), way,
+                             [x for x in r.lines if x.startswith(("  the candidates", "  arm 24"))]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the inner loop's continues hold no arm; the outer loop's continue (10) holds the Kill arm
+    assert got["free"] == [14, 17]
+    # the run's mark is the value, whole or as a name=value field; a time token's digits are not
+    assert got["names"] == [True, True, False, False, False]
+    once = ("the loop at 8 went round once for the run's object: row 19 printed job.PandaID as the run's mark (the object "
+            "once in what it goes over)")
+    killed = "  arm 24 ['failed']: needs ['endTime < timeOut']; false in the passes: ['endTime < timeOut']"
+    # one call's pass on job 7: the loop over jobs went round once for it, so 10's continue is out (row 19 printed); of
+    # the inner loop's continues, 17 is out (its row 16 absent) and 14 is left, which the judgement would choose by
+    # elimination -- but it keeps the pass from no arm: the pass took none, and S3 reads the Wait row's way
+    assert got["wait"] == [[once], None, [
+        "  the candidates pass 1 leaves, [14], are continues or breaks of loops that hold no arm (14 chosen by "
+        "elimination, which no row shows): taken, they keep a pass from none", killed]]
+    # the same rows twice in one run: two calls, no loop read as gone round once, 10 and 14 both left -- undecided
+    assert got["twice"] == [[], "S2: which way pass 1 went", []]
+    # a free jump shown taken (row 16 prints only on 17's path) stays the way the pass went
+    assert got["skip"][1] == 17 and got["skip"][2] == [killed]
+    # another job's run: its own mark, so its loop went round once for job 8 as well
+    assert got["other"][0] == [once] and got["other"][1] is None
+
+
+def test_a_late_value_s_mover_that_ran_in_the_stay_goes_on_alone_and_one_whose_runs_fall_outside_it_is_excluded(tmp_path):
+    (_corpus(tmp_path) / "pandaserver" / "fin.py").write_text(_FINISHER_LOOP)
+    stamp = "2026-01-01 00:00:0{},000 panda.log.datasetManager: DEBUG    {}\n"
+    (tmp_path / "wait.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(
+        ["7 Cloud:WORLD", "7 Limit:2025-12-26 End:2026-01-01", "7 Finisher : Wait"])))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import dataclasses, datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier import windows as W
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            run, = runs_for(read_log("wait.log"), "7")
+            arm = RR.Arm(24, ["failed"], ["endTime < timeOut"])
+            since, moved = datetime.datetime(2026, 1, 1, 0, 0, 0), datetime.datetime(2026, 1, 1, 1, 0, 0)
+
+            def fresh():
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.opened, r.hand, r.hand_used, r.hop, r.mode, r.decide = [], [], {}, [], "L2", "outside", "positive"
+                r.args = N(observed="transferring", key="7", subject="JobSpec.jobStatus")
+                r.data = {"statuslog": {"states": []}}
+                r.logs = N(needs_window=True)
+                r._called_at = lambda fn, c: []
+                r.runs = lambda key, logs, asking, owners: {"wait.log": [run]}
+                r.base_env = lambda at=None, file_row=None: E.Env()
+                r._printed = lambda env: {}
+                return r
+
+            ran = RR.Passes("pandaserver/fin.py::run", ["wait.log"], [arm], "7",
+                            W.Asking(("2025-12-31 23:50:00", "2026-01-01 01:00:00"), None, "the window"))
+            # as _late_absence hands a mover that ran on: with the stay
+            staying = dataclasses.replace(ran, since="2026-01-01 00:00:00", stay=("2026-01-01 00:00:00", "2026-01-01 01:00:00"))
+            q = RR.Missed("JobSpec.jobStatus", "transferring", "finished", since, moved, [], "pandaserver/a.py::fin", None)
+            got = {}
+            for label, others in (("alone", ()), ("with one that ran", (staying,))):
+                r = fresh()
+                r._row_of = lambda cls: {"jobStatus": {"value": "finished"}}
+                r._movers_in_window = lambda q, kinds, r=r, others=others: setattr(r, "_late_ran", others)
+                r._why_moved_only_then = lambda q, ordered: "the mover's own question"
+                went = r.missed(q)
+                got[label] = went if isinstance(went, str) else [
+                    [b if isinstance(b, str) else [b.owner, b.since, b.stay] for b in went.branches], [str(x) for x in went.labels]]
+            # the stay as _late_absence hands it: a pass in it is read; the same pass outside it excludes the mover
+            for label, start in (("in the stay", "2026-01-01 00:00:00"), ("before the stay", "2026-01-01 00:10:00")):
+                r = fresh()
+                p = RR.Passes(ran.owner, ran.logs, ran.arms, ran.key, ran.asking, since=start, stay=(start, "2026-01-01 01:00:00"))
+                try:
+                    got[label] = ["way", r.passes(p).exit_line]
+                except RR.Excluded as e:
+                    got[label] = ["excluded", str(e)]
+                except RR.Stop as e:
+                    got[label] = ["stop", str(e)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # no other mover ran: the mover's own question, as before
+    assert got["alone"] == "the mover's own question"
+    # one ran: it goes on alone beside the mover that moved the value, its passes read over the stay
+    assert got["with one that ran"] == [
+        ["the mover's own question", ["pandaserver/fin.py::run", "2026-01-01 00:00:00", ["2026-01-01 00:00:00", "2026-01-01 01:00:00"]]],
+        ["mover pandaserver/a.py::fin, which moved it on", "mover pandaserver/fin.py::run"]]
+    # its pass in the stay is read (S2: none of the arms, by the Wait row's way); none in the stay: excluded
+    assert got["in the stay"] == ["way", None]
+    assert got["before the stay"] == ["excluded", "S2: no pass of run with the key in the stay (2026-01-01 00:10:00 .. "
+                                                  "2026-01-01 01:00:00): its runs fall outside it, so it did not take the row "
+                                                  "there (KNOWN_ISSUES.md K15)"]
+
+
+
+def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_and_the_edges_compare_to_the_microsecond(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+
+            def row(status, t, ext):
+                return {"status": status, "time": t, "time_extended": ext, "host": "h1"}
+
+            def pas(name, first, last):
+                return N(name=name, first=first, last=last, log=N(name="a.log"), machine="h1",
+                         records=[N(stamp=first), N(stamp=last)])
+
+            moved_in = [row("running", "2026-01-01 00:00:01", "2026-01-01 00:00:01.000000"),
+                        row("transferring", "2026-01-01 00:00:05", "2026-01-01 00:00:05.500000"),
+                        row("finished", "2026-01-01 01:00:00", "2026-01-01 01:00:00.300000")]
+            # the same value written again over itself (activateJob's 'defined' over 'defined'): no edge there
+            again = [row("transferring", "2026-01-01 00:00:01", "2026-01-01 00:00:01.000000"), *moved_in[1:]]
+            got = {}
+            for label, states in (("moved in", moved_in), ("written again", again), ("not cut", moved_in)):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines = []
+                r.args = N(observed="transferring", since="2026-01-01 00:00:05.500000")
+                r.data = {"statuslog": {"states": states}}
+                asked = []
+
+                def recording(owner, arms, subject, key, edge, found, asked=asked):
+                    asked.append(edge["status"])
+                    by = {"transferring": "birth", "finished": "moving"}
+                    p = next((x for x in found if x.name == by[edge["status"]]), None)
+                    return (p, "a call of it recorded the row") if p is not None else None
+
+                r._recording_pass = recording
+                found = [pas("over before", "2026-01-01 00:00:05,100", "2026-01-01 00:00:05,400"),
+                         pas("birth", "2026-01-01 00:00:04,900", "2026-01-01 00:00:05,600"),
+                         pas("in its time", "2026-01-01 00:30:00,000", "2026-01-01 00:30:01,000"),
+                         pas("moving", "2026-01-01 00:59:59,900", "2026-01-01 01:00:00,400"),
+                         pas("begun after", "2026-01-01 01:00:00,350", "2026-01-01 01:00:00,500")]
+                # a run its function's entry row did not cut may hold several executions: not decided (fix 2 (ii))
+                whole = {id(p) for p in found if p.name == "birth"} if label == "not cut" else set()
+                kept, moving = r._stay_edges(None, "a.py::f", [1], "JobSpec.jobStatus", "7", found, "2026-01-01 00:00:05", whole)
+                got[label] = [[p.name for p in kept], [p.name for p in moving], asked]
+            # a row the window cannot place: the passes ending in or after its second, as before
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.args, r.data = [], N(observed="transferring", since=None), {"statuslog": {"states": []}}
+            kept, moving = r._stay_edges(None, "a.py::f", [1], "JobSpec.jobStatus", "7",
+                                         [pas("over before", "2026-01-01 00:00:05,100", "2026-01-01 00:00:05,400")], "2026-01-01 00:00:05")
+            got["no row"] = [[p.name for p in kept], moving]
+            # the pass the recorder's pass holds: the mover's own pass inside the caller's whose call recorded the row
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.logs, r.unanswered = [], N(needs_window=True), []
+            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (("a.py::C.m", (3,)),), ())]
+            caller = N(log=N(name="a.log"), machine="h1", first="2026-01-01 00:00:04,000", last="2026-01-01 00:00:06,000")
+            call = N(token="m < 7 >", machine="h1", first="2026-01-01 00:00:05,450", last="2026-01-01 00:00:05,550")
+            r._recorder_read = lambda rec, subject, key, state, asking: ("pass", "its pass recorded the row", caller, [call])
+            found = [pas("before it", "2026-01-01 00:00:01,000", "2026-01-01 00:00:02,000"),
+                     pas("inside it", "2026-01-01 00:00:04,900", "2026-01-01 00:00:05,600")]
+            hit = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            elsewhere = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", {**moved_in[1], "host": None}, found)
+            # the call's prints cannot bracket it: the recorder's call at the row inside the pass's own records
+            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (("a.py::C.m", (4,)),), ())]
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [call])
+            placed = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [N(**{**vars(call), "machine": "h2"})])
+            other_host = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            # a call of the method inside the pass begun after the row: not the one that recorded it
+            r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [N(**{**vars(call), "first": "2026-01-01 00:00:05,520"})])
+            later_call = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
+            got["recorded"] = [hit[0].name, hit[1], elsewhere, placed[0].name, placed[1], other_host, later_call]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # over before the row in its second, and begun after the move in its second: outside the value's time.  The pass
+    # whose call recorded the value's row moved it in; the one whose call recorded the next row moved it on
+    assert got["moved in"] == [["in its time"], ["moving"], ["transferring", "finished"]]
+    # a row writing the value again over the same value is no edge: the pass that wrote it is read
+    assert got["written again"] == [["birth", "in its time"], ["moving"], ["finished"]]
+    # a run not cut into passes that holds the row is read as before, the recorder not looked for in it
+    assert got["not cut"] == [["birth", "in its time"], ["moving"], ["transferring", "finished"]]
+    assert got["no row"] == [["over before"], []]
+    # a row with no host names no machine to read its recorder on
+    assert got["recorded"] == ["inside it", "its pass recorded the row", None, "inside it",
+                               "m < 7 > recorded it inside the pass, C.g:9 recording it after the arm", None, None]
+
+
+def test_a_pair_whose_write_is_the_mover_s_own_call_is_read_on_the_callee_s_run_or_on_the_call_s_place(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def mover(self, ids):
+                self.logger.debug("start")
+                for task_id in ids:
+                    self.logger.debug("updating")
+                    self.record(task_id)
+                    self.logger.debug("updated")
+                self.logger.debug("done")
+            """
+        )
+    )
+    (corpus / "pandaserver" / "b.py").write_text("def record(self, task_id):\n    self.cur.execute(sql)\n")
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+
+            def rec(caller, call, methods):
+                return RR.Recorder(caller, call, methods, ())
+
+            own = rec("pandaserver/a.py::C.mover", 6, (("pandaserver/a.py::C.mover", (6,)),))
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.unanswered, r.hop, r.mode = [], [], 0, "outside"
+            calls = {"pandaserver/a.py::C.mover": N(calls=[N(how="call", line=6, lines=[6], to="pandaserver/b.py::B.record")])}
+            r._graph = lambda: (None, N(rows=calls), None)
+            got = {"callee": [r._own_call(own),
+                              r._own_call(rec("pandaserver/a.py::C.mover", 6, (("pandaserver/c.py::D.update", (9,)),))),
+                              r._own_call(rec("pandaserver/a.py::C.other", 6, (("pandaserver/a.py::C.other", (6,)),)))]}
+            calls["pandaserver/a.py::C.mover"].calls.append(N(how="call", line=6, lines=[6], to="pandaserver/b.py::E.record"))
+            got["callee"].append(r._own_call(own))
+
+            # the pass: start, two rounds (updating, updated), done
+            node = R.functions("pandaserver/a.py", "mover")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            stamps = ["00,000", "01,000", "02,000", "03,000", "04,000", "05,000"]
+            p = N(machine="h1", first="2026-01-01 00:00:00,000", last="2026-01-01 00:00:05,000", said=lambda: "the pass",
+                  records=[N(stamp=f"2026-01-01 00:00:{s}") for s in stamps])
+            RR.R.function = lambda rel, func, arms=(), within=(): fn
+            RR.R.seen = lambda fn, run, mode: N(fn=fn, run=run, unambiguous={3: [0], 5: [1, 3], 7: [2, 4], 8: [5]})
+            at = lambda s: datetime.datetime.fromisoformat(f"2026-01-01 00:00:{s}")
+            row = {"time": "2026-01-01 00:00:01", "status": "x"}
+            asking = N(machine="h1")
+            # a callee that prints nothing: the row between the pass's prints around the call, or not
+            RR.R._prints_of = lambda owner, lines: None
+            callee = "pandaserver/b.py::record"
+            silent = [r._own_call_pass(own, callee, "7", row, asking, [p], at(t)) for t in ("01.500000", "02.500000")]
+            got["silent"] = [silent[0][1], silent[1]]
+            got["other host"] = r._own_call_pass(own, callee, "7", row, N(machine="h2"), [p], at("01.500000"))
+            # a callee that prints: its run of the key, read in the caller's logs where the map places it in none
+            RR.R._prints_of = lambda owner, lines: N(statements=["start"])
+            asked = []
+            r.files_of = lambda owner, today, lines: [] if owner == callee else ["x.log"]
+
+            def logs_at(key, names, ask, owners):
+                asked.append(names)
+                return {"x.log": N(without=set())}, []
+
+            r._logs_at, RR.owners_of = logs_at, (lambda ids: {})
+            run = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:01,400", last="2026-01-01 00:00:01,600")
+            # its next call by another pass after this one ended, in the same second as far as the window reads
+            again = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:05,500", last="2026-01-01 00:00:05,600")
+            RR.runs_for, RR.of_mover, RR.at_window = (lambda log, key: [run]), (lambda r_, m: True), (lambda r_, w: True)
+            RR.passes_of = lambda fn_, r_, mode: ([r_, again], "")
+            RR.recorded_in_pass = lambda fn_, found, w, inner, sites, mode: (p, sites[0])
+            got["printing"] = r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"))[1]
+            RR.recorded_in_pass = lambda fn_, found, w, inner, sites, mode: None
+            got["in a loop"] = [r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000")),
+                                r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"), placed=False)[1]]
+            got["not at the row"] = r._own_call_pass(own, callee, "7", row, asking, [p], at("03.500000"), placed=False)
+            got["asked"] = asked[0]
+            r._logs_at = lambda key, names, ask, owners: ({}, [("an ask", "why")])
+            got["unanswered"] = [r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000")),
+                                 r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"), placed=False),
+                                 len(r.unanswered)]
+            # two own calls of the pass that record the row (retryTask_JEDI's 5353 and 5365): each is placed in its call
+            # before either is put inside the pass
+            first, second = rec("pandaserver/a.py::C.mover", 6, (("pandaserver/a.py::C.mover", (6,)),)), \
+                rec("pandaserver/a.py::C.mover", 9, (("pandaserver/a.py::C.mover", (9,)),))
+            RR.recorders = lambda subject, owner, line: [first, second]
+            r.logs = N(needs_window=True)
+            r._own_call = lambda rec_: callee
+            r._own_call_pass = lambda rec_, c, k, row_, asking_, found, at_, placed=True: (
+                (p, f"{rec_.call} placed") if placed and rec_ is second else (p, f"{rec_.call} inside") if not placed else None)
+            got["order"] = r._recording_pass("pandaserver/a.py::mover", [3], "JobSpec.jobStatus", "7",
+                                             {**row, "host": "h1", "time_extended": "2026-01-01 00:00:01.500000"}, [p])[1]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the one function the map's reach enters at the pair's own call; none where the pair names another function's
+    # method (K67's), or the reach goes into two
+    assert got["callee"] == ["pandaserver/b.py::record", None, None, None]
+    # a silent callee: the row between the last print before the call and the first after it, in that round
+    assert "its call at pandaserver/a.py:6 ran while the row was written" in got["silent"][0]
+    assert "2026-01-01 00:00:01,000 just before the call and at 2026-01-01 00:00:02,000 just after" in got["silent"][0]
+    assert got["silent"][1] is None
+    assert got["other host"] is None
+    # a printing callee: its run inside the pass's call, or inside the pass where a loop's next round comes between;
+    # its call by another pass, outside this one, does not keep it from it
+    assert got["printing"].startswith("its pass at the row is the pass: record's run of 7 ran inside its call at pandaserver/a.py:6")
+    assert got["in a loop"] == [None, "record < 7 > recorded it inside the pass, mover calling record; its prints do not place the call"]
+    # a call of it not running at the row is not the one that recorded it
+    assert got["not at the row"] is None
+    assert got["asked"] == ["x.log"]
+    # what the records do not answer is asked once, and nothing is decided
+    assert got["unanswered"] == [None, None, 1]
+    assert got["order"] == "9 placed"
+
+
 _PASSES = textwrap.dedent("""
     def rescue(self, ids, who):
         tmp_log = MsgWrapper(logger, f"rescue < {who} >")
@@ -6762,6 +7149,102 @@ def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_t
     assert got["rows"]["asked"] == ["running a.log refine True", "defined a.log refine,scout True", "defined b.log refine,scout True"]
     # a single window is read on its own writers
     assert got["one row"]["read"] == ["p/b.py::scout"]
+
+
+def test_a_status_rows_single_window_whose_judge_chooses_no_writer_is_read_as_one_row_of_the_scan(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+
+            verdict = lambda line, kind: which_ran.Verdict(which_ran.Candidate("p/a.py", "f", [line]), line, kind)
+            run = N(first="2026-11-02 14:46:00,100", last="2026-11-02 14:46:00,300", log=N(name="a.log"),
+                    describe=lambda: "the run")
+            rerun.R.function = lambda rel, func, lines: None
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.owners_of = lambda ids: {}
+            row = {"status": "failed", "time": "2026-11-02 14:46:00"}
+
+            def rerun_(hand=None):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result = [], [], "H2", dict(hand or {}), [], {}
+                r.mode, r.decide, r._dropped_by_guard, r.question = "map", "positive", frozenset(), None
+                r.data = {"statuslog": {"states": [row]}}
+                return r
+
+            # H2 at one window: a judge that chooses no writer at a status's row hands the row back, unreported
+            def wrote_at(chosen, at_row):
+                r = rerun_()
+                r._unborn = lambda readings, subject, state: (readings, "")
+                r._h2_candidates = lambda subject, readings: [N(owner="p/a.py::f", rel="p/a.py", func="f", lines=[3, 5],
+                                                                log_files=["a.log"])]
+                r._ask = lambda key, names, asking, owners, whole: ({"a.log": [run]}, [], {})
+                r._stop_unanswered = lambda asks: None
+                r._batched = lambda *a: {}
+                r.base_env = lambda at=None: N(values={})
+                r._keeps = lambda subject: None
+                r._guard_dropped = lambda verdicts: frozenset()
+                r.warn_split = lambda owner, lines: None
+                left = [verdict(3, "kept"), verdict(5, "kept")]
+                pick = None if chosen is None else left[0]
+                rerun.judge = lambda cands, runs, **k: which_ran.Judgement(left, pick, "undecided", None)
+                asking = N(window=("2026-11-02 14:46:00", "2026-11-02 14:46:00"), holds_write=False)
+                try:
+                    w = r._wrote_at("JobSpec.jobStatus", "jobStatus", "failed", "7", ["readings"], row, asking, at_row)
+                    got = None if w is None else w.chosen.line
+                except rerun.Stop as e:
+                    got = str(e)
+                return [got, any("=> chosen" in line for line in r.lines)]
+
+            # ... and H2 as it reads a single window, given the row (L1's), handed, or a value held (no row)
+            def which(state, wrote=None, hand=None, held=False):
+                r = rerun_(hand)
+                seen = {}
+                r._writers = lambda subject, value, key: ["readings"]
+                r._h2_candidates = lambda subject, readings: []
+                r._writer_logs = lambda subject, readings, cands=None: []
+                r._created = lambda holding: None
+                rerun.PT.history_holding = lambda subject: "jobs_statuslog" if held else None
+                rerun.W.value_held = lambda states, attr, value, created: N(window=("t", "t"), why="held", strings=None)
+
+                def wrote_at(subject, attr, value, key, readings, state, asking, at_row):
+                    seen["row"] = at_row
+                    return wrote
+                r._wrote_at = wrote_at
+                r._scan = lambda subject, attr, value, key, readings, tries: ["scanned", [t[0] for t in tries]]
+                r._stood = lambda subject, value, w, state: "stood"
+                got = r._which_wrote("JobSpec.jobStatus", "failed", "7", state)
+                return [got, seen["row"], [line for line in r.lines if "one row of the scan" in line]]
+
+            print(json.dumps({
+                "none at a row": wrote_at(None, True),
+                "none, no row": wrote_at(None, False),
+                "chosen at a row": wrote_at("kept", True),
+                "the row": which(row),
+                "the row, chosen": which(row, wrote="w"),
+                "the row, handed": which(row, wrote="w", hand={"H2": "f:3"}),
+                "a value held": which(None, wrote="w", held=True),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the judge chose none at a status's row: no report, no stop -- the row goes to the scan, whose judge reports it
+    assert got["none at a row"] == [None, False]
+    # a window with no row stops as before; a writer chosen at a row is read as before
+    assert got["none, no row"] == ["H2: which candidate ran", True]
+    assert got["chosen at a row"] == [3, True]
+    said = ["the judge chose no writer at the row: it is read as one row of the scan, each arm that wrote or may have "
+            "walking on (KNOWN_ISSUES.md K38)"]
+    assert got["the row"] == [["scanned", [{"status": "failed", "time": "2026-11-02 14:46:00"}]], True, said]
+    assert got["the row, chosen"] == ["stood", True, []]
+    # a hand names the writer at the window, and a value held has no row to read as the scan does
+    assert got["the row, handed"] == ["stood", False, []]
+    assert got["a value held"] == ["stood", False, []]
 
 
 def test_a_writer_that_prints_nothing_is_read_at_its_history_pairs_call_and_its_own_condition_is_left_open(tmp_path):
@@ -9540,6 +10023,15 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
                   rows=[N(pattern=marked, prefix="<jediTaskID={} gshare={}>")]),
             ])])]
             runs = runs_for(read_log("panda-x.log"), "5")
+            # as a recorded search reads them: on a machine, with ends of what was searched for each mark
+            log = runs[0].log
+            for x in log.records:
+                x.machine = "m.cern.ch"
+            log.edges = lambda machine, token, first, last: "its records lie outside what was searched on m"
+            with_edges = [[r.alone, r.describe()] for r in runs]
+            log.edges = None
+            for x in log.records:
+                x.machine = ""
             cut = runs[0].records[0]
             stmt = ast.parse("pass").body[0]
             row = R.Row("p/f.py", "feed", stmt, "DEBUG", 'f"failed to get taskSpec for jediTaskID={jediTaskID}"',
@@ -9549,6 +10041,7 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
             print(json.dumps({
                 "runs": [[r.token, [x.stamp[11:19] for x in r.records], r.alone, r.would_print("DEBUG")] for r in runs],
                 "said": runs[0].describe(),
+                "with_edges": with_edges,
                 "cut": [cut.token, cut.message],
                 "writers": sorted(R.line_writers(cut, "panda-x.log")),
                 "matches": row.matches(cut, "outside")[0] > 0,
@@ -9569,6 +10062,11 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
         ["failed", ["01:00:01"], False, True],
     ], got
     assert "read alone: its logger writes no mark, so the token is the line's first word" in got["said"], got
+    # a line read alone is all its run: what was searched for its first word cuts nothing of it, while a marked run
+    # near an end of what was searched is read as cut there
+    assert [[alone, "read as cut" in said] for alone, said in got["with_edges"]] == [
+        [True, False], [False, True], [True, False], [False, True]], got
+    assert all("read alone" in said for alone, said in got["with_edges"] if alone), got
     # the cut is the parser's still; the row and the map's writers read the line as written
     assert got["cut"] == ["failed", "to get taskSpec for jediTaskID=5"], got
     assert got["writers"] == ["p/f.py::Feeder.feed"], got
@@ -9832,6 +10330,66 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
     # H2 leaves no arm: its stop, as before
     assert got["none"]["said"] == ["STOP", "H2: a pass that wrote JediTaskSpec.transUses='A' at the 2 statuslog row(s) its writers' "
                                            "passes can write (none shows a writer's pass: KNOWN_ISSUES.md K38)", "one-of"]
+
+
+def test_a_late_question_goes_on_with_the_one_arm_h2_left_and_every_end_rests_on_it(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            row = {"status": "finished", "time": "2026-10-29 13:47:28"}
+            readings = [N(file="pandaserver/a.py", owner="pandaserver/a.py::fin"), N(file="pandaserver/b.py", owner="pandaserver/b.py::put")]
+            run = N(log=N(name="a.log"), machine="m", token="7", first="2026-10-29 13:47:26,958", last="2026-10-29 13:47:28,324")
+
+            def may(f, func, line, guard, on_run=True):
+                branch = rerun.Wrote(readings, run if on_run else None, [], None, Verdict(Candidate(f"pandaserver/{f}.py", func, [line]), line, "positive", []),
+                                     row=row, window=(row["time"], row["time"]))
+                said = rerun.T.Said("its-condition-not-read", {"guard": guard})
+                return rerun.Possible(f"{f}.py::{func}:{line}", row, False, [rerun.Premise(said, rerun.NOT_READ)], branch=branch)
+
+            def walk(left):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.ends, r.hop, r.result, r.end_code = [], [], "H2", {}, None
+                try:
+                    got = r._the_arm_left("JobSpec.jobStatus", "finished", rerun.OneOf(left, 1))
+                    said = [got.reading.owner, got.chosen.line, got.question is run]
+                except rerun.Stop as e:
+                    said = ["STOP", str(e), e.code]
+                r.hop = "S2"
+                r.end(rerun.T.Said("ends", {"ends": ["moved on at last"]}))
+                return {"said": said, "lines": r.lines[:-1], "ends": [str(w) for _, w in r.ends], "code": r.end_code,
+                        "rests": [rerun.T.to_json(s) for s in r.rests]}
+
+            one = may("a", "fin", 304, "not (x.failed)")
+            # the same arm called twice in the pass: one arm left
+            twice = may("a", "fin", 304, "not (x.merging)")
+            print(json.dumps({"one": walk([one, twice]), "two": walk([one, may("b", "put", 9, "y")]),
+                              "no branch": walk([rerun.Possible("a.py::fin:304", row, False, [], branch=None)]),
+                              "no run": walk([may("a", "fin", 304, "z", on_run=False)])}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    arm = "the one arm H2 left moved it on, a.py::fin:304 (its condition 'not (x.failed)' not read; KNOWN_ISSUES.md K38)"
+    # one arm left: the walk goes on with it, on the run H2 read it on, and every END after says what it rests on
+    assert got["one"]["said"] == ["pandaserver/a.py::fin", 304, True]
+    assert got["one"]["lines"] == [f"{arm}: the late question goes on with it"]
+    assert got["one"]["ends"] == [f"END moved on at last; it rests on: {arm}"]
+    assert got["one"]["code"] == "one-of" and got["one"]["rests"][0]["kind"] == "the-one-arm-left-moved-it-on"
+    # two arms left: which moved it on is not walked for each -- H2's stop, as before, and an END rests on nothing
+    assert got["two"]["said"] == ["STOP", "H2: one arm that wrote JobSpec.jobStatus='finished' last, of 2 left: a.py::fin:304 (may "
+                                          "have at 'finished' 2026-10-29 13:47:28); b.py::put:9 (may have at 'finished' 2026-10-29 "
+                                          "13:47:28) (KNOWN_ISSUES.md K38)", "one-of"]
+    assert got["two"]["ends"] == ["END moved on at last"] and got["two"]["code"] is None and got["two"]["rests"] == []
+    # an arm with no walk to go on with stops as before
+    assert got["no branch"]["said"][0] == "STOP" and got["no branch"]["rests"] == []
+    # one with no run goes on: L1 says it has no pass to read (K47)
+    assert got["no run"]["said"] == ["pandaserver/a.py::fin", 304, False]
 
 
 def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(tmp_path):
@@ -13216,7 +13774,7 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     # endpoint's pass that holds the key and began last in that window, else to the window's end; the endpoint asked
     # once per window.  A mark many calls share is one run of the day, cut into the endpoint's passes: a pass of other
     # jobs in the window, or of the key outside it, closes nothing.  Where the window before the send shows no call, the
-    # caller's rows after its call are asked from the pass's first line to its last and windows.SLACK more (HOP (a′))
+    # caller's rows after its call are asked from the pass's first line to its last and windows.SLACK more (HOP (a'))
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(textwrap.dedent('''
         def kill(req, job_ids):
             tmp_logger = LogWrapper(_logger, "kill")
@@ -13491,7 +14049,7 @@ def test_the_record_door_asks_no_mark_for_a_line_its_logger_writes_with_no_mark(
 
 
 def test_a_callers_rows_after_its_call_show_it_after_the_send_and_rows_before_it_do_not(tmp_path):
-    # HOP (a′) (out/gm/qk-design.md): copyArchive 881 calls Client.kill_jobs(jobs, 2) and prints 882 "killJobs for Anal
+    # HOP (a') (out/gm/qk-design.md): copyArchive 881 calls Client.kill_jobs(jobs, 2) and prints 882 "killJobs for Anal
     # Active (...)" once it returns, after the endpoint's pass (MJE-7383377087).  Over a window after the send, a must
     # row after the call shows it ran; one before its call printed then is a later call's, and does not
     (_corpus(tmp_path) / "pandaserver" / "c.py").write_text(textwrap.dedent('''
@@ -13548,3 +14106,163 @@ def test_a_callers_rows_after_its_call_show_it_after_the_send_and_rows_before_it
     assert "    pandaserver/c.py:5: not read after its call: row(s) [4] print before the call, ending at 5" in got["lines"], got
     # the same verdict where the window is not after the call: positive, as H2 reads it
     assert got["as before"] is True, got
+
+
+def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the_other_selections(tmp_path):
+    # (C) out/gm/qk-design.md: the caller process() is handed parts of Worker.taskList (runImpl), given at __init__ by a
+    # ListWithLock made in Agent.start of what getTasks returned.  Its cycles (MsgWrapper time tokens): the row became
+    # selectable at 00:00:10; m1's user cycle took it (got 6 at 00:00:20) and its pass on it began at 00:15:00; m2's
+    # selections went on every minute and took it after the 10-min lock, at 00:10:30, its pass beginning at 00:12:00
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "jediorder").mkdir(parents=True)
+    (corpus / "pandajedi" / "jediorder" / "Agent.py").write_text(textwrap.dedent('''\
+        from pandajedi.jedicore.MsgWrapper import MsgWrapper
+        from pandajedi.jedicore.ThreadUtils import ListWithLock
+
+        logger = None
+
+
+        class Worker:
+            def __init__(self, taskList):
+                self.taskList = taskList
+
+            def runImpl(self):
+                while True:
+                    task_list = self.taskList.get(10)
+                    if not task_list:
+                        return
+                    self.process(task_list)
+
+            def process(self, task_list):
+                for t in task_list:
+                    logger.info(f"done {t}")
+
+
+        class Agent:
+            def start(self):
+                while True:
+                    tmp_log = MsgWrapper(logger)
+                    tmp_log.info("start")
+                    for vo in self.vos:
+                        for prod_source_label in self.labels:
+                            tmp_log.info(f"preparing tasks to be finished for vo={vo} label={prod_source_label}")
+                            tmp_log.info("getting tasks to be finished")
+                            task_list = self.tb.getTasks(vo, prod_source_label)
+                            if task_list is None:
+                                tmp_log.error("failed to get tasks to be finished")
+                                continue
+                            tmp_log.info(f"got {len(task_list)} tasks")
+                            locked = ListWithLock(task_list)
+                            thr = Worker(locked)
+                            thr.start()
+        '''))
+    (corpus / "pandaserver" / "taskbuffer" / "db_proxy_mods").mkdir(parents=True)
+    (corpus / "pandaserver" / "taskbuffer" / "db_proxy_mods" / "mod.py").write_text(textwrap.dedent('''\
+        import datetime
+
+
+        class M:
+            def getTasks(self, vo, label):
+                sql = "SELECT id FROM T WHERE status=:s AND (lockedBy IS NULL OR lockedTime<:timeLimit) "
+                lock = "UPDATE T SET lockedBy=:lockedBy,lockedTime=CURRENT_DATE WHERE id=:id "
+                varMap = {}
+                timeLimit = naive_utcnow() - datetime.timedelta(minutes=10)
+                varMap[":timeLimit"] = timeLimit
+                return self.run(sql, lock, varMap)
+        '''))
+
+    def cycle(mark, label, t, n, getting=None):
+        g = getting or t
+        return (f"2026-01-01 {t[:8]},000 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> preparing tasks to be finished for vo=None label={label}\n"
+                f"2026-01-01 {g[:8]},500 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> getting tasks to be finished\n"
+                f"2026-01-01 {t[9:]},000 panda.log.PostProcessor: INFO     <2026-01-01/{mark}> got {n} tasks\n")
+    m1 = (cycle("00:00:00.000001", "user", "00:00:00 00:00:20", 6, "00:00:01")
+          + cycle("00:00:05.000001", "managed", "00:00:05 00:00:07", 0)
+          + cycle("00:21:00.000001", "user", "00:21:00 00:21:02", 0))
+    m2 = "".join(cycle(f"00:{mm:02d}:30.000001", "user", f"00:{mm:02d}:30 00:{mm:02d}:31", 0) for mm in range(1, 10))
+    m2 += cycle("00:10:29.000001", "user", "00:10:29 00:10:30", 29, "00:10:29")
+    (tmp_path / "m1.log").write_text(m1)
+    (tmp_path / "m2.log").write_text(m2)
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import agents as AG
+        from bamboo.querier import mapdump
+        from bamboo.querier import rows as R
+        from bamboo.querier.records import read_log
+
+        R.ROWS_FROM = "walk"
+        rel = "pandajedi/jediorder/Agent.py"
+        db = "pandaserver/taskbuffer/db_proxy_mods/mod.py::getTasks"
+        mapdump._FRAGMENT[:] = [N(
+            entered_froms=[N(owner=f"{rel}::process", line=18, sites=[N(owner=f"{rel}::runImpl", line=16)], open=[]),
+                           N(owner=db, line=5, sites=[], open=[])],
+            field_froms=[N(owner=f"{rel}::Worker", field="taskList", bindings=[N(sources=[
+                N(kind="parameter", name="taskList", site_owner=f"{rel}::__init__")])])],
+            parameter_froms=[N(owner=f"{rel}::__init__", parameter="taskList", sources=[
+                N(kind="object", name="ListWithLock", at=[f"{rel}:37"], route=[f"{rel}:38"]),
+                N(kind="constant", name="None", at=["pandajedi/jedimsgprocessor/m.py:9"], route=[])])],
+        )]
+        sel, why = AG.selection_of(f"{rel}::process", 18)
+        crows = AG.cycle_rows(sel)
+        records = []
+        for name, machine in (("m1.log", "m1"), ("m2.log", "m2")):
+            for r in read_log(name).records:
+                r.machine = machine
+                records.append(r)
+        picks, spans = AG.selections(records, crows, "outside")
+        since = "2026-01-01 00:00:10"
+        user = {m: [p for p in ps if p.label == "user"] for m, ps in picks.items()}
+        b1, w1 = AG.batch_of(user["m1"], "2026-01-01 00:15:00,000", "user", since)
+        b2, w2 = AG.batch_of(user["m2"], "2026-01-01 00:12:00,000", "user", since)
+        early, why_early = AG.batch_of(user["m1"], "2026-01-01 00:15:00,000", "user", "2026-01-01 00:00:30")
+        lock = AG.lock_of(sel)
+        between = [q for qs in user.values() for q in qs if b1.at < q.at < b2.after]
+        other = lambda minutes: AG.Lock(datetime.timedelta(minutes=minutes), lock.term, lock.bound, lock.sets)
+        print(json.dumps({
+            "sel": [sel.worker, sel.field, sel.agent, sel.made, sel.handed, sel.call, sel.callee, list(sel.others), why],
+            "not_taken": list(AG.selection_of(f"{rel}::start", 24)),
+            "rows": [[r.line for r in crows.before], [r.line for r in crows.after], crows.label],
+            "literals": AG.literals(crows.after[-1].map_patterns[0]),
+            "strings": AG.ask_strings(list(crows.rows)), "one": AG.ask_strings([crows.after[-1]]),
+            "labels": sorted({(m, p.label, p.count) for m, ps in picks.items() for p in ps if p.count != "0"}),
+            "b1": [b1.mark, b1.after[11:19], b1.at[11:19], b1.count], "b2": [b2.mark, b2.at[11:19], b2.count],
+            "early": [early, why_early],
+            "one_process": [AG.one_process(user["m1"], spans["m1"]), AG.one_process(user["m2"], spans["m2"])],
+            "overlap": AG.one_process(picks["m1"], {**spans["m1"], "<2026-01-01/00:00:05.000001>": ("2026-01-01 00:00:05,000", "2026-01-01 00:21:01,000")}),
+            "lock": [str(lock.span), lock.term, lock.bound, lock.sets],
+            "kept": AG.kept_off(b1, b2, between, lock, since), "n_between": len(between),
+            "short": AG.kept_off(b1, b2, between, other(5), since), "long": AG.kept_off(b1, b2, between, other(15), since),
+        }))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # C1: process() <- runImpl's self.taskList.get <- Worker.__init__'s taskList <- the ListWithLock made at 37 of what
+    # getTasks returned at 32, handed at 38; the message processor's None is another way in, said
+    assert got["sel"] == ["pandajedi/jediorder/Agent.py::Worker", "taskList", "pandajedi/jediorder/Agent.py::Agent.start",
+                          37, 38, 32, "getTasks", ["pandajedi/jedimsgprocessor/m.py:9"], ""], got
+    # a function that takes no part of a worker's list, and no call into it hands one: C1 says what it looked for
+    assert got["not_taken"] == [None, "start takes no part of a worker's list (self.<field>.get()), nor is handed one by the "
+                                      "map's calls into it"], got
+    # C2: the rows in the innermost loop before and after the call, the label the loop's element; the "start" before
+    # the loops is not one; the literal they all hold
+    assert got["rows"] == [[30, 31], [34, 36], "prod_source_label"], got
+    assert got["literals"] == ["got ", " tasks"], got
+    assert got["strings"] == [" tasks"] and got["one"] == [" tasks"], got
+    # C3: each selection carries its cycle's label, the managed one apart; the pass at 00:15 belongs to m1's 00:00:20
+    # selection (its SELECT ran after the row became selectable, 00:00:10), the one at 00:12 to m2's 00:10:30; had the row
+    # become selectable at 00:00:30, after m1's selection ended, the pass would belong to none
+    assert got["labels"] == [["m1", "user", "6"], ["m2", "user", "29"]], got
+    assert got["b1"] == ["<2026-01-01/00:00:00.000001>", "00:00:01", "00:00:20", "6"], got
+    assert got["b2"] == ["<2026-01-01/00:10:29.000001>", "00:10:30", "29"], got
+    assert got["early"][0] is None and "before the row could be selected" in got["early"][1], got
+    # cycles of the label that do not overlap; a cycle spanning another's does
+    assert got["one_process"] == [True, True] and got["overlap"] is False, got
+    # C4: getTasks' lock term, its limit's binding and the take's lock
+    assert got["lock"] == ["0:10:00", "lockedTime<:timeLimit", "timeLimit = naive_utcnow() - datetime.timedelta(minutes=10)",
+                           "lockedTime=CURRENT_DATE"], got
+    # m2's 9 selections between the takes began within the lock from 00:00:20 (to 00:10:20), and the take at 00:10:30
+    # came after its earliest end (00:10:10): kept off; a 5-min lock leaves selections after it, a 15-min one ends
+    # after the next take
+    assert got["n_between"] == 9 and got["kept"] == [True, ""], got
+    assert got["short"][0] is False and "after the lock had ended" in got["short"][1], got
+    assert got["long"][0] is False and "before the lock" in got["long"][1], got

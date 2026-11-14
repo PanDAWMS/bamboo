@@ -53,7 +53,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from bamboo.codemap import evaluate as SE  # noqa: E402
 from bamboo.codemap import (  # noqa: E402
@@ -76,12 +76,46 @@ from bamboo.querier.records import Run  # noqa: E402
 
 def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
     """``rows.once_loops`` of *fn* in one call's run *run*: a row is not printed where rule 4 would read it as
-    missing -- at a level the run prints, its absence trusted."""
+    missing -- at a level the run prints, its absence trusted.  And the loops over objects one of whose rows in the
+    run printed the run's mark as the element's (:func:`keyed_loops`)."""
     def absent(stmt: ast.stmt) -> bool:
         row = fn.row_at(stmt)
         return (row is not None and not sn.present(row) and R.absence_trusted(row, run.log, mode)[0]
                 and run.would_print(row.level, row.func))
-    return R.once_loops(fn.node, absent) if sn.single_call() else {}
+    if not sn.single_call():
+        return {}
+    return R.once_loops(fn.node, absent) | keyed_loops(fn, sn, run)
+
+
+def _names_key(token: str, value: str) -> bool:
+    """Whether the mark *token* is the value *value*: the whole mark (the adder's and datasetManager's PandaID), or one
+    of its ``name=value`` fields (``< jediTaskID=7 >``) -- not a digit of a time token."""
+    value = value.strip()
+    return bool(value) and (token.strip().strip("<>").strip() == value
+                            or re.search(rf"\b\w+={re.escape(value)}(?![\w.])", token) is not None)
+
+
+def keyed_loops(fn, sn, run: Run) -> dict[int, str]:
+    """``{id(loop): why}``: the loops over objects (``for job in jobs``) that went round once for the run's object.  In
+    one call's run (every row printed once) of the records of a key, a row inside the loop printed an attribute of the
+    loop's element whose value is the run's mark: those records are of the round on that object.  It rests on the
+    object being once in what the loop goes over.  datasetManager's FinisherThr.run 662, whose rows print
+    ``job.PandaID``: the pass printed 696 and later rows, so it did not take 664's ``continue`` on that job."""
+    out = {}
+    for loop in R.own_nodes(fn.node):
+        if not isinstance(loop, (ast.For, ast.AsyncFor)) or not isinstance(loop.target, ast.Name):
+            continue
+        element = loop.target.id + "."
+        for row in fn.rows:
+            if not loop.lineno <= row.line <= (loop.end_lineno or loop.lineno) or not sn.present(row):
+                continue
+            named = next((expr for i, _, _ in sn.hits.get(row.line, []) for expr, value in row.capture(run.records[i]).items()
+                          if expr.startswith(element) and _names_key(run.token, value)), None)
+            if named is not None:
+                out[id(loop)] = (f"the loop at {loop.lineno} went round once for the run's object: row {row.line} "
+                                 f"printed {named} as the run's mark (the object once in what it goes over)")
+                break
+    return out
 
 
 def run_holding(c: "Candidate", found: list[Run], mode: str) -> Run | None:
@@ -326,7 +360,7 @@ class Verdict:
     kind: str  # excluded | positive | unexamined | kept
     reasons: list[str] = field(default_factory=list)
     #: the must rows a positive verdict was shown by (``rows.implying_rows`` printed), none for another proof: a reader
-    #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a′))
+    #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a'))
     proven: list[int] = field(default_factory=list)
 
     def describe(self) -> str:
@@ -713,7 +747,16 @@ def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, 
     return None
 
 
-def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None:
+class Moment(NamedTuple):
+    """A moment read as a run's span (``first`` = ``last``, a record's stamp): the row's time, placed in a call of a pass
+    that runs no run of its own -- recordStatusChange, which prints nothing, at updateJobStatus's 484 (KNOWN_ISSUES.md
+    K76)."""
+
+    first: str
+    last: str
+
+
+def inside_call(caller: R.Seen, inner: Run | Moment, site: str) -> tuple[int, int] | None:
     """``(i, j)``: the records of *caller*'s run printed just before and just after the call at *site* (``file:line``)
     whose times hold every record of *inner*, or None.
 
@@ -745,7 +788,7 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
     return None
 
 
-def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, int] | None:
+def _between_records(caller: R.Seen, inner: Run | Moment, stmt: ast.stmt) -> tuple[int, int] | None:
     """``(i, j)`` for a call with no print every path runs on one side of it: the caller's records just before and
     just after *inner*, two in a row of the function's (none of its rows read between them), where the call's
     statement is on a path from the one's print to the other's that prints nothing else (the map's
