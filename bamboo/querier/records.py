@@ -647,10 +647,14 @@ class Run:
 
     def said(self) -> T.Said:
         """The run's line as a record: where, its mark, its records' count and stamps; and, for a run a recorded search
-        may have cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's."""
+        may have cut at an end of what it searched, which end and why (``Log.edges``): its records are not all the run's.
+        Never for a line read alone (:attr:`alone`): it is all its run, and its first word, no mark, was neither
+        searched for nor asked whole (the door, UMK), so what was searched for that word cuts nothing of it."""
         where = T.Said("log-at-machine", {"log": self.log.name, "machine": self.machine.split(".")[0]}) if self.machine else self.log.name
-        cut = self.log.edges(self.machine, self.token, self.first, self.last) if self.log.edges is not None and self.machine else ""
-        cut = self.log.partial.get((self.machine, self.token), cut)
+        cut = ""
+        if not self.alone:
+            cut = self.log.edges(self.machine, self.token, self.first, self.last) if self.log.edges is not None and self.machine else ""
+            cut = self.log.partial.get((self.machine, self.token), cut)
         method = self.log.narrowed.get((self.machine, self.token))
         said_cut: T.Said | str = T.Said("read-as-cut", {"cut": cut}) if cut else ""
         if self.alone:

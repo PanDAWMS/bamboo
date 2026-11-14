@@ -363,6 +363,9 @@ TEMPLATES: dict[str, str] = {
     # the run that recorded the row (rerun._recorder_read, KNOWN_ISSUES.md K67)
     "its-pass-recorded-the-row": "its pass at the row is {run}: {methods:join=, }'s run of {key} ran inside its call at "
                                  "{site}; whether the line ran in it is not read",
+    "its-call-at-the-row": "its call at {site} ran while the row was written: the pass printed at {before} just before "
+                           "the call and at {after} just after it, the row between; {callee}, which it calls there, prints "
+                           "nothing, so this is the call's place, not a run of it",
     "no-recorder-run-at-the-row": "{methods:join=, } ran no run of {key} near the row on {machine} ({logs:join=, }, read "
                                   "whole there): no pass through its call that records the row wrote it",
     "for-the-recorders-pass": "the pass of {func} around its call at {call}, for {marks:rjoin=, }",
@@ -385,6 +388,8 @@ TEMPLATES: dict[str, str] = {
     "others-excluded": "; the other {n_excluded} arm(s) left excluded ({excluded:join=, })",
     "one-arm-ended": "{ends:join= / }{rests}{older}{others}",
     "rests-on": "; it rests on: {premises:join=; }",
+    "an-end-resting-on": "{what}{rests}",
+    "the-one-arm-left-moved-it-on": "the one arm H2 left moved it on, {arm} ({premises:join=; }; KNOWN_ISSUES.md K38)",
     "or-older": "; or at an older row it may have written at: {older:join=, }",
     "the-one-arm-left": "the one arm left",
     "one-of-the-arms-left": "one of the {n_left} arm(s) left",
@@ -418,6 +423,13 @@ TEMPLATES: dict[str, str] = {
     "caller-asked-by-the-key-alone": "asked by the key alone, a pass of it printing no line with the key is not found",
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
+    "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
+    "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{kept}; premises: {premises:join=; }",
+    "an-agent-s-take": "{machine}'s cycle {mark} took it ({callee} ran between {after} and {at} and returned {count} row(s)), and the pass on it began at {first}{moved}",
+    "and-it-moved-it-on": ", the one that moved it on",
+    "kept-off-by-the-lock": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} did not take it: {callee} skips a row locked less than {span} ago ({term}; {bound}) and its take locks it ({sets})",
+    "one-process-a-label": "one process of {agent} selects for {label} on each of {machines:join=, } (no two of its cycles there overlap; two processes taking turns would not show)",
+    "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
     # U3: which call ran an arm with no guard of its own (KNOWN_ISSUES.md K56)
     "the-arm-s-run-mark": "which row {fn}'s call handed it: no mark the map records for {fn} reads a row's identity in its run {token!r} (KNOWN_ISSUES.md K56)",
     "a-call-handing-the-mark-on": "a call of {fn}'s whose caller's run marks hold the row its run's mark holds: none of {sites:join=, } does (KNOWN_ISSUES.md K56)",
@@ -608,6 +620,8 @@ TEMPLATES: dict[str, str] = {
     "history-no-column-why": "its status history here holds no {attr}",
     "logs-not-asked-not-ruled-out": "its logs are not asked: a run not found would not rule it out ({failing:join=; }) (KNOWN_ISSUES.md K15)",
     "premise-why": "{premise}: {why}",
-    "ran-not-read-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: which way its passes went is not read for late (KNOWN_ISSUES.md K15)",
+    "ran-followed-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: followed on its own, which way its passes in the stay went (KNOWN_ISSUES.md K15)",
+    "no-pass-of-in-the-stay": "no pass of {func} with the key in the stay ({since} .. {moved}): its runs fall outside it, so it did not take the row there (KNOWN_ISSUES.md K15)",
+    "mover-that-moved-it-label": "mover {owner}, which moved it on",
     "asks-of-its-logs-not-recorded": "{n} ask(s) of its logs not in the records ({why}): whether it ran is not known yet",
 }
