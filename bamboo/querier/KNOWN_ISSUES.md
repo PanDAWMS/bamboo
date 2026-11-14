@@ -2578,7 +2578,24 @@ Now (`Rerun._stay_edges`, the analyzer handover's out/gm/qk-design.md "BP'", tma
   that recorded the move as the pass that moved it on, where the records show it; else, as before, the passes ending
   at the move's second or later;
 - a row that writes the value again over the same value is no edge (MJ-defined-late's activateJob, 'defined' over
-  'defined' at 08:28:36.007): its pass is read, the reason the value stayed.
+  'defined' at 08:28:36.007): its pass is read, the reason the value stayed;
+- a history pair whose write is the mover's own call (level 0: getTasksToExecCommand_JEDI's
+  `self.record_task_status_change(jediTaskID)` at 4508, updateJobStatus's `self.recordStatusChange(...)` at 484) is
+  read on the function that call enters, the one the map's reach goes into from that line (`Rerun._own_call`), with
+  the mover's pass in hand (`Rerun._own_call_pass`, out/gm/qk-design.md "BP' fix 3", tmaeno "OK" 2026-11-14).  Before,
+  the pair's method was the mover itself, so its own run was read as the recorder's and "recorded" said only that the
+  pass ran over the row's time: 15 of bp2's 21 such lines; and MT-staged-late asked the mover's shared mark whole and
+  its pass by the row's vo and label, which its mark (`vo=None label=None`) does not hold.  Now a callee that prints
+  (record_task_status_change, "start" and "done" under `jediTaskID={}`): its run of the key on the row's host, cut at
+  its entry rows to the calls at the row, each pass read on the calls inside it (the callee runs again in the row's
+  second by another pass: MT-exhausted-late's 'toretry' at 11:14:23.613, again at .688), inside the pass's call and
+  running at the row's time.  Every own call of the pass is tried so before any is put inside the pass without its
+  call named, where the pass's prints cannot bracket it (a loop's next round prints between, getTasksToExecCommand_JEDI
+  over its commands; or no print follows on every path): retryTask_JEDI records 'exhausted' at 5353 and at 5365, in
+  two branches, and 5365's ran.  A callee that
+  prints nothing (recordStatusChange): the pass's records just before and just after the call hold the row's time
+  (`which_ran.Moment` in `inside_call`), said as the call's place, not a run of it.  Neither shown: not decided, and
+  nothing asked of the mover's marks.
 
 Premises not read:
 - *The host's log clock is the database's to the millisecond.*  The rows above fell inside their recorders' runs to
@@ -2592,3 +2609,8 @@ Premises not read:
   aipanda081, 51 records in 9 bursts over two days, MT-throttled-stuck), and is read whole as before: not decided here.
 - *Between the first row of the value and a row writing it again, nothing is read.*  The window opens at the second
   row; a pass wholly between the two is not read.  None of the live cases has one.
+- *A level-0 callee the map places in no log writes to its caller's.*  BaseModule's record_task_status_change is a
+  mixin's, its logger its object's: the map's reach enters it as the caller's classes (`runs_as`), so it is read in the
+  caller's logs (JediDBProxy.log for getTasksToExecCommand_JEDI).
+- *Nothing else writes the key's row on the host in the milliseconds around a silent call.*  recordStatusChange
+  prints nothing: the row between updateJobStatus's prints around 484 is the call's place only.

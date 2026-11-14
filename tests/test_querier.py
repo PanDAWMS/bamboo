@@ -4840,7 +4840,7 @@ def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_
             # the pass the recorder's pass holds: the mover's own pass inside the caller's whose call recorded the row
             r = RR.Rerun.__new__(RR.Rerun)
             r.lines, r.logs, r.unanswered = [], N(needs_window=True), []
-            RR.recorders = lambda subject, owner, line: ["the caller's call"]
+            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (("a.py::C.m", (3,)),), ())]
             caller = N(log=N(name="a.log"), machine="h1", first="2026-01-01 00:00:04,000", last="2026-01-01 00:00:06,000")
             call = N(token="m < 7 >", machine="h1", first="2026-01-01 00:00:05,450", last="2026-01-01 00:00:05,550")
             r._recorder_read = lambda rec, subject, key, state, asking: ("pass", "its pass recorded the row", caller, [call])
@@ -4849,7 +4849,7 @@ def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_
             hit = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
             elsewhere = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", {**moved_in[1], "host": None}, found)
             # the call's prints cannot bracket it: the recorder's call at the row inside the pass's own records
-            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (), ())]
+            RR.recorders = lambda subject, owner, line: [RR.Recorder("a.py::C.g", 9, (("a.py::C.m", (4,)),), ())]
             r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [call])
             placed = r._recording_pass("a.py::f", [1], "JobSpec.jobStatus", "7", moved_in[1], found)
             r._recorder_read = lambda rec, subject, key, state, asking: ("", None, None, [N(**{**vars(call), "machine": "h2"})])
@@ -4874,6 +4874,124 @@ def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_
     # a row with no host names no machine to read its recorder on
     assert got["recorded"] == ["inside it", "its pass recorded the row", None, "inside it",
                                "m < 7 > recorded it inside the pass, C.g:9 recording it after the arm", None, None]
+
+
+def test_a_pair_whose_write_is_the_mover_s_own_call_is_read_on_the_callee_s_run_or_on_the_call_s_place(tmp_path):
+    corpus = _corpus(tmp_path)
+    (corpus / "pandaserver" / "a.py").write_text(
+        textwrap.dedent(
+            """
+            def mover(self, ids):
+                self.logger.debug("start")
+                for task_id in ids:
+                    self.logger.debug("updating")
+                    self.record(task_id)
+                    self.logger.debug("updated")
+                self.logger.debug("done")
+            """
+        )
+    )
+    (corpus / "pandaserver" / "b.py").write_text("def record(self, task_id):\n    self.cur.execute(sql)\n")
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+
+            def rec(caller, call, methods):
+                return RR.Recorder(caller, call, methods, ())
+
+            own = rec("pandaserver/a.py::C.mover", 6, (("pandaserver/a.py::C.mover", (6,)),))
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.unanswered, r.hop, r.mode = [], [], 0, "outside"
+            calls = {"pandaserver/a.py::C.mover": N(calls=[N(how="call", line=6, lines=[6], to="pandaserver/b.py::B.record")])}
+            r._graph = lambda: (None, N(rows=calls), None)
+            got = {"callee": [r._own_call(own),
+                              r._own_call(rec("pandaserver/a.py::C.mover", 6, (("pandaserver/c.py::D.update", (9,)),))),
+                              r._own_call(rec("pandaserver/a.py::C.other", 6, (("pandaserver/a.py::C.other", (6,)),)))]}
+            calls["pandaserver/a.py::C.mover"].calls.append(N(how="call", line=6, lines=[6], to="pandaserver/b.py::E.record"))
+            got["callee"].append(r._own_call(own))
+
+            # the pass: start, two rounds (updating, updated), done
+            node = R.functions("pandaserver/a.py", "mover")[0]
+            fn = N(rel="pandaserver/a.py", node=node, row_at=lambda s: N(line=s.lineno) if R.is_print(s) else None)
+            stamps = ["00,000", "01,000", "02,000", "03,000", "04,000", "05,000"]
+            p = N(machine="h1", first="2026-01-01 00:00:00,000", last="2026-01-01 00:00:05,000", said=lambda: "the pass",
+                  records=[N(stamp=f"2026-01-01 00:00:{s}") for s in stamps])
+            RR.R.function = lambda rel, func, arms=(), within=(): fn
+            RR.R.seen = lambda fn, run, mode: N(fn=fn, run=run, unambiguous={3: [0], 5: [1, 3], 7: [2, 4], 8: [5]})
+            at = lambda s: datetime.datetime.fromisoformat(f"2026-01-01 00:00:{s}")
+            row = {"time": "2026-01-01 00:00:01", "status": "x"}
+            asking = N(machine="h1")
+            # a callee that prints nothing: the row between the pass's prints around the call, or not
+            RR.R._prints_of = lambda owner, lines: None
+            callee = "pandaserver/b.py::record"
+            silent = [r._own_call_pass(own, callee, "7", row, asking, [p], at(t)) for t in ("01.500000", "02.500000")]
+            got["silent"] = [silent[0][1], silent[1]]
+            got["other host"] = r._own_call_pass(own, callee, "7", row, N(machine="h2"), [p], at("01.500000"))
+            # a callee that prints: its run of the key, read in the caller's logs where the map places it in none
+            RR.R._prints_of = lambda owner, lines: N(statements=["start"])
+            asked = []
+            r.files_of = lambda owner, today, lines: [] if owner == callee else ["x.log"]
+
+            def logs_at(key, names, ask, owners):
+                asked.append(names)
+                return {"x.log": N(without=set())}, []
+
+            r._logs_at, RR.owners_of = logs_at, (lambda ids: {})
+            run = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:01,400", last="2026-01-01 00:00:01,600")
+            # its next call by another pass after this one ended, in the same second as far as the window reads
+            again = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:05,500", last="2026-01-01 00:00:05,600")
+            RR.runs_for, RR.of_mover, RR.at_window = (lambda log, key: [run]), (lambda r_, m: True), (lambda r_, w: True)
+            RR.passes_of = lambda fn_, r_, mode: ([r_, again], "")
+            RR.recorded_in_pass = lambda fn_, found, w, inner, sites, mode: (p, sites[0])
+            got["printing"] = r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"))[1]
+            RR.recorded_in_pass = lambda fn_, found, w, inner, sites, mode: None
+            got["in a loop"] = [r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000")),
+                                r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"), placed=False)[1]]
+            got["not at the row"] = r._own_call_pass(own, callee, "7", row, asking, [p], at("03.500000"), placed=False)
+            got["asked"] = asked[0]
+            r._logs_at = lambda key, names, ask, owners: ({}, [("an ask", "why")])
+            got["unanswered"] = [r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000")),
+                                 r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"), placed=False),
+                                 len(r.unanswered)]
+            # two own calls of the pass that record the row (retryTask_JEDI's 5353 and 5365): each is placed in its call
+            # before either is put inside the pass
+            first, second = rec("pandaserver/a.py::C.mover", 6, (("pandaserver/a.py::C.mover", (6,)),)), \
+                rec("pandaserver/a.py::C.mover", 9, (("pandaserver/a.py::C.mover", (9,)),))
+            RR.recorders = lambda subject, owner, line: [first, second]
+            r.logs = N(needs_window=True)
+            r._own_call = lambda rec_: callee
+            r._own_call_pass = lambda rec_, c, k, row_, asking_, found, at_, placed=True: (
+                (p, f"{rec_.call} placed") if placed and rec_ is second else (p, f"{rec_.call} inside") if not placed else None)
+            got["order"] = r._recording_pass("pandaserver/a.py::mover", [3], "JobSpec.jobStatus", "7",
+                                             {**row, "host": "h1", "time_extended": "2026-01-01 00:00:01.500000"}, [p])[1]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the one function the map's reach enters at the pair's own call; none where the pair names another function's
+    # method (K67's), or the reach goes into two
+    assert got["callee"] == ["pandaserver/b.py::record", None, None, None]
+    # a silent callee: the row between the last print before the call and the first after it, in that round
+    assert "its call at pandaserver/a.py:6 ran while the row was written" in got["silent"][0]
+    assert "2026-01-01 00:00:01,000 just before the call and at 2026-01-01 00:00:02,000 just after" in got["silent"][0]
+    assert got["silent"][1] is None
+    assert got["other host"] is None
+    # a printing callee: its run inside the pass's call, or inside the pass where a loop's next round comes between;
+    # its call by another pass, outside this one, does not keep it from it
+    assert got["printing"].startswith("its pass at the row is the pass: record's run of 7 ran inside its call at pandaserver/a.py:6")
+    assert got["in a loop"] == [None, "record < 7 > recorded it inside the pass, mover calling record; its prints do not place the call"]
+    # a call of it not running at the row is not the one that recorded it
+    assert got["not at the row"] is None
+    assert got["asked"] == ["x.log"]
+    # what the records do not answer is asked once, and nothing is decided
+    assert got["unanswered"] == [None, None, 1]
+    assert got["order"] == "9 placed"
 
 
 _PASSES = textwrap.dedent("""
@@ -13560,7 +13678,7 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
     # endpoint's pass that holds the key and began last in that window, else to the window's end; the endpoint asked
     # once per window.  A mark many calls share is one run of the day, cut into the endpoint's passes: a pass of other
     # jobs in the window, or of the key outside it, closes nothing.  Where the window before the send shows no call, the
-    # caller's rows after its call are asked from the pass's first line to its last and windows.SLACK more (HOP (a′))
+    # caller's rows after its call are asked from the pass's first line to its last and windows.SLACK more (HOP (a'))
     (_corpus(tmp_path) / "pandaserver" / "a.py").write_text(textwrap.dedent('''
         def kill(req, job_ids):
             tmp_logger = LogWrapper(_logger, "kill")
@@ -13835,7 +13953,7 @@ def test_the_record_door_asks_no_mark_for_a_line_its_logger_writes_with_no_mark(
 
 
 def test_a_callers_rows_after_its_call_show_it_after_the_send_and_rows_before_it_do_not(tmp_path):
-    # HOP (a′) (out/gm/qk-design.md): copyArchive 881 calls Client.kill_jobs(jobs, 2) and prints 882 "killJobs for Anal
+    # HOP (a') (out/gm/qk-design.md): copyArchive 881 calls Client.kill_jobs(jobs, 2) and prints 882 "killJobs for Anal
     # Active (...)" once it returns, after the endpoint's pass (MJE-7383377087).  Over a window after the send, a must
     # row after the call shows it ran; one before its call printed then is a later call's, and does not
     (_corpus(tmp_path) / "pandaserver" / "c.py").write_text(textwrap.dedent('''

@@ -149,10 +149,12 @@ from bamboo.querier.records import (
 )
 from bamboo.querier.which_ran import (
     Candidate,
+    Moment,
     Verdict,
     at_window,
     class_of,
     holds_key,
+    inside_call,
     judge,
     key_env,
     of_mover,
@@ -1693,6 +1695,11 @@ def _during(inner: list[Run], p: Run, at: datetime.datetime) -> bool:
         return next((W.when(r.stamp) for r in p.records if W.when(r.stamp) > W.when(m.last)), W.when(p.last))
 
     return any(W.when(m.first) <= at <= returned(m) for m in inner)
+
+
+def _stamp(t: datetime.datetime) -> str:
+    """*t* as a record's stamp, ``2026-01-01 00:00:00,123``: a statuslog row's time compared with the records around it."""
+    return f"{t:%Y-%m-%d %H:%M:%S},{t.microsecond // 1000:03d}"
 
 
 def recorders(subject: str, owner: str, line: int) -> list[Recorder]:
@@ -4136,7 +4143,7 @@ class Rerun:
         882 ``killJobs for Anal Active (...)`` at 15:14:55,289, after kill Done at 15:14:55,287 (MJE-7383377087).
         Where the window before the send shows no call, the caller's rows after its call are asked from the pass's
         first line to its last and windows.SLACK more, and count only where every row that shows the call follows it
-        (HOP (a′): each row read on the side of the send its code puts it on)."""
+        (HOP (a'): each row read on the side of the send its code puts it on)."""
         machine = getattr(run, "machine", None)
         if not w.sent or window is None:
             return self._call_shown(w.route[0], window, machine)
@@ -6174,7 +6181,16 @@ class Rerun:
             return None
         recs = list(dict.fromkeys(r for line in arms for r in recorders(subject, owner, line)))
         asking = W.at_transition(row)
+        # the pairs whose write is the mover's own call: each placed in its call first, and only where none is, inside
+        # the pass -- retryTask_JEDI records 'exhausted' at 5353 and at 5365, in two branches, and 5365's ran
+        own = [(rec, callee) for rec in recs if (callee := self._own_call(rec)) is not None]
+        for placed in (True, False):
+            for rec, callee in own:
+                if (got := self._own_call_pass(rec, callee, key, row, asking, found, at, placed)) is not None:
+                    return got
         for rec in recs:
+            if any(rec is r for r, _ in own):
+                continue
             kept = len(self.unanswered)
             kind, said, part, inner = self._recorder_read(rec, subject, key, row, asking)
             if kind == "pass" and part is not None and said is not None:
@@ -6189,6 +6205,83 @@ class Rerun:
                         del self.unanswered[kept:]
                         names = sorted({m.token for m in inner})
                         return p, f"{', '.join(names)} recorded it inside the pass, {rec.caller.split('::')[-1]}:{rec.call} recording it after the arm"
+        return None
+
+    def _own_call(self, rec: Recorder) -> str | None:
+        """The function *rec*'s call enters, ``file::function``, where the map's history pair names the caller's own call
+        as the write (level 0: ``writes`` is ``rec.caller:rec.call``, getTasksToExecCommand_JEDI's
+        ``self.record_task_status_change(jediTaskID)`` at 4508): the one function the map's reach goes into from that
+        line.  None for a pair whose recording method is another function (runImpl's updateTask_JEDI, K67's), or where the
+        reach names none or more than one (KNOWN_ISSUES.md K76)."""
+        if [(_bare(m), tuple(lines)) for m, lines in rec.methods] != [(_bare(rec.caller), (rec.call,))]:
+            return None
+        graph = self._graph()
+        row = graph[1].rows.get(rec.caller) if graph is not None else None
+        to = {c.to for c in (row.calls if row is not None else []) if c.how == "call" and rec.call in (c.lines or [c.line])}
+        return _bare(to.pop()) if len(to) == 1 else None
+
+    def _own_call_pass(self, rec: Recorder, callee: str, key: str, row: dict, asking: W.Asking, found: list,
+                       at: datetime.datetime, placed: bool = True) -> tuple[Run, str] | None:
+        """``(the pass, what says so)`` of *found* whose own call at ``rec.call`` recorded *row*, for a pair whose write is
+        that call (:meth:`_own_call`, *callee* the function it enters), or None (KNOWN_ISSUES.md K76).  The pass is in
+        hand, so none is asked by its marks, nor its own mark whole.  A callee that prints (record_task_status_change,
+        "start" and "done" under ``jediTaskID={}``, read in the caller's logs where the map places it in none): its run
+        of the key on the row's host, cut to its call at the row, ran
+        inside the pass's call (``recorded_in_pass``) while the row was written (:func:`_during`); or, not *placed*, where
+        the pass's prints cannot bracket the call (a loop's next round prints between, as getTasksToExecCommand_JEDI's
+        over its commands, or no print follows on every path), inside the pass, the call not named.  One that prints
+        nothing (recordStatusChange): the pass's records just before and just after the call hold the row's time
+        (``inside_call`` of the moment) -- the call's place, not a run of it, and said so."""
+        host = str(asking.machine)
+        rel, _, func = _bare(rec.caller).partition("::")
+        fn = R.function(rel, func, [rec.call])
+        site = f"{fn.rel}:{rec.call}"
+        crel, _, cfunc = callee.partition("::")
+        defs = R.functions(crel, cfunc)
+        mine = [p for p in found if p.machine == host]
+        if len(defs) != 1 or not defs[0].body or not mine:
+            return None
+        lines = [defs[0].body[0].lineno]
+        if not getattr(R._prints_of(callee, lines), "statements", None):
+            if not placed:
+                return None
+            moment = _stamp(at)
+            for p in mine:
+                if (got := inside_call(R.seen(fn, p, self.mode), Moment(moment, moment), site)) is not None:
+                    return p, T.text(T.Said("its-call-at-the-row", {"func": func, "site": site, "callee": cfunc,
+                                                                    "before": p.records[got[0]].stamp,
+                                                                    "after": p.records[got[1]].stamp}))
+            return None
+        t = datetime.datetime.fromisoformat(str(row["time"])[:19])
+        edge = ((t - EDGE).isoformat(" "), (t + EDGE).isoformat(" "))
+        ask = W.Asking(edge, asking.machine, T.Said("for-the-rows-recorder", {
+            "methods": [cfunc], "status": row.get("status"), "time": row["time"], "machine": host}))
+        # a callee the map places in no log of its own -- BaseModule's, a mixin whose logger is its object's -- runs as
+        # the caller's classes there (the map's reach, ``runs_as``), so its lines are read in the caller's logs
+        files = self.files_of(callee, [], lines) or self.files_of(_bare(rec.caller), [], [rec.call])
+        logs, unanswered = self._logs_at(key, list(dict.fromkeys(files)), ask, owners_of([callee]))
+        if unanswered:
+            # kept once, when the call is first read
+            if placed:
+                self._keep_unanswered(unanswered)
+            return None
+        # the callee's mark holds every call of it for the key (record_task_status_change's at 'staged' and at
+        # 'defined', 17 minutes apart): each run is cut at its entry rows, and the calls at the row are read
+        cfn, when = R.function(crel, cfunc, [], lines), (str(row["time"]), str(row["time"]))
+        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key)
+                 if of_mover(r, callee) and r.machine == host and r.last[:19] >= edge[0] and r.first[:19] <= edge[1]
+                 for part in passes_of(cfn, r, self.mode)[0] if at_window(part, when)]
+        for p in mine:
+            # each pass on the calls inside it: the callee is called again in the row's second by another pass
+            # (MT-exhausted-late's 'toretry' at 11:14:23.613, its next call at .688 after the pass ended at .616)
+            at_row = [m for m in inner if _during([m], p, at)]
+            if not at_row:
+                continue
+            if placed and recorded_in_pass(fn, [p], when, at_row, [site], self.mode):
+                return p, T.text(T.Said("its-pass-recorded-the-row", {"run": p.said(), "methods": [cfunc], "key": key, "site": site}))
+            if not placed:
+                names = sorted({m.token for m in at_row})
+                return p, f"{', '.join(names)} recorded it inside the pass, {func} calling {cfunc}; its prints do not place the call"
         return None
 
     def _which_way(self, fn: R.Function, rel: str, func: str, found: list, arms: list[Arm]) -> Blocked:

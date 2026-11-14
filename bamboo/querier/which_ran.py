@@ -53,7 +53,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from bamboo.codemap import trace  # noqa: E402
 from bamboo.codemap.calls import Target  # noqa: E402
@@ -356,7 +356,7 @@ class Verdict:
     kind: str  # excluded | positive | unexamined | kept
     reasons: list[str] = field(default_factory=list)
     #: the must rows a positive verdict was shown by (``rows.implying_rows`` printed), none for another proof: a reader
-    #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a′))
+    #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a'))
     proven: list[int] = field(default_factory=list)
 
     def describe(self) -> str:
@@ -743,7 +743,16 @@ def bracket_of(values: list[tuple[int, str, str]], observed: str) -> tuple[int, 
     return None
 
 
-def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None:
+class Moment(NamedTuple):
+    """A moment read as a run's span (``first`` = ``last``, a record's stamp): the row's time, placed in a call of a pass
+    that runs no run of its own -- recordStatusChange, which prints nothing, at updateJobStatus's 484 (KNOWN_ISSUES.md
+    K76)."""
+
+    first: str
+    last: str
+
+
+def inside_call(caller: R.Seen, inner: Run | Moment, site: str) -> tuple[int, int] | None:
     """``(i, j)``: the records of *caller*'s run printed just before and just after the call at *site* (``file:line``)
     whose times hold every record of *inner*, or None.
 
@@ -775,7 +784,7 @@ def inside_call(caller: R.Seen, inner: Run, site: str) -> tuple[int, int] | None
     return None
 
 
-def _between_records(caller: R.Seen, inner: Run, stmt: ast.stmt) -> tuple[int, int] | None:
+def _between_records(caller: R.Seen, inner: Run | Moment, stmt: ast.stmt) -> tuple[int, int] | None:
     """``(i, j)`` for a call with no print every path runs on one side of it: the caller's records just before and
     just after *inner*, two in a row of the function's (none of its rows read between them), where the call's
     statement is on a path from the one's print to the other's that prints nothing else (the map's

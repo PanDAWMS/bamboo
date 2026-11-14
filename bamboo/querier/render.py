@@ -363,6 +363,9 @@ TEMPLATES: dict[str, str] = {
     # the run that recorded the row (rerun._recorder_read, KNOWN_ISSUES.md K67)
     "its-pass-recorded-the-row": "its pass at the row is {run}: {methods:join=, }'s run of {key} ran inside its call at "
                                  "{site}; whether the line ran in it is not read",
+    "its-call-at-the-row": "its call at {site} ran while the row was written: the pass printed at {before} just before "
+                           "the call and at {after} just after it, the row between; {callee}, which it calls there, prints "
+                           "nothing, so this is the call's place, not a run of it",
     "no-recorder-run-at-the-row": "{methods:join=, } ran no run of {key} near the row on {machine} ({logs:join=, }, read "
                                   "whole there): no pass through its call that records the row wrote it",
     "for-the-recorders-pass": "the pass of {func} around its call at {call}, for {marks:rjoin=, }",
