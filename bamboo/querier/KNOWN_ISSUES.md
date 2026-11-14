@@ -879,8 +879,8 @@ from it; else it stops naming each arm left with its rows, code `one-of`, and re
 `possibilities` lists them (arm, rows, premises).  Arms, not rows, are the possibilities: the steps after H2 explain
 an arm, and an arm's passes differ only in the run read.  An arm whose passes are all older than the newest shown
 write is not among them.  None read on any row: "a pass that wrote ... (none shows a writer's pass)".  A single
-window (a status's row, a value held, a value that is its time) is judged as before, and a stand-in chosen there
-is read the same way.  A stand-in's arm shown to write goes on as an arm that prints does (attr-time-shape.md 6,
+window (a status's row, a value held, a value that is its time) is judged as before where the judge chooses a writer,
+and a stand-in chosen there is read the same way.  A stand-in's arm shown to write goes on as an arm that prints does (attr-time-shape.md 6,
 P2; tmaeno: "the order does not matter much, so let's keep clearing the second stage", 10-30 14:47): H3 reads its
 own guards, on the caller's run, whose passes and record after the call stand for it (`Wrote.via`).  One writer
 that prints nothing can be called twice in one pass, once shown and once not (setSuperStatus_JEDI from
@@ -900,9 +900,22 @@ result.json, such as H3's `wrote`).  None left: a stop, no arm could have.  An a
 run on them once every arm is walked, so that one round records them.  L1 (`--late`) goes on with the one arm left as
 what moved the value on (`Rerun._the_arm_left`; analyzer handover qk-design.md (M), M1), on the run H2 read it on, and
 every END after rests on it (`Rerun.rests`), code `one-of`; with more than one left it does not walk them, and its
-stop names them as before.  H2's single window, where the judge chooses no candidate ("which candidate
-ran"), does not fork either: most of its arms are unexamined (no pass of the key at the window, K47), and are dropped
-only where the logs are searched whole and every way that takes the row prints the key (the map's K19).
+stop names them as before.
+
+H2's single window at a status's row, where the judge chooses no writer, is read as one row of the scan (H2-1, the
+analyzer handover's qk-design.md, 2026-11-14; tmaeno: "OK"): it stopped at "which candidate ran", where the scan
+reads the same verdicts and forks -- two rules for one question.  Its unexamined arms (no pass of the key at the
+window, K47) go where their logs were searched whole and shown to name runs by the key, and stay as may have where a
+log is not (`_unshown`): the scan's premise, a log's.  It is weaker than the one this paragraph asked for before, an
+arm's (every way that takes the row prints the key, the map's K19).  MF-7396944927's 'failed' at 14:46:00, which
+stopped with process_job_report:416 and 441 and archiveJob:1813 each of which may have written it last in the adder's
+pass, ends one of 16 arms: those three, and 13 whose logs (setupper's, datasetManager's, Watcher's) hold no line of
+the job in the records, asked at the row's second alone -- not read.  On the live sets (the analyzer handover's
+o2p) 7 cases end so, all one-of, and five late questions stop at L1's arms instead.  A window with no row (a value
+held, a time) has none to read so and stops as before, and so does one whose time is handed.  Where the judge
+chooses a positive writer over kept ones at the same window, the single window still picks it, which the scan would
+not: 4 definite ENDs rest on that pick (MJ-running-late's 'holding': updateJobStatus:242 shown, process_job_report:416
+kept on an adder run of the same second).
 
 No run of the key at a row is no write only for a writer whose log some row's records show naming the key -- a run of
 it there, on any machine (`Rerun._named`).  JobGenerator's pass marks its lines `<jediTaskID=... datasetID=...>` and
@@ -924,9 +937,13 @@ walks on from H3", "==== n of k: <arm> (<rows>)" and "==== n: reached the end | 
 excluded ..." per arm, "<arm>'s guard <g> read false in the rows' values at <row>: it did not write there; its next
 row, <row>"; an END "written last by one of the k arm(s) left, which the data does not decide: 1 <arm>: ended; 2 <arm>:
 open (<kinds>); ... (KNOWN_ISSUES.md K38)", or the one arm's END "...; it rests on: <premises>; or at an older row it may
-have written at: <rows>"; a stop "an arm that could have written ...: each of the k left is excluded".
-*Revisit:* with the second stage's second half (H2's single window's "which candidate ran", after the map's K19) and
-L1's arms where more than one is left; when the map says what fills a print's prefix (then ask a writer's log by its mark's key).
+have written at: <rows>"; a stop "an arm that could have written ...: each of the k left is excluded"; at a single
+window, "the judge chose no writer at the row: it is read as one row of the scan, each arm that wrote or may have
+walking on (KNOWN_ISSUES.md K38)", then the row as the scan reads it.
+*Revisit:* with L1's arms where more than one is left; a single window's positive pick over kept arms (to be read as
+the scan reads it, one-of: tmaeno's OK 2026-11-14, a step after H2-1, measured first); a log no record shows naming the
+key, asked over the object's life (H2-1's arms not read); when the map says what fills a print's prefix (then ask a
+writer's log by its mark's key).
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 

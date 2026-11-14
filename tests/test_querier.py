@@ -7151,6 +7151,102 @@ def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_t
     assert got["one row"]["read"] == ["p/b.py::scout"]
 
 
+def test_a_status_rows_single_window_whose_judge_chooses_no_writer_is_read_as_one_row_of_the_scan(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun, which_ran
+
+            verdict = lambda line, kind: which_ran.Verdict(which_ran.Candidate("p/a.py", "f", [line]), line, kind)
+            run = N(first="2026-11-02 14:46:00,100", last="2026-11-02 14:46:00,300", log=N(name="a.log"),
+                    describe=lambda: "the run")
+            rerun.R.function = lambda rel, func, lines: None
+            rerun.R.seen = lambda fn, run, mode: None
+            rerun.stable_holes = lambda *a, **k: None
+            rerun.owners_of = lambda ids: {}
+            row = {"status": "failed", "time": "2026-11-02 14:46:00"}
+
+            def rerun_(hand=None):
+                r = object.__new__(rerun.Rerun)
+                r.lines, r.opened, r.hop, r.hand, r.hand_used, r.result = [], [], "H2", dict(hand or {}), [], {}
+                r.mode, r.decide, r._dropped_by_guard, r.question = "map", "positive", frozenset(), None
+                r.data = {"statuslog": {"states": [row]}}
+                return r
+
+            # H2 at one window: a judge that chooses no writer at a status's row hands the row back, unreported
+            def wrote_at(chosen, at_row):
+                r = rerun_()
+                r._unborn = lambda readings, subject, state: (readings, "")
+                r._h2_candidates = lambda subject, readings: [N(owner="p/a.py::f", rel="p/a.py", func="f", lines=[3, 5],
+                                                                log_files=["a.log"])]
+                r._ask = lambda key, names, asking, owners, whole: ({"a.log": [run]}, [], {})
+                r._stop_unanswered = lambda asks: None
+                r._batched = lambda *a: {}
+                r.base_env = lambda at=None: N(values={})
+                r._keeps = lambda subject: None
+                r._guard_dropped = lambda verdicts: frozenset()
+                r.warn_split = lambda owner, lines: None
+                left = [verdict(3, "kept"), verdict(5, "kept")]
+                pick = None if chosen is None else left[0]
+                rerun.judge = lambda cands, runs, **k: which_ran.Judgement(left, pick, "undecided", None)
+                asking = N(window=("2026-11-02 14:46:00", "2026-11-02 14:46:00"), holds_write=False)
+                try:
+                    w = r._wrote_at("JobSpec.jobStatus", "jobStatus", "failed", "7", ["readings"], row, asking, at_row)
+                    got = None if w is None else w.chosen.line
+                except rerun.Stop as e:
+                    got = str(e)
+                return [got, any("=> chosen" in line for line in r.lines)]
+
+            # ... and H2 as it reads a single window, given the row (L1's), handed, or a value held (no row)
+            def which(state, wrote=None, hand=None, held=False):
+                r = rerun_(hand)
+                seen = {}
+                r._writers = lambda subject, value, key: ["readings"]
+                r._h2_candidates = lambda subject, readings: []
+                r._writer_logs = lambda subject, readings, cands=None: []
+                r._created = lambda holding: None
+                rerun.PT.history_holding = lambda subject: "jobs_statuslog" if held else None
+                rerun.W.value_held = lambda states, attr, value, created: N(window=("t", "t"), why="held", strings=None)
+
+                def wrote_at(subject, attr, value, key, readings, state, asking, at_row):
+                    seen["row"] = at_row
+                    return wrote
+                r._wrote_at = wrote_at
+                r._scan = lambda subject, attr, value, key, readings, tries: ["scanned", [t[0] for t in tries]]
+                r._stood = lambda subject, value, w, state: "stood"
+                got = r._which_wrote("JobSpec.jobStatus", "failed", "7", state)
+                return [got, seen["row"], [line for line in r.lines if "one row of the scan" in line]]
+
+            print(json.dumps({
+                "none at a row": wrote_at(None, True),
+                "none, no row": wrote_at(None, False),
+                "chosen at a row": wrote_at("kept", True),
+                "the row": which(row),
+                "the row, chosen": which(row, wrote="w"),
+                "the row, handed": which(row, wrote="w", hand={"H2": "f:3"}),
+                "a value held": which(None, wrote="w", held=True),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the judge chose none at a status's row: no report, no stop -- the row goes to the scan, whose judge reports it
+    assert got["none at a row"] == [None, False]
+    # a window with no row stops as before; a writer chosen at a row is read as before
+    assert got["none, no row"] == ["H2: which candidate ran", True]
+    assert got["chosen at a row"] == [3, True]
+    said = ["the judge chose no writer at the row: it is read as one row of the scan, each arm that wrote or may have "
+            "walking on (KNOWN_ISSUES.md K38)"]
+    assert got["the row"] == [["scanned", [{"status": "failed", "time": "2026-11-02 14:46:00"}]], True, said]
+    assert got["the row, chosen"] == ["stood", True, []]
+    # a hand names the writer at the window, and a value held has no row to read as the scan does
+    assert got["the row, handed"] == ["stood", False, []]
+    assert got["a value held"] == ["stood", False, []]
+
+
 def test_a_writer_that_prints_nothing_is_read_at_its_history_pairs_call_and_its_own_condition_is_left_open(tmp_path):
     corpus = _corpus(tmp_path)
     (corpus / "pandajedi" / "r.py").write_text(

@@ -4484,7 +4484,15 @@ class Rerun:
             self._stop_unanswered(unanswered)
             return self._scan(subject, attr, value, key, readings, tries)
         state, asking, own = tries[0]
-        return self._stood(subject, value, self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking, True), state)
+        # a statuslog row the judge chooses no writer at is read as the scan reads a row (H2-1); a window with no row (a
+        # value held, a time) has none to read so, and a time handed is the hand's
+        wrote = self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking,
+                               state is not None and self.hop not in self.hand)
+        if wrote is None:
+            self.say("the judge chose no writer at the row: it is read as one row of the scan, each arm that wrote or "
+                     "may have walking on (KNOWN_ISSUES.md K38)")
+            return self._scan(subject, attr, value, key, readings, tries)
+        return self._stood(subject, value, wrote, state)
 
     def _stood(self, subject: str, value: str, wrote: Wrote, state: dict | None) -> Wrote | OneOf:
         """A single window's pick, where it stands in for writers that print nothing (:class:`StandIn`): the arm shown
@@ -4991,9 +4999,12 @@ class Rerun:
         return tries
 
     def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
-                  asking: W.Asking, last: bool) -> Wrote | None:
-        """H2 at one window: the run of the key there and which candidate ran.  None, where *last* is not, for a
-        window with no run or no candidate that ran: the next row is tried."""
+                  asking: W.Asking, row: bool) -> Wrote | None:
+        """H2 at one window: the run of the key there and which candidate ran.  None where the judge chooses none at
+        a statuslog row (*row*), before its report: the caller reads the row as :meth:`_scan` reads one, whose judge
+        is this one -- the same candidates, runs and window -- and reports it (H2-1, KNOWN_ISSUES.md K38).
+        MF-7396944927's 'failed' at 14:46:00 left process_job_report:416 and 441 and archiveJob:1813, each of which
+        may have written it last in the adder's pass, and stopped here."""
         readings, said = self._unborn(readings, subject, state)
         if said:
             self.say(said)
@@ -5005,9 +5016,6 @@ class Rerun:
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
-        if not at and not handed and not last:
-            self.say(f"  no run of {key} at {when}")
-            return None
         self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at or handed)
         # a batched writer's run ended before the row: a run of its own log, judged as the others are
         at = {**at, **{r.log.name: [r] for r in handed.values()}}
@@ -5031,11 +5039,10 @@ class Rerun:
             subject=attr, observed=value, question_run=question, env=env, called_at=self._called_at,
             holds_write=asking.holds_write, keeps=self._keeps(subject),
         )
+        if j.chosen is None and row:
+            return None
         self.say(j.report(question))
         self._dropped_by_guard = self._dropped_by_guard | self._guard_dropped(j.verdicts)
-        if j.chosen is None and not last and self.hop not in self.hand:
-            self.say(f"  no writer of {subject} ran at {when}")
-            return None
         chosen = self.pick(T.Said("which-candidate-ran"), j)
         if question is None and chosen.kind != "positive" and j.runs.get(chosen.candidate.owner) is None:
             # left by elimination with no pass of it at the window (KNOWN_ISSUES.md K47): no run is the question's
