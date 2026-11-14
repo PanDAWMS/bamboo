@@ -2378,6 +2378,9 @@ FIELDS = {
                     taskSpec.pack(res)
                     retTasks.append(taskSpec)
                     datasetSpec = JediDatasetSpec()
+                    row = list(res)
+                    row.append(0)  # PAD
+                    datasetSpec.pack(row)  # FILL
                     taskSpec.datasetSpecList.append(datasetSpec)  # APPEND
                 return retTasks
 
@@ -2387,6 +2390,19 @@ FIELDS = {
             def leak(self, datasetSpec: JediDatasetSpec, loose: LooseSpec):
                 unknown_function(datasetSpec.nFiles)  # LEAK
                 unknown_function(loose.nFiles)  # LEAK_LOOSE
+
+            def hold(self, holder: Holder, values):
+                names = list(values)
+                names.append(1)  # NAMES
+                holder.items.append(names)  # PUT_NAMES
+                spec = JediDatasetSpec()
+                spec.pack(values)  # SPEC_FILL
+                holder.items.append(spec)  # PUT_SPEC
+
+
+        class Holder(object):
+            def __init__(self):
+                self.items = []
         """,
 }
 
@@ -2432,6 +2448,7 @@ def spec_fields(tmp_path_factory: pytest.TempPathFactory) -> dict[str, FieldFrom
             f"{FIELDS_PROXY}::JediDatasetSpec", "nFiles"
         )
         made["loose"] = reader._field_from(f"{FIELDS_PROXY}::LooseSpec", "nFiles")
+        made["items"] = reader._field_from(f"{FIELDS_PROXY}::Holder", "items")
         return made
 
 
@@ -2487,6 +2504,47 @@ def test_what_a_field_holds_changed_on_an_object_of_its_class_outside_its_method
     assert [(one.kind, one.at) for one in listed.stops] == [
         ("outside", [f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'UNSAID', FIELDS)}"])
     ]
+
+
+def test_a_value_put_by_a_change_keeps_what_changed_it_before(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """The object 1712 appends to ``taskSpec.datasetSpecList`` was filled at 1711 by ``datasetSpec.pack(res)``: the
+    change's value keeps that row read, which names the rows that filled this object -- not every caller's of
+    ``pack``.  One level: the row it was filled from does not carry its own change (PAD) here, and a stop says
+    so."""
+    ((put,),) = [one.value for one in spec_fields["datasetSpecList"].changes]
+    fill = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'FILL', FIELDS)}"
+    assert [(one.at, one.kind, one.key, one.what) for one in put.changes] == [
+        (fill, "row", "*", "datasetSpec.pack")
+    ]
+    ((row,),) = [one.value for one in put.changes]
+    assert (row.name, row.changes) == ("rows", [])
+    pad = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'PAD', FIELDS)}"
+    assert [(one.kind, one.what) for one in put.changes[0].value_stops] == [
+        ("uncarried", pad)
+    ]
+
+
+def test_only_an_object_a_change_stores_carries_its_own_changes(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """A list a change stores (PUT_NAMES) carries no changes of its own: where they may have changed it (NAMES), a
+    stop says so.  An object a corpus class builds (PUT_SPEC) carries its own (SPEC_FILL)."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, marker, FIELDS)}"
+
+    stored = {one.at: one for one in spec_fields["items"].changes}
+    names, spec = stored[at("PUT_NAMES")], stored[at("PUT_SPEC")]
+    assert [one.changes for one in names.value] == [[]]
+    assert [(one.kind, one.what) for one in names.value_stops] == [
+        ("uncarried", at("NAMES"))
+    ]
+    assert [[change.at for change in one.changes] for one in spec.value] == [
+        [at("SPEC_FILL")]
+    ]
+    assert spec.value_stops == []
 
 
 def test_a_column_a_row_read_fills_holds_its_value_nothing_changes_in_place(

@@ -238,6 +238,29 @@ def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
     return _Way(_STOP, name=name, stop=stop, what=what, at=at)
 
 
+def _own_level(change: _Change) -> _Change:
+    """*change*, with the ways of the value it stores carrying no changes of their own: a record of a record,
+    repeated at every level wherever the value is put.  What it drops is said (:func:`_uncarried`)."""
+    return change._replace(value=_without_changes(change.value))
+
+
+def _without_changes(ways: Iterable[_Way]) -> tuple[_Way, ...]:
+    """*ways* carrying no changes of their own, and a stop for each whose dropped changes may have changed it."""
+    ways = tuple(ways)
+    return tuple(way._replace(changes=()) for way in ways) + tuple(
+        stop for way in ways for stop in _uncarried(way)
+    )
+
+
+def _uncarried(way: _Way) -> tuple[_Way, ...]:
+    """A stop naming where *way*'s own changes were made, where a stored value does not carry them and they may have
+    changed it in place: not where it holds nothing that changes in place by itself (:func:`_fixed`)."""
+    if way.kind == _STOP or not way.changes or _fixed(way):
+        return ()
+    sites = ", ".join(dict.fromkeys(change.at for change in way.changes))
+    return (_stop("uncarried", way.name, sites),)
+
+
 #: A comprehension and the name its value's ``through`` is called by, as Python names its code.
 _COMPREHENSIONS = {
     ast.ListComp: "<listcomp>",
@@ -1605,7 +1628,11 @@ class _Reader:
         return self._lowlink.read(self._hops, key, read, again=())
 
     def _made(self, raw: Iterable[changes_mod.ObjectChange]) -> tuple[_Change, ...]:
-        """*raw*, each once, a store's value read as a way."""
+        """*raw*, each once, a store's value read as a way -- with what changed the value in place before it was put
+        (:attr:`_Way.changes`): ``datasetSpec.pack(resDs)`` at 1711 on the object made at 1710 that 1712 appends to
+        ``taskSpec.datasetSpecList``, the row read naming which rows filled this object.  An object a corpus class
+        builds only, and one level: the values those changes store do not carry theirs (:func:`_own_level`).  Any
+        other value carries none; what is dropped is said (:func:`_uncarried`)."""
         seen: set[tuple] = set()
         made: list[_Change] = []
         for one in raw:
@@ -1618,8 +1645,17 @@ class _Reader:
                 read = self._safely(one.value, one.value, one.file, one.func)
                 if one.element:
                     read = self._stepped(read, one.element)
-                # Its own way's end, not what was done to the stored value before: a record of a record.
-                value = tuple(way._replace(changes=()) for way in read)
+                value = tuple(
+                    way._replace(changes=tuple(map(_own_level, way.changes)))
+                    if way.kind == KEY_OBJECT
+                    else way._replace(changes=())
+                    for way in read
+                ) + tuple(
+                    stop
+                    for way in read
+                    if way.kind != KEY_OBJECT
+                    for stop in _uncarried(way)
+                )
             made.append(
                 _Change(
                     f"{one.file}:{one.line}",
@@ -2899,17 +2935,25 @@ def _immutable(func: ast.AST, ways: list[_Way]) -> bool:
     value, through no call and stepped into nothing; or a parameter of *func* itself annotated with such types only
     (``job_status: str``).  A way that stops says nothing, so it is not."""
     return bool(ways) and all(
-        not one.steps
-        and not one.through
-        and (
-            one.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
-            or (
-                one.kind == KEY_PARAMETER
-                and not one.route
-                and callfacts.immutable_annotation(_annotation(func, one.name))
-            )
+        _fixed(one)
+        or (
+            not one.steps
+            and not one.through
+            and one.kind == KEY_PARAMETER
+            and not one.route
+            and callfacts.immutable_annotation(_annotation(func, one.name))
         )
         for one in ways
+    )
+
+
+def _fixed(way: _Way) -> bool:
+    """Whether *way* ends at a value nothing can change in place by itself: a literal or a column's value, through
+    no call and stepped into nothing."""
+    return (
+        not way.steps
+        and not way.through
+        and way.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
     )
 
 

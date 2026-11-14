@@ -6011,6 +6011,7 @@ KEY_STOPS: dict[str, str] = {
     "receiver": "the call at {at} runs {name} on an object it does not name",
     "computed": "{name} may be set at {at} by a name computed there: {what}",
     "method": "{name} is a method or property the class defines at {at}",
+    "uncarried": "what changed {name} in place before it was stored, at {what}, is not carried with it",
 }
 
 
