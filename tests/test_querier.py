@@ -14357,3 +14357,92 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
     # the value's arm without the column's time in its pass: not known, said
     assert got["lacking"][0] is False and got["lacking"][1] == [] and got["lacking"][2] == ["getJobs:2455"], got
     assert got["asked"] == [["assigned", "defined"], None], got
+
+
+def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_path):
+    """M2 (value_reach): the writers the rows of a statement selecting the value reach -- the movers, what the rows are
+    handed to, and what those call up to DEPTH calls, not through the statement's own function.  A writer they do not
+    reach is left out only where the object's rows come to it from statements selecting other values alone, no API
+    endpoint reaches it, and every statement selecting the value has its callers complete and every crossing placed;
+    one also handed the object by its key, or by no statement the map places, may hold any value and stays."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import value_reach as VR
+
+            def node(owner, *to):
+                return N(owner=owner, calls=[N(to=t) for t in to])
+
+            def site(owner, selects, to, crossing=None, result="rows", keys=()):
+                return N(owner=owner, selects=selects, crosses_to=to, crossing_selects=crossing or {}, result=result,
+                         keys=list(keys))
+
+            S = "JediTaskSpec.status"
+            graph = [
+                node("j/Cmd.py::CmdThread.runImpl", "j/Buf.py::Buf.updateTask", "j/Buf.py::Buf.retryTask"),
+                node("j/Buf.py::Buf.updateTask", "s/db.py::Db.updateTask"),
+                node("j/Buf.py::Buf.retryTask", "s/db.py::Db.retryTask"),
+                node("j/Refiner.py::RefinerThread.runImpl", "j/Buf.py::Buf.updateTask", "s/spec.py::Spec.setOnHold"),
+                node("j/Deep.py::a", "j/Deep.py::b"), node("j/Deep.py::b", "j/Deep.py::c"),
+                node("j/Deep.py::c", "j/Deep.py::d"), node("j/Deep.py::d", "j/Deep.py::e"),
+                node("s/api.py::kill", "s/db.py::Db.killTask"),
+            ]
+            calls = VR.calls_of(graph)
+            entered = VR.entered([N(function="s/api.py::kill")], calls)
+            sites = [
+                site("s/db.py::getTasksToRefine", [f"{S}=registered", f"{S}=staged"], ["j/Refiner.py::runImpl"]),
+                # another object's rows (a DEFT task's) say nothing of the task's value
+                site("s/db.py::getNewTasks", [], ["j/Refiner.py::runImpl"], keys=["T_TASK.vo"]),
+                # a function also handed the task by its key may hold any value: it, and what it calls, stay
+                site("s/db.py::getExhausted", [f"{S}=exhausted"], ["j/Mixed.py::run"]),
+                site("s/db.py::getTaskWithID", [], ["j/Mixed.py::run"], keys=["JediTaskSpec.jediTaskID"]),
+                site("s/db.py::getReassigning", [f"{S}=reassigning"], ["j/Dog.py::doActionForReassign"]),
+                # a statement that also selects the value is not another value's; an aggregate hands on no row
+                site("s/db.py::getTasksToExec", [f"{S}=aborting", f"{S}=finishing"], ["j/Cmd.py::runImpl"]),
+                site("s/db.py::count", [f"{S}=ready"], ["j/Stats.py::report"], result="aggregate"),
+                # a crossing whose routes select no status hands on none of the values
+                site("s/db.py::getStaged", [f"{S}=staged"], ["j/Kill.py::kill"], {"j/Kill.py::kill": ["JediTaskSpec.lockedBy=x"]}),
+            ]
+            other = VR.other_values(sites, S, "aborting", calls)
+            read = N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True, crosses_open=[])
+            r = VR.reach([read], ["j/Cmd.py::runImpl"], ["j/Cmd.py::runImpl"], calls, entered, other)
+            got = {"reads": list(r.reads), "closed": r.closed, "other": sorted(other),
+                   "out": {o: r.leaves_out(o) for o in ["j/Cmd.py::runImpl", "s/db.py::updateTask", "s/db.py::retryTask",
+                                                         "s/db.py::getTasksToExec", "j/Refiner.py::runImpl",
+                                                         "j/Dog.py::doActionForReassign", "s/spec.py::setOnHold",
+                                                         "s/db.py::killTask", "j/Stats.py::report", "j/Kill.py::kill",
+                                                         "j/Mixed.py::run"]}}
+            deep = VR.reach([read], ["j/Deep.py::a"], [], calls, entered, frozenset(["j/Deep.py::d", "j/Deep.py::e"]))
+            got["deep"] = {o: deep.leaves_out(o) for o in ["j/Deep.py::d", "j/Deep.py::e"]}
+            opened = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=False, crosses_open=[])],
+                              [], [], calls, entered, other)
+            crossing = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True,
+                                   crosses_open=[N()])], [], [], calls, entered, other)
+            none = VR.reach([], [], [], calls, entered, other)
+            got["open"] = [opened.closed, list(opened.open), crossing.closed, list(crossing.open), none.closed,
+                           opened.leaves_out("j/Refiner.py::runImpl"), none.leaves_out("j/Refiner.py::runImpl")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["reads"] == ["getTasksToExec@4564"] and got["closed"] is True, got
+    # the refiner and the watchdog get tasks from other values' statements alone, and the setter only the refiner calls;
+    # the task buffer is also called by the commando, which gets the value's rows
+    assert got["other"] == ["j/Dog.py::doActionForReassign", "j/Refiner.py::runImpl", "s/spec.py::setOnHold"], got
+    # what the value's rows reach stays, so does a writer reached by both; one only other values reach is left out; one
+    # no selecting statement reaches (the value's own statement's function, a command's, an aggregate's, a crossing
+    # selecting no status) takes its row by another key and stays, and so does one an API endpoint reaches
+    assert got["out"] == {"j/Cmd.py::runImpl": False, "s/db.py::updateTask": False, "s/db.py::retryTask": False,
+                          "s/db.py::getTasksToExec": False, "j/Refiner.py::runImpl": True,
+                          "j/Dog.py::doActionForReassign": True, "s/spec.py::setOnHold": True,
+                          "s/db.py::killTask": False, "j/Stats.py::report": False, "j/Kill.py::kill": False,
+                          "j/Mixed.py::run": False}, got
+    # three calls deep is reached, the fourth is not
+    assert got["deep"] == {"j/Deep.py::d": False, "j/Deep.py::e": True}, got
+    # callers not complete, a crossing not placed, or no selecting statement: nothing is left out
+    assert got["open"] == [False, ["getTasksToExec@4564: callers not complete"], False,
+                           ["getTasksToExec@4564: a crossing not placed"], False, False, False], got

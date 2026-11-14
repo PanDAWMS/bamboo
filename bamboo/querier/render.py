@@ -608,6 +608,7 @@ TEMPLATES: dict[str, str] = {
     "spans-from-to": "{spans:join=, }",
     "from-to": "from {a} to {b}",
     "writes-refuse-a-row": "its writes of another value refuse a row holding {observed!r}: {arms:join=; }",
+    "not-reached-from-the-value-s-reads": "no read of {observed!r}'s rows reaches it ({reads:join=, }); only reads of other values do, and no API endpoint: not a mover off {observed!r} (M2)",
     "writes-only-on-a-row-holding": "{line} writes {outcome} only on a row holding {column} in {values}",
     "statements-refused": "{said:join=; }",
     "no-arm-through-calls": "no arm of its own: it writes, if at all, through what it calls (KNOWN_ISSUES.md K14)",
