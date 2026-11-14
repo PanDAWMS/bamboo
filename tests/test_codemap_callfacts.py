@@ -482,6 +482,74 @@ def test_a_function_the_corpus_holds_and_reads_as_outside_is_a_call_outside_it(
     assert calls.types.imported_from_outside(file, "naive_utcnow")
 
 
+_LOGS = """\
+from pandacommon.pandalogger import logger_utils
+from pandacommon.pandalogger.PandaLogger import PandaLogger
+
+
+def logs():
+    PandaLogger().getLogger("x")
+    tmp_log = logger_utils.make_logger(None, "y")
+    tmp_log.info("z")
+"""
+
+_PANDA_LOGGER = """\
+class PandaLogger:
+    def getLogger(self, name):
+        return name
+"""
+
+_LOGGER_UTILS = """\
+def make_logger(base, token):
+    return base
+"""
+
+#: The files of pandacommon the fixture's corpus reads.
+_COMMON_READ = ["pandacommon/__init__.py", "pandacommon/pandautils/__init__.py"]
+
+
+def test_a_pandacommon_module_the_corpus_does_not_read_is_outside_as_before(tmp_path):
+    # The pin holds panda-common whole, so the code run from it imports; the corpus reads of it only
+    # callfacts.PACKAGE_FILES.  The logger reads as it did when pandacommon was no package of the corpus, whether
+    # the pin holds the logger or not: make_logger is a call outside it, not a hole.
+    read = {}
+    for name in ("no_package", "without_logger", "with_logger"):
+        roots = _tree(tmp_path / name, mod=_LOGS)
+        if name != "no_package":
+            common = tmp_path / name / "pandacommon"
+            (common / "pandautils").mkdir(parents=True)
+            (common / "__init__.py").write_text("")
+            (common / "pandautils" / "__init__.py").write_text("")
+            if name == "with_logger":
+                (common / "pandalogger").mkdir()
+                (common / "pandalogger" / "__init__.py").write_text("")
+                (common / "pandalogger" / "PandaLogger.py").write_text(_PANDA_LOGGER)
+                (common / "pandalogger" / "logger_utils.py").write_text(_LOGGER_UTILS)
+            roots = {**roots, "pandacommon": common}
+        calls = calls_mod.Calls(calls_mod.Types(roots, {}))
+        file = f"{PACKAGE}/mod.py"
+        func = next(
+            node
+            for node in ast.walk(calls.types.tree(file))
+            if isinstance(node, ast.FunctionDef) and node.name == "logs"
+        )
+        read[name] = {
+            ast.unparse(node.func): (
+                (placed := calls.callees(file, func, node)).unplaced,
+                [one.func.name for one in placed.targets],
+            )
+            for node in ast.walk(func)
+            if isinstance(node, ast.Call)
+        }
+        corpus = calls.types.corpus_files()
+        files = [one for one in corpus if one.startswith("pandacommon/")]
+        assert files in ([], _COMMON_READ), name
+    assert read["without_logger"] == read["no_package"]
+    assert read["with_logger"] == read["no_package"]
+    outside = (calls_mod.UNPLACED_OUTSIDE, [])
+    assert read["no_package"]["logger_utils.make_logger"] == outside
+
+
 @pytest.mark.parametrize("callee", ["', '.join", "f'{text}'.format", "sep.join"])
 def test_a_text_s_method_keeps_nothing_it_is_handed(tmp_path, callee):
     """A text's method makes a new text: ``', '.join(v)`` keeps nothing of ``v``, on a literal, a formatted text or a

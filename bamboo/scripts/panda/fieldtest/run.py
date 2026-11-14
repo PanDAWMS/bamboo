@@ -49,7 +49,10 @@ it, whose ``QUERIER`` file names the querier's sha) and ``MAP_DUMP`` with its
 sha256.  :func:`load_pair` checks a pair the way the querier's
 ``run_baselines.sh`` does: the dump's sha256, a run tree named after the dump's
 bamboo sha, and the dump's ``derived_from`` naming the pin.  The pair is written
-into every command, never taken from the querier's defaults.
+into every command, never taken from the querier's defaults.  A settled case
+runs on a pair whose pin is its own (``pin-<pin>``) or holds every file of its
+own pin, found beside it, byte-equal (:func:`pin_misses`): such a pin may add
+a package for the map to read, and no line the case's records name moves.
 
 The querier runs as ``python -m bamboo.querier.rerun`` from the run tree.  It
 installs ``MAP_DUMP`` itself, and writes how the run ended and what it read to
@@ -75,6 +78,8 @@ from __future__ import annotations
 import argparse
 import datetime
 import difflib
+import filecmp
+import functools
 import hashlib
 import json
 import os
@@ -265,6 +270,26 @@ def load_pair(home: Home, name: str) -> dict:
             f"{dump} is derived from {derived and derived[1]}, not PANDA_PIN={pair['PANDA_PIN']}"
         )
     return pair | {"QUERIER_SHA": querier}
+
+
+@functools.lru_cache(maxsize=None)
+def pin_misses(own: Path, pin: Path) -> tuple[str, ...]:
+    """The files of a case's own pin *own* that *pin* lacks or holds otherwise, by their path under the pin.
+
+    Empty when *pin* holds every file of *own* byte-equal: a pin may add files (a package the server imports, for
+    the map to read), and then no line a case's records name has moved.  A missing *own* is one miss.  Pins are not
+    written while a batch runs, so each pair of pins is compared once."""
+    if not own.is_dir():
+        return (f"{own} is not a directory",)
+    misses = []
+    for path in sorted(p for p in own.rglob("*") if p.is_file()):
+        rel = path.relative_to(own)
+        held = pin / rel
+        if not held.is_file():
+            misses.append(f"{rel} missing")
+        elif not filecmp.cmp(path, held, shallow=False):
+            misses.append(f"{rel} differs")
+    return tuple(misses)
 
 
 def build_rows(
@@ -637,9 +662,15 @@ def run_case(
         )
     name = pair_name(home, case, override)
     pair = load_pair(home, name)
-    if settled and Path(pair["PANDA_PIN"]).name != f"pin-{case['pin']}":
+    pin = Path(pair["PANDA_PIN"])
+    if (
+        settled
+        and pin.name != f"pin-{case['pin']}"
+        and (misses := pin_misses(pin.parent / f"pin-{case['pin']}", pin))
+    ):
         raise FieldTestError(
-            f"pair {name} runs {pair['PANDA_PIN']}, case {case['name']} was written by pin-{case['pin']}"
+            f"pair {name} runs {pin}, case {case['name']} was written by pin-{case['pin']}, whose files it does not "
+            f"hold byte-equal ({len(misses)}: {', '.join(misses[:3])})"
         )
     records = case["inputs"].get("records")
     if record and not records:

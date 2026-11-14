@@ -675,6 +675,26 @@ class OffRow(BaseModel):
     )
 
 
+class Unchanged(BaseModel):
+    """What shows an arm leaves its column as the row held it -- see :attr:`Branch.unchanged`."""
+
+    name: str = Field(
+        description=(
+            "The name the arm's value is (``runtime(taskStatus)``), bound at one place in its function: within one run "
+            "of that place it holds one value."
+        )
+    )
+    calls: list[int] = Field(
+        description=(
+            "The line of each flush call the arm's assignment reaches, sorted: each hands ``name`` to a precondition "
+            "on the column it has on every way, so it writes the row only where the column holds that value already."
+        )
+    )
+    terms: list[str] = Field(
+        description="Those preconditions, as their methods spell them (``status IN (:old___in)``), sorted.",
+    )
+
+
 #: Why an arm cannot leave its value on a row made before it (:attr:`AfterMade.by`): its object has no row yet; the
 #: statement makes the row it writes; the statement's own test asks the row for the value it sets.
 AFTER_MADE_NO_ROW_YET = "no_row_yet"
@@ -738,7 +758,7 @@ REWRITE_ROW = "row"
 #: attribute on an object -- an SQL arm's bind or text, a method run on the object, a value carried -- and its later
 #: writes are not read.
 REWRITE_NOT_ATTRIBUTE = "not_an_attribute_arm"
-#: The column is not one the reach record keeps assignments of (:data:`bamboo.codemap.panda.objects.COLUMN_CLASSES`).
+#: The column is not one the reach record keeps assignments of (:func:`bamboo.codemap.panda.objects.column_classes`).
 REWRITE_COLUMNS_UNRECORDED = "columns_unrecorded"
 #: A way up reached :data:`bamboo.codemap.panda.runs.MAX_DEPTH`, or met :data:`~bamboo.codemap.panda.runs.MAX_FUNCTIONS`
 #: functions.
@@ -1102,6 +1122,17 @@ class Branch(BaseModel):
             "where not proven: the arm may write its row, as every arm is read."
         ),
     )
+    unchanged: Optional[Unchanged] = Field(
+        default=None,
+        description=(
+            "Where every flush call the arm's assignment reaches writes the row only where the column already holds "
+            "the arm's value: the arm writes its row and leaves the column as it was "
+            "(:mod:`bamboo.codemap.panda.recognizers.flush`).  Only flush calls are read: a write the arm's object "
+            "reaches by another way is not.  A reader of a value the row holds skips the arm "
+            "(:func:`writes_its_value`).  ``None`` where not shown: the arm may change the column, as every arm is "
+            "read."
+        ),
+    )
     after_made: Optional[AfterMade] = Field(
         default=None,
         description=(
@@ -1110,6 +1141,13 @@ class Branch(BaseModel):
             "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
+
+
+def writes_its_value(branch: Branch) -> bool:
+    """Whether the arm may leave its value in its column where the row held another: neither is its object written to
+    no row (:attr:`Branch.off_row`), nor does every write it reaches take the row only where the column holds its
+    value already (:attr:`Branch.unchanged`).  What a reader of a value the row holds reads an arm by."""
+    return branch.off_row is None and branch.unchanged is None
 
 
 #: A hole in a frame -- see :attr:`Branch.value_frames`.
@@ -3606,6 +3644,14 @@ class KeyFrom(BaseModel):
             "writes that subject's values on -- a junction's :attr:`Branch.line` or one of its "
             ":attr:`Branch.other_lines`: a junction is one per subject and owner, its branches gathered from every "
             "statement writing it, and these say which are this statement's."
+        ),
+    )
+    through_holes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where an assignment *writes* or the binds hold is on *object* only perhaps: the holes its object met "
+            "(``owner:line why``) and where it stopped, *object* having come out of a call "
+            "(:func:`bamboo.codemap.objects.assigns_reaching`).  Empty where each is known to be on it."
         ),
     )
     unread: str = Field(
@@ -6906,6 +6952,34 @@ class ClearedLines(BaseModel):
     lines: list[int] = Field(description=f"Each line, or {EXIT_LINE} for its normal exit, every way to which from :attr:`line` passes the reset.")
 
 
+class OverwrittenLines(BaseModel):
+    """Lines of a function every way between which passes another assignment of a column on an object.
+
+    ``updateWorkers`` sets the worker's attributes from what the harvester sent
+    at 860 (``setattr(worker_spec, key, val)``) and ``worker_spec.lastUpdate``
+    at 861, before its ``INSERT`` or ``UPDATE``: what 860 gave ``lastUpdate``
+    is not what either writes.  An overwrite is ``path.column = value``: one
+    column, assigned, on a path naming one object (no ``[]``).
+    """
+
+    path: str = Field(description="The object assigned on, as a path of the function.")
+    columns: list[str] = Field(
+        description="The attributes assigned, each by these overwrites."
+    )
+    line: int = Field(
+        description=(
+            f"Where the change was made: a line, or {ENTRY_LINE} for before the "
+            "function was entered."
+        )
+    )
+    lines: list[int] = Field(
+        description=(
+            f"Each line, or {EXIT_LINE} for its normal exit, every way to which from "
+            ":attr:`line` passes an overwrite."
+        )
+    )
+
+
 class ReachNode(BaseNode):
     """Where one function can go on to, for every function in the corpus: the record ``reach`` is answered from.
 
@@ -7002,6 +7076,10 @@ class ReachNode(BaseNode):
     cleared: list[ClearedLines] = Field(
         default_factory=list,
         description="The lines every way between which passes a reset of an object's changed attributes.",
+    )
+    overwritten: list[OverwrittenLines] = Field(
+        default_factory=list,
+        description="The lines every way between which passes another assignment of a column on an object.",
     )
     anchor: Optional[Anchor] = None
 

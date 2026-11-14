@@ -2386,6 +2386,19 @@ def precondition_binds(term: str) -> list[str]:
     return [key] if key else [part.strip() for part in keys.split(",")]
 
 
+def tests_list(term: str) -> Optional[bool]:
+    """Whether a precondition of a shape :func:`settled_term` settles holds where its column is one of a list
+    (``status IN (:old___in)``) rather than one bind's value (``status=:preStatus``); ``None`` for any other shape,
+    and for one that holds where the column is not that (``<>``, ``NOT IN``)."""
+    match = _PRECONDITION_BIND.match(_as_list(term).strip())
+    if match is None:
+        return None
+    not_term, _column, operator, _key, not_in, _keys = match.groups()
+    if not_term or not_in or operator in ("<>", "!="):
+        return None
+    return operator is None
+
+
 def settled_term(term: str, held_by: Callable[[str], Optional[set[str]]]) -> tuple[str, bool]:
     """*term* with its binds replaced by what *held_by* says each holds (``None``: not known), and whether that
     happened -- how :func:`settled_precondition` spells a settled guard, and a flush call's guard settled at the call.

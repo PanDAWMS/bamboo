@@ -476,6 +476,23 @@ READ_OUTSIDE = frozenset(
         "pandacommon.pandautils.base.SpecBase.pack",
     }
 )
+#: The files of a package the corpus reads only in part, by package.  The pin holds panda-common's whole package, so
+#: the code run from the pin imports it; of it the corpus reads ``pandautils``' ``base``, ``PandaUtils``,
+#: ``thread_utils`` and ``net_utils`` and the package files above them.  It walks past the other files, as though the
+#: pin did not hold them (:func:`bamboo.codemap.calls.left_out`), and reads the logger, broker and configuration
+#: modules they define as outside, as before the package was in the corpus (:func:`bamboo.codemap.calls.read_outside`).
+PACKAGE_FILES: dict[str, frozenset[str]] = {
+    "pandacommon": frozenset(
+        {
+            "pandacommon/__init__.py",
+            "pandacommon/pandautils/__init__.py",
+            "pandacommon/pandautils/base.py",
+            "pandacommon/pandautils/PandaUtils.py",
+            "pandacommon/pandautils/thread_utils.py",
+            "pandacommon/pandautils/net_utils.py",
+        }
+    ),
+}
 
 #: The dunders each operator calls: what ``a * b`` is, where a class of the corpus defines one.
 OPERATOR_DUNDERS: dict[type, tuple[str, ...]] = {

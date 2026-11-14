@@ -54,6 +54,7 @@ from bamboo.codemap.models import (
     admits_by_exclusion,
     branch_excludes,
     required_values,
+    writes_its_value,
 )
 from bamboo.models.graph_element import BaseNode, NodeType
 
@@ -262,7 +263,10 @@ class CodeMap:
         (:attr:`~bamboo.codemap.models.Branch.off_row`): a spec its function
         makes to ask something of.  That proof does rest on other nodes -- the
         records of the functions the object goes to --, and
-        :mod:`bamboo.codemap.panda.offrow` says what it rests on.
+        :mod:`bamboo.codemap.panda.offrow` says what it rests on.  Nor one
+        whose writes take the row only where it holds the arm's value already
+        (:attr:`~bamboo.codemap.models.Branch.unchanged`): it leaves the column
+        as it was (:func:`~bamboo.codemap.models.writes_its_value`).
 
         The same rule lives in :func:`~bamboo.codemap.strategy._reaching`, one
         level down, because this answers *which junctions* and that answers
@@ -275,7 +279,7 @@ class CodeMap:
             junction
             for junction in await self.writers_of(subject)
             if any(
-                b.off_row is None
+                writes_its_value(b)
                 and (b.outcome == outcome or (b.tier == 2 and not branch_excludes(b, outcome, cut)))
                 for b in junction.branches
             )

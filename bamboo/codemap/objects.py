@@ -56,10 +56,12 @@ is read at ``varMap[':PandaID']`` and ``varMap[]``, not at
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import re
 from collections import defaultdict
 from functools import lru_cache, partial
-from typing import NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -1326,7 +1328,8 @@ def root_name(path: str) -> str:
 
 
 class _Lines:
-    """One function's :attr:`ReachNode.order` and :attr:`ReachNode.cleared`, read for :class:`_Order`."""
+    """One function's :attr:`ReachNode.order`, :attr:`ReachNode.cleared` and :attr:`ReachNode.overwritten`, read for
+    :class:`_Order`."""
 
     def __init__(self, row: ReachNode):
         order = row.order
@@ -1353,6 +1356,16 @@ class _Lines:
             tables[(one.path, tuple(one.columns))][one.line] = set(one.lines)
         self.cleared = [
             (path, set(columns), table) for (path, columns), table in tables.items()
+        ]
+        given: dict[tuple[str, tuple[str, ...]], dict[int, set[int]]] = defaultdict(
+            dict
+        )
+        for overwrite in row.overwritten:
+            given[(overwrite.path, tuple(overwrite.columns))][overwrite.line] = set(
+                overwrite.lines
+            )
+        self.overwritten = [
+            (path, set(columns), table) for (path, columns), table in given.items()
         ]
 
     def kind(self, one: int, other: int) -> str:
@@ -1396,7 +1409,9 @@ class _Order:
     a later pass of a loop, not where every path the second line takes the
     object by is rooted at a name the loop binds to another object between
     (:class:`~bamboo.codemap.models.Renewed`; ``for job in jobs`` holds the
-    object as ``jobs[]`` too, which names no one element); and, for a
+    object as ``jobs[]`` too, which names no one element); no other
+    assignment of the column on a path the object is held by stands on every
+    way between (:attr:`ReachNode.overwritten`); and, for a
     write of the changed attributes, no reset of the column on a path holding
     the object stands on every way between (:attr:`ReachNode.cleared`).  One
     line going down to the same functions both ways is read further down.  A
@@ -1482,12 +1497,9 @@ class _Order:
             found[start][line].add("")
 
         def passes(frame: str, line: int) -> bool:
-            if not changed:
-                return True
             paths = set(held.get(frame, ()))
-            if up:
-                return not self._is_cleared(frame, line, EXIT_LINE, paths, column)
-            return not self._is_cleared(frame, ENTRY_LINE, line, paths, column)
+            one, other = (line, EXIT_LINE) if up else (ENTRY_LINE, line)
+            return not self._taken_back(frame, one, other, paths, column, changed)
 
         live = [start] if any(passes(start, line) for line in lines) else []
         seen = set(live)
@@ -1537,7 +1549,32 @@ class _Order:
                 lines.renewed_between(one, other, root_name(path)) for path in taken
             ):
                 return False
-        return not (changed and self._is_cleared(frame, one, other, paths, column))
+        return not self._taken_back(frame, one, other, paths, column, changed)
+
+    def _taken_back(
+        self,
+        frame: str,
+        one: int,
+        other: int,
+        paths: set[str],
+        column: str,
+        changed: bool,
+    ) -> bool:
+        """Whether what a change at *one* of *frame* gave *column* is gone at *other*: overwritten on every way
+        between, or, for a write of the changed attributes, reset on every way between."""
+        if changed and self._is_cleared(frame, one, other, paths, column):
+            return True
+        return self._is_overwritten(frame, one, other, paths, column)
+
+    def _is_overwritten(
+        self, frame: str, one: int, other: int, paths: set[str], column: str
+    ) -> bool:
+        # The path as it is: an overwrite names one object, and ``[]`` read as ``[0]`` (``_holds``) would let one
+        # element's overwrite stand for another's.
+        return any(
+            column in columns and other in table.get(one, ()) and path in paths
+            for path, columns, table in self._lines_of(frame).overwritten
+        )
 
     def _is_cleared(
         self, frame: str, one: int, other: int, paths: set[str], column: str
@@ -1556,6 +1593,159 @@ class _Order:
         if found is None:
             found = self._lines[frame] = _Lines(self.rows[frame])
         return found
+
+
+class Reaching(NamedTuple):
+    """What :func:`assigns_reaching` answers."""
+
+    #: the lines of the assignments whose value the made can take
+    lines: list[int]
+    #: each line of *lines* whose assignment is on the made's object only perhaps, with the holes its object's
+    #: follow met (``owner:line why``) and where it stopped, the made's object having come out of a call
+    perhaps: dict[int, list[str]]
+
+
+class Records(NamedTuple):
+    """The records a build's readers answer from once they are made (:func:`across_records`)."""
+
+    rows: dict[str, ReachNode]
+    #: the owner a function of the corpus is in *rows*; ``None`` for one they do not name
+    owner_of: Callable[[ast.AST], Optional[str]]
+    #: the follows read on *rows*, by (owner, path)
+    follows: dict[_State, ObjectReach]
+
+
+_RECORDS: Optional[Records] = None
+
+
+@contextlib.contextmanager
+def across_records(
+    rows: dict[str, ReachNode], owner_of: Callable[[ast.AST], Optional[str]]
+) -> Iterator[None]:
+    """Hand *rows* to :func:`records` for the length of the block.
+
+    Set for a build's stages rather than passed to each reader, as
+    ``sql.across_calls`` is: a value a write takes is read from the same
+    records wherever a stage asks it.  *rows* may be filled after the block
+    starts, before the first reader asks.
+    """
+    global _RECORDS
+    previous, _RECORDS = _RECORDS, Records(rows, owner_of, {})
+    try:
+        yield
+    finally:
+        _RECORDS = previous
+
+
+def records() -> Optional[Records]:
+    """The records a build answers from; ``None`` outside :func:`across_records`."""
+    return _RECORDS
+
+
+def _followed(
+    rows: dict[str, ReachNode],
+    owner: str,
+    path: str,
+    follows: dict[_State, ObjectReach],
+) -> ObjectReach:
+    """:func:`follow`, kept in *follows*, the follows read on one set of *rows*."""
+    found = follows.get((owner, path))
+    if found is None:
+        found = follows[(owner, path)] = follow(rows, owner, path)
+    return found
+
+
+def assigns_reaching(
+    rows: dict[str, ReachNode],
+    owner: str,
+    made_line: int,
+    made_paths: Sequence[str],
+    attribute: str,
+    changed: bool,
+    follows: Optional[dict[_State, ObjectReach]] = None,
+) -> Reaching:
+    """The assignments of *attribute* in *owner* whose value the object *made_paths* name at *made_line* can take --
+    a ``valuesMap()`` made of it, or a call handing it to a write --, however either is spelled.
+
+    An assignment is on the made's object where the made's path is the
+    assignment's, or one the assignment's object is held by
+    (:func:`follow`).  It is in what is made where it can run before the
+    made (:meth:`_Order.meets`): not after it, nor on a pass the loop
+    renews the name on, nor overwritten on every way between, nor, for a
+    write of the changed attributes (*changed*), reset on every way between.
+    One whose object follow could not take to the made's -- it met a hole or
+    stopped -- where the made's object may be one made before it
+    (:func:`_made_before`: it came out of a call that is no constructor, or
+    it meets a hole or stops itself) may be the same object through them: it
+    is kept, with them (:attr:`Reaching.perhaps`).
+    *follows* keeps the follows read on one set of *rows*.
+    """
+    row = rows.get(owner)
+    if row is None or not made_paths:
+        return Reaching([], {})
+    kept: dict[_State, ObjectReach] = {} if follows is None else follows
+    order = _Order(rows, [owner])
+    known: set[int] = set()
+    perhaps: dict[int, dict[str, None]] = defaultdict(dict)
+    for one in row.assigns:
+        if attribute not in one.attrs:
+            continue
+        reach = _followed(rows, owner, one.path, kept)
+        here = set(reach.held.get(owner, ()))
+        for made in sorted(made_paths):
+            if made == one.path or made in here:
+                through: Optional[list[str]] = None
+            elif (reach.holes or reach.cut) and _made_before(
+                rows, _followed(rows, owner, made, kept)
+            ):
+                through = [
+                    f"{site.owner}:{site.line} {site.how}" for site in reach.holes
+                ]
+                through += [reach.cut] if reach.cut else []
+            else:
+                continue
+            site = Site(owner, one.line, one.how)
+            if not order.meets(
+                site, owner, [made_line], reach.held, attribute, changed
+            ):
+                continue
+            if through is None:
+                known.add(one.line)
+            else:
+                perhaps[one.line].update(dict.fromkeys(through))
+    return Reaching(
+        sorted(known | perhaps.keys()),
+        {
+            line: sorted(held)
+            for line, held in sorted(perhaps.items())
+            if line not in known
+        },
+    )
+
+
+def _made_before(rows: dict[str, ReachNode], reach: ObjectReach) -> bool:
+    """Whether the object *reach* follows may be one made before: it came out of a call that is no constructor, or,
+    new from a constructor, it meets a hole or stops itself (a hole may keep it and hand it back by another name)."""
+    if not reach.came_from:
+        return False
+    if reach.holes or reach.cut:
+        return True
+    return not all(_constructed(rows, site) for site in reach.came_from)
+
+
+def _constructed(rows: dict[str, ReachNode], site: Site) -> bool:
+    """Whether *site*, where a name is bound to what a call returns, binds it to a new object: every call it may
+    be is a class's ``__init__``.  A call whose callee is not known is not one."""
+    row = rows.get(site.owner)
+    tos = [
+        one.to
+        for one in (row.bindings if row is not None else ())
+        if one.line == site.line and one.name == site.how and one.how == BIND_RESULT
+    ]
+    return bool(tos) and all(
+        to and all(callee.rsplit(".", 1)[-1] == "__init__" for callee in to)
+        for to in tos
+    )
 
 
 def _function_names(rows: dict[str, ReachNode]) -> dict[str, set[str]]:

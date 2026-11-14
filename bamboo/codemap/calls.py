@@ -229,6 +229,14 @@ def is_test_module(rel_path: str) -> bool:
     return bool(_TEST_PATH.search(rel_path) or _TEST_FILE.search(Path(rel_path).stem))
 
 
+def left_out(rel_path: str) -> bool:
+    """True when *rel_path* is a file of a package the corpus reads only in part and not one of the files it reads
+    (:data:`callfacts.PACKAGE_FILES`): the corpus walks past it and a reading finds no tree for it, as though the pin
+    did not hold it."""
+    files = callfacts.PACKAGE_FILES.get(rel_path.partition("/")[0])
+    return files is not None and rel_path not in files
+
+
 def _roots_key(roots: dict[str, Path]) -> tuple:
     return tuple(sorted((package, str(root)) for package, root in roots.items()))
 
@@ -516,11 +524,29 @@ def read_outside(module: str, *names: str) -> bool:
     """Whether the definition *names* of *module* -- a function or a class, or a class and its method -- is one the
     corpus holds and the map reads as outside it (:data:`callfacts.READ_OUTSIDE`): ``naive_utcnow`` of
     ``pandacommon.pandautils.PandaUtils``, ``SpecBase``, ``pack`` of ``pandacommon.pandautils.base``.  A method of a
-    class read so is too."""
-    return any(
-        ".".join((module, *names[:end])) in callfacts.READ_OUTSIDE
-        for end in range(1, len(names) + 1)
-    )
+    class read so is too, and so is all of a module the corpus does not read of a package it reads in part
+    (:func:`left_out`: ``pandacommon.pandalogger``), as it was before the package was in the corpus."""
+    held = [".".join((module, *names[:end])) for end in range(len(names) + 1)]
+    if any(one in callfacts.READ_OUTSIDE for one in held):
+        return True
+    return _in_module_left_out(held[-1])
+
+
+def _in_module_left_out(dotted: str) -> bool:
+    """Whether *dotted* lies in a module the corpus does not read of a package it reads in part.  Walked from the
+    package down, a module it reads holds definitions, a package it reads holds modules, and the first part that is
+    neither is a module left out; the packages the read files of panda-common sit in define nothing themselves."""
+    parts = dotted.split(".")
+    files = callfacts.PACKAGE_FILES.get(parts[0])
+    if files is None:
+        return False
+    for end in range(1, len(parts) + 1):
+        path = "/".join(parts[:end])
+        if f"{path}.py" in files:
+            return False
+        if f"{path}/__init__.py" not in files:
+            return True
+    return False
 
 
 def returns(func: ast.AST) -> list[ast.expr]:
@@ -2353,9 +2379,18 @@ def _unquoted(annotation: ast.expr) -> ast.expr:
             return annotation
     return annotation
 
+
+def _container(annotation: ast.expr) -> ast.expr:
+    """*annotation* unquoted, and ``None`` left out where one other member is left: ``list[A] | None`` and
+    ``Optional[list[A]]`` are ``list[A]``, since a loop over it or a subscript of it is on the container."""
+    members = _members(annotation)
+    return members[0] if len(members) == 1 else _unquoted(annotation)
+
+
 def _element_annotation(annotation: ast.expr) -> Optional[ast.expr]:
-    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``."""
-    annotation = _unquoted(annotation)
+    """The element type a container annotation states: ``dict[K, V]`` -> ``V``, ``list[T]`` -> ``T``, ``None`` left
+    out of a union (:func:`_container`)."""
+    annotation = _container(annotation)
     if not isinstance(annotation, ast.Subscript):
         return None
     wrapper = annotation.value
@@ -2672,7 +2707,7 @@ class Types:
             return self.walked[file][1]
         if file not in self.parsed:
             package, _, relative = file.partition("/")
-            root = self.roots.get(package)
+            root = None if left_out(file) else self.roots.get(package)
             held = parsed(root / relative) if root is not None and relative else None
             self.parsed[file] = held[1] if held is not None else None
         return self.parsed[file]
@@ -2690,12 +2725,13 @@ class Types:
         return self._files.get(id(module))
 
     def corpus_files(self) -> list[str]:
-        """Every module of the corpus, as the map spells a file; tests left out, by the build's rule (:func:`is_test_module`)."""
+        """Every module of the corpus, as the map spells a file; tests left out, by the build's rule (:func:`is_test_module`),
+        and the files of a package read in part that it does not read (:func:`left_out`)."""
         found: list[str] = []
         for package, root in sorted(self.roots.items()):
             for path in sorted(root.rglob("*.py")):
                 file = f"{package}/{path.relative_to(root)}"
-                if not is_test_module(file):
+                if not is_test_module(file) and not left_out(file):
                     found.append(file)
         return found
 
@@ -2745,9 +2781,8 @@ class Types:
         if held is None:
             return False
         module, attribute = held
-        return module.split(".")[0] not in self.roots or (
-            bool(attribute) and read_outside(module, attribute)
-        )
+        names = (attribute,) if attribute else ()
+        return module.split(".")[0] not in self.roots or read_outside(module, *names)
 
     def module_named(self, file: str, expression: ast.expr) -> Optional[str]:
         """The file of the module *expression* names in *file*, when it names one."""
@@ -3737,7 +3772,8 @@ class Types:
         ``list(x)``, ``sorted(x)``, ``reversed(x)`` iterate what ``x`` does;
         ``enumerate(x)``'s second slot is ``x``'s element.  ``d.items()``,
         ``.values()`` and ``.keys()`` on a ``dict[K, V]`` are ``(K, V)``,
-        ``V`` and ``K``; a container is its element, a mapping its key.
+        ``V`` and ``K``; a container is its element, a mapping its key; ``None``
+        is left out of a union (:func:`_container`).
         """
         if isinstance(iterable, ast.Call) and isinstance(iterable.func, ast.Name) and len(iterable.args) == 1:
             if iterable.func.id in ("list", "sorted", "reversed", "tuple", "set", "frozenset") and not unpacked:
@@ -3766,7 +3802,7 @@ class Types:
         if declared is None:
             return None
         where, annotation = declared
-        annotation = _unquoted(annotation)
+        annotation = _container(annotation)
         if not isinstance(annotation, ast.Subscript):
             return None
         wrapper = annotation.value
