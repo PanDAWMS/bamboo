@@ -133,6 +133,7 @@ from bamboo.querier import render as T
 from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import sources as SR
+from bamboo.querier import stay_value as SV
 from bamboo.querier import value_diff as V
 from bamboo.querier import windows as W
 from bamboo.querier.recorded import EDGE, RecordedLogs
@@ -871,6 +872,28 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
     return (sorted(keyed), {line: said for line, said in sorted(unread.items()) if line not in keyed},
             {line: said for line, said in sorted(unpersisted.items()) if line not in keyed},
             {line: said for line, said in sorted(through.items()) if line not in own})
+
+
+def _before_gaps(found: SV.Before) -> list[T.Said]:
+    """Why ``stay_value`` does not settle a column all the stay: the arms writing the value without the column's time,
+    and those that may write the column while the value holds."""
+    out = []
+    if not found.starts and not found.lacking:
+        out.append(T.Said("before-no-start"))
+    if found.lacking:
+        out.append(T.Said("before-written-without", {"arms": list(found.lacking)}))
+    if found.left:
+        out.append(T.Said("before-may-be-written", {"arms": list(found.left)}))
+    return out
+
+
+def _held_before_said(subject: str, observed: str, found: SV.Before, start: str) -> T.Said:
+    """The words for a column ``stay_value`` settles all the stay, with the premises it rests on."""
+    premises = []
+    if found.runtime:
+        premises.append(T.Said("before-premise-runtime", {"arms": list(found.runtime), "observed": observed}))
+    return T.Said("held-before", {"subject": subject, "value": start, "observed": observed, "starts": list(found.starts),
+                                  "out": len(found.out), "premises": premises})
 
 
 def _by_line(said: dict[int, list[str]]) -> str:
@@ -3089,6 +3112,7 @@ class Rerun:
             "wrote": self.result.get("wrote"),
             "moved_by": self.result.get("moved_by"),
             "movers": _movers_json(self.result.get("movers")),
+            "held_before": self.result.get("held_before"),
         }
 
     def looked_up_with(self, side: V.Side, step, depth: int = 2, seen: set[str] | None = None) -> list[str]:
@@ -7427,12 +7451,58 @@ class Rerun:
     def _held(self, subject: str, q: Missed) -> tuple[bool, object]:
         """``(known, value)`` of *subject* for the row over the window: the asked subject holds the observed value;
         another, what the rows file holds (``None`` there is SQL's NULL), its ``after`` only at the window's end
-        (``_after``); a column it lacks is not known."""
+        (``_after``), or, late, the value the map says it held all the stay (``_before``); a column it lacks is not
+        known."""
         if subject == q.subject:
             return True, q.observed
         cls, _, attr = subject.partition(".")
         row = self._row_of(cls)
-        return (True, row[attr]["value"]) if attr in row else self._after(subject, q)
+        if attr in row:
+            return True, row[attr]["value"]
+        known, value = self._after(subject, q)
+        if known:
+            return known, value
+        found = self._before(subject, q)
+        return (True, found[1]) if found is not None and found[0].known else (False, None)
+
+    def _before(self, subject: str, q: Missed) -> tuple[SV.Before, str] | None:
+        """M3(a)-1 (``stay_value``): what the map says of *subject*, a column of the asked row the rows file holds only
+        after the move (late's ``after``), all the stay at the observed value, with the time of the statuslog row
+        that began the stay -- the value it held where the map says ``known``; None where it does not apply: stuck
+        (``after`` is read at the window's end), another class, a column the row holds, a history whose rows' time
+        part H does not state is the write's (``History.at_write``), no such statuslog row.  Each is read once and
+        kept in the result (``held_before``)."""
+        cls, _, attr = subject.partition(".")
+        if q.at_end or cls != q.subject.partition(".")[0] or attr in self._row_of(cls) or attr not in self._read()[1]:
+            return None
+        if not getattr(PT.history(q.subject), "at_write", False):
+            return None
+        cache: dict[tuple, tuple[SV.Before, str] | None] = self.__dict__.setdefault("_befores", {})
+        key = (subject, q.subject, q.observed, q.since, q.moved)
+        if key in cache:
+            return cache[key]
+        states = [s for s in self.data.get("statuslog", {}).get("states", [])
+                  if s.get("status") == q.observed and _when(s.get("time_extended") or s["time"]) <= q.since]
+        if not states:
+            cache[key] = None
+            return None
+        start = states[-1]["time"]
+        fragment = mapdump.fragment()
+        sites = {(r.owner, r.anchor.line_start): r for r in getattr(fragment, "read_sites", None) or []}
+        row_tables = {t.name.lower() for t in getattr(fragment, "tables", None) or [] if t.rows_of == cls}
+        found = SV.before(q.writers, asyncio.run(self._writers_of(subject)), q.subject, q.observed, subject,
+                          getattr(fragment, "key_froms", None) or [], lambda kf: not never_runs(kf),
+                          lambda owner, line: sites.get((owner, line)), row_tables,
+                          lambda owner, b: born(b, birth_marks(owner, subject)))
+        if found is None:
+            cache[key] = None
+            return None
+        cache[key] = (found, start)
+        self.result.setdefault("held_before", {})[subject] = {
+            "known": found.known, "value": start if found.known else None, "starts": list(found.starts),
+            "lacking": list(found.lacking), "runtime": list(found.runtime), "left": list(found.left),
+            "out": [list(x) for x in found.out]}
+        return cache[key]
 
     def _history_rows(self, subject: str, q: Missed) -> list[tuple[object, datetime.datetime]] | None:
         """``(value, written at)`` of each row of the row's status history the subject's column reads, written
@@ -7473,7 +7543,12 @@ class Rerun:
             if attr in row or self._after(subject, q)[0]:
                 return None
             if owner == q.subject.partition(".")[0] and attr in self._read()[1]:
-                return "after-only", T.Said("after-only-why")
+                before = self._before(subject, q)
+                if before is None:
+                    return "after-only", T.Said("after-only-why")
+                if before[0].known:
+                    return None
+                return "after-only", T.Said("after-only-before-why", {"value": q.observed, "why": _before_gaps(before[0])})
             return "rows-no-column", T.Said("rows-no-column-why", {"attr": attr})
         found = PT.history_by_table(owner)
         if found is None or found.subject.partition(".")[0] != q.subject.partition(".")[0]:
@@ -7810,6 +7885,9 @@ class Rerun:
         unanswered = {x: found for x in sorted(_statement_subjects(st)) if (found := self._unanswered_why(x, q))}
         if unanswered:
             said.append("not compared: " + "; ".join(f"{x} ({why})" for x, (_, why) in unanswered.items()))
+        for x in sorted(_statement_subjects(st)):
+            if (before := self._before(x, q)) is not None and before[0].known:
+                said.append(T.text(_held_before_said(x, q.observed, *before)))
         if kind == "refused":
             return kind, said
         by_call, calls = self._routes(st, q)
