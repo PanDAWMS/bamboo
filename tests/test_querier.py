@@ -4815,7 +4815,7 @@ def test_a_pass_whose_calls_recorded_an_edge_row_is_not_one_of_the_value_s_time_
                 r.data = {"statuslog": {"states": states}}
                 asked = []
 
-                def recording(owner, arms, subject, key, edge, found, asked=asked):
+                def recording(owner, arms, subject, key, edge, found, entered=False, asked=asked):
                     asked.append(edge["status"])
                     by = {"transferring": "birth", "finished": "moving"}
                     p = next((x for x in found if x.name == by[edge["status"]]), None)
@@ -14503,3 +14503,54 @@ def test_cap_take_reads_the_first_selection_below_the_cap_after_the_turn(tmp_pat
     assert got["two"] == "the take's cycle <a2> returned rows at 2 of its 4 selections", got
     assert got["full"].startswith("the last selection on a before the pass returned 999 row(s)"), got
     assert got["named"] == ["<a2>", ["<a1>"], -1, []], got
+
+
+def test_waker_readers_take_a_movers_key_from_a_table_its_wakers_write(tmp_path):
+    """A2 (agents.waker_readers): a late mover whose writes of the subject take the row's key only from the rows of a
+    selection on another table, written by the map's wakers -- getTasksToExecCommand_JEDI's 4483 by 4339's
+    ``prodsys_comm.comm_task``, a command row sendCommandTaskPanda inserts -- runs on the row when a waker wrote one for
+    its key.  A write keyed from anything else, a selection on the subject's own table, or no inserting waker: not."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import agents as AG
+
+            mover = "p/task_complex_module.py::TaskComplexModule.getTasksToExecCommand_JEDI"
+            waker = N(kind="insert", owner="p/task_event_module.py::TaskEventModule.sendCommandTaskPanda", line=4038,
+                      value="retry", subject="PRODSYS_COMM.comm_cmd")
+            comm = N(owner=mover, anchor=N(line_start=4339), tables=["PRODSYS_COMM"], wakers=[waker])
+            tasks = N(owner=mover, anchor=N(line_start=4375), tables=["JEDI_Tasks"], wakers=[waker])
+            def kf(site, kind="rows", writes=(4442,)):
+                return N(owner="p/task_complex_module.py::getTasksToExecCommand_JEDI",
+                         writes={"JediTaskSpec.status": list(writes)},
+                         sources=[N(kind=kind, site_owner=mover, site_line=site, column="prodsys_comm.comm_task")])
+            def readers(froms, sites=(comm, tasks), wake=None):
+                if wake is not None:
+                    comm.wakers = wake
+                found = AG.waker_readers(froms, list(sites), {"jedi_tasks"}, "p/task_complex_module.py::getTasksToExecCommand_JEDI",
+                                         "JediTaskSpec.status", {4430, 4442}, "rows")
+                comm.wakers = [waker]
+                return None if found is None else [[[r.anchor.line_start, c] for r, c in found[0]], [w.line for w in found[1]]]
+            got = {
+                "keyed": readers([kf(4339)]),
+                # a write of another subject's, or at other lines: not this mover's key
+                "other": readers([kf(4339), kf(4339, writes=(5000,))]),
+                "param": readers([kf(4339), kf(4339, kind="parameter")]),
+                "own_table": readers([kf(4375)]),
+                "no_insert": readers([kf(4339)], wake=[N(kind="update", owner=waker.owner, line=1, value="x", subject="s")]),
+                "none": readers([]),
+            }
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["keyed"] == [[[4339, "prodsys_comm.comm_task"]], [4038]], got
+    assert got["other"] == got["keyed"], got
+    assert got["param"] is None, got
+    assert got["own_table"] is None, got
+    assert got["no_insert"] is None, got
+    assert got["none"] is None, got

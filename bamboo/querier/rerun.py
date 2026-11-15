@@ -6172,11 +6172,16 @@ class Rerun:
                 moving = [p for p in found if p.last[:19] >= q.before]
                 found = [p for p in found if p.last[:19] < q.before]
                 self.say(f"{len(moving)} pass(es) ending at {q.before} or later, the one that moved it on among them, not read")
+            if not found and since is not None and self._waker_turn(q, since, func):
+                return None
             if not found and (up := self._callers_of_mover(q, since, "before")) is not None:
                 return up
             if q.unsure:
                 self.need(T.Said("a-pass-of-before-the-one-that-2", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "q_unsure": q.unsure}), found, "K45")
             self.need(T.Said("a-pass-of-before-the-one-that", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "func_2": func}), found, "K45")
+        if not found and since is not None and q.before is None:
+            # a stuck value's stay: A2 stops the branch where no row the mover takes it by came, else U1 reads on
+            self._waker_turn(q, since, func)
         if not found and (up := self._callers_of_mover(q, since, "window")) is not None:
             return up
         self.need(T.Said("a-pass-in-the-window-that-holds-the-key", {"func": func, "unkeyed": unkeyed}) if unkeyed
@@ -6192,6 +6197,114 @@ class Rerun:
         end = q.before or q.asking.window[1]
         self.say(f"no pass of {q.owner.split('::')[-1]} took the row from {since} to {end}: its callers' passes there are read (KNOWN_ISSUES.md K55)")
         return Callers(q.owner, q.arms, q.subject or self.args.subject, q.key, (since, end), kind, q.entries, before=q.before)
+
+    def _waker_turn(self, q: Passes, since: str, func: str) -> bool:
+        """A2 (out/gm/qk-design.md, design A, tmaeno's OK 2026-11-15 10:42:25): where no pass of the mover *q* took
+        the row in the stay (before the one that moved it on, for a late value), and the key every write of its arms
+        takes the row by comes only from the rows of selections on another table (the map's KeyFrom sources, ``rows``)
+        that the map's ``wakers`` write -- getTasksToExecCommand_JEDI's 4483 by 4339's ``prodsys_comm.comm_task``, a
+        command row sendCommandTaskPanda inserts at 4038 -- the mover runs on the row when a waker wrote a row for its
+        key.  The wakers' runs of the key are asked over the stay on every machine; a run wrote where a row of it
+        prints only on a path through the waker's line (``implying_rows``, H2's own test).  The last write in the stay
+        before the move ends the branch (True); none in the stay stops it; anything else -- another source of the key,
+        a log not searched whole -- leaves it to U1 (False).  A table another system writes too (the map's inbound
+        boundary, DEFT's PRODSYS_COMM) is named as a premise: its writes leave no log here.
+
+        A stuck value's stay is read the same way up to the window's end, the statuslog's as_of: no write in it stops
+        the branch (no row the mover takes it by came); a write in it with the value not moved on is not read here
+        and leaves it to U1 (False)."""
+        # one rule for late and stuck: only the stay's end differs, the move or the window's end
+        if not self.logs.needs_window:
+            return False
+        if q.before is not None:
+            until = q.before
+        elif q.asking.window is not None:
+            until = q.asking.window[1]
+        else:
+            return False
+        subject = q.subject or self.args.subject
+        fragment = mapdump.fragment()
+        cls = subject.partition(".")[0]
+        row_tables = {t.name.lower() for t in getattr(fragment, "tables", None) or [] if t.rows_of == cls}
+        found = AG.waker_readers(getattr(fragment, "key_froms", None) or [], getattr(fragment, "read_sites", None) or [],
+                                 row_tables, q.owner, subject, {a.line for a in q.arms}, KEY_ROWS)
+        if found is None:
+            return False
+        readers, wakers = found
+        reader, column = readers[0]
+        where = f"{reader.owner.split('::')[-1]}@{reader.anchor.line_start}"
+        values = {w.value for w in wakers}
+        writes = []
+        for owner in sorted({w.owner for w in wakers}):
+            wlines = sorted({w.line for w in wakers if w.owner == owner})
+            rel, wfunc = _bare(owner).split("::", 1)
+            prints = R._prints_of(owner, wlines)
+            files = self.files_of(owner, sorted({f for st in prints.statements for f in st.log_files}) if prints else [], wlines)
+            to_hand = self.logs.names(files)
+            asking = W.Asking((since, until), None, T.Said("over-the-stay-for-its-wakers", {"start": since, "end": until, "reader": where}))
+            self.say(f"{wfunc}, a waker of {where}: logs {files}, asked {asking.why}")
+            runs, missed, holes = self._ask(q.key, to_hand, asking)
+            self._stop_unanswered(missed)
+            whole = self._searched_whole(to_hand, asking, asking, [], holes, None)
+            every = every_log_asked(owner, wlines, to_hand)
+            if not whole["held"] or not every["held"]:
+                self.say(f"{wfunc}'s runs of the key in the stay are not all read ({T.text(whole['why'])}; {T.text(every['why'])}): "
+                         "its writes are not read (A2)")
+                return False
+            fn = R.function(rel, wfunc, wlines)
+            for name in to_hand:
+                for run in runs.get(name, []):
+                    if not of_mover(run, owner):
+                        continue
+                    for p in passes_of(fn, run, self.mode)[0]:
+                        sn = R.claim([R.seen(fn, p, self.mode)])[0]
+                        for line in wlines:
+                            stmt = R.statement_at(fn.node, line)
+                            implying = [r for s in (R.implying_rows(fn.node, stmt) if stmt is not None else [])
+                                        if (r := fn.row_at(s)) is not None and sn.proven(r)]
+                            if not implying:
+                                continue
+                            hits = [(i, r) for r in implying for i, _, _ in sn.hits.get(r.line, ())]
+                            i, r = min(hits, key=lambda h: h[0])
+                            shown = {v.strip().strip("'\"") for v in r.capture(p.records[i]).values()} & values
+                            writes.append((W.when(p.records[i].stamp), p, owner, line, sorted(shown)))
+        start, end = W.when(since), W.when(until)
+        # the move to the microsecond where its statuslog row has it, as BP' reads the edges
+        moved = next((W.when(s.get("time_extended") or str(s["time"])) for s in self.data.get("statuslog", {}).get("states", [])
+                      if q.before is not None and str(s["time"])[:19] == q.before[:19] and s["status"] != self.args.observed), end)
+        stay = sorted((w for w in writes if start <= w[0] <= max(end, moved)), key=lambda w: w[0])
+        outside = [T.Said("an-outside-writer-of-the-table", {"system": b.system, "table": b.interface})
+                   for b in getattr(fragment, "boundaries", None) or []
+                   if getattr(b, "direction", "") == "inbound" and any(
+                       str(b.interface).lower().rpartition(".")[2] == t.lower() for r, _ in readers for t in r.tables)]
+        wakers_said = sorted({f"{w.owner.split('::')[-1].rpartition('.')[2]}:{w.line}" for w in wakers})
+        told = T.Said("written-outside-too", {"writers": outside}) if outside else T.Said("written-here-alone")
+        if not stay:
+            if q.before is None:
+                self.need(T.Said("a-waker-s-write-in-the-window", {
+                    "mover": func, "reader": where, "wakers": wakers_said, "since": since, "until": until, "outside": told}), None, "K55")
+            self.need(T.Said("a-waker-s-write-in-the-stay", {
+                "mover": func, "reader": where, "wakers": wakers_said, "since": since, "before": q.before,
+                "outside": told}), None, "K55")
+        at, p, owner, line, printed = stay[-1]
+        if q.before is None:
+            self.say(f"{owner.split('::')[-1]}:{line} wrote a row {where} selects for the key at {at:%Y-%m-%d %H:%M:%S} "
+                     f"and the value has not moved on by {until}: why {func} did not take it is not read here (A2)")
+            return False
+        routes = {tuple(r) for w in wakers if w.owner == owner and w.line == line and (not printed or w.value in printed)
+                  for r in w.routes}
+        entries = sorted({r[-1] for r in routes if r})
+        what = (T.Said("a-row-holding", {"subject": next(w.subject for w in wakers if w.value == printed[0]), "value": printed[0]})
+                if len(printed) == 1 else T.Said("a-row-for-it"))
+        earlier = (T.Said("earlier-writes-in-the-stay", {"n": len(stay) - 1, "at": [f"{w[0]:%Y-%m-%d %H:%M:%S}" for w in stay[:-1]]})
+                   if len(stay) > 1 else T.Said("no-earlier-write-in-the-stay", {"since": since}))
+        self.end(T.Said("ran-on-a-row-its-wakers-wrote", {
+            "mover": func, "after": f"{(moved - at).total_seconds():.0f}", "waker": owner.split("::")[-1].rpartition(".")[2],
+            "line": line, "what": what, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
+            "through": T.Said("through-the-entry", {"entries": entries}) if len(entries) == 1 else T.Said("through-no-one-entry"),
+            "reader": where, "column": column, "earlier": earlier,
+            "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func})]}))
+        return True
 
     def _stay_edges(self, fn: R.Function, owner: str, arms: list[int], subject: str, key: str, found: list,
                     since: str, whole: frozenset[int] | set[int] = frozenset()) -> tuple[list, list]:
@@ -6246,7 +6359,8 @@ class Rerun:
                 self.say(f"{len(uncut)} run(s) not cut into passes hold the row of {edge['status']!r} at "
                          f"{edge.get('time_extended') or edge['time']}: whether one holds the pass the value moved "
                          f"{'in' if kind == 'in' else 'on in'} is not decided (KNOWN_ISSUES.md K76)")
-            got = self._recording_pass(owner, arms, subject, key, edge, [p for p in kept if id(p) not in whole])
+            got = self._recording_pass(owner, arms, subject, key, edge, [p for p in kept if id(p) not in whole],
+                                       entered=kind == "in")
             if got is None:
                 continue
             p, said = got
@@ -6258,13 +6372,20 @@ class Rerun:
                      "not one of its time")
         return kept, moving
 
-    def _recording_pass(self, owner: str, arms: list[int], subject: str, key: str, row: dict, found: list):
+    def _recording_pass(self, owner: str, arms: list[int], subject: str, key: str, row: dict, found: list,
+                        entered: bool = False):
         """``(the pass of *found*, what says so)`` whose calls recorded *row*, as :meth:`_stay_edges` reads it, or None
         where the records do not show one.  The run of the method recording the row, cut to its call there, is placed
         inside a call of the pass (``recorded_in_pass``), the pass being that one or inside it; where the pass's prints
         cannot bracket the call -- TaskCommando's "done with" after updateTask_JEDI is printed by three rows, 202, 217
         and 232 -- inside the pass's own first and last records on its machine, the map's history pair saying that
-        call records the row after one of *arms* (KNOWN_ISSUES.md K76)."""
+        call records the row after one of *arms* (KNOWN_ISSUES.md K76).
+
+        A1 (*entered*: the row that began the value's time): where none of *arms* recorded it, another writer's arm
+        that may write the value did, inside the pass, in a function the map's calls reach from *owner*'s
+        (:meth:`_entering_recorders`) -- MT-exhausted-late's runImpl pass at 09:33:01, inside which retryTask_JEDI,
+        called on the retry command, recorded 'exhausted' (out/gm/qk-design.md, design A, tmaeno's OK 2026-11-15
+        10:42:25)."""
         at = W.when(row.get("time_extended") or str(row["time"]))
         # only a pass running at the row's time can hold the call that recorded it: none, and nothing is asked
         found = [p for p in found if W.when(p.first) <= at <= W.when(p.last)]
@@ -6296,7 +6417,86 @@ class Rerun:
                         del self.unanswered[kept:]
                         names = sorted({m.token for m in inner})
                         return p, f"{', '.join(names)} recorded it inside the pass, {rec.caller.split('::')[-1]}:{rec.call} recording it after the arm"
+        if entered:
+            for rec in self._entering_recorders(owner, arms, subject, row):
+                got = None
+                where = f"{rec.caller.split('::')[-1].rpartition('.')[2]}:{rec.call}"
+                mover = owner.split("::")[-1].rpartition(".")[2]
+                if (callee := self._own_call(rec)) is not None:
+                    got = self._own_call_pass(rec, callee, key, row, asking, found, at, placed=False)
+                    if got is None:
+                        crel, _, cfunc = callee.partition("::")
+                        defs = R.functions(crel, cfunc)
+                        silent = (len(defs) == 1 and bool(defs[0].body)
+                                  and not getattr(R._prints_of(callee, [defs[0].body[0].lineno]), "statements", None))
+                        self.say(f"{where}, reached from {mover} by the map's calls: " + (
+                            f"{cfunc} prints nothing, so no run of it places the row inside a pass (A1)" if silent else
+                            f"the records place no run of {cfunc} at the row inside a pass of {mover} (A1)"))
+                else:
+                    kept = len(self.unanswered)
+                    kind, _said, _part, inner = self._recorder_read(rec, subject, key, row, asking)
+                    dropped = len(self.unanswered) > kept
+                    del self.unanswered[kept:]
+                    p = next((p for p in found if kind == "" and inner and _during(inner, p, at)), None)
+                    if p is not None:
+                        names = sorted({m.token for m in inner})
+                        got = p, f"{', '.join(names)} recorded it inside the pass, {rec.caller.split('::')[-1]}:{rec.call} recording it"
+                    else:
+                        methods = ", ".join(sorted({_bare(m).rpartition("::")[2].rpartition(".")[2] for m, _ in rec.methods}))
+                        self.say(f"{where}, reached from {mover} by the map's calls: the records place no run of {methods} at "
+                                 f"the row inside a pass of {mover}" + (" (their logs there are not in the records; A1 asks none)"
+                                                                        if dropped else "") + " (A1)")
+                if got is not None:
+                    return got[0], (f"{got[1]}; {owner.split('::')[-1].rpartition('.')[2]} reaches "
+                                    f"{rec.caller.split('::')[-1].rpartition('.')[2]} by the map's calls (A1)")
         return None
+
+    def _entering_recorders(self, owner: str, arms: list[int], subject: str, row: dict) -> list[Recorder]:
+        """A1: the recorders (:func:`recorders`) of the arms other than *owner*'s own *arms* that may write the value
+        *row* records -- the value itself, or one known only at run time (retryTask_JEDI's ``runtime(taskOldStatus)``)
+        -- in a function the map's calls reach from *owner*'s (:meth:`_reached`)."""
+        value = str(row.get("status"))
+        own = {(_bare(owner), a) for a in arms}
+        out: list[Recorder] = []
+        for j in self._subject_writers(subject):
+            if getattr(j, "subject", subject) != subject:
+                continue
+            for b in j.branches:
+                outcome = b.outcome or ""
+                if (_bare(j.owner), b.line) in own or not (outcome.startswith(SV.RUN_TIME) or outcome.strip("'\"") == value):
+                    continue
+                if not self._reached(owner, j.owner):
+                    continue
+                out += [r for r in recorders(subject, j.owner, b.line) if r not in out]
+        return out
+
+    def _subject_writers(self, subject: str) -> list:
+        """The map's writers of *subject* (:meth:`_writers_of`), read once."""
+        cache: dict[str, list] = self.__dict__.setdefault("_subject_writers_read", {})
+        if subject not in cache:
+            cache[subject] = asyncio.run(self._writers_of(subject))
+        return cache[subject]
+
+    def _reached(self, owner: str, target: str) -> bool:
+        """Whether the map's reach goes from *owner*'s function into *target*'s, by calls alone (``by_name`` off: a call
+        closed by its name adds no way) -- TaskCommando's runImpl into retryTask_JEDI through the task buffer."""
+        cache: dict[tuple[str, str], bool] = self.__dict__.setdefault("_reached_read", {})
+        if (owner, target) not in cache:
+            cache[(owner, target)] = False
+            graph = self._graph()
+            if graph is not None:
+                RE, record, _rows = graph
+
+                def at(o: str) -> str | None:
+                    rel, _, func = _bare(o).partition("::")
+                    defs = R.functions(rel, func)
+                    return record.function_at(rel, defs[0].body[0].lineno) if len(defs) == 1 and defs[0].body else None
+
+                start, end = at(owner), at(target)
+                if start is not None and end is not None and start != end:
+                    reached = record.reach([start], RE.Destination({end: ["called"]}, []), by_name=False)
+                    cache[(owner, target)] = any(w.function == end for w in reached.writes or [])
+        return cache[(owner, target)]
 
     def _own_call(self, rec: Recorder) -> str | None:
         """The function *rec*'s call enters, ``file::function``, where the map's history pair names the caller's own call

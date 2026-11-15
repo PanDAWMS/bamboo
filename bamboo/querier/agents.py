@@ -409,6 +409,34 @@ def _timedelta_back(value: Any) -> datetime.timedelta | None:
         return None
 
 
+def waker_readers(key_froms: list, read_sites: list, row_tables: set[str], owner: str, subject: str,
+                   lines: set[int], rows_kind: str = "rows") -> tuple[list[tuple[Any, str]], list] | None:
+    """A2: the selections whose rows alone give *owner*'s writes of *subject* at *lines* the key they take the row by,
+    each with the column the key is read off (``(read site, column)``), and the inserts the map's ``wakers`` of them
+    name -- getTasksToExecCommand_JEDI's 4483 by 4339's ``prodsys_comm.comm_task``, sendCommandTaskPanda's 4038.  None
+    where a write takes its key from anything else, a selection reads a table holding rows of the subject's class
+    (*row_tables*, lower case), or no waker inserts.  *owner* and the KeyFroms' owners compare as ``file::function``."""
+
+    def bare(o: str) -> str:
+        rel, _, qual = o.partition("::")
+        return f"{rel}::{qual.rpartition('.')[2]}"
+
+    sites = {(r.owner, r.anchor.line_start): r for r in read_sites}
+    readers: list[tuple[Any, str]] = []
+    for kf in key_froms:
+        if bare(kf.owner) != bare(owner) or not set(kf.writes.get(subject, [])) & lines:
+            continue
+        for s in kf.sources:
+            site = sites.get((s.site_owner, s.site_line)) if s.kind == rows_kind else None
+            if site is None:
+                return None
+            readers.append((site, s.column))
+    if not readers or any({t.lower() for t in r.tables} & row_tables for r, _ in readers):
+        return None
+    wakers = [w for r, _ in readers for w in getattr(r, "wakers", None) or [] if w.kind == "insert"]
+    return (readers, wakers) if wakers else None
+
+
 def cap_rows(limits: list[str]) -> int | None:
     """The most rows a statement returns by the map's ``limits`` (``< 1000``: 999, ``<= 50``: 50), the least where it
     has several; None where none is a number (``< nTasks``)."""
