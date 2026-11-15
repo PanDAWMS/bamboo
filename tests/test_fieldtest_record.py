@@ -325,6 +325,45 @@ async def test_an_empty_file_read_from_its_first_byte_covers_from_its_mtime(tmp_
     assert len([c for c in panda.calls if c[0] == "grep"]) == 1
 
 
+async def test_an_unstamped_current_file_covers_from_the_earlier_of_its_rotation_and_its_mtime(
+    tmp_path,
+):
+    # aipanda098's panda-copyArchive.log was made at 08:24:45, a second after its rotation at 08:24:44, and held no
+    # stamped line: from its mtime it left 08:24:44 unsettled (NJE-7425252125, 2026-11-15)
+    made_late = [
+        entry(ADDER, "2026-10-14 06:59:59", 0),
+        entry("panda-adder.log-20261014.gz", "2026-10-14 06:59:58"),
+    ]
+    # an empty file older than its machine's last rotated one keeps its mtime
+    old_empty = [
+        entry(ADDER, "2026-10-13 05:00:00", 0),
+        entry("panda-adder.log-20261013.gz", "2026-10-13 07:11:35"),
+    ]
+    greps = {
+        (SERVER[0], ADDER): [found(first=None, offset=0)],
+        (SERVER[1], ADDER): [found(first=None, offset=0)],
+    }
+    panda = FakePanda(lists_with({SERVER[0]: made_late, SERVER[1]: old_empty}), greps)
+    window = ("2026-10-14 10:00:00", "2026-10-14 10:00:00")
+    _, records = await run(
+        tmp_path,
+        panda,
+        [
+            ask(ADDER, ["7339"], window, SERVER[0]),
+            ask(ADDER, ["7340"], window, SERVER[1]),
+        ],
+    )
+    covers = {
+        m: [f["covers"] for f in r["machines"][m]["files"] if f["file"] == ADDER]
+        for r in records
+        for m in r["machines"]
+    }
+    assert covers == {
+        SERVER[0]: [["2026-10-14 06:59:58", "2026-10-14 11:50:00"]],
+        SERVER[1]: [["2026-10-13 05:00:00", "2026-10-14 11:50:00"]],
+    }
+
+
 async def test_the_current_file_is_read_over_its_asks_windows_and_covers_to_the_record_the_read_stopped_before(
     tmp_path,
 ):

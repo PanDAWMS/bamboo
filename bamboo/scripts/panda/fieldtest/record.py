@@ -60,8 +60,10 @@ where it read to the file's end, on this machine's clock, which ran 13-203 ms
 behind the database's.  A window over 1 GiB is cut, and read on from where it
 stopped.  A machine whose processor predates the window greps the whole file
 and says no window: it covers from its rotation.  One read from its first byte
-with no stamped line holds no record and covers from its mtime: server
-machines list an empty ``panda-JediDBProxy.log`` (2026-10-14).
+with no stamped line holds no record and covers from its rotation or its
+mtime, whichever is earlier: server machines list an empty
+``panda-JediDBProxy.log`` (2026-10-14), and from its mtime a log made a
+second after its rotation left that second unsettled (2026-11-15).
 
 **Greps.**  One request per machine and file, to that machine alone, with the
 strings of every ask reading it.  An answer of several strings cut at 1 MB is
@@ -1185,15 +1187,22 @@ def window_covers(
     A read that began at the file's first byte with a line older than the list is the file listed, whole: it covers
     from the rotation before it, as does a read with no window, which the machine's processor made of the whole
     file.  Reads that all began at the first byte and found no stamped line read a file that holds no record: it
-    covers from its mtime, after which nothing was written to it (an empty file a machine's processes never log to,
-    such as JediDBProxy's on a server machine).  Otherwise it covers from its first stamp; one with no stamp covers
-    nothing.  A chain covers to the record its last read stopped before (``end_stamp``: the file goes on past it), or
-    to when that read was asked where it read to the file's end (``asked``: nothing more is there yet); at a tie the
-    first, which the querier's door widens past (its EDGE: a run near the end may go on, 2026-11-02)."""
+    covers from the earlier of the rotation before it, when it was made, and its mtime, after which nothing was
+    written to it (an empty file a machine's processes never log to, such as JediDBProxy's on a server machine,
+    whose rotation may be unknown or later than its mtime; from its mtime, one made a second after its rotation
+    left the rotation's second to the margin of the file before it, which the querier does not settle,
+    2026-11-15).  Otherwise it covers from its first stamp; one with no stamp covers nothing.  A chain covers to the
+    record its last read stopped before (``end_stamp``: the file goes on past it), or to when that read was asked
+    where it read to the file's end (``asked``: nothing more is there yet); at a tie the first, which the querier's
+    door widens past (its EDGE: a run near the end may go on, 2026-11-02)."""
     reads = job.reads
     if reads and all(r.offset == 0 and not r.first and not r.whole for r in reads):
+        made, mtime = job.file.start, job.file.mtime
         return (
-            [text(job.file.mtime), text(min(r.asked for r in reads))],
+            [
+                text(mtime if made is None or made > mtime else made),
+                text(min(r.asked for r in reads)),
+            ],
             "unstamped",
             "asked",
         )
