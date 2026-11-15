@@ -3430,6 +3430,33 @@ class HeldThrough(BaseModel):
     )
 
 
+class HeldKeyed(BaseModel):
+    """One selection by a key computed at run time a :class:`HeldSource`'s way went through, where the map knows the
+    key the source sat under: ``JediTaskSpec.commandStatusMap()[commandStr]["doing"]`` at
+    ``task_complex_module.py:4446`` holds ``'dummy'`` under ``'resume'``, ``'avalanche'`` and ``'release'`` -- three
+    sources, each with its key -- and ``'aborting'`` under ``'kill'``.  The selection is a test in all but name: the
+    way is taken where *by* equals *key*.  Where *by* reads names of the function, a :class:`GuardFrom` at the
+    selection's line reads each (``test`` the selection as written), so a reader decides it with the names' values as
+    it decides a test."""
+
+    at: str = Field(description="``file:line`` of the selection.")
+    by: str = Field(
+        description=(
+            "What selects, as written: the key of ``d[k]``, ``d.get(k)``, ``d.pop(k)`` (``commandStr``); for a pair "
+            "of ``d.items()`` a loop takes, the name the loop binds the pair's key to (``for k, v in d.items()``: "
+            "``k``), empty where it binds none."
+        )
+    )
+    key: str = Field(
+        description=(
+            "The key the source sat under, as the reader placed it or a put stored it: a constant's repr "
+            "(``'resume'``, ``0``).  A sequence's position counts from its start: a *by* that is negative at run "
+            "time counts from its end, which the reader reads with the sequence's length.  A key that is a "
+            "constant's expression (``x[-1]``) is no selection by a value and keys nothing."
+        )
+    )
+
+
 class HeldSource(KeySource):
     """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
     of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
@@ -3521,6 +3548,17 @@ class HeldSource(KeySource):
             "taskParamMap:``, where the bindings under its ``elif`` and ``else`` reach the loop too.  Which of them a "
             "run made is the tests on the way to each, which have GuardFroms (:attr:`GuardFrom.calls`).  Not the "
             "function's entry, which no statement is; empty where each read on the way had one binding reaching it."
+        ),
+    )
+    keyed: list[HeldKeyed] = Field(
+        default_factory=list,
+        description=(
+            "Each selection by a key computed at run time the way went through where the map knows the key the "
+            "source sat under, in the order run (:class:`HeldKeyed`): sources that are one but for the key they sat "
+            "under are as many sources.  The selections' lines have GuardFroms of the tests on the way to them "
+            "(:attr:`GuardFrom.calls`).  Empty where the key is not known: the value was put under a computed key, or "
+            "the path carry says where it sits (``loose``), or the container is read on past the way's end (a "
+            "parameter's, a field's: the ``[*]`` among *steps*)."
         ),
     )
     sent: bool = Field(
@@ -6043,7 +6081,12 @@ class KeyStop(BaseModel):
     )
     at: list[str] = Field(
         default_factory=list,
-        description="``owner:line`` of each site, or the function, in the order met.",
+        description=(
+            "``owner:line`` of each site, or the function, in the order met.  On a held way "
+            "(:class:`HeldSource`) that came back through calls of the corpus, those calls first, as the way's "
+            "*route* lists them, then the stop's own site; an ``uncarried`` stop has no site of its own, so its *at* "
+            "is the route alone (``TaskBuffer.py:1025``, then ``adder_gen.py:111``)."
+        ),
     )
 
     def said(self) -> str:
@@ -6072,6 +6115,10 @@ class GuardFrom(BaseModel):
     So ``taskParamMap`` reaches three ways through ``runImpl`` 211: ``JEDI_TaskParams.taskParams`` read at
     ``getTaskParamsWithID_JEDI`` 1407, ``''`` where no row came, ``None`` where it raised, each through
     ``json.loads``.  Which way a run took, and whether the decoder kept the value, are the reader's.
+
+    A selection by a key computed at run time a way goes through (:class:`HeldKeyed`) is a test of its key: each name
+    the key reads has a GuardFrom at the selection, *test* the selection as written
+    (``JediTaskSpec.commandStatusMap()[commandStr]``), *test_line* its line, which is among its *calls*.
     """
 
     owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
@@ -6096,7 +6143,9 @@ class GuardFrom(BaseModel):
             "the corpus or operator (:attr:`HeldThrough.at`), each binding that was one of several reaching its read "
             "(:attr:`HeldSource.chosen`) -- ``if 'log' not in taskParamMap:`` guards ``itemList = "
             "taskParamMap['jobParameters']`` and the ``+`` under its ``else`` --, and each call of the corpus "
-            "(:attr:`HeldSource.route`).  Not lines of calls only, then: the lines of the places it guards."
+            "(:attr:`HeldSource.route`), and each selection by a computed key (:attr:`HeldSource.keyed`); a "
+            "selection's own GuardFrom has the selection's line.  Not lines of calls only, then: the lines of the "
+            "places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")

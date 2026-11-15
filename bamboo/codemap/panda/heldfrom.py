@@ -101,6 +101,7 @@ from bamboo.codemap.models import (
     FieldFrom,
     GuardFrom,
     HeldChange,
+    HeldKeyed,
     HeldSource,
     HeldThrough,
     JunctionNode,
@@ -170,6 +171,9 @@ class _Way(NamedTuple):
     chosen: tuple[str, ...] = ()
     #: What the corpus's client sends an endpoint's parameter (:attr:`HeldSource.sent`, :meth:`_Reader._sent`).
     sent: bool = False
+    #: ``(at, by, key)`` of each selection by a computed key the way went through where the key the end sat under is
+    #: known, in the order run (:attr:`HeldSource.keyed`, :func:`_selected`).
+    keyed: tuple[tuple[str, str, str], ...] = ()
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -306,7 +310,12 @@ def _unread_part(way: _Way, step: str) -> _Way:
 
 
 def _step(
-    way: _Way, step: str, element: bool = False, unread: Optional[_Way] = None, keys: bool = False
+    way: _Way,
+    step: str,
+    element: bool = False,
+    unread: Optional[_Way] = None,
+    keys: bool = False,
+    select: Optional[tuple[str, str]] = None,
 ) -> list[_Way]:
     """*way* with *step* taken: an element of a list, set or generator a comprehension made last is its element
     (``[f for f in job.Files][0]`` is ``job.Files``'s ``[*]``, not ``[*][0]``); a dict's elements are its keys, not
@@ -326,7 +335,10 @@ def _step(
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
     value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
-    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's."""
+    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's.
+
+    *select*: the step ``[*]`` is a selection by a key computed at run time, ``(at, by)`` (:class:`HeldKeyed`): a part
+    the reader placed under a key is taken with that key kept (:func:`_selected`)."""
     if way.puts:
         way = way._replace(puts=())
     if step.startswith("["):
@@ -344,6 +356,13 @@ def _step(
         return [way._replace(through=way.through[1:])]
     if not way.paths or step == _ENTER:
         return [way._replace(steps=way.steps + (step,))]
+    if select is not None and step == "[*]" and not way.loose:
+        return _selected(way, select, element, keys)
+    return _cut(way, step, element, unread, keys)
+
+
+def _cut(way: _Way, step: str, element: bool, unread: Optional[_Way], keys: bool) -> list[_Way]:
+    """*way*, whose source sits at parts of the value (*paths*), cut by *step* as :func:`_step` says."""
     from bamboo.codemap.panda.recognizers.sqlwrite import paths_under
 
     under = paths_under(step, way.paths, element, keys)
@@ -352,6 +371,57 @@ def _step(
     if "()" in under:
         found.insert(0, unread or _unread_part(way, step) if way.loose else way._replace(paths=()))
     return found
+
+
+def _path_key(path: str) -> Optional[str]:
+    """The key a spelled path (:attr:`KeySource.paths`) starts under, as a constant's repr (``'resume'``, ``0``);
+    ``None`` where its first step names no key: an element not named (``[*]``), a dict's key, a field, any part."""
+    from bamboo.codemap.panda.recognizers.sqlwrite import KEY_STEP, unspelled_path
+
+    steps = unspelled_path(path) if path != "()" else ()
+    if not steps or not steps[0].startswith("[") or steps[0] in ("[*]", KEY_STEP):
+        return None
+    return steps[0][1:-1]
+
+
+def _selected(way: _Way, select: tuple[str, str], element: bool, keys: bool) -> list[_Way]:
+    """*way* with a selection by a key computed at run time taken (``d[k]``, ``d.get(k)``, a pair of ``d.items()``):
+    where the reader placed the source under a key (*paths* starting ``['resume']``, ``[0]``), the part under each key
+    is a way of its own, taken as the step of that key takes it and keyed with it (:attr:`_Way.keyed`, *select* the
+    selection's ``(at, by)``): ``commandStatusMap()[commandStr]`` holds ``'dummy'`` under ``'resume'`` and under
+    ``'release'``, two ways.  The paths starting with no key are cut by ``[*]`` as before, keyed with nothing."""
+    spots: dict[str, list[str]] = {}
+    rest: list[str] = []
+    for path in way.paths:
+        spot = _path_key(path)
+        if spot is None:
+            rest.append(path)
+        else:
+            spots.setdefault(spot, []).append(path)
+    found: list[_Way] = []
+    for spot, paths in spots.items():
+        keyed = way._replace(paths=tuple(paths), keyed=(*way.keyed, (*select, spot)))
+        found += _cut(keyed, f"[{spot}]", element, None, keys)
+    if rest:
+        found += _cut(way._replace(paths=tuple(rest)), "[*]", element, None, keys)
+    return found
+
+
+def _computed(key: ast.expr) -> bool:
+    """Whether *key* is computed at run time: not a constant's expression (``-1`` is one, read as ``[*]`` all the
+    same, and no selection by a value: it counts from the end)."""
+    try:
+        ast.literal_eval(key)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return True
+    return False
+
+
+def _put_key(change: _Change) -> Optional[str]:
+    """The key *change* puts its value under, as a constant's repr; ``None`` where it is computed or not a key."""
+    if change.key == changes_mod.EVERY or change.key.startswith("."):
+        return None
+    return change.key
 
 
 def _element_of_operation(way: _Way) -> Optional[_Way]:
@@ -387,14 +457,21 @@ def _then(way: _Way, steps: tuple[str, ...], fall_back: bool = True) -> list[_Wa
 
 
 def _taken(
-    ways: list[_Way], step: str, element: bool = False, unread: Optional[_Way] = None, keys: bool = False
+    ways: list[_Way],
+    step: str,
+    element: bool = False,
+    unread: Optional[_Way] = None,
+    keys: bool = False,
+    select: Optional[tuple[str, str]] = None,
 ) -> list[_Way]:
     """*ways* with *step* taken (:func:`_step`) and joined (:func:`_joined`), a stop as it is.  An element step also
     takes what the value's puts put that it may take (:attr:`_Way.puts`), each put once however many of the ways
     carry it: ``data = {"job_ids": ids}`` then ``data["code"] = code`` -- ``data["code"]`` is ``code``,
     ``data["job_ids"]`` is ``ids``.  Where the step leaves none of them -- every source sits only at other parts, no
     put puts it -- the part is a value no way reaches: *unread*, else :func:`_unread_part` of the first way.
-    *unread* is given once where several ways land on it.  *element* and *keys* as :func:`_step` takes them."""
+    *unread* is given once where several ways land on it.  *element* and *keys* as :func:`_step` takes them;
+    *select*, a selection by a computed key, keys each part with the key it sat under, a put's value with the key it
+    was put under (:func:`_selected`)."""
     found: list[_Way] = []
     put: dict[int, tuple[_Change, _Way]] = {}
     for one in ways:
@@ -402,31 +479,37 @@ def _taken(
             for change in one.puts:
                 if _puts_at(change, step):
                     put.setdefault(id(change), (change, one))
-        for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread, keys):
+        for stepped in [one] if one.kind == _STOP else _step(one, step, element, unread, keys, select):
             if stepped is unread and unread in found:
                 continue
-            found += [stepped] if stepped.kind == _STOP else _joined(stepped, keys)
+            # The step is the way's first only where the end had none: there a put's value is the step's part.
+            joined_select = select if len(stepped.steps) == 1 else None
+            found += [stepped] if stepped.kind == _STOP else _joined(stepped, keys, joined_select)
     for change, one in put.values():
-        found += _put_values([change], one)
+        found += _put_values([change], one, select)
     if ways and not found:
         return [unread or _unread_part(ways[0], step)]
     return found
 
 
-def _put_values(puts: list["_Change"], way: _Way) -> list[_Way]:
+def _put_values(puts: list["_Change"], way: _Way, select: Optional[tuple[str, str]] = None) -> list[_Way]:
     """The ways of the values *puts* put into the value *way* reads, as an element of it: each through the calls to
     its put (*via*) after *way*'s route, carrying what may change an element in the container (:func:`_joined`,
-    :func:`_taken`)."""
+    :func:`_taken`).  Taken by a selection by a computed key (*select*, :func:`_selected`), each keyed with the key
+    its put put it under, where that key is a constant."""
     kept = tuple(one for one in way.changes if one.kind in _ELEMENT_CHANGES)
-    return [
-        value
-        if value.kind == _STOP
-        else value._replace(
-            route=way.route + one.via + value.route, changes=value.changes + kept, chosen=_chosen_of(value, way)
-        )
-        for one in puts
-        for value in one.value
-    ]
+    found = []
+    for one in puts:
+        key = _put_key(one) if select is not None else None
+        for value in one.value:
+            if value.kind != _STOP:
+                value = value._replace(
+                    route=way.route + one.via + value.route, changes=value.changes + kept, chosen=_chosen_of(value, way)
+                )
+                if select is not None and key is not None:
+                    value = value._replace(keyed=(*value.keyed, (*select, key)))
+            found.append(value)
+    return found
 
 
 def _chosen_of(*ways: _Way) -> tuple[str, ...]:
@@ -489,7 +572,14 @@ def _onto(
         if inner.paths and one.kind != _STOP:
             held = tuple(spot + path for spot in inner.paths for path in one.paths) or inner.paths
             one = one._replace(paths=held, loose=inner.loose or one.loose)
-        found.append(one._replace(route=route, changes=one.changes + inner.changes, chosen=_chosen_of(inner, one)))
+        found.append(
+            one._replace(
+                route=route,
+                changes=one.changes + inner.changes,
+                chosen=_chosen_of(inner, one),
+                keyed=one.keyed + inner.keyed,
+            )
+        )
     return found
 
 
@@ -555,14 +645,16 @@ def _puts_unread(change) -> bool:
     )
 
 
-def _joined(way: _Way, keys: bool = False) -> list[_Way]:
+def _joined(way: _Way, keys: bool = False, select: Optional[tuple[str, str]] = None) -> list[_Way]:
     """*way*, where its end is a container made empty and its first step takes an element: the ways of the values
     its changes put that the step may take, with the rest of the steps -- each through the calls to its put
     (*via*), carrying what may change an element in the container --; *way* too where a put is not read or the step
     may take a mapping's key (``[*]``).  ``TaskBuffer.peekJobs``' ``retJobs = []`` filled by ``retJobs.append(res)``:
     ``retJobs[0]`` is ``res``.  Any other way, itself -- also where that step is a loop's over a value known as a
     dict (*keys*): its element is a key, and a put's key is kept as its spelling only (:attr:`HeldChange.key`), so
-    no put gives it (``for tmp_rse in replica_availability_info`` takes none of the dicts put as its values)."""
+    no put gives it (``for tmp_rse in replica_availability_info`` takes none of the dicts put as its values).  Where
+    the first step is a selection by a computed key (*select*), each put's value is keyed with its put's key
+    (:func:`_put_values`)."""
     if way.kind == _STOP or not way.made_empty or way.through or not way.steps or not way.steps[0].startswith("["):
         return [way]
     if keys and len(way.steps) == 1:
@@ -574,7 +666,7 @@ def _joined(way: _Way, keys: bool = False) -> list[_Way]:
     # Each put's value, the rest of the steps taken; a value they cut away is left out (a put under another key is
     # no source of the key asked), and only where nothing is left -- no value and not the way itself -- is the part
     # a value no way reaches, as :func:`_taken` falls back.
-    values = _put_values(puts, way)
+    values = _put_values(puts, way, select)
     found = [
         stepped
         for value in values
@@ -983,6 +1075,28 @@ class _Reader:
         self._classes: Optional[dict[str, tuple[str, ast.ClassDef]]] = None
         self._stored: Optional[dict[str, list[tuple[str, str]]]] = None
         self._changed_others: Optional[dict[str, list[tuple[str, bool]]]] = None
+        #: ``(at, by)`` of each selection by a computed key read (:class:`HeldKeyed`) -> its file, function, the
+        #: selection and its key, for the GuardFroms of the names the key reads (:func:`guard_froms`).
+        self.selections: dict[tuple[str, str], tuple[str, ast.AST, ast.expr, ast.expr]] = {}
+
+    def _selection(self, file: str, func: ast.AST, node: ast.expr, key: ast.expr) -> tuple[str, str]:
+        """``(at, by)`` of *node*, a selection in *func* by *key*, a key computed at run time (``d[k]``,
+        ``d.get(k)``); kept so the names *key* reads get GuardFroms at its line."""
+        select = (f"{file}:{node.lineno}", ast.unparse(key))
+        self.selections.setdefault(select, (file, func, node, key))
+        return select
+
+    @staticmethod
+    def _pair_selection(file: str, func: ast.AST, call: ast.Call) -> tuple[str, str]:
+        """``(at, by)`` of the pairs *call* (``d.items()``) hands out: *by* the name a loop over it binds each pair's
+        key to (``for k, v in d.items()``), empty where none does; the key is the pair's own, so no GuardFrom."""
+        for node in walk(func):
+            if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and node.iter is call:
+                target = node.target
+                if isinstance(target, ast.Tuple) and len(target.elts) == 2 and isinstance(target.elts[0], ast.Name):
+                    return f"{file}:{call.lineno}", target.elts[0].id
+                break
+        return f"{file}:{call.lineno}", ""
 
     def filled(self, file: str, func: ast.AST):
         held = self._filled.get(id(func))
@@ -1166,15 +1280,18 @@ class _Reader:
                 returned = self._returned_field(expr, at, file, func, selves=selves)
                 if returned is not None:
                     return returned
+            select = None
             if isinstance(expr, ast.Subscript):
                 index = expr.slice
                 step = (
                     f"[{index.value!r}]" if isinstance(index, ast.Constant) else "[*]"
                 )
+                if step == "[*]" and _computed(index):
+                    select = self._selection(file, func, expr, index)
             else:
                 step = f".{expr.attr}"
             unread = _Way(KEY_ATTRIBUTE if isinstance(expr, ast.Attribute) else KEY_UNKNOWN, ast.unparse(expr), line)
-            return _taken(self.read(expr.value, at, file, func, selves=selves), step, unread=unread)
+            return _taken(self.read(expr.value, at, file, func, selves=selves), step, unread=unread, select=select)
         if isinstance(expr, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # A new collection of the element's values: the element's ways, through the comprehension.
             element = expr.value if isinstance(expr, ast.DictComp) else expr.elt
@@ -1582,8 +1699,14 @@ class _Reader:
         return self._stepped(self.read(value, at, file, func, selves=selves), step, element=element, keys=keys)
 
     @staticmethod
-    def _stepped(ways: list[_Way], step: str, element: bool = False, keys: bool = False) -> list[_Way]:
-        return _taken(ways, step, element, keys=keys)
+    def _stepped(
+        ways: list[_Way],
+        step: str,
+        element: bool = False,
+        keys: bool = False,
+        select: Optional[tuple[str, str]] = None,
+    ) -> list[_Way]:
+        return _taken(ways, step, element, keys=keys, select=select)
 
     @classmethod
     def _of_field(cls, ways: list[_Way], field: Optional[str]) -> list[_Way]:
@@ -1870,12 +1993,15 @@ class _Reader:
         if spot is not None:
             if call.args or call.keywords:
                 return None
-            return _at(spot, self._stepped(self.read(called.value, call, file, func, selves=selves), "[*]"))
+            # A pair holds its value with its key: which key, the pair's selection keeps (:func:`_selected`).
+            pairs = self._pair_selection(file, func, call) if spot in ("[*][1]", "[1]") else None
+            return _at(spot, self._stepped(self.read(called.value, call, file, func, selves=selves), "[*]", select=pairs))
         if gives.part != callfacts.AT:
             return None
         key = call.args[gives.key] if gives.key is not None and gives.key < len(call.args) else None
         step = f"[{key.value!r}]" if isinstance(key, ast.Constant) else "[*]"
-        found = self._stepped(self.read(called.value, call, file, func, selves=selves), step)
+        select = self._selection(file, func, call, key) if key is not None and step == "[*]" and _computed(key) else None
+        found = self._stepped(self.read(called.value, call, file, func, selves=selves), step, select=select)
         if gives.default is not None and gives.default < len(call.args):
             found += self.read(call.args[gives.default], call, file, func, selves=selves)
         elif gives.none:
@@ -2831,6 +2957,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 changes=[_change_said(change) for change in one.changes],
                 made_empty=one.made_empty,
                 sent=one.sent,
+                keyed=[HeldKeyed(at=at, by=by, key=key) for at, by, key in one.keyed],
             ),
         )
         if one.end_file and one.line is not None and f"{one.end_file}:{one.line}" not in held.at:
@@ -2854,19 +2981,36 @@ def _end_sites(guards: Iterable[GuardFrom], reader: _Reader) -> set[str]:
     (:attr:`HeldSource.at`), the source's own statement; each call outside the corpus it went through
     (:attr:`HeldThrough.at`), an operator's statement among them; each binding it came from that was one of several
     reaching its read (:attr:`HeldSource.chosen`); each call of the corpus on it (:attr:`HeldSource.route`), the one
-    whose return the value is or the caller's that hands it in.  Every place on the way, then."""
+    whose return the value is or the caller's that hands it in; each selection by a computed key it went through
+    (:attr:`HeldSource.keyed`).  Every place on the way, then."""
     found: set[str] = set()
-    sources = [
-        *(source for guard in guards for source in guard.sources),
-        *(source for parameter in reader.parameters.values() for source in parameter.sources),
-        *(source for field in reader.fields.values() for binding in field.bindings for source in binding.sources),
-    ]
-    for source in sources:
+    for source in _way_sources(guards, reader):
         found.update(source.at)
         found.update(call.at for call in source.through if call.at)
         found.update(source.chosen)
         found.update(source.route)
+        found.update(one.at for one in source.keyed)
     return found
+
+
+def _way_sources(guards: Iterable[GuardFrom], reader: _Reader) -> list[HeldSource]:
+    """The sources of the GuardFroms', the ParameterFroms' and the FieldFrom bindings' ways."""
+    return [
+        *(source for guard in guards for source in guard.sources),
+        *(source for parameter in reader.parameters.values() for source in parameter.sources),
+        *(source for field in reader.fields.values() for binding in field.bindings for source in binding.sources),
+    ]
+
+
+def _selections(guards: Iterable[GuardFrom], reader: _Reader) -> set[tuple[str, str]]:
+    """``(at, by)`` of each selection by a computed key on a GuardFrom's, a ParameterFrom's or a FieldFrom binding's
+    way whose key reads names (:meth:`_Reader._selection`): the names get GuardFroms at its line."""
+    return {
+        (one.at, one.by)
+        for source in _way_sources(guards, reader)
+        for one in source.keyed
+        if (one.at, one.by) in reader.selections
+    }
 
 
 def _unchanging(func: ast.AST, name: str, site: ast.AST, ways: list[_Way]) -> bool:
@@ -3201,27 +3345,42 @@ def guard_froms(
 
     def guards_on(owner: str, file: str, func: ast.AST, stmt: ast.stmt) -> list[GuardFrom]:
         """The GuardFrom of each test on the way to *stmt* in *func* and name it reads, each read once."""
-        on: list[GuardFrom] = []
-        for test in pathcond.tests_on(stmt, func):
-            for read, node in _names(test, func).items():
-                key = (owner, test.lineno, test.col_offset, read)
-                guard = found.get(key)
-                if guard is None:
-                    sources, stops = _said(reader._safely(node, node, file, func))
-                    reader.queue(sources)
-                    if read == "self":
-                        for field in _self_values(test):
-                            reader.ask_field(reader.class_owner(file, func), field)
-                    guard = found[key] = GuardFrom(
-                        owner=owner,
-                        test_line=test.lineno,
-                        test=ast.unparse(test),
-                        name=read,
-                        sources=sources,
-                        stops=stops,
-                    )
-                on.append(guard)
-        return on
+        return [
+            guard_of(owner, file, func, test, test, read, node)
+            for test in pathcond.tests_on(stmt, func)
+            for read, node in _names(test, func).items()
+        ]
+
+    def guard_of(
+        owner: str, file: str, func: ast.AST, test: ast.expr, reads: ast.expr, read: str, node: ast.expr
+    ) -> GuardFrom:
+        """The GuardFrom of *test* and the name *read* (*node*) the part *reads* of it reads, read once."""
+        key = (owner, test.lineno, test.col_offset, read)
+        guard = found.get(key)
+        if guard is None:
+            sources, stops = _said(reader._safely(node, node, file, func))
+            reader.queue(sources)
+            if read == "self":
+                for field in _self_values(reads):
+                    reader.ask_field(reader.class_owner(file, func), field)
+            guard = found[key] = GuardFrom(
+                owner=owner,
+                test_line=test.lineno,
+                test=ast.unparse(test),
+                name=read,
+                sources=sources,
+                stops=stops,
+            )
+        return guard
+
+    def guards_at_selection(select: tuple[str, str]) -> None:
+        """A GuardFrom at a selection by a computed key for each name its key reads: the selection is a test of the
+        key (:class:`HeldKeyed`), and its line among the GuardFrom's *calls*, the place it guards."""
+        file, func, node, key = reader.selections[select]
+        for read, name in _names(key, func).items():
+            guard = guard_of(owner_of(file, func), file, func, node, key, read, name)
+            if node.lineno not in guard.calls:
+                guard.calls.append(node.lineno)
 
     for junction in junctions:
         file, _, name = junction.owner.partition("::")
@@ -3293,16 +3452,22 @@ def guard_froms(
     # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
     # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``);
     # so is it at each call the way went through, of the corpus or not, an operator, and each binding it came from
-    # that was one of several (``itemList = ... + ...`` under ``else``), the end past them (_end_sites).
+    # that was one of several (``itemList = ... + ...`` under ``else``), the end past them (_end_sites); and at each
+    # selection by a computed key a way went through, the names its key reads (_selections).
     # Their ways' too, until no place is new.
     guarded: set[str] = set()
+    selected: set[tuple[str, str]] = set()
     held: dict[str, list[ast.AST]] = {}
     while True:
         reader.settle()
         fresh = sorted((_change_sites(found.values(), reader) | _end_sites(found.values(), reader)) - guarded)
-        if not fresh:
+        picks = sorted(_selections(found.values(), reader) - selected)
+        if not fresh and not picks:
             break
         guarded.update(fresh)
+        selected.update(picks)
+        for pick in picks:
+            guards_at_selection(pick)
         for at in fresh:
             file, _, number = at.rpartition(":")
             tree = trees.get(file)
