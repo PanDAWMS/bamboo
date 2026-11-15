@@ -14489,6 +14489,221 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
     assert got["asked"] == [["assigned", "defined"], None], got
 
 
+def test_timeline_bounds_say_where_a_time_term_surely_held(tmp_path):
+    """Q1 part 1 (timeline): a time column kept as bounds over the stay.  A write a print of its statement's binds shows
+    (ran) sets them, one the pass only reached widens them, an arm not read writes at any moment; a term
+    ``col < clock + offset`` surely holds where the most the column may hold is below it, and surely fails where the
+    least is not.  NT-tobroken: the stay began at 20:29:16.42, so ``modificationtime < now - 5 min`` surely held from
+    20:34:16.42 to the mover's own write -- where the arm not read is named as having not written it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from bamboo.querier import timeline as TL
+
+            def t(s, day="2026-11-13"):
+                return D.datetime.fromisoformat(f"{day} {s}")
+
+            H, Z = D.timedelta(hours=1), D.timedelta(0)
+            start, end = t("20:29:16.423630"), t("20:34:45.105988")
+            since = start - D.timedelta(minutes=10)
+            ran = TL.Write(t("20:22:05.542"), t("20:22:05.542"), t("20:22:05.542"), TL.RAN, ("lock:2099",), "lock:2166", "m82")
+            old = TL.Write(t("20:23:17.396"), t("20:23:17.396") - H, t("20:23:17.396"), TL.REACHED, ("upd:1441", "upd:1443"),
+                           "upd:1424", "m82")
+            unread = TL.Write(t("20:23:17.396"), TL.LOW, TL.HIGH, TL.REACHED, ("upd:1441", "upd:1443"), "upd:1424", "m82")
+            mover = TL.Write(t("20:34:44.342"), t("20:34:44.342"), t("20:34:44.342"), TL.RAN, ("cmd:4595",), "cmd:4611", "m89")
+            opens = [TL.Opening("staged:5710", None, None), TL.Opening("preassign:4902", Z, Z)]
+
+            def line(writes, opens, starts=True, lacking=True):
+                return TL.Timeline(start, end, TL.first_bounds(start, since, starts, lacking, writes, opens),
+                                   TL.first_bounds(start, since, starts, lacking, writes, []), tuple(writes), tuple(opens))
+
+            def spans(found):
+                return [[str(a), str(b)] for a, b in found]
+
+            five = -D.timedelta(minutes=5)
+            got = {}
+            tl = line([ran, old, mover], opens)
+            got["strict"] = spans(TL.surely_true("<", five, tl.pieces()))
+            got["assumed"] = spans(TL.surely_true("<", five, tl.pieces(assume=True)))
+            got["unread"] = spans(TL.surely_true("<", five, line([ran, unread, mover], opens).pieces(assume=True)))
+            # only an arm writing both may have begun the stay: its start, whatever came before
+            got["starts only"] = spans(TL.surely_true("<", five, line([unread, mover], [], lacking=False).pieces()))
+            # NT-pending: refreshed within 20 minutes all the stay, then not
+            p0 = t("05:47:37.091349", "2026-11-15")
+            locks = [TL.Write(x, x, x, TL.RAN, ("lock:2099",), "lock:2166", "m") for x in
+                     (t("06:07:06.165", "2026-11-15"), t("06:26:44.318", "2026-11-15"), t("06:46:43.466", "2026-11-15"))]
+            twenty = -D.timedelta(minutes=20)
+
+            def pending(end, opens=()):
+                first = TL.first_bounds(p0, p0 - D.timedelta(minutes=10), True, False, locks, list(opens))
+                return TL.Timeline(p0, end, first, first, tuple(locks), tuple(opens))
+
+            moved = t("07:07:11.369830", "2026-11-15")
+            got["pending true"] = spans(TL.surely_true("<", twenty, pending(moved).pieces()))
+            got["pending false all"] = [TL.surely_false_all("<", twenty, pending(t("07:06:00", "2026-11-15")).pieces()),
+                                        TL.surely_false_all("<", twenty, pending(moved).pieces())]
+            # an arm not read that writes the clock: never surely below the clock less a margin, still surely not below
+            clock = [TL.Opening("lockTask:2755", Z, Z)]
+            got["pending open clock"] = [TL.surely_true("<", twenty, pending(moved, clock).pieces()),
+                                         TL.surely_false_all("<", twenty, pending(t("07:06:00", "2026-11-15"), clock).pieces())]
+            # col >= clock - 30 days: surely above it where the least is
+            got["above"] = spans(TL.surely_true(">", -D.timedelta(days=30), pending(moved).pieces()))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # an arm not read whose value is not read either (CURRENT_DATE-1) may write any value at any moment: nothing sure
+    assert got["strict"] == [], got
+    # named as having not, the most the column held in the stay is its start; the mover's own write ends it
+    assert got["assumed"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:44.342000"]], got
+    # a write before the stay whose value is not read leaves the start open where an arm writing the value alone may
+    # have begun the stay
+    assert got["unread"] == [], got
+    assert got["starts only"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:44.342000"]], got
+    assert got["pending true"] == [["2026-11-15 07:06:43.466000", "2026-11-15 07:07:11.369830"]], got
+    assert got["pending false all"] == [True, False], got
+    assert got["pending open clock"] == [[], True], got
+    assert got["above"] == [["2026-11-15 05:47:37.091349", "2026-11-15 07:07:11.369830"]], got
+
+
+def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_path):
+    """Q1 part 1 (Rerun._timeline): each arm M3(a)-1 leaves as may writing the column in the stay is read from the
+    records -- its must prints whose hole the map names as the written row's key, under any mark (the lock UPDATE's
+    binds under its caller's mark, updateTask_JEDI's mark) -- shown absent where judgement 3's premises hold, open
+    otherwise; two arms one print reads are one write.  A term on the column is compared on it; inside a turn the open
+    arms are named as having not written it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap.models import MustName, PrintRow, SkeletonHole
+            from bamboo.querier import stay_value as SV
+            from bamboo.querier import timeline as TL
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-13 {s}")
+
+            C, S = "JediTaskSpec.modificationTime", "JediTaskSpec.status"
+            before = SV.Before(False, ("prep:3971 with 3839",), ("feed:742",), (),
+                               ("lock:2099", "upd:1441", "upd:1443", "err:767", "staged:5710"), ())
+
+            def br(line, outcome):
+                return N(line=line, outcome=outcome)
+
+            writers = [N(owner="t.py::lock", branches=[br(2099, "runtime(CURRENT_DATE)")]),
+                       N(owner="t.py::upd", branches=[br(1441, "runtime(timeNow - datetime.timedelta(hours=1))"),
+                                                       br(1443, "runtime(naive_utcnow())")]),
+                       N(owner="t.py::err", branches=[br(767, "runtime(CURRENT_DATE)")]),
+                       N(owner="t.py::staged", branches=[br(5710, "runtime(CURRENT_DATE-1)")])]
+            m82 = "aipanda082.cern.ch"
+
+            def rerun(hits):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args, r.result = N(key="53641080"), {}
+                r._before = lambda subject, q: (before, "2026-11-13 20:29:16")
+                r._subject_writers = lambda subject: writers
+                r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
+                r._column_writes = lambda j, b, keys, window, ws: hits[b.line]
+                return r
+
+            q = N(subject=S, observed="tobroken", since=t("20:29:16.423630"), moved=t("20:34:45.105988"))
+            term = N(node="compare", op="<", values=[N(base="CURRENT_DATE", offset_seconds=-300.0)], subject=C, settled=True,
+                     text="modificationtime<:timeLimit")
+            got = {}
+            hits = {2099: ([(t("20:22:05.542"), m82, "lock:2166", TL.RAN)], True),
+                    1441: ([(t("20:23:17.396"), m82, "upd:1424", TL.REACHED)], True),
+                    1443: ([(t("20:23:17.396"), m82, "upd:1424", TL.REACHED)], True),
+                    767: ([], True), 5710: ([], False)}
+            r = rerun(hits)
+            tl = RR.Rerun._timeline(r, C, q)
+            got["writes"] = [[w.how, list(w.arms), w.machine, w.lo == w.hi] for w in tl.writes]
+            got["absent"], got["open"] = list(tl.absent), [[o.arm, o.lo] for o in tl.opens]
+            got["result"] = r.result["timelines"][C]["open"]
+            got["strict"] = RR.Rerun._timeline_spans(r, term, q)
+            got["false"] = RR.Rerun._timeline_false(r, term, q)
+            # updateTask_JEDI shown not to have written: named as having not, the open arm leaves the stay's start
+            r = rerun({**hits, 1441: ([], True), 1443: ([], True)})
+            got["strict2"] = RR.Rerun._timeline_spans(r, term, q)
+            r._assuming = {}
+            got["assumed2"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q)]
+            got["assuming"] = r._assuming
+            # what M3(a)-1 settles, or a timeline that reads nothing, is read as before
+            r = rerun({2099: ([], False), 1441: ([], False), 1443: ([], False), 767: ([], False), 5710: ([], False)})
+            got["nothing"] = RR.Rerun._timeline_spans(r, term, q)
+            # the hole a must name reads: the logger's mark, the printed bind map
+            hole = SkeletonHole(expression="taskSpec.jediTaskID", group=1)
+            row = N(map_rows=[PrintRow(text="start", capture="start", prefix=r"updateTask_JEDI\\ <\\ jediTaskID=.*?\\ >\\ ",
+                                       prefix_capture=r"updateTask_JEDI\\ <\\ jediTaskID=(.*?)\\ >", prefix_holes=[hole])])
+            mark = MustName(line=1424, expression="taskSpec.jediTaskID", column="JediTaskSpec.jediTaskID", row="written",
+                            part="mark")
+            started = N(text="start", token="updateTask_JEDI < jediTaskID=53641080 >")
+            bind = MustName(line=2166, expression="str(var_map)", column="JediTaskSpec.jediTaskID", row="written", part="bind",
+                            bind=":jediTaskID")
+            locked = N(text="UPDATE ATLAS_PANDA.JEDI_Tasks  SET lockedBy=:newLockedBy WHERE jediTaskID=:jediTaskID /* x */"
+                            "{':jediTaskID': 53641080, ':newLockedBy': '53641081'}",
+                       token="getTasksToBeProcessed_JEDI < jediTasks=[53641080] >")
+            got["holes"] = [RR._hole_holds(row, started, mark, "53641080"), RR._hole_holds(row, started, mark, "53641081"),
+                            RR._hole_holds(N(map_rows=[]), locked, bind, "53641080"),
+                            RR._hole_holds(N(map_rows=[]), locked, bind, "53641081")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the lock UPDATE's binds ran it at its time; the entry print of updateTask_JEDI reads both its arms, one write,
+    # whose value is not read (timeNow - 1 h is no clock the querier reads)
+    assert got["writes"] == [["ran", ["lock:2099"], "aipanda082", True],
+                             ["reached", ["upd:1441", "upd:1443"], "aipanda082", False]], got
+    assert got["absent"] == ["err:767"] and got["open"] == [["staged:5710", None]] and got["result"] == ["staged:5710"], got
+    # the start not bounded above: nothing sure, nothing false all the window
+    assert got["strict"] == [] and got["false"] == "", got
+    assert got["strict2"] == [], got
+    assert got["assumed2"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["assuming"] == {"JediTaskSpec.modificationTime": ["staged:5710"]}, got
+    assert got["nothing"] is None, got
+    assert got["holes"] == [True, False, True, False], got
+
+
+def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):
+    """M3(a)-1: a statement whose table the map does not read (``''``: updateTask_JEDI's UPDATE built from
+    bindUpdateChangesExpression) is not known to write another table, so its arm may write the column in the stay; one
+    writing a known table that holds no row of the class is left out, as before."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import stay_value as SV
+
+            def br(line, outcome):
+                return N(line=line, other_lines=[], outcome=outcome, history=[], row_precondition=[])
+
+            S, C = "JediTaskSpec.status", "JediTaskSpec.modificationTime"
+            status = [N(owner="t.py::prep", subject=S, branches=[br(3971, "tobroken")])]
+            column = [N(owner="t.py::upd", subject=C, branches=[br(1443, "runtime(naive_utcnow())")]),
+                      N(owner="t.py::meta", subject=C, branches=[br(10, "runtime(CURRENT_DATE)")])]
+            kfs = [N(owner="t.py::upd", statement=1484, table="", term="", writes={C: [1443]}, sources=[N(kind="parameter")],
+                     routes_open=False),
+                   N(owner="t.py::meta", statement=12, table="metaTable", term="jediTaskID=:jediTaskID", writes={C: [10]},
+                     sources=[N(kind="parameter")], routes_open=False)]
+            b = SV.before(status, column, S, "tobroken", C, kfs, lambda k: True, lambda o, line: None, {"jedi_tasks"},
+                          lambda o, b: False)
+            print(json.dumps([list(b.left), [list(x) for x in b.out]]))
+            """,
+        )
+    )
+    left, out_ = json.loads(out.splitlines()[-1])
+    assert left == ["upd:1443"], (left, out_)
+    assert out_ == [["meta:10", "it writes ['metaTable'], which hold no row of JediTaskSpec"]], out_
+
+
 def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_path):
     """M2 (value_reach): the writers the rows of a statement selecting the value reach -- the movers, what the rows are
     handed to, and what those call up to DEPTH calls, not through the statement's own function.  A writer they do not

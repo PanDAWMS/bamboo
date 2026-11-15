@@ -91,7 +91,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, TypedDict, cast
 
-from bamboo.codemap import pathcond
+from bamboo.codemap import pathcond, trace
 from bamboo.codemap import strategy as strategy_mod
 from bamboo.codemap.calls import Types, call_statements
 from bamboo.codemap.models import (
@@ -103,6 +103,8 @@ from bamboo.codemap.models import (
     KEY_RETURNED,
     KEY_ROWS,
     KEY_UNKNOWN,
+    MUST_PART_BIND,
+    MUST_PART_MARK,
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
     REWRITE_NOT_ATTRIBUTE,
@@ -135,6 +137,7 @@ from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import sources as SR
 from bamboo.querier import stay_value as SV
+from bamboo.querier import timeline as TL
 from bamboo.querier import value_diff as V
 from bamboo.querier import value_reach as VR
 from bamboo.querier import windows as W
@@ -396,6 +399,27 @@ def reach_said(reach: dict | None, hidden: bool) -> tuple[bool, T.Said | None]:
         return False, T.Said("reach-rows-hidden")
     closed = T.Said("reach-closed-by-name", {"n": reach["closed"], "first_closed": reach["first_closed"]}) if reach.get("closed") else ""
     return True, T.Said("reach-dropped", {"closure": reach["closure"], "assumptions": sorted(reach["assumptions"]), "closed": closed})
+
+
+def _hole_holds(row: R.Row, record, name, key: str) -> bool:
+    """Whether *record*, a line of the print *row*, holds *key* in the hole the map's must name *name* reads: an entry
+    of its printed bind map (``sqltext.cut``: ``str(var_map)`` after the statement), or a hole of its logger's mark or
+    of its message as the map's rows read them back (``trace.hole_values``, the record whole first) --
+    ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID``."""
+    if name.part == MUST_PART_BIND:
+        got = sqltext.cut(record.text)
+        values = [got[1].get(name.bind)] if got is not None else []
+    else:
+        values = []
+        for m in row.map_rows:
+            for whole in (True, False):
+                read = trace.hole_values(m, record.text, record.token, whole=whole)
+                if read is None:
+                    continue
+                holes, printed = (m.prefix_holes, read[1]) if name.part == MUST_PART_MARK else (m.holes, read[0])
+                values += [v for h, v in zip(holes, printed, strict=False) if h.expression == name.expression]
+                break
+    return any(v is not None and str(v).strip().strip("'\"") == key for v in values)
 
 
 def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
@@ -888,6 +912,25 @@ def _before_gaps(found: SV.Before) -> list[T.Said]:
     if found.left:
         out.append(T.Said("before-may-be-written", {"arms": list(found.left)}))
     return out
+
+
+def _timeline_gaps(tl: TL.Timeline) -> list[T.Said]:
+    """Why a timeline (:meth:`Rerun._timeline`) does not settle a column all the stay: the arms no record reads all of,
+    besides the writes it read."""
+    out = [T.Said("timeline-read-so-far", {"n": len(tl.writes), "k": len(tl.absent)})]
+    out.append(T.Said("before-may-be-written", {"arms": [o.arm for o in tl.opens]}))
+    return out
+
+
+def _timeline_said(subject: str, tl: TL.Timeline) -> T.Said:
+    """The words for a column read on its timeline: each write read, the arms shown not to write, those not read."""
+    writes = [T.Said("timeline-write", {"at": f"{w.at:%H:%M:%S.%f}"[:12], "how": w.how, "arms": list(w.arms),
+                                        "where": w.where, "machine": w.machine}) for w in tl.writes]
+    return T.Said("timeline-read", {"subject": subject, "start": f"{tl.start:%Y-%m-%d %H:%M:%S}",
+                                    "end": f"{tl.end:%Y-%m-%d %H:%M:%S}",
+                                    "writes": T.Said("timeline-writes", {"writes": writes}) if writes else T.Said("timeline-no-write"),
+                                    "absent": T.Said("timeline-absent", {"arms": list(tl.absent)}) if tl.absent else "",
+                                    "opens": T.Said("timeline-opens", {"arms": [o.arm for o in tl.opens]}) if tl.opens else ""})
 
 
 def _held_before_said(subject: str, observed: str, found: SV.Before, start: str) -> T.Said:
@@ -3001,9 +3044,10 @@ class Rerun:
         return out
 
     def _ask(self, key: str, names: list[str], asking: W.Asking, owners: Owners | None = None,
-             whole: bool = False) -> tuple[dict[str, list], list, dict[str, list[str]]]:
+             whole: bool = False, quiet: bool = False) -> tuple[dict[str, list], list, dict[str, list[str]]]:
         """``runs()`` without the stop: the runs found, the asks the door had no answer for, and what of the window each
-        log was not searched for (``Log.holes``).  *owners* and *whole* as ``Logs.log`` takes them."""
+        log was not searched for (``Log.holes``).  *owners* and *whole* as ``Logs.log`` takes them; *quiet*: the logs'
+        notes are not said (the timeline's asks, one for each arm, say the same notes over and over)."""
         window = self.window(asking)
         out, unanswered, holes = {}, [], {}
         for name in self.logs.names(names):
@@ -3013,7 +3057,7 @@ class Rerun:
                 # the asks file keeps the why as text (its form is O4's)
                 unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
                 continue
-            for note in log.notes + [f"not searched: {h}" for h in log.holes]:
+            for note in [] if quiet else log.notes + [f"not searched: {h}" for h in log.holes]:
                 self.say(f"  {name}: {note}")
             if log.holes:
                 holes[name] = log.holes
@@ -7224,8 +7268,12 @@ class Rerun:
         window's end, stuck): a column a run of the row printed at the stay's start at or after it is said held so
         (M3(a)-2); else its arms that may write it are named as having not, the print, earlier, said too."""
         out: list[T.Said] = []
+        timelines = {k[0]: tl for k, tl in self.__dict__.get("_timelines", {}).items() if tl is not None}
         for col, arms in assumed.items():
             if not arms:
+                continue
+            if (tl := timelines.get(col)) is not None and (tl.writes or tl.absent):
+                out.append(T.Said("none-of-wrote-it-besides", {"column": col, "arms": arms, "n": len(tl.writes)}))
                 continue
             got = printed.get(col)
             if got is not None and got[0] >= W.when(until):
@@ -8056,7 +8104,13 @@ class Rerun:
             return None
         spans = _union([span for st in took for span in self._statement_true(st, q)])
         where = ", ".join(f"{st.owner.split('::')[-1]}@{st.line}" for st in took)
-        held = f"held for the row {_spans_words(spans, (q.since, q.moved))}" if spans else "held for the row at times not known"
+        held: str | T.Said = f"held for the row {_spans_words(spans, (q.since, q.moved))}" if spans else "held for the row at times not known"
+        if not spans:
+            # Q1 part 1: where it holds with the arms no record reads named as having not written what it compares
+            if_spans, assumed = self._assumed_true(took, q)
+            if if_spans and assumed:
+                held = T.Said("held-for-the-row-if", {"spans": _spans_words(if_spans, (q.since, q.moved)),
+                                                      "premises": self._held_premises(assumed, {}, f"{q.moved}")})
         said = T.Said("why-took-it-only-at-and-it", {"name": name, "q_moved": q.moved, "where": where, "held": held})
         entries = _entries_of(q.writers, q.mover)
         since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
@@ -8233,6 +8287,196 @@ class Rerun:
             "out": [list(x) for x in found.out]}
         return cache[key]
 
+    def _timeline(self, subject: str, q: Missed) -> TL.Timeline | None:
+        """Q1 part 1 (:mod:`timeline`; out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06):
+        *subject*, a time column M3(a)-1 (:meth:`_before`) leaves open, read over the stay from the records.  Each arm
+        M3(a)-1 leaves as may writing it in the stay (``left``): its writes where its must prints name the row's key
+        (:meth:`_column_writes`), from the stay's start less ``windows.SLACK`` to the move; one with none is shown not to
+        have written where judgement 3's three premises hold, and one whose premises do not hold is open, read or not.
+        The bounds as the stay began: :func:`timeline.first_bounds`.  None where M3(a)-1 does not apply or settles the
+        column.  Kept in the result (``timelines``)."""
+        found = self._before(subject, q)
+        if found is None or found[0].known:
+            return None
+        cache: dict[tuple, TL.Timeline | None] = self.__dict__.setdefault("_timelines", {})
+        ckey = (subject, q.subject, q.observed, q.since, q.moved)
+        if ckey in cache:
+            return cache[ckey]
+        cache[ckey] = None
+        before, start = found
+        # the stay's start to the microsecond where the question has it (the statuslog row's time_extended)
+        begun = q.since if abs(q.since - _when(start)) < datetime.timedelta(seconds=1) else _when(start)
+        since = begun - W.SLACK
+        writers = self._subject_writers(subject)
+        keys = self._key_columns(q.subject, self.args.key)
+        shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, bool]]] = {}
+        opens: list[TL.Opening] = []
+        absent: list[str] = []
+        zero = datetime.timedelta(0)
+        for j in writers:
+            for b in j.branches:
+                name = SV._name(j.owner, b.line)
+                if name not in before.left:
+                    continue
+                got, whole = self._column_writes(j, b, keys, (since, q.moved), writers)
+                now = b.outcome in AT.NOW
+                for at, machine, where, how in got:
+                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, now))
+                if not whole:
+                    opens.append(TL.Opening(name, zero if now else None, zero if now else None))
+                elif not got:
+                    absent.append(name)
+        writes = []
+        for (_, at, machine, where), arms in sorted(shown.items(), key=lambda x: (x[0][1], x[0][3])):
+            nows = {now for _, _, now in arms}
+            lo, hi = (at, at) if nows == {True} else (TL.LOW, TL.HIGH)
+            ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or nows == {True})
+            writes.append(TL.Write(at, lo, hi, TL.RAN if ran else TL.REACHED, tuple(n for n, _, _ in arms), where,
+                                   machine.split(".")[0]))
+        starts, lacking = bool(before.starts), bool(before.lacking)
+        tl = TL.Timeline(begun, q.moved, TL.first_bounds(begun, since, starts, lacking, writes, opens),
+                         TL.first_bounds(begun, since, starts, lacking, writes, []), tuple(writes), tuple(opens),
+                         tuple(absent))
+        cache[ckey] = tl
+        self.result.setdefault("timelines", {})[subject] = {
+            "start": _iso(str(begun)), "end": _iso(str(q.moved)),
+            "writes": [{"at": _iso(str(w.at)), "how": w.how, "arms": list(w.arms), "where": w.where, "machine": w.machine,
+                        "value": _iso(str(w.lo)) if w.lo == w.hi else None} for w in writes],
+            "absent": absent, "open": [o.arm for o in opens]}
+        return tl
+
+    def _column_writes(self, j, b, keys: set[str], window: tuple[datetime.datetime, datetime.datetime],
+                       writers: list) -> tuple[list[tuple[datetime.datetime, str, str, str]], bool]:
+        """The writes of the arm *b* of *j* the records show over *window*, ``(at, machine, print "func:line", how)``
+        each: a record of one of its must prints whose hole the map names as the written row's key (``MustName.row``
+        ``written``, its column among *keys*) holding the key, under any mark (:func:`_hole_holds`) -- the statement's
+        bind map printed ran it (``timeline.RAN``), its message or mark reached it (``REACHED``).  A record another print
+        of the function reads at least as well is not taken.  And whether these are all: judgement 3's three premises
+        (window, logs, prints: :meth:`_premises`) held over the window, so no run reached the arm unseen.  The logs are
+        asked for the writer alone (``owners_of``): a mark that does not hold the key is read from the key's records."""
+        key = self.args.key
+        names = [n for n in b.must_names or [] if n.row == MUST_ROW_WRITTEN and n.column in keys]
+        rel, _, func = _bare(j.owner).partition("::")
+        to_hand = self.logs.names(self.files_of(j.owner, list(j.log_files or []), [b.line]))
+        if not names or not to_hand:
+            return [], False
+        lo, hi = W._down(window[0]), W._down(window[1])
+        asking = W.Asking((lo, hi), None, T.Said("for-the-column-s-writes", {
+            "start": lo, "end": hi, "where": f"{func.rpartition('.')[2]}:{b.line}"}))
+        runs, missed, holes = self._ask(key, to_hand, asking, owners_of([j.owner]), quiet=True)
+        self._keep_unanswered(missed)
+        found = []
+        for line in sorted({n.line for n in names}):
+            try:
+                fn = R.function(rel, func, within=[line])
+            except (LookupError, ValueError, SyntaxError):
+                continue
+            stmt = R.statement_at(fn.node, line)
+            row = fn.row_at(stmt) if stmt is not None else None
+            if row is None:
+                continue
+            for name in to_hand:
+                for run in runs.get(name, []):
+                    sn = R.seen(fn, run, self.mode)
+                    for i, literal, _ in sn.hits.get(row.line, ()):
+                        record = run.records[i]
+                        at = W.when(record.stamp)
+                        if not window[0] <= at <= window[1] or any(
+                                other != row.line and any(k == i and lit >= literal for k, lit, _ in hs)
+                                for other, hs in sn.hits.items()):
+                            continue
+                        held = [n for n in names if n.line == line and _hole_holds(row, record, n, key)]
+                        if held:
+                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}",
+                                          TL.RAN if any(n.part == MUST_PART_BIND for n in held) else TL.REACHED))
+        premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),
+                    "logs": every_log_asked(j.owner, [b.line], to_hand),
+                    "prints": prints_naming(writers, j.owner, [b.line], keys)}
+        # a run of its own in the window whose must prints are not read in it: a reading missed, not a run absent
+        own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
+        return sorted(set(found)), all(p["held"] for p in premises.values()) and (bool(found) or not own)
+
+    def _timeline_spans(self, t, q: Missed) -> list | None:
+        """Where a term comparing a time column with the clock surely holds for the row, on the column's timeline
+        (:meth:`_timeline`): None where it has none, or reads no write and shows no arm absent -- M3(a)-1 and -2 read
+        it as before.  Inside a turn (``_assuming``, M3(a)-cap) its open arms are named as having not written it."""
+        tl = self._timeline(t.subject, q)
+        if tl is None or not (tl.writes or tl.absent):
+            return None
+        assuming = getattr(self, "_assuming", None)
+        if assuming is not None and tl.opens:
+            assuming[t.subject] = [o.arm for o in tl.opens]
+        pieces = tl.pieces(assume=assuming is not None)
+        out = [(q.since, q.moved)]
+        for v in t.values:
+            if not v.base or v.base not in UTC_CLOCKS or v.offset_seconds is None:
+                return []
+            out = _intersect(out, TL.surely_true(t.op, datetime.timedelta(seconds=v.offset_seconds), pieces))
+        return _union(out)
+
+    def _timeline_terms(self, st, q: Missed) -> list[T.Said]:
+        """Q1 part 1: each term of *st*'s condition trees comparing a column read on its timeline with the clock, where
+        it surely held for the row (:meth:`_timeline_spans`) -- and, where nowhere, where it did with the arms no record
+        reads named as having not written the column."""
+        out: list[T.Said] = []
+        whole = (q.since, q.moved)
+        seen: set[str] = set()
+
+        def leaves(node):
+            if node.node in ("any", "all"):
+                for item in node.items:
+                    yield from leaves(item)
+            else:
+                yield node
+
+        for reading in st.condition_trees:
+            for t in leaves(reading.tree):
+                if t.node != "compare" or not t.settled or t.text in seen:
+                    continue
+                strict = self._timeline_spans(t, q)
+                if strict is None:
+                    continue
+                seen.add(t.text)
+                kept = getattr(self, "_assuming", None)
+                self._assuming = {}
+                try:
+                    assumed = self._timeline_spans(t, q) or []
+                finally:
+                    arms, self._assuming = self._assuming or {}, kept
+                if strict:
+                    out.append(T.Said("timeline-term-held", {"term": t.text, "spans": _spans_words(strict, whole)}))
+                elif assumed and arms.get(t.subject):
+                    out.append(T.Said("timeline-term-held-if", {"term": t.text, "spans": _spans_words(assumed, whole),
+                                                                "column": t.subject, "arms": arms[t.subject]}))
+                else:
+                    out.append(T.Said("timeline-term-not-held", {"term": t.text}))
+        return out
+
+    def _timeline_false(self, t, q: Missed) -> str | None:
+        """Why a term comparing a time column with the clock is surely false for the row all the window on the
+        column's timeline, its open arms writing at any moment (no premise); "" where it is not; None where the
+        timeline reads nothing (:meth:`_timeline_spans`)."""
+        tl = self._timeline(t.subject, q)
+        if tl is None or not (tl.writes or tl.absent):
+            return None
+        pieces = tl.pieces()
+        for v in t.values:
+            if not v.base or v.base not in UTC_CLOCKS or v.offset_seconds is None:
+                return ""
+            if not TL.surely_false_all(t.op, datetime.timedelta(seconds=v.offset_seconds), pieces):
+                return ""
+        return T.text(T.Said("false-on-the-timeline", {"n": len(tl.writes), "absent": len(tl.absent)}))
+
+    def _assumed_true(self, sts: list, q: Missed) -> tuple[list, dict[str, list[str]]]:
+        """Where one of *sts* surely returns the row with the arms no record reads named as having not written the
+        columns it compares (``_assuming``, as a turn reads them), and those arms by column."""
+        self._assuming = {}
+        try:
+            spans = _union([span for st in sts for span in self._statement_true(st, q)])
+        finally:
+            assumed, self._assuming = self._assuming or {}, None
+        return spans, {col: arms for col, arms in assumed.items() if arms}
+
     def _history_rows(self, subject: str, q: Missed) -> list[tuple[object, datetime.datetime]] | None:
         """``(value, written at)`` of each row of the row's status history the subject's column reads, written
         before the value moved on (the move's own row is the mover's), when the subject is a column of a log that
@@ -8277,6 +8521,11 @@ class Rerun:
                     return "after-only", T.Said("after-only-why")
                 if before[0].known:
                     return None
+                tl = self._timeline(subject, q)
+                if tl is not None and (tl.writes or tl.absent):
+                    if not tl.opens:
+                        return None
+                    return "after-only", T.Said("after-only-before-why", {"value": q.observed, "why": _timeline_gaps(tl)})
                 return "after-only", T.Said("after-only-before-why", {"value": q.observed, "why": _before_gaps(before[0])})
             return "rows-no-column", T.Said("rows-no-column-why", {"attr": attr})
         found = PT.history_by_table(owner)
@@ -8359,6 +8608,8 @@ class Rerun:
                 return NULL_FAILS
         if not t.settled:
             return None
+        if t.node == "compare" and (got := self._timeline_false(t, q)) is not None:
+            return got or None
         rows = self._history_rows(t.subject, q)
         if rows is not None:
             return self._history_leaf(t, rows, q)
@@ -8418,6 +8669,8 @@ class Rerun:
             return []
         if t.subject != q.subject and self._history_rows(t.subject, q) is not None:
             return []
+        if t.node == "compare" and (spans := self._timeline_spans(t, q)) is not None:
+            return spans
         known, held = self._held(t.subject, q)
         if not known:
             return []
@@ -8615,9 +8868,15 @@ class Rerun:
         unanswered = {x: found for x in sorted(_statement_subjects(st)) if (found := self._unanswered_why(x, q))}
         if unanswered:
             said.append("not compared: " + "; ".join(f"{x} ({why})" for x, (_, why) in unanswered.items()))
+        told = self.__dict__.setdefault("_timelines_told", set())
         for x in sorted(_statement_subjects(st)):
             if (before := self._before(x, q)) is not None and before[0].known:
                 said.append(T.text(_held_before_said(x, q.observed, *before)))
+            elif (tl := self._timeline(x, q)) is not None and (tl.writes or tl.absent) and x not in told:
+                # Q1 part 1: what the records show of it in the stay, said once
+                told.add(x)
+                said.append(T.text(_timeline_said(x, tl)))
+        said += [T.text(x) for x in self._timeline_terms(st, q)]
         if kind == "refused":
             return kind, said
         by_call, calls = self._routes(st, q)
