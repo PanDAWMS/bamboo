@@ -1651,6 +1651,7 @@ def keyed_items(
     run: Execution,
     column_holes: Sequence[tuple[int, str, tuple[int, ...]]],
     keys_of: Optional[Callable[[str], Optional[frozenset[str]]]] = None,
+    clause: str = "SET",
 ) -> list[KeyedItem]:
     """The ``SET`` items of *run* whose holes a loop over a mapping's keys fills with its key (:func:`map_key`), each
     with the keys the mapping can hold that the loop's ``continue`` tests let through (:func:`kept_map_keys`):
@@ -1659,7 +1660,11 @@ def keyed_items(
     every name holding it through the corpus's calls (:func:`_corpus_keys`).  An item not read so stays a hole.
 
     An item that is not a bind, ``{}={}+{}`` (:attr:`sqltext.SqlWrite.column_holes`), writes each key's column
-    changed by an amount, read as :func:`_counted_key` says: ``propagateResultToJEDI``'s file counts."""
+    changed by an amount, read as :func:`_counted_key` says: ``propagateResultToJEDI``'s file counts.
+
+    The ``WHERE`` terms ``{}=:cr_{}`` (:attr:`sqltext.SqlWrite.key_holes`, *clause* ``WHERE``) are read the same way:
+    ``updateTask_JEDI``'s ``for tmpKey, tmpVal in criteria.items(): sql += f"{tmpKey}={crKey} AND "`` names its row by
+    each key its callers' criteria hold."""
     holes = run.reading_holes
     found: list[KeyedItem] = []
     for column, bind, numbers in column_holes:
@@ -1684,7 +1689,7 @@ def keyed_items(
             continue
         found.append(
             KeyedItem(
-                f"SET {{}}={bind}",
+                f"{clause} {{}}={bind}",
                 mapping,
                 {key: bind.replace("{}", key, 1) if counted else bind.replace("{}", key) for key in kept},
                 hole.stmt if isinstance(hole.stmt, ast.stmt) else None,

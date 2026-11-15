@@ -2427,6 +2427,14 @@ class ReadSiteNode(BaseNode):
             "A statement asking by these alone is still a reader of the rows."
         ),
     )
+    keyed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Those of *keys* a term built in a loop over a mapping's keys asks by (``WHERE {key}=:{key}`` over "
+            "``queryDatasetWithMap``'s *map*, :attr:`KeyFrom.keyed`), sorted: a run asks by one only where its "
+            "caller's mapping holds that key, so two of them need not be asked together."
+        ),
+    )
     order_by: list[str] = Field(
         default_factory=list,
         description=(
@@ -3743,6 +3751,15 @@ class KeyFrom(BaseModel):
             "As the map reads it: ``jediTaskID=:jediTaskID``, ``datasetID IN (:dataset__in)``; empty for an object no "
             "write persists, and for an ``INSERT`` into a table with no key."
         )
+    )
+    keyed: str = Field(
+        default="",
+        description=(
+            "Where the term is one the statement builds in a loop over a mapping's keys, ``{tmpKey}=:cr_{tmpKey}`` "
+            "over ``updateTask_JEDI``'s *criteria*, the mapping as the function spells it: the term is one of the "
+            "keys the mapping holds through the corpus's calls (:func:`bamboo.codemap.panda.sql.keyed_items`), and "
+            "a run has it only where its caller's mapping holds that key.  Empty for a term the text spells."
+        ),
     )
     writes: dict[str, list[int]] = Field(
         default_factory=dict,
@@ -6945,6 +6962,16 @@ class WrittenValue(BaseModel):
         description="Otherwise the value as the code or the statement spells it: ``literal:'failed'``, ``expression:CURRENT_DATE``.",
     )
     why: str = Field(default="", description="Why neither is read; empty where one is.")
+    keyed: str = Field(
+        default="",
+        description=(
+            "For a key a term built in a loop over a mapping's keys names the row by, read for one key the mapping "
+            "holds through the corpus's calls (:attr:`KeyFrom.keyed`): the mapping as the function spells it -- "
+            "*column* ``jediTaskID`` at *path* ``criteria['jediTaskID']`` of ``updateTask_JEDI``'s *criteria*.  A run "
+            "has the key only where its caller's mapping holds it.  Empty otherwise; a mapping whose keys are not "
+            "read keeps :data:`MAP_KEY`."
+        ),
+    )
 
 
 class DbWrite(BaseModel):

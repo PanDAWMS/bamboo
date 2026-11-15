@@ -1096,6 +1096,21 @@ def where_terms(sql: str) -> Optional[dict[str, tuple[str, list[tuple[int, int]]
     return {column: (term, spans.get(column, [])) for column, term in preconditions.items()}
 
 
+def read_key_holes(sql: str) -> list[tuple[int, str, tuple[int, ...]]]:
+    """The terms ``{}=:{}`` of the ``WHERE`` of the ``SELECT`` in *sql* -- a column that is a hole, equated to a bind
+    whose name holds one -- spelt as :attr:`SqlWrite.key_holes` spells an ``UPDATE``'s: ``queryDatasetWithMap``'s
+    ``WHERE {key}=:{key}`` over its *map*.  Only the conjuncts every row meets, of the statement's own clause."""
+    tree = parsed(sql).tree
+    while isinstance(tree, exp.Subquery):
+        tree = tree.this
+    if not isinstance(tree, exp.Select):
+        return []
+    where = tree.args.get("where")
+    if where is None:
+        return []
+    return [held for term in _conjuncts(where.this) if (held := _key_hole(term)) is not None]
+
+
 def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
     """``(column hole, bind, bind holes)`` of a term ``{}=:cr_{}`` (:attr:`SqlWrite.key_holes`); ``None`` for any other."""
     if not (isinstance(term, exp.EQ) and _is_hole(term.this) and isinstance(term.expression, exp.Placeholder)):

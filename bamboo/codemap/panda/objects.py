@@ -1583,7 +1583,9 @@ def _map_keys(
     func: ast.AST, run, key_holes, versions: "_Versions"
 ) -> list[WrittenValue]:
     """The keys a loop over a mapping names *run*'s row by (:data:`MAP_KEY`, :func:`sql.map_key`), one per path the
-    mapping is; a term ``{}=:cr_{}`` whose holes are no such loop's key names nothing."""
+    mapping is; a term ``{}=:cr_{}`` whose holes are no such loop's key names nothing.  Where the keys the mapping
+    holds through the corpus's calls are read (:func:`sql.keyed_items`), one per key and path instead, the key its
+    column: ``updateTask_JEDI``'s ``jediTaskID`` at ``criteria['jediTaskID']`` (:attr:`WrittenValue.keyed`)."""
     if not key_holes:
         return []
     holes = run.reading_holes
@@ -1598,8 +1600,19 @@ def _map_keys(
             bind,
             tuple(holes[number - 1] for number in numbers),
         )
-        for held in versions.paths(mapping) if mapping is not None else []:
-            found.setdefault(held, WrittenValue(column=MAP_KEY, path=f"{held}[]"))
+        if mapping is None:
+            continue
+        items = sql.keyed_items(func, run, [(column, bind, numbers)], clause="WHERE")  # type: ignore[arg-type]
+        keys = sorted({key for item in items for key in item.binds})
+        for held in versions.paths(mapping):
+            if not keys:
+                found.setdefault(held, WrittenValue(column=MAP_KEY, path=f"{held}[]"))
+            for key in keys:
+                path = f"{held}['{key}']"
+                found.setdefault(
+                    path,
+                    WrittenValue(column=key, path=path, keyed=ast.unparse(mapping)),
+                )
     return list(found.values())
 
 

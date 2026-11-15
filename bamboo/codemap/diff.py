@@ -86,6 +86,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "restricts",
         "consults",
         "keys",
+        "keyed",
         "order_by",
         "limits",
         # What each route of calls reads, and whether the routes are all of them.

@@ -149,7 +149,7 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import sql, sqleval, sqltext
+from bamboo.codemap.panda import mapentries, sql, sqleval, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 
 # The block a decision records about itself reads the same way whichever slice
@@ -469,14 +469,18 @@ def _key_froms(
     whose runs fill none, :data:`KEY_NO_BIND`.
     """
     owner = f"{rel_path}::{func.name}"
-    terms = [(f"{column}={bind}", bind) for column, bind in sorted(statement.keys.items())]
-    terms += [(f"{column} IN ({bind})", bind) for column, bind in sorted(statement.key_lists.items())]
-    for term, bind in terms:
+    for term, bind, mapping in _row_terms(func, run, statement):
         name = (owner, run.call.lineno, statement.table, term)
         record = keyed.get(name)
         if record is None:
             record = keyed[name] = KeyFrom(
-                owner=owner, file=rel_path, statement=run.call.lineno, table=statement.table, term=term, unread=KEY_NO_MAP
+                owner=owner,
+                file=rel_path,
+                statement=run.call.lineno,
+                table=statement.table,
+                term=term,
+                keyed=mapping,
+                unread=KEY_NO_MAP,
             )
             record._binds = (func, rel_path, [])
             key_froms.append(record)
@@ -494,6 +498,20 @@ def _key_froms(
         binds = record._binds[2]
         binds.extend(found)
         record.unread = "" if binds else KEY_NO_BIND
+
+
+def _row_terms(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution, statement: sqltext.SqlWrite
+) -> list[tuple[str, str, str]]:
+    """``(term, bind, mapping)`` for each term of *statement* that names its rows: the ones its text spells
+    (``jediTaskID=:jediTaskID``, an ``IN`` list a helper builds), *mapping* empty; and a term ``{}=:cr_{}`` it builds
+    in a loop over a mapping's keys, one per key the mapping holds through the corpus's calls
+    (:func:`sql.keyed_items`): ``updateTask_JEDI``'s ``jediTaskID=:cr_jediTaskID``, *mapping* ``criteria``."""
+    terms = [(f"{column}={bind}", bind, "") for column, bind in sorted(statement.keys.items())]
+    terms += [(f"{column} IN ({bind})", bind, "") for column, bind in sorted(statement.key_lists.items())]
+    for item in sql.keyed_items(func, run, statement.key_holes, clause="WHERE"):
+        terms += [(f"{key}={bind}", bind, ast.unparse(item.mapping)) for key, bind in sorted(item.binds.items())]
+    return terms
 
 
 def _ran_by(record: KeyFrom, func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution) -> None:
@@ -721,7 +739,10 @@ def _values_map(node: Optional[ast.AST]) -> Optional[tuple[ast.expr, ast.Call]]:
 
 
 def _objects_in(func: ast.AST, name: str, at: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
-    """The objects the map *name* is made of where *at* runs: each ``name = obj.valuesMap(...)`` that reaches it."""
+    """The objects the map *name* is made of where *at* runs: each ``name = obj.valuesMap(...)`` that reaches it, and
+    each ``obj.valuesMap(...)`` it is filled from entry by entry where the entries reach it -- ``updateTask_JEDI``'s
+    ``for tmpKey, tmpVal in taskSpec.valuesMap(useSeq=False, onlyChanged=True).items(): varMap[tmpKey] = tmpVal``
+    beside its criteria's binds (:func:`mapentries.row_copies`, as the objects' records read the map)."""
     made = [
         node
         for node in own_nodes(func)
@@ -729,10 +750,15 @@ def _objects_in(func: ast.AST, name: str, at: ast.AST) -> list[tuple[ast.expr, a
         and any(isinstance(t, ast.Name) and t.id == name for t in node.targets)
         and _values_map(node.value) is not None
     ]
-    if not made:
-        return []
-    live = sql._live_at(func, name, made, at)  # type: ignore[arg-type]
-    return [_values_map(node.value) for node in made if id(node) in live]  # type: ignore[misc]
+    found: list[tuple[ast.expr, ast.Call]] = []
+    if made:
+        live = sql._live_at(func, name, made, at)  # type: ignore[arg-type]
+        found += [_values_map(node.value) for node in made if id(node) in live]  # type: ignore[misc]
+    for copied, node in mapentries.row_copies(func, name).items():
+        one = _values_map(copied)
+        if one is not None and id(node) in sql._live_at(func, name, [node], at):  # type: ignore[arg-type]
+            found.append(one)
+    return found
 
 
 def _objects_of(run: sql.Execution, func: ast.AST) -> list[tuple[ast.expr, ast.Call]]:
@@ -1211,9 +1237,7 @@ def _mark_object(
     spelled_obj = ast.unparse(obj)
     attributes = {a.lower(): a for a in attributor.declared_attributes(obj_class)}
     owner = f"{rel_path}::{func.name}"
-    terms = [(f"{column}={bind}", bind) for column, bind in statement.keys.items()]
-    terms += [(f"{column} IN ({bind})", bind) for column, bind in statement.key_lists.items()]
-    for term, bind in terms:
+    for term, bind, _mapping in _row_terms(func, run, statement):
         record = keyed.get((owner, run.call.lineno, statement.table, term))
         if record is None:
             continue
@@ -2245,6 +2269,9 @@ class ReadStatement(NamedTuple):
     #: What the statement returns -- :attr:`ReadSiteNode.result`.  Read off
     #: every run, so it arrives by ``_replace``.
     result: str = ""
+    #: Those of ``keys`` a term built in a loop over a mapping's keys asks by -- :attr:`ReadSiteNode.keyed`.  A set
+    #: made with the record, where its runs are read.
+    keyed: Optional[set[str]] = None
 
 
 class _Hop(NamedTuple):
@@ -4535,6 +4562,7 @@ def read_side(
                     tables=set(),
                     conditions=[],
                     joins=set(),
+                    keyed=set(),
                     unresolved=tuple(
                         sorted(
                             {f"{stop.source} -- {stop.reason}" for stop in run.unresolved}
@@ -4585,6 +4613,12 @@ def read_side(
                             statements.setdefault((at.owner, at.line), at).keys.add(subject)
                     for value in term.literals:
                         record(subject, value, owner, term.verb, at)
+                for table, column, _bind, _mapping in _read_keyed(func, run):
+                    held = statements.setdefault((at.owner, at.line), at)
+                    subject = _column_subject(attributor, table, column)
+                    held.keys.add(subject)
+                    if held.keyed is not None:
+                        held.keyed.add(subject)
                 ways = _outright_terms(func, run)
                 refuses_here = run_refuses(func, run, module.rel_path, ways)
                 site = (owner, run.call.lineno)
@@ -4666,6 +4700,7 @@ def read_site_nodes(
                 restricts=sorted(f"{subject}={value}" for subject, value in at.restricts),
                 consults=sorted(f"{subject}={value}" for subject, value in at.consults),
                 keys=sorted(at.keys),
+                keyed=sorted(at.keyed or ()),
                 order_by=sorted(at.order_by),
                 limits=sorted(at.limits),
                 call_readings=list(at.call_readings),
@@ -7184,6 +7219,23 @@ def _site_function(
     )
 
 
+def _read_keyed(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
+) -> list[tuple[str, str, str, str]]:
+    """``(table, column, bind, mapping)`` for each term ``{}=:{}`` of a read *run*'s ``WHERE`` it builds in a loop over
+    a mapping's keys, one per key the mapping holds through the corpus's calls (:func:`sql.keyed_items`):
+    ``queryDatasetWithMap``'s ``WHERE {key}=:{key}`` over its *map*, ``name`` and ``vuid``.  The table is the one the
+    statement reads; none where it reads several."""
+    tables = sorted({table for verb, table in _table_verbs(run.reading) if verb == "read"})
+    if len(tables) != 1:
+        return []
+    return [
+        (tables[0], key, bind, ast.unparse(item.mapping))
+        for item in sql.keyed_items(func, run, sqltext.read_key_holes(run.reading), clause="WHERE")
+        for key, bind in sorted(item.binds.items())
+    ]
+
+
 def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) -> list[KeyFrom]:
     """A KeyFrom (:attr:`KeyFrom.reads`) for each row-naming term of each read site's run: a term on the statement's
     own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding, every row meeting it -- as
@@ -7236,6 +7288,32 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                     continue
                 record._binds[2].extend(bound)
                 record.unread = "" if record._binds[2] else KEY_NO_BIND
+            for table, column, bind, mapping in _read_keyed(func, run):
+                spelled = f"{column}={bind}"
+                record = found.get((site.owner, line, table, spelled))
+                if record is None:
+                    record = found[(site.owner, line, table, spelled)] = KeyFrom(
+                        owner=site.owner,
+                        file=file,
+                        statement=line,
+                        table=table,
+                        term=spelled,
+                        keyed=mapping,
+                        unread=KEY_NO_MAP,
+                        reads=True,
+                    )
+                    record._binds = (func, file, [])
+                _ran_by(record, func, run)
+                bound = (
+                    sql.bound_values(func, run.varmap, bind, run.window, at=run)
+                    if run.varmap is not None
+                    else sql.inline_binds(run.call, bind)
+                )
+                held = record._binds
+                if held is None or (run.varmap is None and not bound):
+                    continue
+                held[2].extend(bound)
+                record.unread = "" if held[2] else KEY_NO_BIND
     return list(found.values())
 
 

@@ -20456,6 +20456,117 @@ def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_
     ]
 
 
+#: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,
+#: from a map whose callers hand one key or the other; and one over a map no caller is read for.
+_KEYED_WHERE = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria):
+        if criteria == {}:
+            return False
+        taskSpec.status = "running"  # SET
+        sqlU = f"UPDATE ATLAS_PANDA.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in criteria.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        for tmpKey, tmpVal in taskSpec.valuesMap(useSeq=False, onlyChanged=True).items():
+            varMap[tmpKey] = tmpVal
+        self.cur.execute(sqlU + sql, varMap)  # RUN T
+        return True
+
+    def queryDatasetWithMap(self, map):
+        sql = "SELECT name FROM ATLAS_PANDA.Datasets"
+        varMap = {}
+        for key in map:
+            sql += f" WHERE {key}=:{key}"
+            varMap[f":{key}"] = map[key]
+        self.cur.execute(sql, varMap)  # RUN D
+        return self.cur.fetchall()
+
+    def unread(self, task, handed):
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in handed.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        varMap[":status"] = "done"
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status " + sql, varMap)  # RUN U
+
+    def caller(self, taskSpec: JediTaskSpec, name, vuid):
+        self.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID})
+        self.queryDatasetWithMap({"name": name})
+        self.queryDatasetWithMap({"vuid": vuid})
+'''
+
+
+def test_a_where_term_built_from_a_maps_keys_is_a_term_for_each_key_its_callers_hand(tmp_path):
+    """``updateTask_JEDI``'s ``{tmpKey}=:cr_{tmpKey}`` over its criteria is read for each key the criteria hold through
+    the corpus's calls, as a ``SET`` item ``{}=:{}`` is (:func:`sql.keyed_items`): the write keyed by ``jediTaskID``,
+    marked as there only when the caller's map holds the key.  A map read for no key keeps the term unread."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/Specs.py": _MAPPED_SPECS, rel: _KEYED_WHERE}
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions + arms,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            modules=modules,
+            attributor=attributor,
+        )
+    lines = _KEYED_WHERE.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    found = sorted(
+        (one.owner.rpartition("::")[2], one.statement, one.table, one.term, one.keyed)
+        for one in froms
+        if one.term and one.table
+    )
+    assert found == [
+        ("queryDatasetWithMap", at("# RUN D"), "Datasets", "name=:name", "map"),
+        ("queryDatasetWithMap", at("# RUN D"), "Datasets", "vuid=:vuid", "map"),
+        ("updateTask_JEDI", at("# RUN T"), "JEDI_Tasks", "jediTaskID=:cr_jediTaskID", "criteria"),
+    ]
+    (keyed,) = [one for one in froms if one.term == "jediTaskID=:cr_jediTaskID"]
+    # A value of the map's items reads as the map itself (KeySource.paths): the caller's criteria, key and all.
+    assert [(s.kind, s.name, s.paths) for s in keyed.sources] == [("parameter", "criteria", ["()"])]
+    # The map is filled from the spec's valuesMap() entry by entry: the statement persists the spec, so its write is
+    # on the row the term names, and no record is left for an object no write persists.
+    assert keyed.writes == {"JediTaskSpec.status": [at("# SET")]}
+    assert not [one for one in froms if one.owner.endswith("::updateTask_JEDI") and not one.table]
+    read = {s.owner.rpartition("::")[2]: s for s in sites}
+    assert read["queryDatasetWithMap"].keys == ["Datasets.name", "Datasets.vuid"]
+    assert read["queryDatasetWithMap"].keyed == ["Datasets.name", "Datasets.vuid"]
+    assert not [one for one in froms if one.owner.endswith("::unread") and one.term]
+
+
+#: A term whose binds a parameter fills (``status IN (:old___in)`` from *oldStatus*), and a caller handing it a list
+#: of literals a spec's method returns, and one more.
 _READ_TWICE = '''
 class TaskModule:
     def countTasks(self, vo):
