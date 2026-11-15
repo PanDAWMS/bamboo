@@ -1389,6 +1389,22 @@ lines carry no mark (ContentsFeeder's, K70), or where the list is not made of a 
 label is a premise its lines cannot show (two whose short cycles take turns overlap nowhere), and a message
 processor's way in is named, not read.
 
+*Changed (A2, 2026-11-15, out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* where no pass of a late mover took
+the row before the one that moved it on, and the key each write of its arms takes the row by comes only from rows of
+selections on another table the map's `wakers` write -- getTasksToExecCommand_JEDI's 4483 by 4339's
+`prodsys_comm.comm_task`, a command row sendCommandTaskPanda inserts at 4038 -- the mover runs on the row when a waker
+wrote a row for its key (`Rerun._waker_turn`), before U1.  The wakers' runs of the key are asked over the stay on every
+machine; a run wrote where a row of it prints only on a path through the waker's line (`implying_rows`, H2's test); the
+last such write before the move ends the branch, with the value a row printed where it is one of the wakers' values,
+and the API entry the map's waker routes name where they name one.  None in the stay stops it (K55), naming the system
+an inbound boundary says writes the table too (DEFT's PRODSYS_COMM: no log here).  Premises named: that system wrote
+none in the stay; the mover's first pass after the write took it (its passes print no key).  Another source of the
+key, or a waker's log not searched whole, leaves it to U1 as before.  MT-exhausted-late: a retry command registered at
+11:14:16 on aipanda097, the move 7 s later.  The external actor is the chain's end, as a pilot's API call is; what A2
+reads is the table between the act and the mover (tmaeno, 2026-11-15).  A stuck value's stay is read alike up to the
+window's end, the statuslog's as_of: none in it stops the branch the same way (MT-exhausted-stuck: no command row for
+the task from 08:31:31 to 13:58:02); a write in it with the value not moved on is not read here (U1 as before).
+
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
 A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's
@@ -2619,9 +2635,16 @@ Premises not read:
   the millisecond on the same host; elsewhere it is measured to the second only (recorded.py, JEDI_CLOCKS).
 - *The recorder's runs are in the records.*  Its methods' logs are asked on the row's host near the row, whole, as
   K67 asks them; where they are not answered the asks are kept and the pass is read as before.
-- *The row's recorder is called after one of the mover's own arms.*  The history pairs are read after the mover's arms
-  only: TaskCommando's pass that wrote 'exhausted' through retryTask_JEDI (MT-exhausted-late, 09:33:01.716) has none
-  after its arms 181 and 197 (those name updateTask_JEDI at 201), so it is read as one of the value's time.
+- *The row's recorder is called after one of the mover's own arms.*  *Changed (A1, 2026-11-15, the analyzer
+  handover's out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* at the row that began the value's time, where
+  none of the mover's arms' pairs places it, the pairs of another writer's arm that may write the value (the value, or
+  one known only at run time) are read too, where the map's reach goes from the mover's function into that arm's by
+  calls alone (`Rerun._entering_recorders`, `Rerun._reached`): TaskCommando's pass that wrote 'exhausted' through
+  retryTask_JEDI (MT-exhausted-late, 09:33:01.716; its arms 181 and 197 name updateTask_JEDI at 201) is that row's
+  pass, the recorder's run placed inside it by time, its call not named.  At the move the mover's own arms alone are
+  read, as before.  A recorder that prints nothing leaves no run to place: MJ-starting-late's update_job pass at
+  08:28:00, inside which updateJobStatus's recordStatusChange (silent) most likely recorded 'starting', stays one of
+  the value's time, and a line says so.
 - *A pass is one execution.*  A run with no entry row is not cut (JobGenerator's `<jediTaskID=... datasetID=...>` on
   aipanda081, 51 records in 9 bursts over two days, MT-throttled-stuck), and is read whole as before: not decided here.
 - *Between the first row of the value and a row writing it again, nothing is read.*  The window opens at the second
