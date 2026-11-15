@@ -167,17 +167,27 @@ def surely_true(op: str, offset: datetime.timedelta, pieces) -> list[tuple[datet
 
 def surely_false_all(op: str, offset: datetime.timedelta, pieces) -> bool:
     """Whether ``col <op> clock + offset`` surely fails at every moment of the pieces."""
+    return bool(pieces) and surely_false_between(op, offset, pieces, pieces[0][0], pieces[-1][1])
+
+
+def surely_false_between(op: str, offset: datetime.timedelta, pieces, a: datetime.datetime, b: datetime.datetime) -> bool:
+    """Whether ``col <op> clock + offset`` surely fails at every moment of [a, b]: a selection that ran then did not
+    return the row on it (P5).  An open arm writes from its piece's start, not from *a*."""
+    met = False
     for p in pieces:
-        a, b = p[0], p[1]
+        lo_t, hi_t = max(p[0], a), min(p[1], b)
+        if lo_t > hi_t:
+            continue
+        met = True
         if op in ("<", "<="):
-            # col >= t + offset for every value at t: lo(t) >= t + offset, worst at the piece's end
-            lo, _ = bounds_at(p, b)
-            if lo == LOW or _plus(lo, -offset) < b:
+            # col >= t + offset for every value at t: lo(t) >= t + offset, worst at the latest t
+            lo, _ = bounds_at(p, hi_t)
+            if lo == LOW or _plus(lo, -offset) < hi_t:
                 return False
         elif op in (">", ">="):
             # col <= t + offset for every value at t: an open arm's at most t + o.hi, the writes read's at most hi
-            if any(o.hi is None or o.hi > offset for o in p[4]) or p[3] == HIGH or _plus(p[3], -offset) > a:
+            if any(o.hi is None or o.hi > offset for o in p[4]) or p[3] == HIGH or _plus(p[3], -offset) > lo_t:
                 return False
         else:
             return False
-    return True
+    return met

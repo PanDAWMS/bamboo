@@ -218,7 +218,9 @@ def selection_of(owner: str, line: int) -> tuple[Selection | None, str]:
 @dataclass(frozen=True)
 class CycleRows:
     """C2: the agent's rows in the innermost loop around the selecting call: *before* it (in order) and *after* it;
-    *label*, the hole a row before it prints the loop's element by (``prod_source_label``), or ""."""
+    *label*, the hole a row before it prints the loop's element by (``prod_source_label``), or "" -- a row every pass
+    to the call prints (:func:`_straight`), not one a branch or a handler prints on the way that skips the call
+    (TaskCommando's "failed to get lock" line; P7, out/gm/qk-design.md, tmaeno's OK 2026-11-15 23:06)."""
 
     before: tuple[R.Row, ...]
     after: tuple[R.Row, ...]
@@ -241,8 +243,23 @@ def cycle_rows(sel: Selection) -> CycleRows | None:
     before = tuple(r for r in rows if r.line < sel.call)
     after = tuple(r for r in rows if r.line > sel.call)
     targets = {n.id for n in ast.walk(loop.target) if isinstance(n, ast.Name)} if isinstance(loop, (ast.For, ast.AsyncFor)) else set()
-    label = next((t for r in before for t in targets if t in _holes(r)), "")
+    label = next((t for r in before if _straight(r.stmt, loop) for t in targets if t in _holes(r)), "")
     return CycleRows(before, after, label)
+
+
+def _straight(stmt: ast.AST, loop: ast.For | ast.AsyncFor | ast.While) -> bool:
+    """Whether *loop*'s body reaches *stmt* straight: through the bodies of ``with`` and ``try`` only, not an ``if``'s
+    branch, a handler, an ``else`` or a nested loop -- so every pass of the body that reaches a later statement of it
+    printed *stmt* first."""
+    child = stmt
+    for parent in pathcond.ancestors(stmt):
+        if parent is loop:
+            return any(c is child for c in loop.body)
+        if isinstance(parent, (ast.With, ast.AsyncWith, ast.Try)) and any(c is child for c in parent.body):
+            child = parent
+            continue
+        return False
+    return False
 
 
 def _holes(row: R.Row) -> set[str]:
