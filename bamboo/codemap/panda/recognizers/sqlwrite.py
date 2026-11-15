@@ -1752,6 +1752,10 @@ def _outcomes(
             )
         return found
 
+    if supplied.kind == "expression" and (keyed := sql.keyed_fragments(func, run, statement).get(column)):
+        # A column named by a mapping's key and changed by an amount: decided
+        # at each fragment putting its item in, under that fragment's tests.
+        return [_Outcome(f"runtime({said})", 2, node, [], node) for node, said in keyed]
     node = _deciding_fragment(func, run, column, supplied, statement.kind)
     if node is None:
         why.append(NO_DECIDING_FRAGMENT)

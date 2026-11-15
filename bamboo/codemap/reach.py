@@ -144,6 +144,8 @@ _BUILTIN_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
 } | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
 _SCALARS = callfacts.SCALARS
+#: The builtin mappings by the names :meth:`_Receivers.of` gives them: going through one gives its keys.
+_MAPPINGS = frozenset(one.builtin for one in callfacts.CONTAINERS.values() if one.holds == callfacts.MAPPING and one.builtin)
 #: The dunders each operator calls (:data:`callfacts.OPERATOR_DUNDERS`).
 _OPERATORS = callfacts.OPERATOR_DUNDERS
 
@@ -1322,6 +1324,8 @@ class _Holders:
             and not isinstance(value.args[0], ast.Starred)
             and (function := callfacts.builtin_function(self.calls.types, file, func, value)) is not None
         ):
+            if self._keys_only(file, func, value.args[0]):
+                return []  # sorted(d), list(d): a mapping's keys, as d.keys() is
             if function.gives == callfacts.COPY:
                 return [(value.args[0], (None,), (None,))]
             if function.gives == callfacts.NUMBERED:
@@ -1566,11 +1570,20 @@ class _Holders:
             isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension))
             and parent.target is here
         ):
-            self._place(file, func, parent.iter, (None, *path, *at), of)
+            if not self._keys_only(file, func, parent.iter):
+                self._place(file, func, parent.iter, (None, *path, *at), of)
         elif isinstance(parent, ast.NamedExpr) and parent.target is here:
             self._place(file, func, parent.value, at, of)
         else:
             self._unread(at, of)
+
+    def _keys_only(self, file: str, func: ast.AST, value: ast.AST) -> bool:
+        """Whether going through *value* -- a loop over it, a builtin's copy of it -- gives its keys and none of its
+        values: a mapping, as ``d.keys()`` does (``for k in d``, ``sorted(d)``).  By what the map says *value* is."""
+        if not isinstance(value, ast.expr):
+            return False
+        kind = self.receivers.of(file, func, value)
+        return kind[0] == _BUILTIN and kind[1] in _MAPPINGS
 
     # -- where a holder's value goes ------------------------------------------------
 
@@ -1654,7 +1667,7 @@ class _Holders:
                     return
                 step = ((None,), ())
             elif isinstance(parent, (ast.comprehension, ast.For, ast.AsyncFor)):
-                if parent.iter is here:
+                if parent.iter is here and not self._keys_only(file, func, here):
                     self._assigned(file, func, parent.target, (), (None,), at, of)
                 return
             elif (
@@ -1824,7 +1837,9 @@ class _Holders:
                 if any(argument is one for one in whole):
                     return (), ()  # max(a, b), next(it, default): one of them
                 if any(argument is one for one in elements):
-                    return (), (None,)
+                    return None if self._keys_only(file, func, argument) else ((), (None,))
+            if len(call.args) == 1 and gives in (callfacts.COPY, callfacts.NUMBERED) and self._keys_only(file, func, argument):
+                return None  # sorted(d), list(d), enumerate(d): a mapping's keys, as d.keys() is
             if len(call.args) == 1 and gives == callfacts.COPY:
                 return (None,), (None,)
             if len(call.args) == 1 and gives == callfacts.NUMBERED:

@@ -43,6 +43,7 @@ What the text says -- tables, columns, values, order -- is read by
 from __future__ import annotations
 
 import ast
+import builtins
 import collections
 import contextlib
 import logging
@@ -330,6 +331,23 @@ _CALLS: Optional["Calls"] = None
 
 #: What a mapping can hold, read through :data:`_CALLS` (:func:`_corpus_keys`), with the calls it was read through.
 _RECEIVERS: Optional[tuple["Calls", "_Receivers"]] = None
+
+#: Each loop over a mapping whose ``SET`` items a run was read to write columns through (:func:`with_keyed_columns`),
+#: as :func:`_loop_place` says it, with the calls it was read through: what :func:`key_column_census` counts as named.
+_NAMED: Optional[tuple[Optional["Calls"], set[tuple[str, int, int, int]]]] = None
+
+
+def _named() -> set[tuple[str, int, int, int]]:
+    global _NAMED
+    if _NAMED is None or _NAMED[0] is not _CALLS:
+        _NAMED = (_CALLS, set())
+    return _NAMED[1]
+
+
+def _loop_place(func: ast.AST, mapping: ast.expr) -> tuple[str, int, int, int]:
+    """Where a loop over *mapping* in *func* is, by line rather than by node: a slice may read its own copy of the
+    tree."""
+    return (getattr(func, "name", ""), getattr(func, "lineno", 0), mapping.lineno, mapping.col_offset)
 
 @contextlib.contextmanager
 def across_calls(calls: Optional["Calls"]) -> Iterator[None]:
@@ -1171,7 +1189,7 @@ def kept_map_keys(column: object, keys: list[str]) -> Optional[list[str]]:
     key, mapping = _mapping_iterated(loop)
     if not key or mapping is None or column.source != key:
         return None
-    return _kept_keys(loop, key, keys)
+    return _kept_keys(loop, key, keys, mapping)
 
 
 def _literal_keys(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[str]:
@@ -1348,12 +1366,18 @@ def _test_value(
     return None
 
 
-def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
+def _kept_keys(loop: ast.For, key: str, keys: list[str], mapping: ast.expr) -> Optional[list[str]]:
     """Of *keys*, the ones the loop does not ``continue`` past.
 
     ``None`` when the loop skips on something this cannot read.  A skip that is
     missed does not shorten the answer, it falsifies it: the column would be
     reported as written on every pass when the code writes it on none.
+
+    A skip that reads the key only as *mapping*'s value at it
+    (:func:`_tests_the_value`) says on which passes a key is skipped, not
+    which keys are: ``propagateResultToJEDI``'s ``if tmpStatVal == 0:
+    continue``.  The key is kept, as a pass the loop may make -- the reading
+    holds the loop's pass as one that may run or not already.
     """
     guards: list[ast.expr] = []
     for node in walk(loop):
@@ -1362,6 +1386,8 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
             # about which keys reach the fragment.
             continue
         if isinstance(node, ast.If) and len(node.body) == 1 and isinstance(node.body[0], ast.Continue):
+            if _tests_the_value(node.test, loop, key, mapping):
+                continue
             guards.append(node.test)
         elif isinstance(node, ast.Continue) and not any(
             isinstance(one, ast.If) and one.body == [node] for one in walk(loop)
@@ -1376,6 +1402,63 @@ def _kept_keys(loop: ast.For, key: str, keys: list[str]) -> Optional[list[str]]:
         if not any(decided):
             kept.append(one)
     return kept
+
+
+def _at_key(node: ast.AST, key: str, mapping: ast.expr) -> bool:
+    """Whether *node* is ``mapping[key]``."""
+    return (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.slice, ast.Name)
+        and node.slice.id == key
+        and ast.unparse(node.value) == ast.unparse(mapping)
+    )
+
+
+def _value_names(loop: ast.For, key: str, mapping: ast.expr) -> set[str]:
+    """The names *loop* holds its mapping's value at *key* in: ``v`` of ``for k, v in d.items()``, ``x`` of ``x =
+    d[k]`` -- each bound in the loop to that and nothing else."""
+    found: set[str] = set()
+    target = loop.target
+    if (
+        isinstance(target, ast.Tuple)
+        and len(target.elts) == 2
+        and isinstance(target.elts[1], ast.Name)
+        and isinstance(loop.iter, ast.Call)
+        and isinstance(loop.iter.func, ast.Attribute)
+        and loop.iter.func.attr == "items"
+    ):
+        found.add(target.elts[1].id)
+    bound: dict[str, bool] = {}
+    for node in walk(loop):
+        if node is loop:
+            continue
+        for one in targets_of(node):
+            if isinstance(one, ast.Name):
+                plain = isinstance(node, ast.Assign) and len(node.targets) == 1 and _at_key(node.value, key, mapping)
+                bound[one.id] = bound.get(one.id, True) and plain
+    return {name for name in found if name not in bound} | {name for name, plain in bound.items() if plain}
+
+
+def _tests_the_value(test: ast.expr, loop: ast.For, key: str, mapping: ast.expr) -> bool:
+    """Whether *test* reads the loop's key only as its mapping's value there -- ``d[k]``, or a name holding it
+    (:func:`_value_names`) --, and nothing else but builtins it calls: ``tmpStatVal == 0`` after ``tmpStatVal =
+    tmpContentsStat[tmpStatKey]``."""
+    values = _value_names(loop, key, mapping)
+    inside: set[int] = set()
+    reads = False
+    for node in ast.walk(test):
+        if _at_key(node, key, mapping):
+            reads = True
+            inside.update(id(one) for one in ast.walk(node))
+    called = {id(node.func) for node in ast.walk(test) if isinstance(node, ast.Call)}
+    for node in ast.walk(test):
+        if not isinstance(node, ast.Name) or id(node) in inside:
+            continue
+        if node.id in values:
+            reads = True
+        elif not (id(node) in called and hasattr(builtins, node.id)):
+            return False
+    return reads
 
 
 def spells_key(
@@ -1400,7 +1483,7 @@ def spells_key(
     if not name or mapping is None:
         return None
     keys = _mapping_keys(func, mapping)
-    kept = _kept_keys(loop, name, keys) if keys else None
+    kept = _kept_keys(loop, name, keys, mapping) if keys else None
     if not kept:
         return None
     tests = _tests_inside(node, loop)
@@ -1531,13 +1614,36 @@ def map_key(
 
 
 class KeyedItem(NamedTuple):
-    """A ``SET`` item ``{}=:{}`` read for each key of the mapping its loop walks (:func:`keyed_items`)."""
+    """A ``SET`` item ``{}=:{}`` or ``{}={}+{}`` read for each key of the mapping its loop walks
+    (:func:`keyed_items`)."""
 
     #: The item as the statement spells it: ``SET {}=:{}``.
     spelled: str
     mapping: ast.expr
-    #: Each key the loop lets through -- the column the item writes -- and the bind it puts there: ``:transExitCode``.
+    #: Each key the loop lets through -- the column the item writes -- and what it puts there: the bind
+    #: ``:transExitCode``, or the column changed by an amount, ``nFilesFinished + {}``.
     binds: dict[str, str]
+    #: The statement putting the item into the text, the one its column's hole is at: ``sqlJediDS +=
+    #: f"{tmpStatKey}={tmpStatKey}+{tmpStatVal},"``.  None where the hole is at no statement.
+    fragment: Optional[ast.stmt] = None
+
+
+def _counted_key(column: object, first: object) -> Optional[ast.expr]:
+    """The mapping a ``SET`` item ``{k}={k}+{v}`` is named by the key of: ``tmpContentsStat`` for
+    ``propagateResultToJEDI``'s ``for tmpStatKey in tmpContentsStat: ... sqlJediDS +=
+    f"{tmpStatKey}={tmpStatKey}+{tmpStatVal},"``.  The item's column and the first hole of its value are both the key of
+    the loop they are written in; the amount is the run's, and not read."""
+    if type(column) is not sqleval.HoleAt or type(first) is not sqleval.HoleAt:
+        return None
+    if not (isinstance(column.stmt, ast.AST) and isinstance(first.stmt, ast.AST)):
+        return None
+    loop = next((one for one in ancestors(column.stmt) if isinstance(one, ast.For)), None)
+    if loop is None or not any(one is loop for one in ancestors(first.stmt)):
+        return None
+    key, mapping = _mapping_iterated(loop)
+    if not key or mapping is None or column.source != key or first.source != key:
+        return None
+    return mapping
 
 
 def keyed_items(
@@ -1550,16 +1656,23 @@ def keyed_items(
     with the keys the mapping can hold that the loop's ``continue`` tests let through (:func:`kept_map_keys`):
     ``updateJobStatus``' ``for key in list(param): ... sql1 += f",{key}=:{key}"; varMap[f":{key}"] = param[key]``,
     ``param`` filled by ``pilot_api.update_job``.  *keys_of* says what a mapping named so can hold, by default from
-    every name holding it through the corpus's calls (:func:`_corpus_keys`).  An item not read so stays a hole."""
+    every name holding it through the corpus's calls (:func:`_corpus_keys`).  An item not read so stays a hole.
+
+    An item that is not a bind, ``{}={}+{}`` (:attr:`sqltext.SqlWrite.column_holes`), writes each key's column
+    changed by an amount, read as :func:`_counted_key` says: ``propagateResultToJEDI``'s file counts."""
     holes = run.reading_holes
     found: list[KeyedItem] = []
     for column, bind, numbers in column_holes:
         if not all(0 < number <= len(holes) for number in (column, *numbers)):
             continue
         hole = holes[column - 1]
+        counted = not bind.startswith(":")
         mapping: Optional[ast.expr] = None
         try:
-            mapping = map_key(func, run, hole, bind, tuple(holes[number - 1] for number in numbers))
+            if counted:
+                mapping = _counted_key(hole, holes[numbers[0] - 1]) if numbers else None
+            else:
+                mapping = map_key(func, run, hole, bind, tuple(holes[number - 1] for number in numbers))
             if isinstance(mapping, ast.Name):
                 keys = keys_of(mapping.id) if keys_of is not None else _corpus_keys(func, mapping.id)
             else:
@@ -1569,24 +1682,61 @@ def keyed_items(
             kept = None
         if kept is None or mapping is None:
             continue
-        found.append(KeyedItem(f"SET {{}}={bind}", mapping, {key: bind.replace("{}", key) for key in kept}))
+        found.append(
+            KeyedItem(
+                f"SET {{}}={bind}",
+                mapping,
+                {key: bind.replace("{}", key, 1) if counted else bind.replace("{}", key) for key in kept},
+                hole.stmt if isinstance(hole.stmt, ast.stmt) else None,
+            )
+        )
+    return found
+
+
+def keyed_fragments(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, statement: sqltext.SqlWrite
+) -> dict[str, list[tuple[ast.stmt, str]]]:
+    """For each column *statement*'s ``SET`` items ``{}={}+{}`` write for a mapping's keys (:func:`keyed_items`), the
+    statements putting an item into the text, each with what it puts there: ``propagateResultToJEDI``'s
+    ``nFilesFinished`` from ``f"{tmpStatKey}={tmpStatKey}+{tmpStatVal},"`` as ``nFilesFinished + {}``, under ``if
+    tmpStatVal > 0``, and from the ``-`` one under its ``else``.  The text spells neither column, so no reading of it
+    finds where the value was put; the item's own hole says.  An item filled by a bind is decided where the bind is
+    filled, and is not here."""
+    found: dict[str, list[tuple[ast.stmt, str]]] = {}
+    for item in keyed_items(func, run, statement.column_holes):
+        if item.fragment is None:
+            continue
+        for column, said in item.binds.items():
+            if not said.startswith(":"):
+                found.setdefault(column, []).append((item.fragment, said))
     return found
 
 
 def with_keyed_columns(
     func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution, statement: sqltext.SqlWrite
 ) -> sqltext.SqlWrite:
-    """*statement* with its ``SET`` items ``{}=:{}`` read for each key of the mapping their loop walks
-    (:func:`keyed_items`) as the columns they write, each filled by its bind as ``col=:bind`` is:
+    """*statement* with its ``SET`` items ``{}=:{}`` and ``{}={}+{}`` read for each key of the mapping their loop walks
+    (:func:`keyed_items`) as the columns they write, each filled by its bind as ``col=:bind`` is, or changed as
+    ``col=col+1`` is:
     ``updateJobStatus``' ``,{key}=:{key}`` over the pilot's keys writes ``transExitCode`` from ``:transExitCode``,
     which the run's map gets at ``varMap[f":{key}"] = param[key]`` (:func:`spells_key`).  Every reader of the
     columns a run writes reads them so: the junctions, and where a history row is placed."""
-    added = {
-        column: sqltext.ColumnValue(kind="bind", text=bind)
-        for item in keyed_items(func, run, statement.column_holes)
-        for column, bind in item.binds.items()
-        if column not in statement.columns
-    }
+    items = keyed_items(func, run, statement.column_holes)
+    named = _named()
+    named.update(_loop_place(func, item.mapping) for item in items if item.binds)
+    added: dict[str, sqltext.ColumnValue] = {}
+    for item in items:
+        for column, bind in item.binds.items():
+            if column in statement.columns:
+                continue
+            before = added.get(column)
+            if not bind.startswith(":") and before is not None and before.kind == "expression":
+                # ``{k}={k}+{v}`` and ``{k}={k}-{abs(v)}`` in one pass, either
+                # of them run: the column changed by an amount, either way.
+                said = before.text if bind in before.text.split(" or ") else f"{before.text} or {bind}"
+                added[column] = sqltext.ColumnValue(kind="expression", text=said)
+            else:
+                added[column] = sqltext.ColumnValue(kind="bind" if bind.startswith(":") else "expression", text=bind)
     return statement.model_copy(update={"columns": {**statement.columns, **added}}) if added else statement
 
 
@@ -1599,16 +1749,22 @@ class KeyColumnCensus(NamedTuple):
 
 
 def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumnCensus:
-    """Count the fragments written from a mapping's keys, and how many the run read.
+    """Count the fragments written from a mapping's keys, and how many the map named something by.
 
     An unresolved one leaves the statement naming no column at all, which looks
     exactly like a statement that writes none.  The count is reported so that
     the two are not read as the same answer, and so that the five the corpus
-    leaves to a caller are a number rather than a silence.
+    leaves to a caller are a number rather than a silence.  A fragment is
+    resolved where its run read it with no hole left, or where the build read
+    the ``SET`` items of its loop for the keys the mapping holds through the
+    corpus's calls (:func:`with_keyed_columns`): ``updateJobStatus``' ``param``.
+    A key the walk lost -- ``pilot_api.update_job``'s, once -- moves a fragment
+    out of resolved.
     """
     loops = resolved = from_parameter = 0
     arguments = {argument.arg for argument in func.args.args}
     counted: set[int] = set()
+    named = _named()
     # The fragments are where each stretch of what the calls run was written,
     # and the ones a hole stands for; read when no hole is left.
     fragments, unread = _run_fragments(func)
@@ -1619,7 +1775,7 @@ def key_column_census(func: ast.FunctionDef | ast.AsyncFunctionDef) -> KeyColumn
             continue
         counted.add(id(node))
         loops += 1
-        if read:
+        if read or _loop_place(func, fed) in named:
             resolved += 1
         elif isinstance(fed, ast.Name) and fed.id in arguments:
             from_parameter += 1

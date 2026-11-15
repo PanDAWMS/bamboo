@@ -1579,3 +1579,17 @@ def test_a_set_item_naming_its_column_and_its_bind_by_holes_is_kept_with_its_hol
     assert unrolled.column_holes == [(1, ":x_{}", (2,))]
     (named,) = sqltext.writes("UPDATE T SET a=:a,merge{}=:b WHERE b=:b")
     assert named.column_holes == []
+
+
+def test_a_set_item_changing_a_column_named_by_a_hole_by_an_amount_is_kept_with_its_holes():
+    """``propagateResultToJEDI``'s ``{k}={k}+{v},`` and ``{k}={k}-{abs(v)},`` for each key of a dataset's file counts
+    give no bind, so the bind's reading did not keep them.  They are kept as ``{}=:{}`` is, the value as the statement
+    spells it: which column the holes are, and whether the value's first hole is the same key, is the run's to read."""
+    marked = f"UPDATE T SET {sqltext.REPEAT_OPEN}{{}}={{}}+{{}},{{}}={{}}-{{}}{sqltext.REPEAT_CLOSE} WHERE b=:b"
+    (write,) = sqltext.writes(marked)
+    assert (write.columns, write.column_holes) == ({}, [(1, "{} + {}", (2, 3)), (4, "{} - {}", (5, 6))])
+    assert {why for _what, why in sqltext.unread_columns(marked)} == {sqltext.SET_COLUMN_IS_A_HOLE}
+    (amounts,) = sqltext.writes("UPDATE T SET {}={}+{}*2-1 WHERE b=:b")
+    assert amounts.column_holes == [(1, "{} + {} * 2 - 1", (2, 3))]
+    (other,) = sqltext.writes("UPDATE T SET {}=2+{},{}={} WHERE b=:b")
+    assert other.column_holes == []

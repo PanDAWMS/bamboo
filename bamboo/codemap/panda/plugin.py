@@ -34,6 +34,7 @@ from bamboo.codemap.models import (
     Anchor,
     AnnotationAudit,
     CallStop,
+    CoverageStat,
     FunctionPrintsNode,
     JunctionNode,
     MapFragment,
@@ -202,6 +203,9 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
 #: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules stay
 #: outside.
 PACKAGES = ("pandaserver", "pandajedi", "pandacommon")
+#: The coverage slice of the statement fragments a loop over a mapping's keys writes (:func:`sql.key_column_census`):
+#: candidates are the fragments, explained the ones the map named a column or term by.
+KEY_BUILT_SLICE_NAME = "sql-key-built"
 
 # Test code is not the system's behaviour: :func:`calls.is_test_module`, the
 # one rule the build and the call index share.
@@ -673,20 +677,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # A column name the code builds from a mapping key.  Where the keys
         # cannot be read the statement names no column, which in the map looks
         # exactly like a statement that writes none -- so the count is carried
-        # to the build report rather than left as that silence.
-        self.key_columns = sql.KeyColumnCensus(
-            *(
-                sum(part)
-                for part in zip(
-                    *(
-                        sql.key_column_census(func)
-                        for module in self._modules
-                        for func, _owner in functions_with_owner(module.tree)
-                    ),
-                    strict=True,
+        # to the build report, file by file in the coverage matrix, rather than
+        # left as that silence: a key the walk loses shows as one fewer named.
+        census: dict[str, sql.KeyColumnCensus] = {}
+        for module in self._modules:
+            counts = [sql.key_column_census(func) for func, _owner in functions_with_owner(module.tree)]
+            total = sql.KeyColumnCensus(*(sum(part) for part in zip(*counts, strict=True))) if counts else None
+            if total is not None and total.loops:
+                census[module.rel_path] = total
+                fragment.coverage.append(
+                    CoverageStat(
+                        slice_name=KEY_BUILT_SLICE_NAME,
+                        file=module.rel_path,
+                        candidates=total.loops,
+                        explained=total.resolved,
+                    )
                 )
-            )
-        )
+        self.key_columns = sql.KeyColumnCensus(
+            *(sum(part) for part in zip(*census.values(), strict=True))
+        ) if census else sql.KeyColumnCensus(0, 0, 0)
 
         # After promotion, which marks the subjects and drops none: the reach
         # figure is over every junction the slices produced.

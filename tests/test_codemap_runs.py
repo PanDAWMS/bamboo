@@ -39,7 +39,15 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
-from bamboo.codemap.panda import attribution, heldfrom, keycolumns, rewrites, runs, sql
+from bamboo.codemap.panda import (
+    attribution,
+    heldfrom,
+    keycolumns,
+    rewrites,
+    runs,
+    sql,
+    sqltext,
+)
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
 from bamboo.codemap.panda.recognizers import progress, sqlwrite
@@ -508,6 +516,137 @@ def test_a_column_named_by_a_mapping_s_key_is_on_the_row_its_statement_keys(
     (pair,) = branch.history
     assert (pair.call, pair.order) == (_line(KEYED, "K2"), HISTORY_AFTER)
     assert (pair.row, pair.row_why, pair.object) == (HISTORY_ROW_CAN, "", "panda_id")
+
+
+def test_a_fragment_the_build_read_through_the_callers_keys_is_named_in_the_census(tmp_path: Path) -> None:
+    """``update_status``' ``,{key}=:{key}`` over a parameter: once the build has read the ``SET`` items for the keys
+    ``update_job`` states (``sql.with_keyed_columns``), the census -- the build report's ``sql-key-built`` -- counts
+    the fragment as named.  Before, it counted every such fragment unresolved, the ones the map read included, and a
+    key the walk lost moved nothing."""
+    spec = SPEC.replace('("PandaID", "jobStatus")', '("PandaID", "jobStatus", "transExitCode")')
+    before, after, columns = _keyed_columns(tmp_path, {"spec": spec, "keyed": KEYED}, "update_status")
+
+    assert "transExitCode" in columns
+    assert (before.loops, before.resolved, after.resolved) == (1, 0, 1)
+
+
+def _keyed_columns(
+    tmp_path: Path, sources: dict[str, str], owner: str
+) -> tuple[sql.KeyColumnCensus, sql.KeyColumnCensus, dict[str, sqltext.ColumnValue]]:
+    """*owner*'s key census before and after its statements are read with :func:`sql.with_keyed_columns`, and the
+    columns they write so."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    modules = []
+    for name, text in sources.items():
+        (root / f"{name}.py").write_text(text)
+        _source, tree = calls_mod.parsed(root / f"{name}.py")
+        modules.append(
+            SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=tree, source=text, blob_sha=blob_sha(text))
+        )
+    calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
+    func = next(
+        node
+        for module in modules
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.FunctionDef) and node.name == owner
+    )
+    columns: dict[str, sqltext.ColumnValue] = {}
+    with sql.across_calls(calls):
+        before = sql.key_column_census(func)
+        for run in sql.executions(func):
+            for statement in sqltext.writes(run.reading):
+                columns.update(sql.with_keyed_columns(func, run, statement).columns)
+        after = sql.key_column_census(func)
+    return before, after, columns
+
+
+COUNTED = """\
+class DBProxy:
+    def propagate(self, task_id, files):
+        stats = {}
+        for dataset_id, status in files:
+            if dataset_id not in stats:
+                stats[dataset_id] = {"nFilesFinished": 0, "nFilesFailed": 0}
+            if status == "finished":
+                stats[dataset_id]["nFilesFinished"] += 1
+            else:
+                stats[dataset_id]["nFilesFailed"] += 1
+        for dataset_id in sorted(stats):
+            counts = stats[dataset_id]
+            sql = "UPDATE ATLAS_PANDA.JEDI_Datasets SET "
+            for key in counts:
+                value = counts[key]
+                if value == 0:
+                    continue
+                if value > 0:
+                    sql += f"{key}={key}+{value},"  # C1
+                else:
+                    sql += f"{key}={key}-{abs(value)},"  # C2
+            sql = sql[:-1]
+            sql += " WHERE jediTaskID=:jediTaskID AND datasetID=:datasetID"
+            self.cur.execute(sql, {":jediTaskID": task_id, ":datasetID": dataset_id})
+"""
+
+
+def test_a_column_named_by_a_key_and_changed_by_an_amount_is_written_whichever_amount_a_pass_skips(
+    tmp_path: Path,
+) -> None:
+    """``propagateResultToJEDI``'s ``{k}={k}+{v},`` / ``{k}={k}-{abs(v)},`` over a dataset's file counts, the counts a
+    dict literal put under each dataset ID, a count of 0 skipped.  Each key's column is written, changed by an amount
+    the map does not read: the skip reads the key only as the count at it, so it says which passes write the column,
+    not which columns are written (``sql._kept_keys``).  Before, the skip it could not decide declined the loop, and
+    the statement wrote no column the map could name."""
+    before, after, columns = _keyed_columns(tmp_path, {"counted": COUNTED}, "propagate")
+
+    assert {column: (value.kind, value.text) for column, value in columns.items()} == {
+        "nFilesFinished": ("expression", "nFilesFinished + {} or nFilesFinished - {}"),
+        "nFilesFailed": ("expression", "nFilesFailed + {} or nFilesFailed - {}"),
+    }
+    assert (before.loops, before.resolved, after.resolved) == (2, 0, 2)
+
+
+def test_a_column_named_by_a_key_and_changed_by_an_amount_is_a_branch_at_each_fragment_putting_it(
+    tmp_path: Path,
+) -> None:
+    """The text spells no column, so no reading of it finds where a value was put, and the statement wrote no column
+    the junctions named.  Each fragment putting an item in is where its value is decided, under its own tests: the
+    ``+`` at C1, the ``-`` at C2."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "counted.py").write_text(COUNTED)
+    _source, tree = calls_mod.parsed(root / "counted.py")
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/counted.py", tree=tree, source=COUNTED, blob_sha=blob_sha(COUNTED))
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    with sql.across_calls(sqlwrite.corpus_calls(modules, {PACKAGE: root})):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, "panda", "test", attributor)
+    branches = {
+        junction.subject: sorted((branch.outcome, branch.line) for branch in junction.branches)
+        for junction in junctions
+        if junction.subject.startswith("JEDI_Datasets.nFiles")
+    }
+
+    assert branches == {
+        f"JEDI_Datasets.{column}": [
+            (f"runtime({column} + {{}})", _line(COUNTED, "C1")),
+            (f"runtime({column} - {{}})", _line(COUNTED, "C2")),
+        ]
+        for column in ("nFilesFinished", "nFilesFailed")
+    }
+
+
+def test_a_skip_on_anything_but_the_value_at_the_key_still_declines_the_loop(tmp_path: Path) -> None:
+    """A ``continue`` on what the map cannot decide for a key, other than the value at it, may drop a key on every
+    pass: the loop stays unread, its columns unnamed."""
+    skipped = COUNTED.replace("if value == 0:", "if value == 0 or task_id in self.frozen:")
+    _before, _after, columns = _keyed_columns(tmp_path, {"counted": skipped}, "propagate")
+
+    assert columns == {}
 
 
 def test_the_next_turn_of_a_loop_is_another_pass(tmp_path: Path) -> None:

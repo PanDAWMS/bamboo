@@ -199,9 +199,10 @@ class SqlWrite(BaseModel):
         default_factory=list,
         description=(
             "The ``SET`` items ``{}=:{}`` -- a column that is a hole, given a bind whose name holds one -- as "
-            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  Not in "
-            "*columns*, and each still a :data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's "
-            "to read."
+            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  So is "
+            "``{}={}+{}``, a column that is a hole changed by an amount, with the value as the statement spells it "
+            "and not a bind: ``propagateResultToJEDI``'s file counts.  Not in *columns*, and each still a "
+            ":data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's to read."
         ),
     )
 
@@ -872,8 +873,9 @@ def _update_pairs(
 
     An item it cannot pair goes into *passed*, where given, as ``(the item as
     the statement spells it, why)`` -- see :func:`unread_columns`; one whose
-    column is a hole and whose bind holds one goes into *holes* as well, where
-    given (:attr:`SqlWrite.column_holes`).
+    column is a hole and whose bind holds one, or whose value is a hole changed
+    by an amount, goes into *holes* as well, where given
+    (:attr:`SqlWrite.column_holes`).
     """
     update = _at_depth(tokens, 0, {_T.UPDATE})
     assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
@@ -902,7 +904,7 @@ def _update_pairs(
                 passed.append(
                     ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_COLUMN_IS_A_HOLE if equals is not None else SET_ITEM_NOT_READ)
                 )
-            if holes is not None and equals is not None and (held := _key_hole(item)) is not None:
+            if holes is not None and equals is not None and (held := _key_hole(item) or _counted_hole(item)) is not None:
                 holes.append(held)
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
@@ -1103,6 +1105,26 @@ def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]
     if column is None or not numbers:
         return None
     return int(column.group(1)), ":" + _NAMED_HOLE.sub("{}", term.expression.name), numbers
+
+
+def _counted_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
+    """``(column hole, value, value holes)`` of a ``SET`` item ``{}={}+{}`` or ``{}={}-{}`` (:attr:`SqlWrite.column_holes`):
+    a column that is a hole, changed by an amount -- ``propagateResultToJEDI``'s ``f"{tmpStatKey}={tmpStatKey}+{tmpStatVal},"``.
+    The value as the statement spells it, its holes ``{}``; it starts with a hole, and whether that hole is the
+    column's key is the run's to read (``sql.keyed_items``).  ``None`` for any other."""
+    if not (isinstance(term, exp.EQ) and _is_hole(term.this)):
+        return None
+    first = term.expression
+    while isinstance(first, (exp.Add, exp.Sub)):
+        first = first.this
+    if first is term.expression or not _is_hole(first):
+        return None
+    column = _HOLE_NUMBER.fullmatch(term.this.name)
+    spelled = term.expression.sql()
+    numbers = tuple(int(number) for number in _HOLE_NUMBER.findall(spelled))
+    if column is None or not numbers:
+        return None
+    return int(column.group(1)), _NAMED_HOLE.sub("{}", spelled), numbers
 
 
 #: Why a column a statement writes is not in what :func:`writes` returns.  Each
