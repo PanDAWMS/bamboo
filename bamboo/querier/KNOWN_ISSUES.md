@@ -221,10 +221,16 @@ its 51 not-settled judgements lacking rows (JediDatasetSpec 50, FileSpec 1) all 
 (`out/nrow/nr0-summary.txt`); JediFileSpec and T_TASK appear there only in refused ones; the FileSpec one's rows
 are in its file's `linked` (the harness's reading of f99a537's ask, 10-29).  The fetch that answers
 them is the harness's (stage 2); until it reads them the file keeps its sections as now.  A stop no other rule
-names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
-walk does not read as a row's attribute asks nothing.
+names, with rows asked at one of the first three places, has the code `rows` -- not `asks`, which the harness records
+the logs for (`Rerun.rows_code`).  Each ask carries its place (`place`: `loop`, `call`, `answers`, `linked`).  The 4th
+place's asks alone do not code a stop: its statement stays not settled whatever the rows, so a stop beside them is not
+one for them (NT-pending-late, r4x38, was coded `rows` though its stop is two U2 branches, K55 and a log ask; tmaeno's
+OK 2026-11-15 18:34).  The first place need not stop either: a loop over a collection the file lacks leaves what it
+binds unknown (`Walk.elements` gives None) and the walk goes on, so a stop after it for another reason is coded `rows`
+all the same; none on v88's r5 (its only rows asks are the 4th place's, 2 questions).  An iterable the walk does not
+read as a row's attribute asks nothing.
 
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+*Shows:* `rows_asks` in result.json (`path`, `count`); each ask's `place` in the rows-asks file; a stop coded `rows`.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
 a comparison that takes the row where some joined row holds the terms, which is not built.
@@ -665,6 +671,22 @@ key alone ('pandaid asc', MJ-activated-late) left no column and stopped.  Now (t
   job/get_status_history takes keys, not a value and a site.  So the answers are a hand's SQL, or a fetch by the
   parts, until PanDA answers the structure.
 
+The questions are asked under the order the call that took the row sorted by, not the statement's other order (the
+analyzer handover's out/gm/qk-design.md, the section on L3's fix, step 1, tmaeno's OK 2026-11-15 17:27).  L3 counted under the
+other: rows ahead under an order no call is shown to have used do not say why the row waited.  NJ-activated-late
+(v88) was taken by a call sorting by getCriteriaForGlobalShares (gshare's rank, currentpriority desc, pandaid asc;
+the call's 33 `:leave` binds) and counted under getCriteriaByAge's 'pandaid asc': 0 ahead at the move.  The live
+MJ-activated-late counted 1866 ahead under 'pandaid asc', and a call sorting by the other took it.  Now:
+- each question's name holds the order (`... at the move, under 'O', by ...`); the old names, without it, are read as
+  the other order's;
+- the other order is counted beside, where the rows file answers its questions, and never asked; an answer that does
+  not hold (the row not once in its own group, a column missing) is said, not stopped on;
+- no END: the run stops on the answers under the order that took the row, and with them on the count under it, which
+  is not built (step 2: its run-time ranking -- getJobs' CASE by gshare -- is in the taking call's binds, and the END
+  must show rows ahead at the move that had left, or the call's njobs).  The rows file's row holds neither gshare nor
+  currentpriority on both L3 cases (the sort line prints "-> ?"), so step 2 reads the row's own group as the answer's
+  group with n_self 1.
+
 What stays:
 - the order's columns are read as they are now (currentpriority, gshare); a term read as now that changed since
   the move (a time column) counts other rows than the call did;
@@ -672,18 +694,22 @@ What stays:
   there all differ from the row it left (its site changed at the move) is not counted;
 - the lookback: 8 days before the move (`L3_LOOKBACK`: copyArchive.py:509-512 kills an activated job created more than
   7 days before; D's group waited up to 169.1 h).  A row that entered the value earlier is not counted;
-- only the call that took the row is read: its WHERE and binds, and the other order counted.  The calls that passed
-  it over -- each picks its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by
-  gshare) and its binds from the pilot's request -- are not read;
+- only the call that took the row is read: its WHERE, binds and order.  The calls that passed it over -- each picks
+  its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by gshare) and its binds
+  from the pilot's request -- are not read;
 - stuck does not reach L3: no call of a stuck row's statement is read (S1 asks the logs for the key, which a call that
   passed the row over does not print), and M2's "takes it" reads no first-rows statement in the five sets.  Its way
   in, and its count now from the row tables, are a design of their own (part B).
 
-*Shows:* L3's two questions under their names "... held V at the move, by the order's items before the key" and
-"... left V in the window, by the value it went to and the key"; "at the move (T): N row(s) ahead of it (G in groups
-ahead, K of its own group's M with a key ahead)"; the END's "read as now: ..." and "-- at least: ...".
-*Revisit:* when a stuck case's first-rows statement is read (part B); when the calls that passed the row over are
-read; when PanDA answers a history held at a moment.
+*Shows:* L3's two questions under their names "... held V at the move, under 'O', by the order's items before the
+key" and "... left V in the window, under 'O', by the value it went to and the key"; "under 'O' (the call that took it
+sorted by it)" and "(no call is shown to have sorted by it)"; beside, "at the move (T): N row(s) ahead of it (G in
+groups ahead, K of its own group's M with a key ahead)", "read as now: ...", "-- at least: ...", or "not counted:
+..."; the stop "a count of the rows ahead of it under 'O', the order the call that took it sorted by (KNOWN_ISSUES.md
+K48: not built)".
+*Revisit:* step 2, once the answers under the order that took the row are in a rows file; when a stuck case's
+first-rows statement is read (part B); when the calls that passed the row over are read; when PanDA answers a history
+held at a moment.
 
 ### K77. A selection waiting on other rows is read at their last move, by function, from the rows the file links
 

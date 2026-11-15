@@ -3032,10 +3032,18 @@ class Rerun:
             n = len({ask.key for ask, _ in unanswered})
             raise Stop(T.at(self.hop, T.Said("ask-s-of-the-logs-not-in", {"n": n, "asks": self.args.asks})), "asks")
 
-    def ask_rows(self, rows: dict, why: str) -> None:
+    def ask_rows(self, rows: dict, why: str, place: str) -> None:
         """Keep *rows*, what the rows file does not have said as a fetch can answer it -- a collection of a row, the
-        rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1)."""
-        self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str), {"rows": rows, "step": self.hop, "why": why})
+        rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1), with the *place*
+        that asks it (K36's four: ``loop``, ``call``, ``answers``, ``linked``)."""
+        self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str),
+                                  {"rows": rows, "step": self.hop, "why": why, "place": place})
+
+    def rows_code(self) -> str | None:
+        """The code of a stop no other rule names: ``rows`` where rows are asked at a place whose answer a step reads.
+        Not for the 4th place's alone (``ask_linked``): its statement stays not settled whatever the rows, so a stop
+        beside it is not one for them (KNOWN_ISSUES.md K36)."""
+        return "rows" if any(a["place"] != "linked" for a in self.rows_asks.values()) else None
 
     def ask_collection(self, iterable: str, step, env: E.Env) -> None:
         """A row's collection a walk's loop runs over and the rows file does not have (``Walk.elements``): the row by
@@ -3050,7 +3058,7 @@ class Rerun:
         row = env.table.get(name, {})
         key = {n: row[n].value for n in (x.partition(".")[2] for x in _identity_attrs(cls)) if n in row}
         self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": attr, "entity": None},
-                      f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have")
+                      f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have", "loop")
 
     def ask_linked(self, st, subjects: list[str], q: Missed) -> list[str]:
         """The rows of a class *st* compares (*subjects*) and the rows file has no row of (``rows-no-row``): the rows of
@@ -3097,7 +3105,7 @@ class Rerun:
                 self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": None, "entity": lacked, "where": by,
                                "via": via},
                               f"{where} compares {lacked}'s {compared} with the row's, and neither the rows file's rows nor its "
-                              f"linked hold {lacked}'s")
+                              f"linked hold {lacked}'s", "linked")
         return list(dict.fromkeys(notes))
 
     def window(self, asking: W.Asking) -> Window | None:
@@ -4120,8 +4128,14 @@ class Rerun:
                  + (f"; the read takes {''.join(steps)} off it" if steps else ""))
         if traced:
             self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
-        shown = traced or ([] if one_call or not ask else [w for w in alone if self._caller_shows(w, window, run)])
-        if len(shown) == 1:
+        judged = [] if traced or one_call or not ask else [(w, self._caller_shows(w, window, run)) for w in alone]
+        shown = traced or [w for w, s in judged if s]
+        # a caller not judged (its send's entry asked, not answered) may be the one that ran: no other is told alone
+        unjudged = [w.route[0] for w, s in judged if s is None]
+        if len(shown) == 1 and unjudged:
+            self.say(f"    {param}: the call at {shown[0].route[0]} shown, and not told alone: the caller(s) at "
+                     f"{', '.join(unjudged)} not judged")
+        if len(shown) == 1 and not unjudged:
             # a constant-through keeps its why: its value is not the literal's
             return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)
         if not consts and rest and all(r.end == SR.API for r in rest):
@@ -4215,7 +4229,7 @@ class Rerun:
                   for i, *_ in sn.hits.get(row.line, ()) if param in row.capture(run.records[i])}
         return values.pop() if len(values) == 1 else None
 
-    def _caller_shows(self, w: SR.Way, window: tuple[str, str] | None, run: Any) -> bool:
+    def _caller_shows(self, w: SR.Way, window: tuple[str, str] | None, run: Any) -> bool | None:
         """Whether the caller's own run shows the call *w* comes by ran (:meth:`_call_shown`).  A way that came across a
         send (the map's ``HeldSource.sent``, SND) is asked as HOP's reader asks it (out/gm/qk-design.md, HOP (2)): the
         caller is a client in another process, so on every machine, over the arm's window opened windows.SLACK earlier
@@ -4225,26 +4239,38 @@ class Rerun:
         882 ``killJobs for Anal Active (...)`` at 15:14:55,289, after kill Done at 15:14:55,287 (MJE-7383377087).
         Where the window before the send shows no call, the caller's rows after its call are asked from the pass's
         first line to its last and windows.SLACK more, and count only where every row that shows the call follows it
-        (HOP (a'): each row read on the side of the send its code puts it on)."""
+        (HOP (a'): each row read on the side of the send its code puts it on).  Where the ask of the endpoint's logs
+        is not all answered, the callers are not judged (None): a pass not in logs not recorded yet is no pass that
+        did not begin, and the window's end would take in what a caller printed after its send (NJE-7425252125, r3x38:
+        an END on copyArchive 634 while that ask was open; out/gm/qk-design.md, the r4 fixes (1))."""
         machine = getattr(run, "machine", None)
         if not w.sent or window is None:
             return self._call_shown(w.route[0], window, machine)
         start = f"{W.when(window[0]) - W.SLACK:%Y-%m-%d %H:%M:%S}"
         # one entry's run is asked once per window, and its windows said once, however many calls send into it
-        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str, str | None]] = self.__dict__.setdefault("_send_windows", {})
+        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str, str | None] | None] = self.__dict__.setdefault("_send_windows", {})
         key = (w.sent_into, w.sent, (start, window[1]))
         if key not in said:
-            entry = self._entry_pass(w, (start, window[1]))
-            said[key] = (start, entry[0], entry[1]) if entry else (start, window[1], None)
-            closed = ("the first line of the entry's pass that holds the key" if entry
-                      else "the window's end: no pass of the entry holding the key began in it")
-            self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
-                     f"{said[key][0]} to {said[key][1]} ({closed}), on every machine")
-            if entry:
-                self.say(f"    and a caller's rows after its call from {entry[0]} to "
-                         f"{W.when(entry[1]) + W.SLACK:%Y-%m-%d %H:%M:%S} (the pass's last line, {entry[1]}, and "
-                         f"{int(W.SLACK.total_seconds() // 60)} min more), where the window before shows no call")
-        start, first, last = said[key]
+            entry, answered = self._entry_pass(w, (start, window[1]))
+            if not answered:
+                said[key] = None
+                self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers not judged: the "
+                         f"ask of the entry's logs from {start} to {window[1]} is not answered yet, and the first line of its "
+                         "pass that holds the key would close their window")
+            else:
+                said[key] = (start, entry[0], entry[1]) if entry else (start, window[1], None)
+                closed = ("the first line of the entry's pass that holds the key" if entry
+                          else "the window's end: no pass of the entry holding the key began in it")
+                self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
+                         f"{start} to {entry[0] if entry else window[1]} ({closed}), on every machine")
+                if entry:
+                    self.say(f"    and a caller's rows after its call from {entry[0]} to "
+                             f"{W.when(entry[1]) + W.SLACK:%Y-%m-%d %H:%M:%S} (the pass's last line, {entry[1]}, and "
+                             f"{int(W.SLACK.total_seconds() // 60)} min more), where the window before shows no call")
+        got = said[key]
+        if got is None:
+            return None
+        start, first, last = got
         if self._call_shown(w.route[0], (start, first), None, "for-a-call-across-a-send", {"send": w.sent}):
             return True
         if last is None:
@@ -4253,10 +4279,11 @@ class Rerun:
         return self._call_shown(w.route[0], after, None, "for-the-rows-after-a-call-across-a-send", {"send": w.sent},
                                 after_call=True)
 
-    def _entry_pass(self, w: SR.Way, window: tuple[str, str]) -> tuple[str, str] | None:
+    def _entry_pass(self, w: SR.Way, window: tuple[str, str]) -> tuple[tuple[str, str] | None, bool]:
         """The first and last lines of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key
         and began last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before
-        killJobs ran -- or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
+        killJobs ran -- or None where its logs are not to hand or hold no such pass; and whether the ask of its logs
+        was answered whole (False: not judged, :meth:`_caller_shows`).  A pass begins at a record the map reads as the
         endpoint's entry row whole (``rows.entries``): a mark many calls share makes one run of hours -- job_api's
         ``kill``, a day's 198 lines on one machine -- whose first line, or its first inside the window, is another
         call's (MJE-7395160958's 16:34:40,732, a kill of other jobs).  A run with no record read so begins no pass here:
@@ -4267,16 +4294,18 @@ class Rerun:
         files = self.files_of(entry, today, lines)
         if not files or not self.logs.names(files):
             self.say(f"    {entry.split('::')[-1]}: no log of it to hand ({', '.join(files) or 'none'})")
-            return None
+            return None, True
         asking = W.Asking(window, None, T.Said("for-the-entry-a-send-entered", {"entry": entry.split("::")[-1], "send": w.sent}))
         runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([entry]), whole=True)
         self._keep_unanswered(unanswered)
+        if unanswered:
+            return None, False
         rel, _, name = entry.partition("::")
         try:
             fn = R.function(rel, name.rpartition(".")[2], within=lines)
         except LookupError:
             self.say(f"    {name}: not found in {rel}, so no pass of it begins")
-            return None
+            return None, True
         passes = []
         for r in (r for rs in runs.values() for r in rs if of_mover(r, entry)):
             starts = R.entries(fn, r, self.mode)
@@ -4286,7 +4315,7 @@ class Rerun:
                 p = r.part(a, b)
                 if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]:
                     passes.append((p.first, p.last))
-        return max(passes) if passes else None
+        return (max(passes) if passes else None), True
 
     def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",
                     facts: dict[str, Any] | None = None, after_call: bool = False) -> bool:
@@ -7584,7 +7613,7 @@ class Rerun:
             self.ask_rows({"kind": "statement", "method": callee, "site": sites, "tables": at_call, "binds": binds,
                            "at": [p.first for p in q.passes]},
                           f"the rows {callee} returned in each pass, their history and the tables' counts (the rows file lacks "
-                          f"{', '.join(lacking)})")
+                          f"{', '.join(lacking)})", "call")
         self.need(T.Said("the-rows-returned-in-each-pass-the", {"callee": callee}), jobs and history)
         self.say(f"rows: {self.data['job_rows']['source']}")
         counts = self.need(T.Said("the-tables-rows-of-the-key-by"),
@@ -8646,26 +8675,35 @@ class Rerun:
         # items after it decide nothing (the key is unique); an order of the key alone is one group.  A blanked item
         # the map's order_holes says ranks by a column of the row (getJobs' (CASE ...) by gshare) is grouped by, its
         # ranking computed at run time -- a row of another value is neither ahead nor behind here
-        holes = {h.item: h for h in getattr(st, "order_holes", None) or [] if h.order == other}
-        cols, blank, ranked, key_order = [], [], [], None
-        for i, item in enumerate(sqltext.order_items(other)):
-            hole = holes.get(i)
-            column = item.expression.split(".")[-1].lower() if not item.blanked and item.columns == (item.expression,) else None
-            if column is not None and column == key_col:
-                key_order = "desc" if item.descending else "asc"
-                break
-            if column is not None:
-                cols.append((column, "desc" if item.descending else "asc"))
-            elif hole and hole.subjects and all(x.partition(".")[0] == cls for x in hole.subjects):
-                ranked += [(item.expression, x.partition(".")[2].lower(), hole.computed_at) for x in hole.subjects]
-                cols += [(x.partition(".")[2].lower(), "ranked") for x in hole.subjects]
-            else:
-                blank.append(item.expression)
-        self.say(f"  under {other!r} the row sorts by "
-                 + "".join(f"{c} {'(ranked at run time)' if d == 'ranked' else d} -> {row.get(c, '?')}; " for c, d in cols)
-                 + (f"{'then its key' if cols else 'its key alone,'} {key_col} {key_order} -> {row.get(key_col)}" if key_order else
-                    f"the order does not hold its key {key_col}: its ties are in an order the database picks")
-                 + (f"; the map leaves {blank} blank" if blank else ""))
+        def sort_of(order: str) -> tuple[list[tuple[str, str]], list[str], list[tuple[str, str, Any]], str | None]:
+            holes = {h.item: h for h in getattr(st, "order_holes", None) or [] if h.order == order}
+            cols: list[tuple[str, str]] = []
+            blank: list[str] = []
+            ranked: list[tuple[str, str, Any]] = []
+            key_order = None
+            for i, item in enumerate(sqltext.order_items(order)):
+                hole = holes.get(i)
+                column = item.expression.split(".")[-1].lower() if not item.blanked and item.columns == (item.expression,) else None
+                if column is not None and column == key_col:
+                    key_order = "desc" if item.descending else "asc"
+                    break
+                if column is not None:
+                    cols.append((column, "desc" if item.descending else "asc"))
+                elif hole and hole.subjects and all(x.partition(".")[0] == cls for x in hole.subjects):
+                    ranked += [(item.expression, x.partition(".")[2].lower(), hole.computed_at) for x in hole.subjects]
+                    cols += [(x.partition(".")[2].lower(), "ranked") for x in hole.subjects]
+                else:
+                    blank.append(item.expression)
+            return cols, blank, ranked, key_order
+
+        sorts = {took: sort_of(took), other: sort_of(other)}
+        for order, whose in ((took, "the call that took it sorted by it"), (other, "no call is shown to have sorted by it")):
+            cols, blank, _, key_order = sorts[order]
+            self.say(f"  under {order!r} ({whose}) the row sorts by "
+                     + "".join(f"{c} {'(ranked at run time)' if d == 'ranked' else d} -> {row.get(c, '?')}; " for c, d in cols)
+                     + (f"{'then its key' if cols else 'its key alone,'} {key_col} {key_order} -> {row.get(key_col)}" if key_order else
+                        f"the order does not hold its key {key_col}: its ties are in an order the database picks")
+                     + (f"; the map leaves {blank} blank" if blank else ""))
         history = self.need(T.Said("a-history-of-to-ask-the-window", {"subject": self.args.subject}), PT.history(self.args.subject))
         # the call's terms: on the subject, the history's value stands for them; on the columns the history holds, read
         # at the moment (the move, or the row each left); the others on the row as it is now
@@ -8680,34 +8718,23 @@ class Rerun:
         miss = q.q
         mine = row.get(key_col)
         lookback = miss.moved - L3_LOOKBACK
-        questions = {
-            f"{where} held {miss.observed!r} at the move, by the order's items before the key": PT.HeldAt(
-                history, miss.observed, miss.moved, lookback, held, now, cols, key_col, mine, key_order
-            ),
-            f"{where} left {miss.observed!r} in the window, by the value it went to and the key": PT.MovedOn(
-                history, miss.observed, miss.since, miss.moved, held, now, cols, key_col, mine, key_order
-            ),
-        }
-        asks = {ask: PT.draw(pq) for ask, pq in questions.items()}
-        answers = self.data.get("answers", {})
-        for ask, sql in asks.items():
-            self.say(f"-- {ask}{' (answered in the rows file)' if ask in answers else ''}")
-            for line in sql.splitlines():
-                self.say(f"   {line}")
-            if ask not in answers:
-                # no db_read form: both are windows over the history; the structure lets a fetch answer by the parts
-                self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}, "question": PT.asked(questions[ask])},
-                              f"L3's answer {ask!r}, not in the rows file")
-        self.need(T.Said("the-answers-to-in-the-rows-file", {"asks": list(asks)}), all(ask in answers for ask in asks))
-        at_ask, window_ask = asks
-        moment, window = answers[at_ask], answers[window_ask]
 
-        def holding(ask: str, answer: dict) -> None:
-            """An answer does not carry the SQL it answers: it must at least hold every column the question's SQL
-            names."""
-            held = {k.lower() for r in answer["rows"] for k in r}
-            lacking = [c for c in PT.columns(questions[ask]) if c not in held]
-            self.need(T.Said("the-answer-to-holding-the-column-s", {"ask": ask, "lacking": lacking, "held": sorted(held)}), not lacking)
+        def questions_of(order: str, named: bool = True) -> dict[str, Any]:
+            """The two questions under *order*, by the names they are asked and answered under; *named* False gives
+            the names L3 gave them when it counted the statement's other order alone (before 2026-11-15), the order
+            then left out of the name."""
+            cols, _, _, key_order = sorts[order]
+            under = f", under {order!r}" if named else ""
+            return {
+                f"{where} held {miss.observed!r} at the move{under}, by the order's items before the key": PT.HeldAt(
+                    history, miss.observed, miss.moved, lookback, held, now, cols, key_col, mine, key_order
+                ),
+                f"{where} left {miss.observed!r} in the window{under}, by the value it went to and the key": PT.MovedOn(
+                    history, miss.observed, miss.since, miss.moved, held, now, cols, key_col, mine, key_order
+                ),
+            }
+
+        answers = self.data.get("answers", {})
 
         def number(value):
             try:
@@ -8715,67 +8742,106 @@ class Rerun:
             except (TypeError, ValueError):
                 return value
 
-        def other_rank(r: dict) -> bool:
-            """Another value of a ranked column: placed by the ranking the run computes, not known here."""
-            return any(d == "ranked" and str(r.get(c)) != str(row.get(c)) for c, d in cols)
-
-        def ahead(r: dict) -> bool:
-            if other_rank(r):
-                return False
-            for c, d in cols:
-                a, b = number(r.get(c)), number(row.get(c))
-                if d != "ranked" and a != b:
-                    return a > b if d == "desc" else a < b
-            return False
-
-        def same(r: dict) -> bool:
-            return all(number(r.get(c)) == number(row.get(c)) for c, _ in cols)
-
         def count(rs: list, column: str) -> int:
             return sum(int(r.get(column) or 0) for r in rs)
 
-        holding(at_ask, moment)
-        rows_at = [{k.lower(): v for k, v in r.items()} for r in moment["rows"]]
-        own = [r for r in rows_at if same(r)]
-        self.need(T.Said("the-row-itself-once-in-its-own", {"miss_observed": miss.observed, "fact": count(own, 'n_self'), "fact_2": count(rows_at, 'n_self'), "fact_3": now or 'none'}), count(own, "n_self") == 1)
-        n_groups, n_own = count([r for r in rows_at if ahead(r)], "n"), count(own, "n")
-        n_key = count(own, "n_key_ahead") if key_order else 0
-        n_other = count([r for r in rows_at if other_rank(r)], "n")
-        firsts = sorted(str(r["first_entered"])[:19] for r in rows_at if r.get("first_entered"))
-        at_least = bool(firsts) and _when(firsts[0]) - lookback < datetime.timedelta(hours=1)
-        names = [c for c, d in cols if d == "ranked"]
-        mine_rank = f" of its {', '.join(f'{c} {row.get(c)!r}' for c in names)}" if names else ""
-        others = (f", {n_other} of another {'/'.join(names)}, placed by the ranking computed at run time"
-                  f" ({'; '.join(at for *_, at in ranked)})") if names else ""
-        how = ((f"{n_groups} in groups ahead, " if cols else "")
-               + (f"{n_key} of its own group's {n_own} with a key ahead" if key_order else
-                  f"its own group's {n_own}, their order among them not known"))
-        total = n_groups + n_key
-        self.say(f"  at the move ({miss.moved}): {total} row(s){mine_rank} ahead of it ({how}){others}; the earliest "
-                 f"entry counted {firsts[0] if firsts else 'none'}, the lookback {lookback} ({moment['source']})")
-        holding(window_ask, window)
-        rows_win = [{k.lower(): v for k, v in r.items()} for r in window["rows"]]
-        self.say(f"  left {miss.observed!r} in the window, by the value it went to ({window['source']}):")
+        def tally(order: str, qs: dict[str, Any]) -> tuple[dict[str, Any], T.Said | None]:
+            """The rows ahead of the row under *order*, from the rows file's answers to its two questions *qs*: what
+            the END would say of them, or what of the answers does not hold (None the first where they do)."""
+            cols, _, ranked, key_order = sorts[order]
+            (at_ask, at_q), (window_ask, window_q) = qs.items()
+            moment, window = answers[at_ask], answers[window_ask]
+            for ask, pq, answer in ((at_ask, at_q, moment), (window_ask, window_q, window)):
+                # an answer does not carry the SQL it answers: it must at least hold every column the question's SQL names
+                got = {k.lower() for r in answer["rows"] for k in r}
+                if lacking := [c for c in PT.columns(pq) if c not in got]:
+                    return {}, T.Said("the-answer-to-holding-the-column-s", {"ask": ask, "lacking": lacking, "held": sorted(got)})
 
-        def place(r: dict) -> list:
-            return [str(r.get(c)) if d == "ranked" else number(r.get(c)) for c, d in cols]
+            def other_rank(r: dict) -> bool:
+                """Another value of a ranked column: placed by the ranking the run computes, not known here."""
+                return any(d == "ranked" and str(r.get(c)) != str(row.get(c)) for c, d in cols)
 
-        for nxt in sorted({str(r.get("next_value")) for r in rows_win}):
-            for r in sorted((r for r in rows_win if str(r.get("next_value")) == nxt), key=place, reverse=True):
-                mark = "its group" if same(r) else "other" if other_rank(r) else "ahead" if ahead(r) else "behind"
-                self.say(f"    {mark:9} {' '.join(f'{k}={v}' for k, v in r.items())}")
-        mine_left = [r for r in rows_win if same(r)]
-        self.need(T.Said("its-own-group-among-the-rows-that", {"miss_observed": miss.observed}), mine_left)
-        left = "; ".join(f"{r.get('n')} to {r.get('next_value')!s} after {r.get('min_h')}-{r.get('max_h')} h"
-                         + (f" ({r.get('n_key_ahead')} with a key ahead)" if key_order else "") for r in mine_left)
-        as_now = [*now, *(f"the order's {c}" for c, _ in cols)]
-        self.end(T.Said("lost-on-order", {
-            "where": where, "other": other, "took": took, "moved": miss.moved, "total": total, "mine_rank": mine_rank,
-            "observed": miss.observed, "how": how,
-            "at_least": T.Said("at-least-within-an-hour", {"first": firsts[0], "lookback": lookback}) if at_least else "",
-            "left": left, "next_value": miss.next_value,
-            "as_now": T.Said("read-as-now", {"as_now": as_now}) if as_now else "",
-        }))
+            def ahead(r: dict) -> bool:
+                if other_rank(r):
+                    return False
+                for c, d in cols:
+                    a, b = number(r.get(c)), number(row.get(c))
+                    if d != "ranked" and a != b:
+                        return a > b if d == "desc" else a < b
+                return False
+
+            def same(r: dict) -> bool:
+                return all(number(r.get(c)) == number(row.get(c)) for c, _ in cols)
+
+            rows_at = [{k.lower(): v for k, v in r.items()} for r in moment["rows"]]
+            own = [r for r in rows_at if same(r)]
+            if count(own, "n_self") != 1:
+                return {}, T.Said("the-row-itself-once-in-its-own", {"miss_observed": miss.observed, "fact": count(own, 'n_self'),
+                                                                     "fact_2": count(rows_at, 'n_self'), "fact_3": now or 'none'})
+            n_groups, n_own = count([r for r in rows_at if ahead(r)], "n"), count(own, "n")
+            n_key = count(own, "n_key_ahead") if key_order else 0
+            n_other = count([r for r in rows_at if other_rank(r)], "n")
+            firsts = sorted(str(r["first_entered"])[:19] for r in rows_at if r.get("first_entered"))
+            names = [c for c, d in cols if d == "ranked"]
+            mine_rank = f" of its {', '.join(f'{c} {row.get(c)!r}' for c in names)}" if names else ""
+            others = (f", {n_other} of another {'/'.join(names)}, placed by the ranking computed at run time"
+                      f" ({'; '.join(at for *_, at in ranked)})") if names else ""
+            how = ((f"{n_groups} in groups ahead, " if cols else "")
+                   + (f"{n_key} of its own group's {n_own} with a key ahead" if key_order else
+                      f"its own group's {n_own}, their order among them not known"))
+            total = n_groups + n_key
+            self.say(f"    at the move ({miss.moved}): {total} row(s){mine_rank} ahead of it ({how}){others}; the earliest "
+                     f"entry counted {firsts[0] if firsts else 'none'}, the lookback {lookback} ({moment['source']})")
+            rows_win = [{k.lower(): v for k, v in r.items()} for r in window["rows"]]
+            self.say(f"    left {miss.observed!r} in the window, by the value it went to ({window['source']}):")
+
+            def place(r: dict) -> list:
+                return [str(r.get(c)) if d == "ranked" else number(r.get(c)) for c, d in cols]
+
+            for nxt in sorted({str(r.get("next_value")) for r in rows_win}):
+                for r in sorted((r for r in rows_win if str(r.get("next_value")) == nxt), key=place, reverse=True):
+                    mark = "its group" if same(r) else "other" if other_rank(r) else "ahead" if ahead(r) else "behind"
+                    self.say(f"      {mark:9} {' '.join(f'{k}={v}' for k, v in r.items())}")
+            mine_left = [r for r in rows_win if same(r)]
+            if not mine_left:
+                return {}, T.Said("its-own-group-among-the-rows-that", {"miss_observed": miss.observed})
+            return {
+                "total": total, "mine_rank": mine_rank, "how": how,
+                "at_least": bool(firsts) and _when(firsts[0]) - lookback < datetime.timedelta(hours=1), "first": firsts[0] if firsts else None,
+                "left": "; ".join(f"{r.get('n')} to {r.get('next_value')!s} after {r.get('min_h')}-{r.get('max_h')} h"
+                                  + (f" ({r.get('n_key_ahead')} with a key ahead)" if key_order else "") for r in mine_left),
+                "as_now": [*now, *(f"the order's {c}" for c, _ in cols)],
+            }, None
+
+        # the rows ahead are asked under the order the call that took the row sorted by: an order no call is shown to
+        # have used says nothing of why the row waited (KNOWN_ISSUES.md K48)
+        questions = questions_of(took)
+        asks = {ask: PT.draw(pq) for ask, pq in questions.items()}
+        for ask, sql in asks.items():
+            self.say(f"-- {ask}{' (answered in the rows file)' if ask in answers else ''}")
+            for line in sql.splitlines():
+                self.say(f"   {line}")
+            if ask not in answers:
+                # no db_read form: both are windows over the history; the structure lets a fetch answer by the parts
+                self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}, "question": PT.asked(questions[ask])},
+                              f"L3's answer {ask!r}, not in the rows file", "answers")
+        # the statement's other order beside it, counted where the rows file answers its questions -- under their names
+        # or the ones L3 gave them before -- and never asked
+        beside = next((qs for qs in (questions_of(other), questions_of(other, named=False)) if all(a in answers for a in qs)), None)
+        if beside is None:
+            self.say(f"  under {other!r}: not counted, nor asked (no answer in the rows file; no call is shown to have sorted by it)")
+        else:
+            self.say(f"  under {other!r}, beside (no call is shown to have sorted by it), by the rows file's answers:")
+            facts, problem = tally(other, beside)
+            if problem is not None:
+                self.say(f"    not counted: {T.text(problem)}")
+            else:
+                at_least = T.text(T.Said("at-least-within-an-hour", {"first": facts["first"], "lookback": lookback})) if facts["at_least"] else ""
+                as_now = T.text(T.Said("read-as-now", {"as_now": facts["as_now"]})) if facts["as_now"] else ""
+                self.say(f"    at the move {facts['total']} row(s){facts['mine_rank']} ahead of it ({facts['how']}){at_least}; its group "
+                         f"left {miss.observed!r}: {facts['left']}{as_now} -- not why it waited: no call is shown to have sorted by it")
+        self.need(T.Said("the-answers-to-in-the-rows-file", {"asks": list(asks)}), all(ask in answers for ask in asks))
+        self.need(T.Said("a-count-under-the-order-that-took-it", {"took": took}), False)
         return None
 
 def main() -> None:
@@ -8823,7 +8889,7 @@ def main() -> None:
         r.say(f"STOP {stop}; HAND used {len(r.hand_used)} time(s) {r.hand_used}")
         # rows asked and no other rule naming the stop: answering them may move it -- not "asks", which the harness
         # records the logs for
-        outcome = {"kind": "stop", "step": r.hop, "record": stop.said, "code": stop.code or ("rows" if r.rows_asks else None)}
+        outcome = {"kind": "stop", "step": r.hop, "record": stop.said, "code": stop.code or r.rows_code()}
     r.stamp("end")
     if args.out:
         _write(args.out, "\n".join(r.lines) + "\n")
