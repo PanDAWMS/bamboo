@@ -1656,7 +1656,7 @@ class Wrote:
     chosen: Verdict
     #: the caller's verdict where *chosen* is the arm of a writer that prints nothing, read on that caller's run at its
     #: call (:class:`StandIn`): the run's marks and the guard's record are the call's, the guards the arm's
-    via: object = None
+    via: Verdict | None = None
     #: the statuslog row whose pass wrote it, where H2 asked at a row (None for a value held or a value that is its time)
     row: dict | None = None
     #: the window H2 asked the logs over, ``(lo, hi)``
@@ -6702,6 +6702,8 @@ class Rerun:
                          "no label in what was searched: one may be the row's")
                 return False
             if not AG.one_process(chain, spans.get(m, {})):
+                if self._cap_take(c, sel, picks, label, moving, up):
+                    return True
                 self.say(f"(C) not read: {sel.agent_name}'s cycles{' for ' + label if label else ''} on {m.split('.')[0]} overlap: "
                          "more than one process selects there, and which one took the row is not told by its lines")
                 return False
@@ -6710,6 +6712,8 @@ class Rerun:
         first = min((pick for pick, _ in takes), key=lambda q: q.at)
         passed = AG.passed_over(picks, first, label, since)
         if passed:
+            if self._cap_take(c, sel, picks, label, moving, up):
+                return True
             self.say(f"(C) not read: {sel.agent_name}'s cycles took the row first at {first.at} ({first.machine.split('.')[0]}), and "
                      f"the {len(passed)} selection(s) on {len({q.machine for q in passed})} machine(s) from {since} to "
                      f"{max(first.after or first.at, since)} did not take it: why ({sel.callee}'s lock by another, its count's "
@@ -6744,6 +6748,68 @@ class Rerun:
             premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": list(sel.others)}))
         self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said, "kept": kept,
                                                              "premises": premises}))
+        return True
+
+    def _turn(self, st, q: Missed) -> tuple[datetime.datetime | None, dict[str, list[str]]]:
+        """M3(a)-cap: when the statement *st* began to surely return the row (the first of ``_statement_true``'s
+        spans), a time column M3(a)-1 starts the stay with but cannot keep all of it read at its start: ``(turn,
+        {column: its arms that may write it in the stay, named as having not})``; None where it never surely does.
+        Its keys (``vo``, ``prodSourceLabel``: the agent's loop chooses them each selection) are read as the row's: the
+        selections read are the ones made with the row's values (:func:`agents.cap_take`)."""
+        self._assuming: dict[str, list[str]] | None = {}
+        try:
+            spans = self._statement_true(st, q, keyed=True)
+        finally:
+            assumed, self._assuming = self._assuming or {}, None
+        return (min(s for s, _ in spans) if spans else None), assumed
+
+    def _cap_take(self, c: Caller, sel, picks: dict, label: str, moving: list, up: Callers) -> bool:
+        """M3(a)-cap (out/gm/qk-design.md, tmaeno's OK 2026-11-15 01:16:35, its build 01:46:09): where the late
+        question's statement of the selecting function returns at most a cap of rows, the first selection after the
+        statement's turn that returned fewer took every row selectable then -- the row among them -- where it is the
+        last of the moving pass's machine before the pass; those before it returned the cap or none.  An END and True;
+        False, said why, where it does not read."""
+        q = getattr(self, "_missed_q", None)
+        if q is None or q.subject != up.subject:
+            return False
+        sts = [st for st in q.statements if st.owner.rpartition("::")[2].rpartition(".")[2] == sel.callee
+               and st.result != RESULT_AGGREGATE and AG.cap_rows(st.limits) is not None]
+        if len(sts) != 1:
+            return False
+        st = sts[0]
+        cap = AG.cap_rows(st.limits)
+        assert cap is not None
+        where = f"{sel.callee}@{st.line}"
+        turn, assumed = self._turn(st, q)
+        if turn is None:
+            self.say(f"(C) {where} returns at most {cap} row(s); when it began to return the row is not read")
+            return False
+        host = self._move_host(up.before) if up.before is not None else None
+        p = next((p for p in sorted(moving, key=lambda p: p.first) if p.machine == host), None) or min(moving, key=lambda p: p.first)
+        found, why = AG.cap_take(picks, p.machine, p.first, turn, cap, label)
+        if found is None:
+            self.say(f"(C) not read by {where}'s cap ({cap} row(s)) from its turn {turn:%Y-%m-%d %H:%M:%S}: {why}")
+            return False
+        take = found.take
+        premises: list = [T.Said("held-from-the-stay-s-start", {"column": col, "arms": arms}) for col, arms in assumed.items() if arms]
+        if found.empty:
+            premises.append(T.Said("an-empty-selection-lost-the-rows", {"n": len(found.empty), "callee": sel.callee}))
+        if found.place >= 0:
+            # the row's values of the keys, as the rows file read them at as_of (set as the row is made)
+            keys = [f"{k.rpartition('.')[2]}={self._label_of(q.subject, k.rpartition('.')[2]) or '?'}" for k in st.keys] \
+                or ["the row's label"]
+            premises.append(T.Said("the-row-s-label-by-the-take-s-place", {"place": found.place + 1, "width": found.width,
+                                                                            "mark": take.mark, "agent": sel.agent_name,
+                                                                            "keys": keys}))
+        if found.others:
+            premises.append(T.Said("another-width-another-label", {"n": len(found.others), "agent": sel.agent_name,
+                                                                   "width": found.width}))
+        self.end(T.Said("ran-when-the-first-selection-below-its-cap-took-it", {
+            "caller": c.owner.split("::")[-1], "agent": sel.agent_name, "where": where, "turn": f"{turn:%Y-%m-%d %H:%M:%S}",
+            "cap": cap, "full": len(found.full), "empty": len(found.empty),
+            "machines": len({x.machine for x in (*found.full, *found.empty)}),
+            "machine": take.machine.split(".")[0], "mark": take.mark, "at": take.at[:23],
+            "count": take.count, "first": p.first[:23], "premises": premises}))
         return True
 
     def _label_of(self, subject: str, hole: str) -> str:
@@ -7158,6 +7224,8 @@ class Rerun:
 
     def missed(self, q: Missed):
         self.start("L2", "why the others passed it over")
+        # the late question the mover's callers are read for (M3(a)-cap reads its statements' turn)
+        self._missed_q = q
         cls = q.subject.split(".")[0]
         self.need(T.Said("the-rows-file-s-row-of-its", {"cls": cls}), self._row_of(cls))
         self.say(f"{len(q.statements)} statement(s) ask rows on {q.subject}={q.observed}, from {q.since} to {q.moved}")
@@ -7540,7 +7608,15 @@ class Rerun:
         if known:
             return known, value
         found = self._before(subject, q)
-        return (True, found[1]) if found is not None and found[0].known else (False, None)
+        if found is not None and found[0].known:
+            return True, found[1]
+        # M3(a)-cap's turn: the value every arm writing the observed value began the stay with, the column's arms that
+        # may write it while the value holds (M3(a)-1's (2)) named as having not
+        assuming = getattr(self, "_assuming", None)
+        if assuming is not None and found is not None and found[0].starts and not found[0].lacking:
+            assuming[subject] = list(found[0].left)
+            return True, found[1]
+        return False, None
 
     def _before(self, subject: str, q: Missed) -> tuple[SV.Before, str] | None:
         """M3(a)-1 (``stay_value``): what the map says of *subject*, a column of the asked row the rows file holds only
@@ -7818,15 +7894,16 @@ class Rerun:
                 return []
         return [(q.since, q.moved)]
 
-    def _statement_true(self, st, q: Missed) -> list:
+    def _statement_true(self, st, q: Missed, keyed: bool = False) -> list:
         """Where in [since, moved] the statement surely returns the row: it holds a value of each subject the map says
         every build restricts and none it refuses, every condition tree is true -- each build's and those some build
         adds, as which build ran is not known -- and so is one running route of calls into it, by that route's own
         reading (a route read as the statement adds nothing); a statement whose every route is not run returns
         nothing, one with no route read has no route to hold.  A statement that asks rows by a value chosen at run
         time (the map's ``keys``: ``WHERE jediTaskID=:jediTaskID``) returns the row only when called with the row's
-        value, which is not known here: never surely (KNOWN_ISSUES.md K18)."""
-        if st.keys:
+        value, which is not known here: never surely (KNOWN_ISSUES.md K18) -- unless *keyed*: read as called with the
+        row's values (M3(a)-cap, whose selections are the row's label's)."""
+        if st.keys and not keyed:
             return []
         out = self._pairs_true(st.restricts, st.refuses, q)
         for reading in st.condition_trees:

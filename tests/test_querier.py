@@ -14446,3 +14446,60 @@ def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_pa
     # callers not complete, a crossing not placed, or no selecting statement: nothing is left out
     assert got["open"] == [False, ["getTasksToExec@4564: callers not complete"], False,
                            ["getTasksToExec@4564: a crossing not placed"], False, False, False], got
+
+
+def test_cap_take_reads_the_first_selection_below_the_cap_after_the_turn(tmp_path):
+    """M3(a)-cap (agents.cap_take): where the selecting statement returns at most a cap of rows, the first selection of
+    the row's label after the statement's turn that returned fewer than the cap and some took every row selectable then
+    -- the row among them -- where it is the last such of the moving pass's machine before the pass; every one of the
+    label's before it returned the cap or none.  Where the lines name no label, the row's is the one place the take's
+    cycle returned rows at, among cycles of its width; cycles of another width are another label's."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime
+            import json
+            from bamboo.querier import agents as AG
+
+            P = AG.Pick
+            turn = datetime.datetime(2026, 1, 1, 0, 10)
+            def cycle(m, mark, at, counts):
+                return [P(m, mark, "", "", f"2026-01-01 {at},{i:03d}", str(n)) for i, n in enumerate(counts)]
+            picks = {
+                "a": [*cycle("a", "<a0>", "00:05:00", [5, 0, 0, 0]),       # before the turn: not read
+                      *cycle("a", "<a1>", "00:11:00", [999, 0, 0, 0]),     # at the cap: rows ahead of it
+                      *cycle("a", "<s1>", "00:12:00", [3]),                # another process's width: another label's
+                      *cycle("a", "<a2>", "00:15:00", [968, 0, 0, 0])],    # below the cap: the take
+                "b": [*cycle("b", "<b1>", "00:12:30", [0, 0, 0, 0])],      # none: beside one that took the same rows
+            }
+            got = {"caps": [AG.cap_rows(["< 1000"]), AG.cap_rows(["<= 50"]), AG.cap_rows(["< nTasks"]), AG.cap_rows([])]}
+            found, why = AG.cap_take(picks, "a", "2026-01-01 00:15:40,000", turn, 999, "")
+            got["take"] = [found.take.mark, found.take.count, [q.mark for q in found.full], [q.mark for q in found.empty],
+                           found.place, found.width, [q.mark for q in found.others]]
+            # a selection of the label below the cap after the turn that did not take it: not read
+            odd = dict(picks, b=[*cycle("b", "<b1>", "00:12:30", [12, 0, 0, 0])])
+            got["odd"] = AG.cap_take(odd, "a", "2026-01-01 00:15:40,000", turn, 999, "")[1]
+            # the take's cycle returned rows at two places: which is the row's is not told
+            two = dict(picks, a=[*picks["a"][:-4], *cycle("a", "<a2>", "00:15:00", [968, 4, 0, 0])])
+            got["two"] = AG.cap_take(two, "a", "2026-01-01 00:15:40,000", turn, 999, "")[1]
+            # the machine's last selection with rows before the pass is at the cap: not the take
+            full = dict(picks, a=[*picks["a"][:-4], *cycle("a", "<a2>", "00:15:00", [999, 0, 0, 0])])
+            got["full"] = AG.cap_take(full, "a", "2026-01-01 00:15:40,000", turn, 999, "")[1]
+            # the lines name the label: the label's selections only, no place
+            named = {"a": [P("a", "<a1>", "managed", "", "2026-01-01 00:11:00,000", "999"),
+                           P("a", "<a1>", "user", "", "2026-01-01 00:11:00,100", "3"),
+                           P("a", "<a2>", "managed", "", "2026-01-01 00:15:00,000", "968")]}
+            n, _ = AG.cap_take(named, "a", "2026-01-01 00:15:40,000", turn, 999, "managed")
+            got["named"] = [n.take.mark, [q.mark for q in n.full], n.place, list(n.others)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["caps"] == [999, 50, None, None], got
+    assert got["take"] == ["<a2>", "968", ["<a1>"], ["<b1>"], 0, 4, ["<s1>"]], got
+    assert got["odd"] == "b's selection at 00:12:30,000 returned 12 row(s), fewer than 999, and did not take it", got
+    assert got["two"] == "the take's cycle <a2> returned rows at 2 of its 4 selections", got
+    assert got["full"].startswith("the last selection on a before the pass returned 999 row(s)"), got
+    assert got["named"] == ["<a2>", ["<a1>"], -1, []], got
