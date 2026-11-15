@@ -140,6 +140,7 @@ from bamboo.codemap.models import (
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
+    RowsTerm,
     SetFrom,
     SourceModule,
     SubjectNode,
@@ -3621,7 +3622,9 @@ def read_side(
             return ConditionNode(node=twin.node, items=[tree_of(func, run, file, one) for one in twin.items])
         test = twin.test
         if test is None or test.kind == "other":
-            return ConditionNode(node="other", text=test.text if test is not None else "")
+            if test is None:
+                return ConditionNode(node="other")
+            return ConditionNode(node="other", text=test.text, rows=rows_of(func, run, file, test.rows))
         found: list[ConditionValue] = []
         settled = True
         for side in test.sides:
@@ -3638,6 +3641,22 @@ def read_side(
             settled=settled,
         )
 
+    def subject_of(column: tuple[str, str]) -> str:
+        return _column_subject(attributor, *column) if column[0] else ""
+
+    def rows_of(func, run, file: str, rows: Optional["sqltext.Rows"]) -> Optional[RowsTerm]:
+        """*rows* with its subjects named and its tree's values read off *run*: :attr:`ConditionNode.rows`."""
+        if rows is None:
+            return None
+        return RowsTerm(
+            op=rows.op,
+            tables=list(rows.tables),
+            correlated=[f"{subject_of(inner)}={subject_of(outer)}" for inner, outer in rows.correlated],
+            subject=subject_of(rows.column),
+            selected=subject_of(rows.selected),
+            tree=tree_of(func, run, file, rows.tree) if rows.tree is not None else None,
+        )
+
     def side_values(func, run, file: str, side: "sqltext.Side", amount: bool) -> list[ConditionValue]:
         """What one side of a term holds on *run*: one value per way a run fills it.
 
@@ -3650,7 +3669,15 @@ def read_side(
         if side.kind == "column":
             return [ConditionValue(kind="column", text=side.text, subject=_column_subject(attributor, side.table, side.column))]
         if side.kind == "other":
-            return [ConditionValue(kind="other", text=side.text, said=side.text)]
+            return [
+                ConditionValue(
+                    kind="other",
+                    text=side.text,
+                    said=side.text,
+                    rows=rows_of(func, run, file, side.rows),
+                    columns=[subject_of(column) for column in side.columns],
+                )
+            ]
         if side.kind == "clock" and not side.binds:
             return [ConditionValue(kind="clock", text=side.text, base=side.clock, offset_seconds=side.offset_seconds)]
         key = side.binds[0]

@@ -26,7 +26,7 @@ import functools
 import itertools
 import re
 from pathlib import Path
-from typing import Iterator, NamedTuple, Optional
+from typing import Any, Iterator, NamedTuple, Optional
 
 import sqlglot
 from pydantic import BaseModel, Field
@@ -2506,6 +2506,37 @@ class Side(NamedTuple):
     #: Seconds per unit of a bind amount added to the clock:
     #: ``CURRENT_DATE-:days`` is ``-86400`` times the bind's value.
     scale_seconds: Optional[float] = None
+    #: An ``other`` side that is one value a subquery gives: ``(SELECT MAX(fileID) FROM ...)``.
+    rows: Optional[Rows] = None
+    #: An ``other`` side made only of the row's columns, numbers and ``+ - * /``, each column as :attr:`table` and
+    #: :attr:`column` are: ``nFilesFinished+nFilesFailed``.  The expression is not evaluated.
+    columns: tuple[tuple[str, str], ...] = ()
+
+
+class Rows(NamedTuple):
+    """What a term asks of rows other than its own, as a subquery says it.
+
+    ``NOT EXISTS (SELECT 1 FROM JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID AND ...)`` is the
+    datasets of the task the statement's row is, and the clause they must all fail; ``PandaID NOT IN (SELECT PandaID
+    FROM ...)`` the rows whose column the row's must not be; ``MAX_PRIORITY=(SELECT MAX(...) FROM ...)`` the rows
+    one value is read off.  The term stays ``other``: nothing here says whether it holds.
+    """
+
+    #: ``EXISTS``, ``NOT EXISTS``, ``IN``, ``NOT IN``, or ``value`` for the one value a comparison reads.
+    op: str
+    #: The subquery's own tables, spelled as :attr:`Term.table`.
+    tables: tuple[str, ...] = ()
+    #: Each column of the subquery its ``WHERE`` equates with a column of a statement outside it, as ``((table,
+    #: column), (outer table, column))``: ``tabD.jediTaskID=tabT.jediTaskID``.
+    correlated: tuple[tuple[tuple[str, str], tuple[str, str]], ...] = ()
+    #: ``IN`` and ``NOT IN``: the column outside that is looked for, as ``(table, column)``.
+    column: tuple[str, str] = ("", "")
+    #: The column the subquery selects, or the one its selected aggregate is of: ``MAX(fileID)`` is ``fileID``.
+    selected: tuple[str, str] = ("", "")
+    #: The subquery's ``WHERE`` without the correlation, read as a statement's own clause is: what a row of
+    #: :attr:`tables` must meet to count.  ``None`` where the clause does not read; an ``all`` of nothing where it
+    #: asks nothing more.
+    tree: Optional[Twin] = None
 
 
 class Test(NamedTuple):
@@ -2524,6 +2555,8 @@ class Test(NamedTuple):
     op: str = ""
     #: The other side: one for a comparison, each listed value for ``IN``.
     sides: tuple[Side, ...] = ()
+    #: An ``other`` term that asks about other rows: ``EXISTS``, ``IN (SELECT ...)`` and their negations.
+    rows: Optional[Rows] = None
 
 
 class Twin(NamedTuple):
@@ -2698,16 +2731,16 @@ def _own(node: exp.Expression, select: Optional[exp.Expression]) -> list[exp.Col
 
 def _term_kind(term: exp.Expression, scope, root) -> str:
     """:data:`_KEEP`, :data:`_HELD` or :data:`_DROP`, read off the tree."""
-    node, negations = term, 0
+    node = term
     while isinstance(node, (exp.Not, exp.Paren)):
-        negations += isinstance(node, exp.Not)
         node = node.this
     if isinstance(node, exp.Exists) or (isinstance(node, exp.In) and node.args.get("query") is not None):
-        # ``EXISTS (...)`` looks rows up and is ``consults``; ``NOT EXISTS``
-        # turns the subquery's terms round, and only the term as a whole says
-        # what it asks.  So does the subquery an ``UPDATE`` picks its own
-        # rows by, which no other field holds.
-        return _KEEP if negations % 2 or _picks_own_rows(node) else _DROP
+        # A term about other rows, ``EXISTS`` as much as ``NOT EXISTS``: a
+        # row the statement passed over may have failed it alone, and the
+        # entry it is dropped from would read as met without it.  Only the
+        # term as a whole says what it asks (:class:`Rows`); ``consults``
+        # still holds the values an ``EXISTS`` looks rows up by.
+        return _KEEP
     select = None if isinstance(scope, _Root) else scope.expression
     own = _own(node, select)
     if not own:
@@ -2976,7 +3009,10 @@ def _side(node: exp.Expression, scope, root, sql: str) -> Side:
     clock = _clock_side(node, text)
     if clock is not None:
         return clock
-    return Side("other", text, binds=tuple(f":{one.name}" for one in node.find_all(exp.Placeholder)))
+    binds = tuple(f":{one.name}" for one in node.find_all(exp.Placeholder))
+    if isinstance(node, exp.Subquery):
+        return Side("other", text, binds=binds, rows=_rows("value", node, scope, root, sql))
+    return Side("other", text, binds=binds, columns=_arithmetic(node, scope, root))
 
 
 def _column_owner(column: exp.Expression, scope, root) -> Optional[str]:
@@ -2989,6 +3025,110 @@ def _column_owner(column: exp.Expression, scope, root) -> Optional[str]:
     return owners[0] if owners and not why else None
 
 
+def _owned(node: Optional[exp.Expression], scope, root) -> tuple[str, str]:
+    """A plain column as ``(table, column)``, or ``("", "")``."""
+    owner = _column_owner(node, scope, root) if node is not None else None
+    return (owner, node.name) if owner is not None and node is not None else ("", "")
+
+
+def _arithmetic(node: exp.Expression, scope, root) -> tuple[tuple[str, str], ...]:
+    """The columns *node* is made of where it is only the row's columns, numbers and ``+ - * /``; ``()`` for
+    anything else: ``nFilesFinished+nFilesFailed``."""
+    found: list[tuple[str, str]] = []
+    stack = [node]
+    while stack:
+        one = stack.pop()
+        if isinstance(one, exp.Paren):
+            stack.append(one.this)
+        elif isinstance(one, (exp.Add, exp.Sub, exp.Mul, exp.Div)):
+            stack.extend((one.expression, one.this))
+        elif isinstance(one, exp.Literal) and not one.is_string:
+            continue
+        else:
+            column = _owned(one, scope, root)
+            if not column[0]:
+                return ()
+            if column not in found:
+                found.append(column)
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=None)
+def _scoped(sql: str) -> tuple[dict[int, Any], Optional[_Root], list[_Token]]:
+    """*sql*'s scopes by the expression each is of, its ``UPDATE``/``DELETE`` root, and its tokens.
+
+    One set for a statement and every subquery in it, so a subquery's column is owned through the same chain of
+    scopes the statement's own clause is read in.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return {}, None, []
+    scopes, root = _scopes(read.tree)
+    return {id(scope.expression): scope for scope, _verb, _kind in scopes}, root, _tokens(read.text)
+
+
+def _rows(op: str, query: exp.Expression, scope, root, sql: str, column: tuple[str, str] = ("", "")) -> Rows:
+    """The subquery *query* of a term *op* asks by, as :class:`Rows`; only *op* where it is not one ``SELECT``.
+
+    The correlation is each term of its ``WHERE``'s outermost ``AND`` equating a column of its own with one a
+    qualifier from outside names: ``tabD.jediTaskID=tabT.jediTaskID``.  Its tree is the rest of the clause, a term
+    against a column outside kept as it compares (``tabD.creationTime>tabT.creationTime``): it is part of what a row
+    must meet to count.
+    """
+    while isinstance(query, (exp.Subquery, exp.Paren)):
+        query = query.this
+    if not isinstance(query, exp.Select):
+        return Rows(op, column=column)
+    scope_of, _root, tokens = _scoped(sql)
+    inner = scope_of.get(id(query))
+    if inner is None:
+        return Rows(op, column=column)
+    tables = tuple(sorted({_table_name(one) for one in inner.sources.values() if isinstance(one, exp.Table)}))
+    own = {key.lower() for key in inner.sources}
+
+    def outside(node: exp.Expression) -> bool:
+        return isinstance(node, exp.Column) and bool(node.table) and node.table.lower() not in own
+
+    correlated: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    through: set[int] = set()
+    where = query.args.get("where")
+    for term in _conjuncts(where.this) if where is not None else ():
+        if not isinstance(term, exp.EQ) or outside(term.this) == outside(term.expression):
+            continue
+        mine, theirs = (term.expression, term.this) if outside(term.this) else (term.this, term.expression)
+        pair = (_owned(mine, inner, root), _owned(theirs, inner, root))
+        if pair[0][0] and pair[1][0]:
+            correlated.append(pair)
+            through.add(id(term))
+    projections = query.selects
+    picked = list(projections[0].find_all(exp.Column)) if len(projections) == 1 else []
+    selected = _owned(picked[0], inner, root) if len(picked) == 1 else ("", "")
+    tree: Optional[Twin] = Twin("all")
+    if where is not None:
+        clause = _where_tree(where, inner, root, parsed(sql), sql, tokens)
+        if clause is None:
+            tree = None
+        else:
+            kept = _prune(_correlation_off(clause, through, outside), False, True)
+            tree = _as_twin(kept, inner, root, sql) if kept is not None else Twin("all")
+    return Rows(op, tables, tuple(correlated), column, selected, tree)
+
+
+def _correlation_off(node, through: set[int], outside):
+    """A subquery's clause tree with its correlation terms dropped, and a term against a column outside kept."""
+    if node[0] != "term":
+        kind, body = node
+        return (kind, [_correlation_off(child, through, outside) for child in body])
+    _term, text, kind, held, span = node
+    if held is None:
+        return node
+    if id(held) in through:
+        return ("term", text, _DROP, held, span)
+    if kind == _DROP and any(outside(one) for one in held.find_all(exp.Column)):
+        return ("term", text, _KEEP, held, span)
+    return node
+
+
 def _test(node: Optional[exp.Expression], text: str, scope, root, sql: str) -> Twin:
     """The term *node* of a clause as a :class:`Test`, or the ``all`` of a ``BETWEEN``'s two."""
     other = Twin("test", test=Test("other", text))
@@ -2998,6 +3138,12 @@ def _test(node: Optional[exp.Expression], text: str, scope, root, sql: str) -> T
     while isinstance(node, (exp.Not, exp.Paren)):
         negated ^= isinstance(node, exp.Not)
         node = node.this
+    if isinstance(node, exp.Exists):
+        return Twin("test", test=Test("other", text, rows=_rows("NOT EXISTS" if negated else "EXISTS", node.this, scope, root, sql)))
+    if isinstance(node, exp.In) and node.args.get("query") is not None:
+        op = "NOT IN" if negated else "IN"
+        rows = _rows(op, node.args["query"], scope, root, sql, _owned(node.this, scope, root))
+        return Twin("test", test=Test("other", text, rows=rows))
     if isinstance(node, exp.Is) and isinstance(node.expression, exp.Null):
         owner = _column_owner(node.this, scope, root)
         if owner is None:
@@ -3234,9 +3380,7 @@ def _readings(sql: str, held: bool) -> tuple[_Read, ...]:
     read = parsed(sql)
     if read.tree is None:
         return ()
-    tokens = _tokens(read.text)
-    scopes, root = _scopes(read.tree)
-    scope_of = {id(scope.expression): scope for scope, _verb, _kind in scopes}
+    scope_of, root, tokens = _scoped(sql)
     ctes: dict[str, exp.Expression] = {}
     entered: set[int] = set()
 

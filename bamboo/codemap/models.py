@@ -1982,6 +1982,18 @@ class ConditionValue(BaseModel):
             "nothing in the map fills."
         ),
     )
+    rows: Optional[RowsTerm] = Field(
+        default=None,
+        description="An ``other`` value one subquery gives: ``(SELECT MAX(fileID) FROM ...)``, its ``op`` ``value``.",
+    )
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An ``other`` value made only of the row's columns, numbers and "
+            "``+ - * /``: each column's subject, spelled as ``subject`` is -- "
+            "``nFilesFinished+nFilesFailed``.  The expression is not evaluated."
+        ),
+    )
 
 
 class ConditionNode(BaseModel):
@@ -2028,6 +2040,52 @@ class ConditionNode(BaseModel):
     settled: bool = Field(
         default=False,
         description="Every bind of the term is filled with a value the map settles, and nothing in it is ``other``.",
+    )
+    rows: Optional[RowsTerm] = Field(
+        default=None,
+        description=(
+            "An ``other`` term that asks about rows other than the statement's "
+            "own -- ``EXISTS``, ``NOT EXISTS``, ``IN (SELECT ...)``, ``NOT IN "
+            "(SELECT ...)`` -- as its subquery says it.  The term stays "
+            "``other``: this says what it asks, not whether it holds."
+        ),
+    )
+
+
+class RowsTerm(BaseModel):
+    """What a term asks of rows other than the statement's own, as its subquery says it: :attr:`ConditionNode.rows`.
+
+    ``NOT EXISTS (SELECT 1 FROM JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID AND masterID IS NULL AND
+    ...)`` is the datasets of the row's task (``correlated``) and what one of them must meet to stop the row
+    (``tree``).
+    """
+
+    op: str = Field(
+        ...,
+        description="``EXISTS``, ``NOT EXISTS``, ``IN``, ``NOT IN``, or ``value`` for the one value a comparison reads.",
+    )
+    tables: list[str] = Field(default_factory=list, description="The subquery's own tables, as ``ReadSiteNode.tables`` spells them.")
+    correlated: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<inner subject>=<outer subject>`` for each column of the subquery "
+            "its ``WHERE`` equates with one of a statement outside it: "
+            "``JediDatasetSpec.jediTaskID=JediTaskSpec.jediTaskID``."
+        ),
+    )
+    subject: str = Field(default="", description="``IN``/``NOT IN``: the subject of the column outside that is looked for.")
+    selected: str = Field(
+        default="",
+        description="The subject of the column the subquery selects, or that its selected aggregate is of.",
+    )
+    tree: Optional[ConditionNode] = Field(
+        default=None,
+        description=(
+            "The subquery's ``WHERE`` without the correlation, read as a "
+            "statement's own clause is, its binds settled by the same run: "
+            "what a row of ``tables`` must meet to count.  ``None`` where the "
+            "clause does not read; an ``all`` of nothing where it asks nothing more."
+        ),
     )
 
 

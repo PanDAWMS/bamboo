@@ -451,9 +451,10 @@ def test_a_column_compared_with_one_bind_is_not_a_condition_outside_an_or():
 
     Inside an ``OR`` the term stays: there it says the statement accepts that
     value *or* something else.  ``IN`` and a quoted value stay as the text
-    reading kept them.  ``EXISTS`` is ``consults`` and ``ROWNUM`` is
-    ``limits``; ``NOT EXISTS`` asks the subquery turned round, and only the
-    term as written says that.
+    reading kept them.  ``ROWNUM`` is ``limits``.  ``EXISTS`` and ``NOT
+    EXISTS`` ask about other rows, and only the term as written says what:
+    both stay, or a row passed over for failing one would read as having met
+    its entry.
     """
     required = _required(
         "SELECT t.jediTaskID FROM {}.JEDI_Tasks t WHERE t.status<>:s0 AND t.status IN (:s1,:s2) "
@@ -468,6 +469,7 @@ def test_a_column_compared_with_one_bind_is_not_a_condition_outside_an_or():
         [("t.vo='atlas'",)],
         [("t.status=:s3",), ("t.lockedBy IS NULL",)],
         [("NOT EXISTS (SELECT 1 FROM {}.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID AND d.status=:ds)",)],
+        [("EXISTS (SELECT 1 FROM {}.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID AND d.type='input')",)],
     ]
 
 
@@ -1266,6 +1268,102 @@ def test_what_two_branches_of_a_union_require_between_them_folds_into_one_tree()
     folded = _shape(twins[1])
     assert folded[0] == "any" and len(folded) == 3
     assert [branch[0] for branch in folded[1:]] == ["all", "all"]
+
+
+def _rows_terms(sql: str) -> list:
+    """Each ``other`` term of *sql*'s condition trees that asks about other rows, in order, a nested one after its own."""
+    found = []
+
+    def walk(twin):
+        if twin.node == "test":
+            if twin.test.rows is not None:
+                found.append(twin.test)
+                if twin.test.rows.tree is not None:
+                    walk(twin.test.rows.tree)
+            return
+        for one in twin.items:
+            walk(one)
+
+    with sqltext.with_schema(_SCHEMA):
+        for twin in sqltext.condition_twins(sql):
+            walk(twin)
+    return found
+
+
+def test_a_term_about_other_rows_says_which_rows_and_what_one_of_them_must_meet():
+    """``prepareTasksToBeFinished_JEDI``'s ``NOT EXISTS``: the datasets of the row's task, and the clause one must meet.
+
+    The term stays ``other`` -- nothing says whether it holds -- and carries the subquery's table, the column it
+    equates with the statement's own (the correlation, out of its tree), and its ``WHERE`` read as a statement's own
+    clause is, down to a side made of the dataset's own columns.
+    """
+    sql = (
+        "SELECT tabT.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks tabT WHERE tabT.status IN (:s1,:s2) AND NOT EXISTS "
+        "(SELECT 1 FROM ATLAS_PANDA.JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID AND masterID IS NULL "
+        "AND type IN (:type1,:type2) AND NOT status IN (:e1,:e2) AND ("
+        "nFilesToBeUsed>nFilesFinished+nFilesFailed OR (nFilesUsed=0 AND nFilesToBeUsed>0)))"
+    )
+    (term,) = _rows_terms(sql)
+    rows = term.rows
+    assert term.kind == "other" and term.text.startswith("NOT EXISTS (SELECT 1 FROM")
+    assert (rows.op, rows.tables) == ("NOT EXISTS", ("JEDI_Datasets",))
+    assert rows.correlated == ((("JEDI_Datasets", "jediTaskID"), ("JEDI_Tasks", "jediTaskID")),)
+    assert _shape(rows.tree) == (
+        "any",
+        (
+            "all",
+            ("null", "JEDI_Datasets.masterID", "", ()),
+            ("equal", "JEDI_Datasets.type", "IN", (("bind", ":type1"), ("bind", ":type2"))),
+            ("unequal", "JEDI_Datasets.status", "NOT IN", (("bind", ":e1"), ("bind", ":e2"))),
+            (
+                "any",
+                ("compare", "JEDI_Datasets.nFilesToBeUsed", ">", (("other", "nFilesFinished + nFilesFailed"),)),
+                (
+                    "all",
+                    ("equal", "JEDI_Datasets.nFilesUsed", "=", (("constant", "0"),)),
+                    ("compare", "JEDI_Datasets.nFilesToBeUsed", ">", (("constant", "0"),)),
+                ),
+            ),
+        ),
+    )
+    (expression,) = [side for side in _sides(rows.tree) if side.kind == "other"]
+    assert expression.columns == (("JEDI_Datasets", "nFilesFinished"), ("JEDI_Datasets", "nFilesFailed"))
+
+
+def test_an_exists_is_an_entry_and_an_in_over_rows_names_the_column_looked_for():
+    """A positive ``EXISTS`` is an entry as ``NOT EXISTS`` is; ``IN (SELECT ...)`` names both columns; a nested one nests.
+
+    A term of the subquery against the statement's column other than an equality is part of what a row must meet,
+    so it stays in the tree, compared with that column.  A comparison with one value a subquery gives carries the
+    subquery on that side.  A side with a bind in it is not made of the row's columns.
+    """
+    sql = (
+        "SELECT t.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks t WHERE t.vo=:vo "
+        "AND EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Datasets d WHERE d.jediTaskID=t.jediTaskID "
+        "AND d.status=:ds AND d.datasetID>t.jediTaskID "
+        "AND NOT EXISTS (SELECT 1 FROM ATLAS_PANDA.JEDI_Dataset_Contents c WHERE c.datasetID=d.datasetID AND c.status=:cs)) "
+        "AND t.jediTaskID NOT IN (SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Datasets WHERE type=:t) "
+        "AND t.status=(SELECT MAX(status) FROM ATLAS_PANDA.JEDI_Datasets WHERE jediTaskID=:tid) "
+        "AND t.vo<>t.status+:n"
+    )
+    with sqltext.with_schema(_SCHEMA):
+        entries = [condition.branches[0].terms[0] for condition in sqltext.conditions(sql)]
+    assert any(entry.startswith("EXISTS (SELECT 1 FROM") for entry in entries)
+    exists, nested, not_in = _rows_terms(sql)
+    assert (exists.rows.op, nested.rows.op, not_in.rows.op) == ("EXISTS", "NOT EXISTS", "NOT IN")
+    assert exists.rows.correlated == ((("JEDI_Datasets", "jediTaskID"), ("JEDI_Tasks", "jediTaskID")),)
+    tree = _shape(exists.rows.tree)
+    assert ("equal", "JEDI_Datasets.status", "=", (("bind", ":ds"),)) in tree[1]
+    assert ("compare", "JEDI_Datasets.datasetID", ">", (("column", "t.jediTaskID"),)) in tree[1]
+    assert nested.rows.correlated == ((("JEDI_Dataset_Contents", "datasetID"), ("JEDI_Datasets", "datasetID")),)
+    assert (not_in.rows.column, not_in.rows.selected) == (("JEDI_Tasks", "jediTaskID"), ("JEDI_Datasets", "jediTaskID"))
+    assert not_in.rows.correlated == ()
+    with sqltext.with_schema(_SCHEMA):
+        sides = [side for twin in sqltext.condition_twins(sql) for side in _sides(twin) if side.kind == "other"]
+    value = next(side for side in sides if side.rows is not None)
+    assert (value.rows.op, value.rows.selected) == ("value", ("JEDI_Datasets", "status"))
+    assert _shape(value.rows.tree) == ("any", ("all", ("equal", "JEDI_Datasets.jediTaskID", "=", (("bind", ":tid"),))))
+    assert [side.columns for side in sides if side.rows is None] == [()]
 
 
 def test_a_logged_statement_and_its_map_are_cut_apart_without_losing_a_time():

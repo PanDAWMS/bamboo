@@ -2060,6 +2060,54 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     ]
 
 
+def test_a_term_about_other_rows_carries_them_with_its_binds_settled_by_the_same_run(tmp_path):
+    """``NOT EXISTS`` over the task's datasets: the term stays ``other``, and says the rows, the correlation by
+    subject, and the subquery's clause with its bind read off the run as a statement's own clause is."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Tasks:\n"
+        "    def pick(self):\n"
+        "        comment = ' /* JediDBProxy.pick */'\n"
+        "        varMap = {}\n"
+        "        varMap[':s'] = 'running'\n"
+        "        varMap[':ds'] = 'ready'\n"
+        "        sql = 'SELECT tabT.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks tabT WHERE tabT.status=:s AND NOT EXISTS '\n"
+        "        sql += '(SELECT 1 FROM ATLAS_PANDA.JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID '\n"
+        "        sql += 'AND tabD.status=:ds AND nFilesToBeUsed>nFilesFinished+nFilesFailed)'\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+
+    (statement,) = side.statements.values()
+    (reading,) = [one for one in statement.condition_trees if one.entry.startswith("NOT EXISTS")]
+    (term,) = reading.tree.items[0].items
+    rows = term.rows
+    assert (term.node, term.settled, rows.op, rows.tables) == ("other", False, "NOT EXISTS", ["JEDI_Datasets"])
+    assert rows.correlated == ["JEDI_Datasets.jediTaskID=JEDI_Tasks.jediTaskID"]
+    status, files = rows.tree.items[0].items
+    assert (status.subject, [value.constant for value in status.values], status.settled) == (
+        "JEDI_Datasets.status",
+        ["ready"],
+        True,
+    )
+    (expression,) = files.values
+    assert (files.subject, expression.kind, expression.columns) == (
+        "JEDI_Datasets.nFilesToBeUsed",
+        "other",
+        ["JEDI_Datasets.nFilesFinished", "JEDI_Datasets.nFilesFailed"],
+    )
+
+
 def test_an_order_a_loop_builds_says_its_column_and_an_order_a_format_hands_says_its_test(tmp_path):
     """``getJobs``' share ranking and ``_read_unprocessed_inputs``' ``ORDER BY {0}``.
 
