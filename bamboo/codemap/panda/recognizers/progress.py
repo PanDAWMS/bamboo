@@ -832,6 +832,78 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
 LENGTH_LIMITS = "_limitLength"
 
 
+def spec_unset_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]:
+    """``{(spec_class, attribute): value}`` a spec's map writes for a field no code set.
+
+    ``JobSpec()`` starts every field ``None``, read back as ``"NULL"``, and its
+    ``valuesMap`` writes ``0`` for one of ``_zeroAttrs`` that is still so --
+    ``if val == "NULL": if attr in self._zeroAttrs: val = 0`` -- so a row
+    made of a job no one gave a ``taskBufferErrorCode`` holds ``0``.
+    ``JediFileSpec`` tests ``val is None`` the same way.
+
+    **The test, not the name.**  As :func:`spec_length_limits` reads a cut:
+    a tuple of names in the class counts only where its own body replaces an
+    unset value by a literal under a test of the attribute's membership in it,
+    the value tested unset (``== "NULL"`` or ``is None``) around it.  The
+    ``else`` writing ``None`` is no value: a field unset is ``NULL``, which is
+    what a row not given it holds anyway.
+    """
+    found: dict[tuple[str, str], str] = {}
+    for module in modules:
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
+            declared: dict[str, list[str]] = {}
+            for stmt in cls.body:
+                value = getattr(stmt, "value", None)
+                if not isinstance(value, (ast.Tuple, ast.List)):
+                    continue
+                names = [one.value for one in value.elts if isinstance(one, ast.Constant) and isinstance(one.value, str)]
+                if len(names) != len(value.elts):
+                    continue
+                for target in targets_of(stmt):
+                    if isinstance(target, ast.Name):
+                        declared[target.id] = names
+            unset_tests = [n for n in walk(cls) if isinstance(n, ast.If) and _tests_unset(n.test)]
+            inner = [n for outer in unset_tests for stmt in outer.body for n in walk(stmt) if isinstance(n, ast.If)]
+            for test in inner:
+                held = _unset_membership(test.test)
+                if held is None or held not in declared:
+                    continue
+                literal = next(
+                    (
+                        repr(stmt.value.value)
+                        for stmt in test.body
+                        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant)
+                        and stmt.value.value is not None
+                    ),
+                    None,
+                )
+                if literal is not None:
+                    found.update(((cls.name, attribute), literal) for attribute in declared[held])
+    return found
+
+
+def _unset_membership(test: ast.expr) -> Optional[str]:
+    """``_zeroAttrs`` of ``attr in self._zeroAttrs``; ``None`` for any other test."""
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.In)
+        and isinstance(test.comparators[0], ast.Attribute)
+        and isinstance(test.comparators[0].value, ast.Name)
+        and test.comparators[0].value.id == "self"
+    ):
+        return test.comparators[0].attr
+    return None
+
+
+def _tests_unset(test: ast.expr) -> bool:
+    """Whether *test* asks a value unset: ``== "NULL"`` or ``is None``."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.comparators[0], ast.Constant)):
+        return False
+    right = test.comparators[0].value
+    return (isinstance(test.ops[0], ast.Eq) and right == "NULL") or (isinstance(test.ops[0], ast.Is) and right is None)
+
+
 def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int]:
     """``{(spec_class, attribute): characters}`` a spec cuts the field to.
 

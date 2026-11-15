@@ -20631,6 +20631,174 @@ def test_a_term_a_parameter_fills_points_at_what_each_call_hands_the_parameter(t
 
 #: insertNewJob's INSERT of a job handed in, keyed by its PandaID; archiveJob's move; and an INSERT keyed by a field the
 #: function itself assigns on the object it was handed, ppEventServiceJob's jobParamsTable row.
+_HANDED_PROXY = '''
+class JobModule:
+    def insertNewJob(self, job: JobSpec):
+        sql1 = f"INSERT INTO ATLAS_PANDA.jobsDefined4 ({JobSpec.columnNames()}) "
+        sql1 += JobSpec.bindValuesExpression()
+        self.cur.execute(sql1 + comment, job.valuesMap())  # NEW JOB
+
+    def archiveJob(self, job: JobSpec):
+        sql1 = f"INSERT INTO ATLAS_PANDA.jobsArchived4 ({JobSpec.columnNames()}) "
+        sql1 += JobSpec.bindValuesExpression()
+        self.cur.execute(sql1 + comment, job.valuesMap())  # ARCHIVE
+
+    def cloneJob(self, jobSpec: JobSpec, val):
+        jobSpec.PandaID = int(val)  # STORE IN
+        varMap = {":PandaID": jobSpec.PandaID, ":jobStatus": "activated"}
+        self.cur.execute("INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus) VALUES (:PandaID,:jobStatus) ", varMap)  # CLONE
+
+    def fetch_ids(self, n):
+        self.cur.execute("SELECT ATLAS_PANDA.JOBSDEFINED4_PANDAID_SEQ.nextval FROM dual", {})
+        return [one for (one,) in self.cur.fetchall()]
+'''
+
+_HANDED_CALLER = '''
+from pandaserver.taskbuffer.Specs import JobSpec
+from pandaserver.taskbuffer.db_proxy_mods.job_module import JobModule
+
+
+class Buffer:
+    def __init__(self, proxy: JobModule):
+        self.proxy = proxy
+
+    def storeJobs(self, jobs: list[JobSpec]):
+        new_ids = self.proxy.fetch_ids(len(jobs))
+        for idx, job in enumerate(jobs):
+            job.PandaID = new_ids[idx]  # SET ID
+            self.proxy.insertNewJob(job)
+
+    def archiveJobs(self, jobs: list[JobSpec]):
+        for job in jobs:
+            self.proxy.archiveJob(job)
+'''
+
+
+def _handed_built(tmp_path, specs: str = _MAPPED_SPECS):
+    """The build's steps an INSERT's mark is read in, over :data:`_HANDED_PROXY` and :data:`_HANDED_CALLER`: the key
+    records and their sources, the guards' records with the ParameterFroms the sources end at, then the births
+    (:func:`sqlwrite.handed_births`).  ``(KeyFroms, junctions, modules, marks before the births)``."""
+    proxy = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    caller = "pandaserver/taskbuffer/Buffer.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/Specs.py": specs, proxy: _HANDED_PROXY, caller: _HANDED_CALLER}
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    keys = {
+        "jobsdefined4": frozenset({"pandaid"}),
+        "jobsarchived4": frozenset({"pandaid"}),
+        "jobsactive4": frozenset({"pandaid"}),
+    }
+    froms: list[KeyFrom] = []
+    trees = {module.rel_path: module.tree for module in modules}
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, keys, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions + arms,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=attributor,
+        )
+        ends = sqlwrite.parameter_ends(froms)
+        _guards, parameters, _sets, writes, _fields = heldfrom.guard_froms(
+            junctions + arms, sites, trees, calls, record, parameters=ends
+        )
+    before = {
+        (one.owner.rpartition("::")[2], one.table): (one.new_row, one.new_row_by) for one in froms if one.new_row_by
+    }
+    every = junctions + arms
+    sqlwrite.handed_births(froms, every, writes, parameters)
+    return froms, every, modules, before
+
+
+def _at(text: str, where: str) -> int:
+    return next(n for n, line in enumerate(where.split("\n"), 1) if text in line)
+
+
+def test_an_insert_of_an_object_handed_in_is_new_where_its_key_was_given_a_value_before_it(tmp_path):
+    """An INSERT keyed by a field of an object of its class handed in is not said by the function alone: who made the
+    key is the caller's.  Where the field was given a value on that object before the statement on every way -- in a
+    caller before its call (storeJobs' ``job.PandaID = new_ids[idx]`` for insertNewJob), or in the function itself
+    (cloneJob, as ppEventServiceJob keys its jobParamsTable row by the PandaID its job's RETURNING gave) -- the row is
+    new, not of its class, and *new_row_at* says where (:func:`sqlwrite.handed_births`).  archiveJob's callers give
+    the field no value: still not said."""
+    proxy = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    caller = "pandaserver/taskbuffer/Buffer.py"
+    froms, _junctions, _modules, before = _handed_built(tmp_path)
+    marks = {
+        (one.owner.rpartition("::")[2], one.table): (one.new_row, one.new_row_by, one.new_row_at)
+        for one in froms
+        if one.new_row_by
+    }
+    assert before[("insertNewJob", "jobsDefined4")] == (None, "handed in as its class")
+    assert before[("cloneJob", "jobsActive4")] == (None, "handed in as its class")
+    assert marks[("insertNewJob", "jobsDefined4")] == (
+        True,
+        "not of its class",
+        f"{caller}:{_at('# SET ID', _HANDED_CALLER)}",
+    )
+    assert marks[("cloneJob", "jobsActive4")] == (True, "not of its class", f"{proxy}:{_at('# STORE IN', _HANDED_PROXY)}")
+    assert marks[("archiveJob", "jobsArchived4")] == (None, "handed in as its class", "")
+
+
+#: JobSpec's map as PanDA's: an unset field reads back ``"NULL"``, written ``0`` where the field is one of _zeroAttrs.
+_ZERO_SPECS = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus", "taskBufferErrorCode", "jobName")
+    _zeroAttrs = ("taskBufferErrorCode",)
+
+    def valuesMap(self, useSeq=False, onlyChanged=False):
+        ret = {}
+        for attr in self._attributes:
+            val = getattr(self, attr)
+            if val == "NULL":
+                if attr in self._zeroAttrs:
+                    val = 0
+                else:
+                    val = None
+            ret[f":{attr}"] = val
+        return ret
+"""
+
+
+def test_an_insert_making_a_row_of_an_object_written_whole_writes_its_classs_value_of_an_unset_field(tmp_path):
+    """ZDF: JobSpec's valuesMap writes ``0`` for a field of ``_zeroAttrs`` no code set (``progress.spec_unset_values``),
+    so insertNewJob's INSERT -- a row made, of the job written whole -- is an arm writing ``0`` to
+    ``taskBufferErrorCode`` where the job does not hold one: a tier-1 arm at the INSERT, marked as the unset field's
+    value (:attr:`Branch.unset_default`), and a write of the field at that line on the INSERT's records, so a reader
+    asking whether a write makes its row reads it as a birth.  archiveJob's INSERT moves a row (not said here):
+    none.  cloneJob's INSERT writes no object whole: none."""
+    froms, junctions, modules, _before = _handed_built(tmp_path, _ZERO_SPECS)
+    assert progress.spec_unset_values(modules) == {("JobSpec", "taskBufferErrorCode"): "0"}
+    sqlwrite.unset_births(junctions, froms, progress.spec_unset_values(modules), modules, MAP_ID, VERSION)
+    line = _at("# NEW JOB", _HANDED_PROXY)
+    arms = [
+        (j.owner.rpartition("::")[2], b.line, b.outcome, b.tier, b.unset_default)
+        for j in junctions
+        if j.subject == "JobSpec.taskBufferErrorCode"
+        for b in j.branches
+    ]
+    assert arms == [("insertNewJob", line, "0", 1, "JobSpec.taskBufferErrorCode")]
+    (born,) = [one for one in froms if one.owner.endswith("::insertNewJob") and one.table == "jobsDefined4"]
+    assert born.writes["JobSpec.taskBufferErrorCode"] == [line]
+
+
 _READ_TWICE = '''
 class TaskModule:
     def countTasks(self, vo):

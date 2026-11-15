@@ -117,6 +117,7 @@ from bamboo.codemap.models import (
     SET_BIND,
     SET_EXPRESSION,
     SET_OBJECT,
+    WRITE_OBJECT,
     AddedTerm,
     Anchor,
     Branch,
@@ -129,12 +130,14 @@ from bamboo.codemap.models import (
     DiagnosticTemplate,
     EntityNode,
     GuardRead,
+    HeldSource,
     JoinPair,
     JunctionNode,
     KeyFrom,
     KeySource,
     OpenCrossing,
     OrderHole,
+    ParameterFrom,
     PrintedBy,
     ReachNode,
     ReadingStop,
@@ -146,6 +149,7 @@ from bamboo.codemap.models import (
     SubjectNode,
     TermGuard,
     TermPlace,
+    WriteFrom,
     pooled_cuts,
     pooled_frames,
 )
@@ -177,6 +181,7 @@ from bamboo.codemap.pathcond import (
     surviving_writes,
     targets_of,
 )
+from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.reach import ReachGraph
@@ -7644,6 +7649,214 @@ def attach_key_sources(
     if attributor is not None and key_froms is not None:
         key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading))
     return read
+
+
+def handed_births(
+    key_froms: Iterable[KeyFrom],
+    junctions: Iterable[JunctionNode],
+    write_froms: Iterable[WriteFrom],
+    parameter_froms: Iterable[ParameterFrom],
+) -> None:
+    """Mark new each ``INSERT`` whose mark is :data:`NEW_ROW_HANDED` -- its key carried from a field of an object of
+    the table's class handed in -- where the field was given a value on that object before the statement on every
+    way, and none carried from another object's field (a passthrough arm).  In the function: the assignments of the
+    field on the parameter that reach the statement, where the value it was handed does not
+    (:func:`bamboo.codemap.reaching.reaching`, the parameter list written on entry) -- ``ppEventServiceJob``'s
+    ``jobSpec.PandaID = int(val)`` from its job's ``RETURNING`` or ``None``, then the ``jobParamsTable`` row keyed by
+    it.  Where the handed value may reach, in each caller its :class:`ParameterFrom` reaches: the assignments there
+    on the object it hands, before the call (``storeJobs``' ``job.PandaID = new_panda_ids[idxJob]`` for
+    ``insertNewJob``'s ``INSERT``, through ``bulk_insert_new_jobs`` too), by the arms' :class:`WriteFrom` s.  The
+    value's kind is the arm's outcome.  Not of its class, then (:data:`NEW_ROW_OTHER_CLASS`), where
+    (:attr:`KeyFrom.new_row_at`).  A way no assignment is read on -- an object read off a row of the class, a call
+    handing what it was handed --, or a function binding the object's name again, leaves the statement not said."""
+    outcomes: dict[tuple[str, str, int], str] = {}
+    for junction in junctions:
+        for branch in junction.branches:
+            for line in (branch.line, *branch.other_lines):
+                if line is not None:
+                    outcomes[(junction.owner, junction.subject, line)] = branch.outcome
+    stores: dict[tuple[str, str], list[WriteFrom]] = {}
+    for one in write_froms:
+        if one.role == WRITE_OBJECT:
+            stores.setdefault((one.owner, one.subject), []).append(one)
+    parameters = {(one.owner, one.line, one.parameter): one for one in parameter_froms}
+    statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
+    for key_from in key_froms:
+        if key_from.new_row is None and key_from.new_row_by == NEW_ROW_HANDED:
+            statements.setdefault((key_from.owner, key_from.statement, key_from.table), []).append(key_from)
+    for together in statements.values():
+        found: list[tuple[str, str]] = []
+        for key_from in together:
+            given = _field_given(key_from, stores, parameters, outcomes)
+            if given is None:
+                break
+            found += given
+        else:
+            if found and not any(outcome.startswith("passthrough(") for _at, outcome in found):
+                for key_from in together:
+                    key_from.new_row, key_from.new_row_by, key_from.new_row_at = True, NEW_ROW_OTHER_CLASS, found[0][0]
+
+
+def _field_given(
+    key_from: KeyFrom,
+    stores: dict[tuple[str, str], list[WriteFrom]],
+    parameters: dict[tuple[str, int, str], ParameterFrom],
+    outcomes: dict[tuple[str, str, int], str],
+) -> Optional[list[tuple[str, str]]]:
+    """``(file:line, outcome)`` of each assignment giving the key's field on the object handed in its value, for each
+    of *key_from*'s binds (see :func:`handed_births`); ``None`` where a bind is no field of a parameter, or a way
+    gives it none."""
+    if key_from._binds is None or not key_from._binds[2]:
+        return None
+    func, file, binds = key_from._binds
+    found: list[tuple[str, str]] = []
+    for bind in binds:
+        value = bind.value
+        if not (isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)):
+            return None
+        root, attribute = value.value.id, value.attr
+        source = next(
+            (one for one in key_from.sources if one.kind == KEY_PARAMETER and one.name == root and one.attr), None
+        )
+        if source is None:
+            return None
+        statements = [node for node in own_nodes(func) if isinstance(node, ast.stmt)]
+        if any(isinstance(target, ast.Name) and target.id == root for node in statements for target in targets_of(node)):
+            return None
+        assigned = [
+            node
+            for node in statements
+            if any(
+                isinstance(target, ast.Attribute)
+                and target.attr == attribute
+                and isinstance(target.value, ast.Name)
+                and target.value.id == root
+                for target in targets_of(node)
+            )
+        ]
+        entry = True
+        if assigned:
+            reached = reaching(bind.site, [func.args, *assigned])
+            entry = any(one is func.args for one in reached)
+            found += [
+                (f"{file}:{one.lineno}", outcomes.get((key_from.owner, source.attr, one.lineno), ""))
+                for one in reached
+                if isinstance(one, ast.stmt)
+            ]
+        if entry:
+            handed = _callers_given(source, stores, parameters, outcomes)
+            if handed is None:
+                return None
+            found += handed
+    return found
+
+
+def _same_way(one: HeldSource, other: HeldSource) -> bool:
+    """Whether two ways end at the same value: kind, name, owner and line of its site, and the steps past it."""
+    return (one.kind, one.name, one.site_owner, one.site_line, list(one.steps)) == (
+        other.kind,
+        other.name,
+        other.site_owner,
+        other.site_line,
+        list(other.steps),
+    )
+
+
+def _callers_given(
+    source: KeySource,
+    stores: dict[tuple[str, str], list[WriteFrom]],
+    parameters: dict[tuple[str, int, str], ParameterFrom],
+    outcomes: dict[tuple[str, str, int], str],
+) -> Optional[list[tuple[str, str]]]:
+    """``(file:line, outcome)`` of each assignment of *source*'s field, in each caller its parameter's
+    :class:`ParameterFrom` reaches, on the object that caller hands, before its call; ``None`` where a way has
+    none."""
+    parameter = parameters.get((source.site_owner, source.site_line or 0, source.name))
+    if parameter is None or not parameter.sources:
+        return None
+    found: list[tuple[str, str]] = []
+    for way in parameter.sources:
+        if way.kind == KEY_CONSTANT:
+            continue
+        file = way.site_owner.partition("::")[0]
+        call = next((int(at.rpartition(":")[2]) for at in way.route if at.rpartition(":")[0] == file), None)
+        if not way.site_owner or call is None:
+            return None
+        there = [
+            one
+            for one in stores.get((way.site_owner, source.attr), ())
+            if one.line < call and any(_same_way(held, way) for held in one.sources)
+        ]
+        if not there:
+            return None
+        found += [(f"{file}:{one.line}", outcomes.get((one.owner, one.subject, one.line), "")) for one in there]
+    return found or None
+
+
+def unset_births(
+    junctions: list[JunctionNode],
+    key_froms: Iterable[KeyFrom],
+    unset: dict[tuple[str, str], str],
+    modules: Iterable[SourceModule],
+    map_id: str,
+    derived_from: str,
+) -> None:
+    """An arm at each ``INSERT`` making a row (:attr:`KeyFrom.new_row`) of an object written whole -- its
+    ``valuesMap()``, not its changed fields only -- for each field its class's map gives a value when unset
+    (*unset*, :func:`progress.spec_unset_values`): ``insertNewJob``'s ``INSERT`` writes ``0`` for a job's
+    ``taskBufferErrorCode`` no code set.  The arm is the field's value, tier 1, under the statement's own path
+    condition, and :attr:`Branch.unset_default` says it holds only where the field is unset there; each KeyFrom of
+    the statement writes the field at the statement's line, as a reader asking whether a write makes its row reads
+    a write's lines (:attr:`KeyFrom.writes`).  A junction of the field and the function is made where none is."""
+    by_name = {junction.name: junction for junction in junctions}
+    module_of = {module.rel_path: module for module in modules}
+    statements: dict[tuple[str, int, str], list[KeyFrom]] = {}
+    for key_from in key_froms:
+        if key_from.new_row is True and key_from._object is not None and key_from._binds is not None:
+            statements.setdefault((key_from.owner, key_from.statement, key_from.table), []).append(key_from)
+    for (owner, line, _table), together in sorted(statements.items()):
+        _spelled, obj_class, mades, _excluded = together[0]._object  # type: ignore[misc]
+        if not mades or any(_changed_only(made) for made in mades):
+            continue
+        func, file, _binds = together[0]._binds  # type: ignore[misc]
+        module = module_of.get(file)
+        node = next(
+            (one for one in own_nodes(func) if isinstance(one, ast.stmt) and one.lineno == line and not isinstance(one, _COMPOUND)),
+            None,
+        )
+        if module is None or node is None:
+            continue
+        condition = path_condition(node)
+        for (spec_class, attribute), value in sorted(unset.items()):
+            if spec_class != obj_class:
+                continue
+            subject = f"{spec_class}.{attribute}"
+            name = JunctionNode.make_name(map_id, subject, owner)
+            junction = by_name.get(name)
+            if junction is None:
+                junction = by_name[name] = JunctionNode(
+                    map_id=map_id,
+                    derived_from=derived_from,
+                    name=name,
+                    subject=subject,
+                    owner=owner,
+                    attribution="certain",
+                    anchor=Anchor(
+                        package=module.package, file=file, line_start=line, line_end=line, blob_sha=module.blob_sha
+                    ),
+                )
+                junctions.append(junction)
+            if any(branch.line == line and branch.unset_default for branch in junction.branches):
+                continue
+            junction.branches.append(
+                Branch(outcome=value, tier=1, line=line, path_condition=list(condition), unset_default=subject)
+            )
+            for key_from in together:
+                key_from.writes[subject] = sorted({*key_from.writes.get(subject, ()), line})
+
+
+#: Statements holding others: never the one a run's call is on.
+_COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.FunctionDef, ast.ClassDef)
 
 
 def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str]]:

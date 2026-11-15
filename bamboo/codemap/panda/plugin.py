@@ -841,6 +841,21 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             ),
         )
         lap("guard sources")
+        # An INSERT keyed by a field of an object of its class handed in is new where the field was given a value
+        # before it on every way -- in the function, or in the callers the parameter's ways reach.
+        sqlwrite.handed_births(
+            fragment.key_froms, fragment.junctions, fragment.write_froms, fragment.parameter_froms
+        )
+        # And at each INSERT making a row of an object written whole, the value its class's map gives a field no code
+        # set: an arm a reader asking who wrote that value finds.
+        sqlwrite.unset_births(
+            fragment.junctions,
+            fragment.key_froms,
+            progress.spec_unset_values(self._modules),
+            self._modules,
+            fragment.map_id,
+            fragment.derived_from,
+        )
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(

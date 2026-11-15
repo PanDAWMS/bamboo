@@ -302,6 +302,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "same_pass",
     "rewrites",
     "rewrites_open",
+    "unset_default",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

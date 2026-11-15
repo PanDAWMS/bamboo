@@ -1141,6 +1141,17 @@ class Branch(BaseModel):
             "``off_row`` holds, or of a class whose assignments the reach record does not keep."
         ),
     )
+    unset_default: str = Field(
+        default="",
+        description=(
+            "Where the arm is the value an ``INSERT`` making a row gives a field the object it writes whole does not "
+            "hold -- no code set it, and the spec's map writes the value its class declares for an unset field "
+            "(``JobSpec.valuesMap`` writes ``0`` for each of ``_zeroAttrs``, :func:`progress.spec_unset_values`) --: "
+            "the field, ``JobSpec.taskBufferErrorCode``.  The arm is at the ``INSERT``, written only where the field "
+            "is not set on the object there, which no print shows: a reader names that as a premise.  Empty for any "
+            "other arm."
+        ),
+    )
 
 
 def writes_its_value(branch: Branch) -> bool:
@@ -3841,6 +3852,16 @@ class KeyFrom(BaseModel):
         description=(
             "Where *new_row_by* is read: the statement selecting the sequence, the one returning the key, the value "
             "computed or carried, the delete -- or the ``INSERT`` itself."
+        ),
+    )
+    new_row_at: str = Field(
+        default="",
+        description=(
+            "Where the key of an object of the table's class handed in or held was given its value, as "
+            "``file:line``, read by :func:`bamboo.codemap.panda.recognizers.sqlwrite.handed_births`: an assignment of "
+            "the key's field on that object before the statement -- in the function, else in each caller before its "
+            "call (``storeJobs``' ``job.PandaID = new_panda_ids[idxJob]`` at ``TaskBuffer.py:358`` for "
+            "``insertNewJob``'s ``INSERT``).  Empty where the mark is read in the function itself (*new_row_line*)."
         ),
     )
     routes: int = Field(
