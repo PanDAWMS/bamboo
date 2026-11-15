@@ -6021,6 +6021,7 @@ KEY_STOPS: dict[str, str] = {
     "outside": "{name} is bound outside {at}",
     "bound": "{name} is {what} at {at}",
     "element": "{name} is an element of {what} at {at}",
+    "row_item": "it is a part of {name}'s rows that is no one select item whole ({what}), at {at}",
     "value": "it is {what} at {at}",
     "undeclared": "the class of {name} is not declared at {at}",
     "several": "{name} is declared as several classes at {at}: {what}",

@@ -32,6 +32,16 @@ an attribute of a name declared as one class gives that attribute
 (``tmp_id = job.PandaID``); a name bound to a name is read again, as it
 runs (:func:`pathcond.surviving_writes`).
 
+**A statement's rows.**  A binding read no further -- a loop's target, a
+call's value, an item or a position of one -- is read again as the reader
+of the guards' ways reads it (:meth:`heldfrom._Reader.binding_rows`): a
+value that is a select item of a statement's rows is that item's column.
+``copyArchive``'s ``for (id,) in res`` over ``SELECT PandaID FROM
+jobsActive4`` prints ``id``, which is ``JobSpec.PandaID``, as the guard
+``int(id) in xmlIDs`` beside it reads it.  A part of the rows that is no one
+item -- a row whole, a part of an item -- says so (``row_item``); a binding
+some of whose ways are not rows keeps its stop as well.
+
 **Backward, up the callers.**  A parameter is what each call placed at the
 function hands it (:meth:`Calls.callers`, :meth:`Calls.handed`), read
 backward there in the same way, up to :data:`CALLERS_UP` calls; the columns
@@ -63,7 +73,7 @@ it where nothing else is named.
 from __future__ import annotations
 
 import ast
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from bamboo.codemap import callfacts, objects, pathcond, reach
 from bamboo.codemap import calls as C
@@ -73,8 +83,17 @@ from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
 
+if TYPE_CHECKING:
+    from bamboo.codemap.panda import heldfrom
+
 #: How many calls up a parameter is read at its callers.
 CALLERS_UP = 6
+
+#: ``(name, binding, file, function) -> (the ways ending at a statement's rows, whether every way does)``:
+#: :meth:`heldfrom._Reader.binding_rows`.
+RowItems = Callable[
+    [ast.Name, ast.AST, str, ast.AST], tuple[list["heldfrom.RowItem"], bool]
+]
 
 
 class Reader:
@@ -88,8 +107,11 @@ class Reader:
         names: reach._Names,
         funcs: dict[str, tuple[str, ast.AST]],
         follow: Callable[[str, str, int], objects.ObjectReach],
+        row_items: Optional[RowItems] = None,
     ):
         self.calls = calls
+        #: :meth:`heldfrom._Reader.binding_rows`, where the build reads the guards' ways.
+        self.row_items = row_items
         self.types = calls.types
         self.trees = {module.rel_path: module.tree for module in modules}
         self.names = names
@@ -331,24 +353,25 @@ class Reader:
                     if iterable is not None
                     else "a loop"
                 )
-                stops.append(_stop("element", name=node.id, what=what, at=where))
+                stop = _stop("element", name=node.id, what=what, at=where)
+                self._at_binding(file, func, node, binding.site, stop, found, stops)
             elif value is None:
-                stops.append(
-                    _stop(
-                        "bound", name=node.id, what=f"a {binding.kind} target", at=where
-                    )
+                stop = _stop(
+                    "bound", name=node.id, what=f"a {binding.kind} target", at=where
                 )
+                self._at_binding(file, func, node, binding.site, stop, found, stops)
             elif binding.unpacked:
                 if (
                     binding.slot is not None
                     and isinstance(value, (ast.Tuple, ast.List))
                     and len(value.elts) > binding.slot
                 ):
-                    self._bound(
+                    self._given(
                         file,
                         func,
                         owner,
-                        node.id,
+                        node,
+                        binding.site,
                         value.elts[binding.slot],
                         found,
                         stops,
@@ -356,16 +379,80 @@ class Reader:
                         up,
                     )
                 else:
-                    stops.append(
-                        _stop(
-                            "bound",
-                            name=node.id,
-                            what=f"a position of {_kind(callfacts.unconverted(self.types, file, func, value))}",
-                            at=where,
-                        )
+                    stop = _stop(
+                        "bound",
+                        name=node.id,
+                        what=f"a position of {_kind(callfacts.unconverted(self.types, file, func, value))}",
+                        at=where,
                     )
+                    self._at_binding(file, func, node, binding.site, stop, found, stops)
             else:
-                self._bound(file, func, owner, node.id, value, found, stops, seen, up)
+                self._given(
+                    file, func, owner, node, binding.site, value, found, stops, seen, up
+                )
+
+    def _given(
+        self,
+        file: str,
+        func: ast.AST,
+        owner: str,
+        node: ast.Name,
+        site: ast.AST,
+        value: ast.expr,
+        found: set[str],
+        stops: list[KeyStop],
+        seen: set[tuple[str, str]],
+        up: int,
+    ) -> None:
+        """What *value*, bound to *node*'s name at *site* of *func*, gives it: a name or an attribute read back
+        (:meth:`_backward`), else the binding read as a statement's rows (:meth:`_at_binding`)."""
+        value = callfacts.unconverted(self.types, file, func, value)
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            self._backward(file, func, owner, value, found, stops, seen, up)
+            return
+        at = f"{_short(owner)}:{getattr(value, 'lineno', '?')}"
+        stop = _stop("bound", name=node.id, what=_kind(value), at=at)
+        self._at_binding(file, func, node, site, stop, found, stops)
+
+    def _at_binding(
+        self,
+        file: str,
+        func: ast.AST,
+        node: ast.Name,
+        site: ast.AST,
+        stop: KeyStop,
+        found: set[str],
+        stops: list[KeyStop],
+    ) -> None:
+        """The reading of *node* stopped at its binding *site* (*stop*): the binding read again as a statement's rows
+        (:attr:`row_items`).  A way that is a select item whole is its column, spelled as the table's class declares
+        it (:meth:`_column`); one that is the rows but no one item whole says so (``row_item``); *stop* stands unless
+        every way is the rows."""
+        items: list = []
+        every = False
+        if self.row_items is not None:
+            try:
+                items, every = self.row_items(node, site, file, func)
+            except Exception:  # noqa: BLE001 -- the binding unread as rows: its stop stands
+                items, every = [], False
+        if not every:
+            stops.append(stop)
+        where = stop.at[0] if stop.at else ""
+        for item in items:
+            if item.whole and item.column:
+                table, _dot, column = item.column.rpartition(".")
+                self._column(table, column, where, found, stops)
+            elif item.whole and item.attr and self.holds_rows(item.attr):
+                found.add(item.attr)
+            else:
+                what = item.why or (
+                    f"a value made from {item.column} ({item.made})"
+                    if item.made and item.column
+                    else f"a part of {item.column}"
+                    if item.column
+                    else ""
+                )
+                stops.append(_stop("row_item", name=item.site, what=what, at=where))
 
     def _handed(
         self,

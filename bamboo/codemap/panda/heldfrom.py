@@ -176,6 +176,28 @@ class _Way(NamedTuple):
     keyed: tuple[tuple[str, str, str], ...] = ()
 
 
+#: What a way may go through and still be the value it came from: a copy, the same value as another type.
+_SAME_VALUE = (THROUGH_COPY, THROUGH_CONVERTED)
+
+
+class RowItem(NamedTuple):
+    """A way a binding gives a name that ends at a statement's rows (:meth:`_Reader.binding_rows`)."""
+
+    #: The :class:`ReadSiteNode`'s name, ``panda:<owner>@<line>``.
+    site: str
+    #: The select item the way names, ``table.column`` lowered (:attr:`KeySource.column`); empty where none.
+    column: str
+    #: Its subject, ``Class.attribute`` (:attr:`KeySource.attr`), where said.
+    attr: str
+    #: Why no item is named (:attr:`KeySource.column_unread`).
+    why: str
+    #: Whether the value is the item itself, not a part of it nor a value holding it somewhere.
+    whole: bool
+    #: What the first call or operator the way went through that makes another value of it gives
+    #: (:attr:`HeldThrough.gives`, ``text`` for ``f"{id},"``); empty where none did.
+    made: str = ""
+
+
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
     """*ways*, each end not placed yet placed in *file* where its line is among *func*'s: the innermost read that
     made the end places it.  Not a parameter, which no statement binds, nor a stop, nor an end whose line is outside
@@ -1216,6 +1238,23 @@ class _Reader:
         can be in *func*, as the call entering it placed it (:data:`_Selves`); a call there is placed, and what may
         change a name's object in place is read, for them."""
         return _placed_in(self._ways_of(expr, at, file, func, selves=selves), file, func)
+
+    def binding_rows(self, expr: ast.Name, site: ast.AST, file: str, func: ast.AST) -> tuple[list[RowItem], bool]:
+        """What the binding *site* of *func*, reaching the read *expr*, gives it, read as a statement's rows: a
+        :class:`RowItem` for each way ending at rows, and whether every way does.  A reader naming the column a
+        value is (:mod:`bamboo.codemap.panda.keycolumns`) reads so a binding it reads no further -- a loop's target,
+        a call's value -- where the same value is the select item a guard's way names (``for (id,) in res``).  A way
+        through a call or an operator that makes another value of the item -- a text holding it, a sum -- is not the
+        item whole; a copy and the same value as another type (``int(row[0])``) are (:data:`_SAME_VALUE`)."""
+        ways = self._bound(expr, expr, site, file, func)
+        items = []
+        for one in ways:
+            if one.kind != KEY_ROWS:
+                continue
+            made = next((through.gives for through in one.through if through.gives not in _SAME_VALUE), "")
+            whole = not made and not one.steps and not one.loose and all(path in ("", "()") for path in one.paths)
+            items.append(RowItem(one.name, one.column, one.attr, one.column_unread, whole, made))
+        return items, bool(ways) and len(items) == len(ways)
 
     def _ways_of(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()) -> list[_Way]:
         if isinstance(expr, ast.Constant):
@@ -3311,6 +3350,20 @@ def _methods(trees: dict[str, ast.AST]) -> dict[str, set[str]]:
     return found
 
 
+def value_reader(
+    junctions: Iterable[JunctionNode],
+    read_sites: Iterable[ReadSiteNode],
+    trees: dict[str, ast.AST],
+    calls: Optional[Calls],
+    record,
+) -> Optional[_Reader]:
+    """The reader :func:`guard_froms` reads the values with, made once so another reader of values asks the same
+    one (:meth:`_Reader.binding_rows`); none without *calls* or *record*."""
+    if calls is None or record is None:
+        return None
+    return _Reader(calls, record, read_sites, {junction.owner for junction in junctions}, trees)
+
+
 def guard_froms(
     junctions: Iterable[JunctionNode],
     read_sites: Iterable[ReadSiteNode],
@@ -3320,6 +3373,7 @@ def guard_froms(
     writes: Iterable[SetFrom] = (),
     entered: Iterable[EnteredFrom] = (),
     fields: Iterable[tuple[str, str]] = (),
+    reader: Optional[_Reader] = None,
 ) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom], list[FieldFrom]]:
     """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
     :attr:`GuardFrom.calls`), and each name it reads (:func:`_names`); each of *writes*
@@ -3331,13 +3385,15 @@ def guard_froms(
     any ends at -- its first step past the end, then the next ones past the FieldFroms' and ParameterFroms' ends --
     each field a test reads off ``self`` itself, and each of *fields*, ``(file::Class, field)``: the fields of
     ``self`` the definitions the arms' conditions call read (:func:`runnable.condition_fields`).  Nothing without
-    *calls* or *record*: the reading places calls and reads fetches by them."""
+    *calls* or *record*: the reading places calls and reads fetches by them.  *reader*: :func:`value_reader`'s,
+    made here where none."""
     if calls is None or record is None:
         return [], [], [], [], []
     junctions = list(junctions)
-    reader = _Reader(
-        calls, record, read_sites, {junction.owner for junction in junctions}, trees
-    )
+    if reader is None:
+        reader = _Reader(
+            calls, record, read_sites, {junction.owner for junction in junctions}, trees
+        )
     found: dict[tuple[str, int, int, str], GuardFrom] = {}
     written: dict[tuple[str, int, str, str, str], WriteFrom] = {}
     read_once: dict[int, tuple[list[HeldSource], list[KeyStop]]] = {}

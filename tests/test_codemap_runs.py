@@ -39,10 +39,10 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, rewrites, runs, sql
+from bamboo.codemap.panda import attribution, heldfrom, keycolumns, rewrites, runs, sql
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
-from bamboo.codemap.panda.recognizers import sqlwrite
+from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
 PACKAGE = "pkg"
 
@@ -298,10 +298,12 @@ def _build(
     tmp_path: Path,
     arms: list[tuple[str, str, str, str]],
     entities: list[EntityNode] | None = None,
+    read_rows: bool = False,
     **files: str,
 ) -> MapFragment:
     """Read *files* as the build does, with one junction per (file, owner, marker, subject) of *arms*, and the
-    tables *entities* (:data:`ENTITIES` where none) hold."""
+    tables *entities* (:data:`ENTITIES` where none) hold; with *read_rows*, the keys read a binding as a statement's
+    rows as the build does (the read sites, the guards' value reader)."""
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -370,7 +372,25 @@ def _build(
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
         )
         panda_objects.attach(fragment, modules, calls)
-        runs.attach(fragment, modules, calls)
+        row_items = None
+        if read_rows:
+            attributor = attribution.SpecAttributor(
+                progress.spec_attributes(modules), attribution.class_bases(modules)
+            )
+            attributor.learn_table_classes(modules)
+            fragment.read_sites = sqlwrite.read_site_nodes(
+                sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+            )
+            values = heldfrom.value_reader(
+                junctions,
+                fragment.read_sites,
+                {module.rel_path: module.tree for module in modules},
+                calls,
+                reach.ReachGraph(fragment.reach_graph),
+            )
+            assert values is not None
+            row_items = values.binding_rows
+        runs.attach(fragment, modules, calls, row_items)
     return fragment
 
 
@@ -2312,6 +2332,98 @@ def test_a_message_hole_says_the_column_its_value_is_where_the_message_is_writte
     counted = holes[("len(status)", _line(HOLES, "M3"))]
     assert counted.columns == []
     assert [stop.kind for stop in counted.stops] == ["value", "no_use"]
+
+
+ROWS = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+
+_logger = None
+
+
+class Rows(DBProxy):
+    def sent(self):
+        tmp_log = LogWrapper(_logger, "<sent>")
+        self.cur.execute("SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s", {":s": "sent"})
+        res = self.cur.fetchall()
+        for (panda_id, status) in res:
+            tmp_log.debug(f"sent {panda_id} in {status}")  # W1
+        for row in res:
+            tmp_log.debug(f"row {row}")  # W2
+        for other in self.others():
+            tmp_log.debug(f"other {other}")  # W3
+        ids = ""
+        for (panda_id, status) in res:
+            ids += f"{panda_id},"
+        ids = ids[:-1]
+        tmp_log.debug(f"ids {ids}")  # W4
+
+    def others(self):
+        return [1, 2]
+"""
+
+
+def _row_holes(tmp_path: Path, read_rows: bool) -> dict[tuple[str, int], SkeletonHole]:
+    fragment = _build(
+        tmp_path, [], read_rows=read_rows, spec=SPEC, proxy=PROXY, rows=ROWS
+    )
+    (node,) = [
+        one for one in fragment.function_prints if one.owner.endswith("Rows.sent")
+    ]
+    return {
+        (hole.expression, hole.line): hole
+        for st in node.statements
+        for row in st.rows
+        for hole in row.holes
+    }
+
+
+def test_a_message_hole_that_is_a_select_item_of_a_statement_s_rows_is_that_item_s_column(
+    tmp_path: Path,
+) -> None:
+    """``copyArchive``'s ``for (id,) in res`` over ``SELECT PandaID FROM jobsActive4`` prints ``id``: the loop's
+    target is read no further than an element of ``res``, though the guards' ways read the same value as the select
+    item.  Read so, each target unpacked from a row is its item's column, and the element stop goes; a row whole is
+    the rows but no one item, and says so; a loop over what is no statement's rows keeps its element stop."""
+    before = _row_holes(tmp_path / "before", read_rows=False)
+    sent = before[("panda_id", _line(ROWS, "W1"))]
+    assert sent.columns == []
+    assert [stop.kind for stop in sent.stops] == ["element", "no_use"]
+
+    holes = _row_holes(tmp_path / "after", read_rows=True)
+    sent = holes[("panda_id", _line(ROWS, "W1"))]
+    assert (sent.columns, [stop.kind for stop in sent.stops]) == (
+        ["JobSpec.PandaID"],
+        ["no_use"],
+    )
+    assert holes[("status", _line(ROWS, "W1"))].columns == ["JobSpec.jobStatus"]
+    row = holes[("row", _line(ROWS, "W2"))]
+    assert row.columns == []
+    assert "element" not in [stop.kind for stop in row.stops]
+    (item,) = [stop for stop in row.stops if stop.kind == "row_item"]
+    # The statement on the line of its execute, three above W1; a row of two items holds neither whole.
+    assert (item.name.rpartition("@")[2], item.what) == (
+        str(_line(ROWS, "W1") - 3),
+        "no item",
+    )
+    other = holes[("other", _line(ROWS, "W3"))]
+    assert (other.columns, [stop.kind for stop in other.stops][:1]) == ([], ["element"])
+
+
+def test_a_message_hole_holding_a_text_made_from_a_select_item_is_not_that_item_s_column(
+    tmp_path: Path,
+) -> None:
+    """``registerTaskInOneShot_JEDI``'s ``tmpErrStr += f"{tmpJediTaskID},"`` over ``SELECT jediTaskID`` rows, then
+    ``tmpErrStr = tmpErrStr[:-1]``, prints a text made from the item, not the item: it says so (``row_item``) and
+    names no column."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    ids = holes[("ids", _line(ROWS, "W4"))]
+    assert ids.columns == []
+    made = [stop.what for stop in ids.stops if stop.kind == "row_item"]
+    assert made and all(
+        what.startswith("a value made from jobsactive4.pandaid (") for what in made
+    ), made
 
 
 def _handed(tmp_path: Path) -> tuple[list[str], SkeletonHole]:

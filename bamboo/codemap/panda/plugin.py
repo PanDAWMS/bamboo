@@ -797,6 +797,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # And what the object each arm writes, and the value each passthrough arm hands on, hold: a reader binds a
         # guard's name to the arm's row where the two ways end alike.  And what each field of self a definition the
         # conditions call reads holds: a reader runs it on the object (``self.add_result.is_succeeded()``).
+        # The reader of those ways is kept: the runs' keys read a binding they read no further as it does.
+        values = heldfrom.value_reader(
+            fragment.junctions,
+            fragment.read_sites,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+        )
         (
             fragment.guard_froms,
             fragment.parameter_froms,
@@ -810,6 +818,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
             writes,
+            reader=values,
             entered=fragment.entered_froms,
             fields=runnable.condition_fields(
                 fragment.junctions,
@@ -903,7 +912,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # can record, and the calls that write a history row in the same pass
             # as an arm: what gives a value the map sees set a time, and the log
             # lines of the run it was set in.
-            started, recorded, paired, columned, rewritten = runs.attach(fragment, self._modules, self._calls)
+            started, recorded, paired, columned, rewritten = runs.attach(
+                fragment,
+                self._modules,
+                self._calls,
+                values.binding_rows if values is not None else None,
+            )
             logger.info(
                 "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair, "
                 "%d message hole(s) naming a column, %d branch(es) with a later write",
