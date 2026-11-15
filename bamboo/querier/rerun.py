@@ -2508,8 +2508,8 @@ def across_sends(entries: list[str]) -> dict[str, str]:
 
 def _f3(state: dict | None) -> str:
     """The kind of an attribute's H2 try that is no statuslog row (``Rerun._attribute_tries``): "span" (the object's
-    life, asked of F3's writers), "run" (a run found in it), "open" (the life, not searched whole), "made" (a birth's
-    row); "" for a row."""
+    life, asked of F3's writers, or around the value for one writing the time it runs), "run" (a run found in it),
+    "open" (the life, not searched whole), "made" (a birth's row); "" for a row."""
     return (state or {}).get("f3", "")
 
 
@@ -5045,7 +5045,8 @@ class Rerun:
         A writer on no history row of the object is read where the map says more of it: a birth (``born``) wrote as the
         row was made, a try at the row's creation that asks nothing, after the rows; one that marks its runs by the
         object's key (``key_marks``) is asked over the object's life, from its creation to when the value was read
-        (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run.  Any other stops."""
+        (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run -- or, where its write is
+        the time it runs (``attr_time.NOW``), around the value alone (``windows.near_value``).  Any other stops."""
         fragment = mapdump.fragment()
         found = AT.arms(fragment, subject, readings, born=lambda owner, b: born(b, birth_marks(owner, subject)))
         self.need(T.Said("a-writer-of-in-the-map-to", {"subject": subject, "value": value}), found)
@@ -5077,12 +5078,21 @@ class Rerun:
         tries: list[tuple[dict | None, W.Asking | None, list | None]] = [
             (s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
         made = self._made_at(cls) if births or marked else None
-        if marked:
-            life = W.lifetime(made, self._read_at(subject), tuple(sorted({s for a in marked for s in marks[a]})))
-            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in marked)
+        # one whose write is the time it runs ran at the value, if it wrote it: asked around the value, not over the life
+        # (windows.near_value; tmaeno's OK 2026-11-15 14:44:05)
+        near = {a: w for a in marked if a.outcome in AT.NOW
+                if (w := W.near_value(attr, value, tuple(sorted(marks[a])))) is not None}
+        spanned = [a for a in marked if a not in near]
+        if spanned:
+            life = W.lifetime(made, self._read_at(subject), tuple(sorted({s for a in spanned for s in marks[a]})))
+            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in spanned)
             self.need(T.Said("the-object-s-life-to-ask-over", {"names": names, "life_why": life.why}), life.window)
             self.say(f"F3: {names} asked over {life.why}")
-            tries.insert(0, ({"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, marked)))
+            tries.insert(0, ({"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, spanned)))
+        for a, asking in near.items():
+            self.say(f"F3: {a.owner.split('::')[-1]}:{a.line} writes the time it runs: asked over {asking.why}")
+            end = asking.window[1] if asking.window else value
+            tries.insert(0, ({"status": None, "time": end, "f3": "span"}, asking, AT.readings_of(readings, [a])))
         if births:
             names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
             self.need(T.Said("when-the-row-was-made-for-the", {"names": names}), made)

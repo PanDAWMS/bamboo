@@ -337,6 +337,7 @@ TEMPLATES: dict[str, str] = {
     "creation-not-known": "the row's creation time is not known",
     "read-time-not-known": "when the value was read is not known",
     "lifetime": "the object's life, from the row's creation at {lo} to when the value was read at {hi}, on every machine, for {strings:rjoin=, }",
+    "near-value": "{column}={value!r} less and plus {slack}, from {lo} to {hi}: when it ran, if it wrote the value, on every machine, for {strings:rjoin=, }",
     "no-as-of": "the statuslog says no as_of (when it was read)",
     "no-row-for": "the statuslog has no row for {observed!r}",
     "last-part": "{observed!r} since {since}; from {bound} {span} to {end}",

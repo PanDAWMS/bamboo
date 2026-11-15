@@ -6948,6 +6948,11 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                     N(subject="JediTaskSpec.cpuTimeUnit", owner="pandajedi/r.py::Refiner.extract", branches=[branch(202, "runtime(c)", pair("can", [upd]))]),
                     N(subject="JediTaskSpec.cpuTimeUnit", owner="pandaserver/m.py::initialize_cpu_time_task", branches=[branch(408, "runtime(c)", pair("", why="not followed"))]),
                     N(subject="JediTaskSpec.cpuTime", owner="pandajedi/d.py::Dog.massage", branches=[branch(520, "runtime(t)", pair("", why="not followed"))]),
+                    # on no row of the task and marked by its key: one writing the time it runs (409), one not (31);
+                    # a placed writer beside them, so not every writer writes the time
+                    N(subject="JediTaskSpec.lockedTime", owner="pandajedi/r.py::Refiner.extract", branches=[branch(212, "runtime(f)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.lockedTime", owner="pandaserver/m.py::initialize_cpu_time_task", branches=[branch(409, "runtime(naive_utcnow())", pair("", why="not followed"))]),
+                    N(subject="JediTaskSpec.lockedTime", owner="pandaserver/m.py::changeTaskSplitRulePanda", branches=[branch(31, "runtime(l)", pair("", why="not followed"))]),
                 ],
                 reach_graph=[N(owner="pandaserver/t.py::TaskModule.updateTask_JEDI", history=[N(line=1570, values=["runtime(taskSpec.status)"])]),
                              N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])]),
@@ -6996,6 +7001,12 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                 "a birth": ("JediTaskSpec.taskName", "n", [reading("pandajedi/r.py::extract", 126), reading("pandaserver/s.py::getTasksToRefine_JEDI", 1188)]),
                 "marked by the key": ("JediTaskSpec.cpuTimeUnit", "x", [reading("pandajedi/r.py::extract", 202), reading("pandaserver/m.py::initialize_cpu_time_task", 408)]),
                 "marked by a job's": ("JediTaskSpec.cpuTime", "5", [reading("pandajedi/d.py::massage", 520)]),
+                "marked, one timed": ("JediTaskSpec.lockedTime", "2026-10-29 09:00:00", [
+                    reading("pandajedi/r.py::extract", 212), reading("pandaserver/m.py::initialize_cpu_time_task", 409),
+                    reading("pandaserver/m.py::changeTaskSplitRulePanda", 31)]),
+                "marked, one timed, not a time": ("JediTaskSpec.lockedTime", "soon", [
+                    reading("pandajedi/r.py::extract", 212), reading("pandaserver/m.py::initialize_cpu_time_task", 409),
+                    reading("pandaserver/m.py::changeTaskSplitRulePanda", 31)]),
             }
             got = {}
 
@@ -7011,7 +7022,9 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
 
             for name, (subject, value, readings) in asks.items():
                 tries_of(name, subject, value, readings)
-            got["F3 said"] = [x for x in r.lines if x.startswith("F3") or "408 is on no" in x]
+            got["F3 said"] = [x for x in r.lines if (x.startswith("F3") or "408 is on no" in x) and "lockedTime" not in x
+                              and "409" not in x and "Panda:31" not in x]
+            got["F3 said, timed"] = [x for x in r.lines if x.startswith("F3") and ("409" in x or "Panda:31" in x)]
             got["key marks"] = [list(rerun.key_marks(f"p.py::{f}", 1, cls, "53")) for f, cls in (
                 ("changeTaskSplitRulePanda", "JediTaskSpec"), ("initialize_cpu_time_task", "JobSpec"), ("massage", "JediTaskSpec"),
                 ("odd", "JediTaskSpec"), ("odd2", "JediTaskSpec"), ("none", "JediTaskSpec"))]
@@ -7059,6 +7072,27 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
         "history call (not followed); its runs are marked by the object's key",
         "F3: initialize_cpu_time_task:408 asked over the object's life, from the row's creation at 2026-10-29 07:08:39 to "
         "when the value was read at 2026-10-29 14:02:50, on every machine, for '; jediTaskID=53; siteID='"]
+    # one of them writing the time it runs ran at the value, if it wrote it: asked around the value alone, for its own
+    # mark; the other over the life, for its own; the placed writer's rows after (tmaeno's OK 2026-11-15 14:44:05)
+    life = "from the row's creation at 2026-10-29 07:08:39 to when the value was read at 2026-10-29 14:03:01, on every machine"
+    assert got["marked, one timed"][:2] == [
+        [None, ["2026-10-29 08:50:00", "2026-10-29 09:10:00"], None, "span", "2026-10-29 09:10:00",
+         [["initialize_cpu_time_task", [409]]], ["; jediTaskID=53; siteID="]],
+        [None, ["2026-10-29 07:08:39", "2026-10-29 14:03:01"], None, "span", "2026-10-29 14:03:01",
+         [["changeTaskSplitRulePanda", [31]]], ["changeTaskSplitRulePanda < jediTaskID=53 >"]]]
+    assert got["marked, one timed"][2:] == got["any row"]
+    # a value that is no time gives no time to ask around: both over the life
+    assert got["marked, one timed, not a time"][0] == [
+        None, ["2026-10-29 07:08:39", "2026-10-29 14:03:01"], None, "span", "2026-10-29 14:03:01",
+        [["initialize_cpu_time_task", [409]], ["changeTaskSplitRulePanda", [31]]],
+        ["; jediTaskID=53; siteID=", "changeTaskSplitRulePanda < jediTaskID=53 >"]]
+    assert got["F3 said, timed"] == [
+        f"F3: changeTaskSplitRulePanda:31 asked over the object's life, {life}, for 'changeTaskSplitRulePanda < jediTaskID=53 >'",
+        "F3: initialize_cpu_time_task:409 writes the time it runs: asked over lockedTime='2026-10-29 09:00:00' less and plus "
+        "10 min, from 2026-10-29 08:50:00 to 2026-10-29 09:10:00: when it ran, if it wrote the value, on every machine, for "
+        "'; jediTaskID=53; siteID='",
+        f"F3: initialize_cpu_time_task:409, changeTaskSplitRulePanda:31 asked over the object's life, {life}, for "
+        "'; jediTaskID=53; siteID=', 'changeTaskSplitRulePanda < jediTaskID=53 >'"]
     # the text around the key's hole of the mark as the rows print it: a job's key at the first hole takes the
     # function's name; no text for a mark not by the class's key, a prefix of other holes, or no prints
     assert got["key marks"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["initialize_cpu_time_task < PandaID=53; jediTaskID="], [], [], [], []]

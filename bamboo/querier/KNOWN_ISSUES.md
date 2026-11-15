@@ -847,7 +847,14 @@ the value then held need not be.  An arm whose function marks its runs by the ob
 creation to when the value was read, on every machine (F3, `windows.lifetime`), for its mark as its rows' prefix
 prints it with the key (`key_marks`: "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
 siteID="), not the key alone -- a task's ID is on every line of the calls listing it (getTasksToBeProcessed_JEDI), and
-the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Each run found there whose mark holds
+the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Since 2026-11-15 (tmaeno's OK,
+14:44:05), such an arm whose write is the time it runs (`attr_time.NOW`) is asked around the value alone, from the value
+less SLACK to the value plus SLACK, for its own marks (`windows.near_value`).  If it wrote the value, it ran then, on
+its own clock, which its log's times use too.  The window does not hold the write (`holds_write`): another arm may
+have written the value.  The premise is that the run's records span the write's time within SLACK.  killJob writes a
+job's endTime this way (pin s 1021, 1024), but the map gives the value as `runtime(currentTime)`: it does not resolve
+the local to `naive_utcnow()` (below).  So NR-J-7422160126-endTime is still asked over its 47 h life; the
+resolution is asked of the map (11-15).  Each run found there whose mark holds
 the key is read as a row is, by its first record's time among the rows (`_runs_as_rows`), asked for the same marks; a
 run naming the key in its lines alone is another call's.  A life with no run, its logs shown to
 name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
