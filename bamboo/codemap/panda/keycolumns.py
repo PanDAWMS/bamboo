@@ -82,6 +82,7 @@ from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.panda import heldfrom
@@ -331,6 +332,14 @@ class Reader:
                     found.add(column)
                     if not self.holds_rows(column):
                         self._field(where, cls, node.attr, found, stops, seen)
+            return
+        # An item or a slice of a list the function makes and only appends to holds what it appended:
+        # copyArchive's ``str(jobs[iJob:iJob + nJob])``, ``jobs.append(id)`` for each row's PandaID.
+        listed = node.value if isinstance(node, ast.Subscript) else node
+        items = appended(func, listed) if isinstance(listed, ast.Name) else None
+        if items is not None:
+            for item in items:
+                self._backward(file, func, owner, item, found, stops, seen, up)
             return
         if not isinstance(node, ast.Name):
             stops.append(_stop("value", what=_kind(node), at=at))
@@ -593,6 +602,99 @@ class Reader:
 
 #: What :attr:`objects.ObjectReach.capped` says before the path not followed.
 _CAPPED = objects.PARTS_SPENT.format(path="")
+
+
+#: The calls a list is read by and not changed: its length, a printed or sorted copy of it.
+_READS_A_LIST = frozenset({"len", "str", "repr", "sorted", "list", "tuple", "set"})
+
+
+def appended(func: ast.AST, read: ast.Name) -> Optional[list[ast.expr]]:
+    """What the local list *read* reads in *func* holds, where every binding of the name reaching *read* binds it to
+    an empty list and the uses of the name those bindings reach only append to it: each value appended --
+    copyArchive's ``jobs = []`` at 875 and ``jobs.append(id)`` at 878, read at 885.  The name's other bindings are
+    other lists and are not asked: the same ``jobs`` made again for other queries at 754, 857 and 924, handed whole to
+    ``Client.kill_jobs`` at 760, or bound to ``jobsMap[site]`` at 907.  Read where it is sliced, indexed, iterated,
+    tested, measured or copied; ``None`` where anything else is done with it -- handed to a call, extended, put
+    into, returned, bound to another name -- or nothing is appended."""
+    own = [one for one in pathcond.bindings(func, read.id) if not one.nested]
+    sites = [one.site for one in own]
+    made = (
+        {id(site) for site in reaching(pathcond.site_of(read), sites)}
+        if sites
+        else set()
+    )
+    if not made or not all(_empty_list(one) for one in own if id(one.site) in made):
+        return None
+    values: list[ast.expr] = []
+    for node in C.own_nodes(func):
+        if not (
+            isinstance(node, ast.Name)
+            and node.id == read.id
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        if not any(
+            id(site) in made for site in reaching(pathcond.site_of(node), sites)
+        ):
+            continue
+        parent = getattr(node, "parent", None)
+        if isinstance(parent, ast.Attribute):
+            call = getattr(parent, "parent", None)
+            if not (
+                parent.attr == "append"
+                and isinstance(call, ast.Call)
+                and call.func is parent
+                and len(call.args) == 1
+            ):
+                return None
+            values.append(call.args[0])
+        elif (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(parent.ctx, ast.Load)
+        ):
+            continue
+        elif isinstance(parent, ast.Call) and node in parent.args:
+            if not (
+                isinstance(parent.func, ast.Name) and parent.func.id in _READS_A_LIST
+            ):
+                return None
+        elif not isinstance(
+            parent,
+            (
+                ast.If,
+                ast.While,
+                ast.IfExp,
+                ast.UnaryOp,
+                ast.BoolOp,
+                ast.Compare,
+                ast.For,
+            ),
+        ):
+            return None
+        elif isinstance(parent, ast.For) and parent.iter is not node:
+            return None
+    return values or None
+
+
+def _empty_list(binding: pathcond.Binding) -> bool:
+    """Whether *binding* binds its name, whole, to ``[]``."""
+    return (
+        binding.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED)
+        and not binding.unpacked
+        and isinstance(binding.value, ast.List)
+        and not binding.value.elts
+    )
+
+
+def listed(types, file: str, func: ast.AST, node: ast.expr) -> bool:
+    """Whether *node* prints several values of a list :func:`appended` reads -- the list, or a slice of it."""
+    node = callfacts.unconverted(types, file, func, node)
+    if isinstance(node, ast.Subscript):
+        if not isinstance(node.slice, ast.Slice):
+            return False
+        node = node.value
+    return isinstance(node, ast.Name) and appended(func, node) is not None
 
 
 def _stop(kind: str, name: str = "", what: str = "", at: str = "") -> KeyStop:

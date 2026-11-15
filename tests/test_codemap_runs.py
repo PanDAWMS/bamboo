@@ -2497,6 +2497,23 @@ class Rows(DBProxy):
             ids += f"{panda_id},"
         ids = ids[:-1]
         tmp_log.debug(f"ids {ids}")  # W4
+        jobs = []
+        for (panda_id, status) in res:
+            jobs.append(status)
+        self.others(jobs)
+        jobs = []
+        for (panda_id, status) in res:
+            jobs.append(panda_id)
+        if len(jobs):
+            tmp_log.debug(f"kill ({str(jobs[0:100])})")  # W5
+            tmp_log.debug(f"first {jobs[0]}")  # W6
+        jobs = self.others()
+        tmp_log.debug(f"again ({str(jobs[0:100])})")  # W8
+        more = []
+        for (panda_id, status) in res:
+            more.append(panda_id)
+        more.extend(self.others())
+        tmp_log.debug(f"more ({str(more[0:100])})")  # W7
 
     def others(self):
         return [1, 2]
@@ -2548,6 +2565,27 @@ def test_a_message_hole_that_is_a_select_item_of_a_statement_s_rows_is_that_item
     )
     other = holes[("other", _line(ROWS, "W3"))]
     assert (other.columns, [stop.kind for stop in other.stops][:1]) == ([], ["element"])
+
+
+def test_a_message_hole_printing_a_list_of_a_select_item_s_values_is_that_item_s_column_listed(
+    tmp_path: Path,
+) -> None:
+    """copyArchive's ``killJobs for Pending ({str(jobs[iJob:iJob + nJob])})``: the ``jobs`` the print reads is made
+    empty and only appended to, each ``id`` of the rows of ``SELECT PandaID``, so a slice of it prints that column's
+    values, several at once (:attr:`SkeletonHole.listed`); an item of it, one.  The name's other bindings are other
+    lists -- copyArchive makes ``jobs`` again for each query, hands one whole to ``Client.kill_jobs`` and binds it to
+    ``jobsMap[site]`` -- and say nothing of this one: the statuses appended to the first ``jobs`` here, which is
+    handed to a call, are not in it, and the ``jobs`` bound to a call's value after it is not a list read here.  A
+    list that is also extended holds what else it was given too: not read."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    kill = holes[("str(jobs[0:100])", _line(ROWS, "W5"))]
+    assert (kill.columns, kill.listed) == (["JobSpec.PandaID"], True)
+    first = holes[("jobs[0]", _line(ROWS, "W6"))]
+    assert (first.columns, first.listed) == (["JobSpec.PandaID"], False)
+    again = holes[("str(jobs[0:100])", _line(ROWS, "W8"))]
+    assert again.listed is False
+    more = holes[("str(more[0:100])", _line(ROWS, "W7"))]
+    assert (more.columns, more.listed) == ([], False)
 
 
 def test_a_message_hole_holding_a_text_made_from_a_select_item_is_not_that_item_s_column(

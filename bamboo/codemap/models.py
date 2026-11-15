@@ -5859,6 +5859,15 @@ class SkeletonHole(BaseModel):
             "column of a class holding rows or not."
         ),
     )
+    listed: bool = Field(
+        default=False,
+        description=(
+            "Whether the hole prints several values of *columns* at once: a list the function makes and only appends "
+            "to, or a slice of it (:func:`bamboo.codemap.panda.keycolumns.listed`) -- copyArchive's ``killJobs for "
+            "Pending ({str(jobs[iJob:iJob + nJob])})``, a hundred PandaIDs of the rows its SELECT returned.  A reader "
+            "finds a row's value inside the printed list."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):

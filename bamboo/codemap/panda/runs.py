@@ -654,8 +654,30 @@ class _Reader:
                             read[at] = self._hole_key(node.owner, file, func, *at)
                         hole.columns = list(read[at].columns)
                         hole.stops = list(read[at].stops)
+                        hole.listed = bool(hole.columns) and self._hole_listed(
+                            file, func, *at
+                        )
                         named += any(self.keys.holds_rows(one) for one in hole.columns)
         return named
+
+    def _hole_listed(
+        self, file: str, func: ast.AST, line: int, expression: str
+    ) -> bool:
+        """Whether the expression spelled *expression* in a statement of *func* starting at *line* prints a list's
+        values (:func:`keycolumns.listed`)."""
+        for site in walk(func):
+            if isinstance(site, ast.stmt) and site.lineno == line:
+                found = next(
+                    (
+                        one
+                        for one in walk(site)
+                        if isinstance(one, ast.expr) and ast.unparse(one) == expression
+                    ),
+                    None,
+                )
+                if found is not None:
+                    return keycolumns.listed(self.keys.types, file, func, found)
+        return False
 
     def _hole_key(
         self, owner: str, file: str, func: ast.AST, line: int, expression: str
