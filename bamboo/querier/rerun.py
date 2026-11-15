@@ -422,6 +422,13 @@ def _hole_holds(row: R.Row, record, name, key: str) -> bool:
     return any(v is not None and str(v).strip().strip("'\"") == key for v in values)
 
 
+def _binds_name(record, key: str) -> bool:
+    """Whether *record*'s printed bind map (``sqltext.cut``) holds *key* as the value of any bind: the statement named
+    the row (an IN list's ``:jediTaskID1``), whichever bind the write then takes it by."""
+    got = sqltext.cut(record.text)
+    return got is not None and any(v is not None and str(v).strip().strip("'\"") == key for v in got[1].values())
+
+
 def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
     """Judgement 3's third premise for *owner*: every run that reaches one of its arms at *lines* prints the key the
     asks search by -- a line the map says runs before the arm on every path (``Branch.must_prints``) with a hole it
@@ -917,17 +924,27 @@ def _before_gaps(found: SV.Before) -> list[T.Said]:
 def _timeline_gaps(tl: TL.Timeline) -> list[T.Said]:
     """Why a timeline (:meth:`Rerun._timeline`) does not settle a column all the stay: the arms no record reads all of,
     besides the writes it read."""
-    out = [T.Said("timeline-read-so-far", {"n": len(tl.writes), "k": len(tl.absent)})]
+    out = [T.Said("timeline-read-so-far", {**_timeline_counts(tl), "k": len(tl.absent)})]
     out.append(T.Said("before-may-be-written", {"arms": [o.arm for o in tl.opens]}))
     return out
 
 
+def _timeline_counts(tl: TL.Timeline) -> dict[str, int]:
+    """The writes a timeline read in the stay (*n*) and in the ``windows.SLACK`` before it (*m*), which set where the
+    stay began (:func:`timeline.first_bounds`), and that margin in minutes (*slack*)."""
+    n = sum(w.at >= tl.start for w in tl.writes)
+    return {"n": n, "m": len(tl.writes) - n, "slack": int(W.SLACK.total_seconds() // 60)}
+
+
 def _timeline_said(subject: str, tl: TL.Timeline) -> T.Said:
-    """The words for a column read on its timeline: each write read, the arms shown not to write, those not read."""
+    """The words for a column read on its timeline: each write read, marked where it fell before the stay, the arms
+    shown not to write, those not read."""
     writes = [T.Said("timeline-write", {"at": f"{w.at:%H:%M:%S.%f}"[:12], "how": w.how, "arms": list(w.arms),
-                                        "where": w.where, "machine": w.machine}) for w in tl.writes]
+                                        "where": w.where, "machine": w.machine,
+                                        "before": T.Said("timeline-before-the-stay") if w.at < tl.start else ""})
+              for w in tl.writes]
     return T.Said("timeline-read", {"subject": subject, "start": f"{tl.start:%Y-%m-%d %H:%M:%S}",
-                                    "end": f"{tl.end:%Y-%m-%d %H:%M:%S}",
+                                    "end": f"{tl.end:%Y-%m-%d %H:%M:%S}", "slack": _timeline_counts(tl)["slack"],
                                     "writes": T.Said("timeline-writes", {"writes": writes}) if writes else T.Said("timeline-no-write"),
                                     "absent": T.Said("timeline-absent", {"arms": list(tl.absent)}) if tl.absent else "",
                                     "opens": T.Said("timeline-opens", {"arms": [o.arm for o in tl.opens]}) if tl.opens else ""})
@@ -7256,7 +7273,7 @@ class Rerun:
         if c.hop == 1 and up.up is None and outer:
             self.say(f"up to {func}'s callers: {outer}")
             return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner)
-        if moving and up.before is not None and self._agent_cycles(c, up, moving):
+        if moving and up.before is not None and self._agent_cycles(c, up, moving, absent=True):
             return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
                                                                  "hop": c.hop}), None, "K55")
@@ -7351,15 +7368,17 @@ class Rerun:
         self.say(f"{func} takes its rows from a worker's list itself: its agent's cycles are read first (P6)")
         return self._agent_cycles(Caller(q.mover, lines, 0, "none"), q, [mq.run])
 
-    def _agent_cycles(self, c: Caller, up: Callers, moving: list) -> bool:
+    def _agent_cycles(self, c: Caller, up: Callers, moving: list, absent: bool = False) -> bool:
         """(C) (out/gm/qk-design.md): why the passes of the caller *c* that moved the row on (*moving*) ran when they
         did, where the parts its worker is handed come from an agent's cycles (:func:`agents.selection_of`).  The
         agent's lines around its selecting call hold no key: they are asked by the literal they share
         (:func:`agents.ask_strings`) on every machine, from the row's becoming selectable less windows.SLACK to the
         move.  Each pass belongs to its machine's last selection for the row's label before it, where that label's
         cycles there follow one another (one process); the selections between two takes are read against the selecting
-        function's lock (:func:`agents.kept_off`).  An END and True; False where it does not read, said why (the stop
-        K55 stands); asks no record answers stop."""
+        function's lock (:func:`agents.kept_off`), and so are those after a selection that took the row with no pass of
+        the worker after it (P17, :meth:`_unrun_takes`).  *absent*: judgement 3 showed the caller ran on the row in the
+        window only in *moving* (U2), so such a selection is said to have had none after it; else that is a premise.
+        An END and True; False where it does not read, said why (the stop K55 stands); asks no record answers stop."""
         rel, func = c.owner.split("::", 1)
         try:
             fn = R.function(rel, func, c.lines)
@@ -7427,6 +7446,10 @@ class Rerun:
                          "more than one process selects there, and which one took the row is not told by its lines")
                 return False
             takes.append((pick, p))
+        # a selection that took the row with no pass on it after (P17): its lock keeps the others off as a take's does
+        lock = AG.lock_of(sel)
+        unrun = self._unrun_takes(sel, picks, spans, label, up, lock, takes)
+        takes += [(pick, None) for pick, _ in unrun]
         # the selections that could have taken the row before the first take did and did not: nothing here says why
         first = min((pick for pick, _ in takes), key=lambda q: q.at)
         passed = AG.passed_over(picks, first, label, since)
@@ -7443,17 +7466,20 @@ class Rerun:
                          "cap, a bound on the key) is not read")
                 return False
         host = self._move_host(up.before)
+        left = {id(pick): w for pick, w in unrun}
         said = [T.Said("an-agent-s-take", {"machine": pick.machine.split(".")[0], "mark": pick.mark, "callee": sel.callee,
                                            "after": max(pick.after or pick.at, since)[:23], "at": pick.at[:23], "count": pick.count,
                                            "first": p.first[:23],
                                            "moved": T.Said("and-it-moved-it-on", {}) if host is not None and p.machine == host else ""})
-                for pick, p in takes]
-        lock = AG.lock_of(sel)
-        kept: T.Said | str = ""
+                if p is not None else self._unrun_said(sel, func, pick, left[id(pick)], moving, up)
+                for pick, p in sorted(takes, key=lambda t: t[0].at)]
+        kept: list[T.Said] = []
         ordered = sorted(takes, key=lambda t: t[0].at)
+        read = {id(q) for q in passed} | {id(pick) for pick, _ in takes}
         for (take, _), (nxt, _) in zip(ordered, ordered[1:], strict=False):
             between = [q for qs in picks.values() for q in qs if take.at < q.at < (nxt.after or nxt.at)
                        and (not label or q.label == label) and q is not nxt]
+            read |= {id(q) for q in between}
             if lock is None:
                 self.say(f"(C) {len(between)} selection(s) from {take.at} to {nxt.after or nxt.at} did not take the row; "
                          f"{sel.callee}'s lock is not read")
@@ -7462,17 +7488,76 @@ class Rerun:
             if not ok:
                 self.say(f"(C) not read: the selections between the takes at {take.at} and {nxt.at}: {why}")
                 return False
-            kept = T.Said("kept-off-by-the-lock", {"n": len(between), "machines": len({q.machine for q in between}),
-                                                   "start": take.at[:23], "end": (nxt.after or nxt.at)[:23], "callee": sel.callee,
-                                                   "span": str(lock.span), "term": lock.term, "bound": lock.bound, "sets": lock.sets})
+            kept.append(T.Said("kept-off-by-the-lock", {"n": len(between), "machines": len({q.machine for q in between}),
+                                                        "start": take.at[:23], "end": (nxt.after or nxt.at)[:23], "callee": sel.callee,
+                                                        "span": str(lock.span), "term": lock.term, "bound": lock.bound, "sets": lock.sets}))
         premises = [T.Said("one-process-a-label", {"agent": sel.agent_name, "label": label or "every label",
                                                   "machines": sorted({pick.machine.split(".")[0] for pick, _ in takes})})]
         premises += refused_premises
+        # a selection that ran while a take did is neither before the first take nor between two: the take came first
+        during = [q for qs in picks.values() for q in qs if id(q) not in read and (not label or q.label == label)
+                  and q.at[:23] >= since[:23]
+                  and any((q.after or q.at)[:23] <= t.at[:23] and q.at[:23] >= (t.after or t.at)[:23] for t, _ in takes)]
+        if during:
+            premises.append(T.Said("ran-while-a-take-did", {"items": [
+                T.Said("a-selection-s-span", {"machine": q.machine.split(".")[0], "start": (q.after or q.at)[:23], "end": q.at[:23]})
+                for q in sorted(during, key=lambda q: q.at)]}))
+        not_known: list[T.Said] = []
+        for pick, w in unrun:
+            premises.append(T.Said("a-cycle-s-lock-on-the-row" if w.how != TL.RAN else "a-cycle-s-lock-changed-it", {
+                "machine": w.machine, "callee": sel.callee, "after": (pick.after or pick.at)[:23], "at": pick.at[:23],
+                "sets": lock.sets if lock is not None else "", "where": w.where}))
+            if not absent:
+                premises.append(T.Said("no-pass-after-a-cycle-s-take", {"caller": func, "machine": w.machine}))
+            not_known.append(T.Said("why-a-cycle-left-it", {"machine": w.machine, "files": files, "at": pick.at[:19]}))
         if sel.others:
             premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": list(sel.others)}))
         self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said, "kept": kept,
-                                                             "refused": refused, "premises": premises}))
+                                                             "refused": refused, "premises": premises, "unknown": not_known}))
         return True
+
+    def _unrun_takes(self, sel, picks: dict, spans: dict, label: str, up: Callers, lock, takes: list) -> list:
+        """Q1 P17 (out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06): the agent's selections
+        that took the row with no pass of the worker after: a write of the column the selecting function's lock sets
+        (C4, *lock*) by that function itself, read on the column's timeline (:meth:`_timeline`) inside one of its
+        machine's selections for the row's label that began after the row could be selected (the window's start) and
+        before the move -- NT-prepared-late's aipanda088 07:09:15.636 .. .809, whose select print named the row among
+        its targets (:meth:`_column_writes`).  ``(pick, write)`` each, not one of *takes*; none where the lock or the
+        timeline is not read, or where that machine's cycles for the label overlap (more than one process: which one
+        selected is not told)."""
+        q = getattr(self, "_missed_q", None)
+        if lock is None or q is None or q.subject != up.subject or up.before is None:
+            return []
+        column = lock.sets.partition("=")[0].strip()
+        tl = self._timeline(f"{up.subject.partition('.')[0]}.{column}", q)
+        if tl is None:
+            return []
+        since = up.window[0]
+        mine = {id(pick) for pick, _ in takes}
+        out = []
+        for w in tl.writes:
+            if w.at >= W.when(up.before) or not any(a.rpartition(":")[0].rpartition(".")[2] == sel.callee for a in w.arms):
+                continue
+            for m, qs in picks.items():
+                if m.split(".")[0] != w.machine:
+                    continue
+                chain = [p for p in qs if not label or p.label == label]
+                # a selection before the row could be selected did not return it (NT-breaking-late's 03:58:05 named it
+                # among its targets while its status was another)
+                pick = next((p for p in chain if W.when(since) <= W.when(p.after or p.at) <= w.at <= W.when(p.at)), None)
+                if pick is not None and id(pick) not in mine and AG.one_process(chain, spans.get(m, {})):
+                    out.append((pick, w))
+                    mine.add(id(pick))
+        return out
+
+    def _unrun_said(self, sel, func: str, pick, w: TL.Write, moving: list, up: Callers) -> T.Said:
+        """The words for a selection that took the row with no pass on it after (:meth:`_unrun_takes`): until the next
+        pass on its machine that moved it on, or the move."""
+        after = [p.first for p in moving if p.machine.split(".")[0] == w.machine and W.when(p.first) > w.at]
+        return T.Said("an-agent-s-unrun-take", {"machine": w.machine, "mark": pick.mark, "callee": sel.callee,
+                                                "after": (pick.after or pick.at)[:23], "at": pick.at[:23], "count": pick.count,
+                                                "where": w.where, "caller": func,
+                                                "until": min(after)[:23] if after else (up.before or "")[:23]})
 
     def _passed_refused(self, sel, passed: list, up: Callers) -> tuple[T.Said | str, list[T.Said]]:
         """Q1 part 3, P5: why the agent's selections *passed* (:func:`agents.passed_over`) did not take the row, read on
@@ -8658,13 +8743,18 @@ class Rerun:
         """The writes of the arm *b* of *j* the records show over *window*, ``(at, machine, print "func:line", how)``
         each: a record of one of its must prints whose hole the map names as the written row's key (``MustName.row``
         ``written``, its column among *keys*) holding the key, under any mark (:func:`_hole_holds`) -- the statement's
-        bind map printed ran it (``timeline.RAN``), its message or mark reached it (``REACHED``).  A record another print
-        of the function reads at least as well is not taken.  And whether these are all: judgement 3's three premises
-        (window, logs, prints: :meth:`_premises`) held over the window, so no run reached the arm unseen.  The logs are
-        asked for no method's runs whole (``owners`` empty): a mark that does not hold the key is read from the key's
-        records, which hold every must print the reading needs."""
+        bind map printed ran it (``timeline.RAN``), its message or mark reached it (``REACHED``).  A bind map print the map
+        cannot show holds the value the write counts (``row`` ''), one holding the key among its values, reached it: the
+        statement it prints named the row, and the write that takes its rows may have run on it (P17,
+        getTasksToBeFinished_JEDI's select print 1643 naming the row among its targets).  A record another print of the
+        function reads at least as well is not taken.  And whether these are all: judgement 3's three premises (window,
+        logs, prints: :meth:`_premises`) held over the window, so no run reached the arm unseen -- never where only
+        such a print names the row.  The logs are asked for no method's runs whole (``owners`` empty): a mark that does
+        not hold the key is read from the key's records, which hold every must print the reading needs."""
         key = self.args.key
-        names = [n for n in b.must_names or [] if n.row == MUST_ROW_WRITTEN and n.column in keys]
+        shown = [n for n in b.must_names or [] if n.row == MUST_ROW_WRITTEN and n.column in keys]
+        named = [n for n in b.must_names or [] if n.row == "" and n.part == MUST_PART_BIND and n.column in keys]
+        names = shown + named
         rel, _, func = _bare(j.owner).partition("::")
         to_hand = self.logs.names(self.files_of(j.owner, list(j.log_files or []), [b.line]))
         if not names or not to_hand:
@@ -8694,16 +8784,18 @@ class Rerun:
                                 other != row.line and any(k == i and lit >= literal for k, lit, _ in hs)
                                 for other, hs in sn.hits.items()):
                             continue
-                        held = [n for n in names if n.line == line and _hole_holds(row, record, n, key)]
+                        held = [n for n in shown if n.line == line and _hole_holds(row, record, n, key)]
                         if held:
                             found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}",
                                           TL.RAN if any(n.part == MUST_PART_BIND for n in held) else TL.REACHED))
+                        elif any(n.line == line for n in named) and _binds_name(record, key):
+                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.REACHED))
         premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),
                     "logs": every_log_asked(j.owner, [b.line], to_hand),
                     "prints": prints_naming(writers, j.owner, [b.line], keys)}
         # a run of its own in the window whose must prints are not read in it: a reading missed, not a run absent
         own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
-        return sorted(set(found)), all(p["held"] for p in premises.values()) and (bool(found) or not own)
+        return sorted(set(found)), bool(shown) and all(p["held"] for p in premises.values()) and (bool(found) or not own)
 
     def _timeline_spans(self, t, q: Missed) -> list | None:
         """Where a term comparing a time column with the clock surely holds for the row, on the column's timeline
@@ -8774,7 +8866,7 @@ class Rerun:
                 return ""
             if not TL.surely_false_all(t.op, datetime.timedelta(seconds=v.offset_seconds), pieces):
                 return ""
-        return T.text(T.Said("false-on-the-timeline", {"n": len(tl.writes), "absent": len(tl.absent)}))
+        return T.text(T.Said("false-on-the-timeline", {**_timeline_counts(tl), "absent": len(tl.absent)}))
 
     def _assumed_true(self, sts: list, q: Missed) -> tuple[list, dict[str, list[str]]]:
         """Where one of *sts* surely returns the row with the arms no record reads named as having not written the
