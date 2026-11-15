@@ -4128,8 +4128,14 @@ class Rerun:
                  + (f"; the read takes {''.join(steps)} off it" if steps else ""))
         if traced:
             self.say(f"    {param}: the call at {', '.join(w.route[0] for w in traced)} stands in its run's traceback: it ran")
-        shown = traced or ([] if one_call or not ask else [w for w in alone if self._caller_shows(w, window, run)])
-        if len(shown) == 1:
+        judged = [] if traced or one_call or not ask else [(w, self._caller_shows(w, window, run)) for w in alone]
+        shown = traced or [w for w, s in judged if s]
+        # a caller not judged (its send's entry asked, not answered) may be the one that ran: no other is told alone
+        unjudged = [w.route[0] for w, s in judged if s is None]
+        if len(shown) == 1 and unjudged:
+            self.say(f"    {param}: the call at {shown[0].route[0]} shown, and not told alone: the caller(s) at "
+                     f"{', '.join(unjudged)} not judged")
+        if len(shown) == 1 and not unjudged:
             # a constant-through keeps its why: its value is not the literal's
             return (SR.End(term, SR.CONSTANT, shown[0].value or shown[0].why, shown[0].route[0], route=shown[0].route),)
         if not consts and rest and all(r.end == SR.API for r in rest):
@@ -4223,7 +4229,7 @@ class Rerun:
                   for i, *_ in sn.hits.get(row.line, ()) if param in row.capture(run.records[i])}
         return values.pop() if len(values) == 1 else None
 
-    def _caller_shows(self, w: SR.Way, window: tuple[str, str] | None, run: Any) -> bool:
+    def _caller_shows(self, w: SR.Way, window: tuple[str, str] | None, run: Any) -> bool | None:
         """Whether the caller's own run shows the call *w* comes by ran (:meth:`_call_shown`).  A way that came across a
         send (the map's ``HeldSource.sent``, SND) is asked as HOP's reader asks it (out/gm/qk-design.md, HOP (2)): the
         caller is a client in another process, so on every machine, over the arm's window opened windows.SLACK earlier
@@ -4233,26 +4239,38 @@ class Rerun:
         882 ``killJobs for Anal Active (...)`` at 15:14:55,289, after kill Done at 15:14:55,287 (MJE-7383377087).
         Where the window before the send shows no call, the caller's rows after its call are asked from the pass's
         first line to its last and windows.SLACK more, and count only where every row that shows the call follows it
-        (HOP (a'): each row read on the side of the send its code puts it on)."""
+        (HOP (a'): each row read on the side of the send its code puts it on).  Where the ask of the endpoint's logs
+        is not all answered, the callers are not judged (None): a pass not in logs not recorded yet is no pass that
+        did not begin, and the window's end would take in what a caller printed after its send (NJE-7425252125, r3x38:
+        an END on copyArchive 634 while that ask was open; out/gm/qk-design.md, the r4 fixes (1))."""
         machine = getattr(run, "machine", None)
         if not w.sent or window is None:
             return self._call_shown(w.route[0], window, machine)
         start = f"{W.when(window[0]) - W.SLACK:%Y-%m-%d %H:%M:%S}"
         # one entry's run is asked once per window, and its windows said once, however many calls send into it
-        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str, str | None]] = self.__dict__.setdefault("_send_windows", {})
+        said: dict[tuple[str, str, tuple[str, str]], tuple[str, str, str | None] | None] = self.__dict__.setdefault("_send_windows", {})
         key = (w.sent_into, w.sent, (start, window[1]))
         if key not in said:
-            entry = self._entry_pass(w, (start, window[1]))
-            said[key] = (start, entry[0], entry[1]) if entry else (start, window[1], None)
-            closed = ("the first line of the entry's pass that holds the key" if entry
-                      else "the window's end: no pass of the entry holding the key began in it")
-            self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
-                     f"{said[key][0]} to {said[key][1]} ({closed}), on every machine")
-            if entry:
-                self.say(f"    and a caller's rows after its call from {entry[0]} to "
-                         f"{W.when(entry[1]) + W.SLACK:%Y-%m-%d %H:%M:%S} (the pass's last line, {entry[1]}, and "
-                         f"{int(W.SLACK.total_seconds() // 60)} min more), where the window before shows no call")
-        start, first, last = said[key]
+            entry, answered = self._entry_pass(w, (start, window[1]))
+            if not answered:
+                said[key] = None
+                self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers not judged: the "
+                         f"ask of the entry's logs from {start} to {window[1]} is not answered yet, and the first line of its "
+                         "pass that holds the key would close their window")
+            else:
+                said[key] = (start, entry[0], entry[1]) if entry else (start, window[1], None)
+                closed = ("the first line of the entry's pass that holds the key" if entry
+                          else "the window's end: no pass of the entry holding the key began in it")
+                self.say(f"    across the send at {w.sent} into {w.sent_into.split('::')[-1]}: its callers asked from "
+                         f"{start} to {entry[0] if entry else window[1]} ({closed}), on every machine")
+                if entry:
+                    self.say(f"    and a caller's rows after its call from {entry[0]} to "
+                             f"{W.when(entry[1]) + W.SLACK:%Y-%m-%d %H:%M:%S} (the pass's last line, {entry[1]}, and "
+                             f"{int(W.SLACK.total_seconds() // 60)} min more), where the window before shows no call")
+        got = said[key]
+        if got is None:
+            return None
+        start, first, last = got
         if self._call_shown(w.route[0], (start, first), None, "for-a-call-across-a-send", {"send": w.sent}):
             return True
         if last is None:
@@ -4261,10 +4279,11 @@ class Rerun:
         return self._call_shown(w.route[0], after, None, "for-the-rows-after-a-call-across-a-send", {"send": w.sent},
                                 after_call=True)
 
-    def _entry_pass(self, w: SR.Way, window: tuple[str, str]) -> tuple[str, str] | None:
+    def _entry_pass(self, w: SR.Way, window: tuple[str, str]) -> tuple[tuple[str, str] | None, bool]:
         """The first and last lines of the pass of the endpoint *w*'s send entered (``w.sent_into``) that holds the key
         and began last inside *window* -- job_api's kill ``kill Start ... job_ids: [...]`` at 16:39:21,051, before
-        killJobs ran -- or None where its logs are not to hand or hold no such pass.  A pass begins at a record the map reads as the
+        killJobs ran -- or None where its logs are not to hand or hold no such pass; and whether the ask of its logs
+        was answered whole (False: not judged, :meth:`_caller_shows`).  A pass begins at a record the map reads as the
         endpoint's entry row whole (``rows.entries``): a mark many calls share makes one run of hours -- job_api's
         ``kill``, a day's 198 lines on one machine -- whose first line, or its first inside the window, is another
         call's (MJE-7395160958's 16:34:40,732, a kill of other jobs).  A run with no record read so begins no pass here:
@@ -4275,16 +4294,18 @@ class Rerun:
         files = self.files_of(entry, today, lines)
         if not files or not self.logs.names(files):
             self.say(f"    {entry.split('::')[-1]}: no log of it to hand ({', '.join(files) or 'none'})")
-            return None
+            return None, True
         asking = W.Asking(window, None, T.Said("for-the-entry-a-send-entered", {"entry": entry.split("::")[-1], "send": w.sent}))
         runs, unanswered, _holes = self._ask(self.args.key, files, asking, owners_of([entry]), whole=True)
         self._keep_unanswered(unanswered)
+        if unanswered:
+            return None, False
         rel, _, name = entry.partition("::")
         try:
             fn = R.function(rel, name.rpartition(".")[2], within=lines)
         except LookupError:
             self.say(f"    {name}: not found in {rel}, so no pass of it begins")
-            return None
+            return None, True
         passes = []
         for r in (r for rs in runs.values() for r in rs if of_mover(r, entry)):
             starts = R.entries(fn, r, self.mode)
@@ -4294,7 +4315,7 @@ class Rerun:
                 p = r.part(a, b)
                 if p.found_by and window[0][:19] <= p.first[:19] <= window[1][:19]:
                     passes.append((p.first, p.last))
-        return max(passes) if passes else None
+        return (max(passes) if passes else None), True
 
     def _call_shown(self, site: str, window: tuple[str, str] | None, machine: str | None, why: str = "for-a-call-handing-a-value",
                     facts: dict[str, Any] | None = None, after_call: bool = False) -> bool:

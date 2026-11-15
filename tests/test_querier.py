@@ -13896,7 +13896,7 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         r.files_of = lambda owner, today, lines: today
         r._keep_unanswered = lambda unanswered: None
         rerun.owners_of = lambda ids: {}
-        shown, asked = [], []
+        shown, asked, opened, results = [], [], {"asks": []}, []
 
         shows = {"before": True}
 
@@ -13913,7 +13913,7 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
 
         def ask(key, names, asking, owners=None, whole=False):
             asked.append([list(asking.window), asking.machine, str(asking.why)])
-            return entry, [], {}
+            return entry, opened["asks"], {}
 
         r._ask = ask
         arm = N(machine="aipanda090")
@@ -13937,7 +13937,11 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         # no pass of the entry: nothing after it to ask
         shows["before"] = False
         r._caller_shows(sent, ("2026-11-02 16:34:45", "2026-11-02 16:34:45"), arm)
-        print(json.dumps({"whole": whole, "shown": shown, "asked": asked, "lines": r.lines}))
+        # the entry's logs asked and not answered (a pass of the key may be in them): its callers not judged, no caller
+        # asked, and the entry asked once for the window
+        opened["asks"] = ["an ask not in the records"]
+        results += [r._caller_shows(sent, ("2026-11-02 17:00:00", "2026-11-02 17:00:00"), arm) for _ in range(2)]
+        print(json.dumps({"whole": whole, "shown": shown, "asked": asked, "lines": r.lines, "results": results}))
     """))
     got = json.loads(out.splitlines()[-1])
     assert got["whole"] == [[8, 3]], got
@@ -13960,7 +13964,9 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
                             [["2026-11-02 15:40:00", "2026-11-02 15:50:00"], None, why],
                             [["2026-11-02 15:42:00", "2026-11-02 15:52:00"], None, why],
                             [["2026-11-02 15:42:01", "2026-11-02 15:52:01"], None, why],
-                            [["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, why]], got
+                            [["2026-11-02 16:24:45", "2026-11-02 16:34:45"], None, why],
+                            [["2026-11-02 16:50:00", "2026-11-02 17:00:00"], None, why]], got
+    assert got["results"] == [None, None]
     none = "the window's end: no pass of the entry holding the key began in it"
     assert got["lines"] == [
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 15:41:59 to "
@@ -13977,7 +13983,45 @@ def test_hop_reader_asks_a_caller_across_a_send_on_every_machine_from_slack_befo
         f"2026-11-02 15:52:01 ({none}), on every machine",
         "    across the send at pandaserver/c.py:7 into kill: its callers asked from 2026-11-02 16:24:45 to "
         f"2026-11-02 16:34:45 ({none}), on every machine",
+        "    across the send at pandaserver/c.py:7 into kill: its callers not judged: the ask of the entry's logs from "
+        "2026-11-02 16:50:00 to 2026-11-02 17:00:00 is not answered yet, and the first line of its pass that holds the "
+        "key would close their window",
     ], got
+
+
+def test_h3_tells_no_way_alone_while_a_caller_across_a_send_is_not_judged(tmp_path):
+    # the r4 fixes (1) (out/gm/qk-design.md): a caller across a send whose entry's logs are asked and not answered is
+    # not judged (None); a way another caller's run shows is then not told alone, the one not judged being possibly the
+    # call that ran (NJE-7425252125, r3x38, ended on copyArchive 634 with the entry's ask open)
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import sources as SR
+
+        r = object.__new__(rerun.Rerun)
+        r.lines = []
+        r.say = r.lines.append
+        r._say_cuts = lambda indent: None
+        sent = SR.Way("constant", "'10'", "constant", ("pandaserver/d.py:634", "pandaserver/c.py:7"), sent="pandaserver/c.py:7",
+                      sent_into="pandaserver/a.py::kill")
+        local = SR.Way("constant", "'60'", "constant", ("pandaserver/g.py:9",))
+        SR.param_ways = lambda owner, param, entered=(), steps=(), truth=False: [sent, local]
+        SR.calls_off_the_path = lambda owner, param, entered: []
+        got = []
+        for of_sent in (None, False, True):
+            r._caller_shows = lambda w, window, run, of_sent=of_sent: of_sent if w.sent else True
+            ends = r._param_end_read("code", "pandaserver/b.py::f", "code", None, N(machine="m", records=[]),
+                                     ("2026-11-02 15:51:59", "2026-11-02 15:51:59"), (), (), True)
+            got.append([[e.end, e.why, e.at] for e in ends])
+        print(json.dumps({"got": got, "lines": [x for x in r.lines if "not told alone" in x]}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    unchosen = [["stop", "parameter-unchosen", ""]]
+    # not judged: the shown way is not told alone; judged not shown: it is; both shown: neither
+    assert got["got"] == [unchosen, [["constant", "'60'", "pandaserver/g.py:9"]], unchosen], got
+    assert got["lines"] == ["    code: the call at pandaserver/g.py:9 shown, and not told alone: the caller(s) at "
+                            "pandaserver/d.py:634 not judged"]
 
 
 def test_u2x_reads_a_caller_across_a_send_and_sets_aside_by_its_way_the_pass_that_moved_it(tmp_path):
