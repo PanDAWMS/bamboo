@@ -124,6 +124,7 @@ from bamboo.querier import field_order as FO
 from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
+from bamboo.querier import hop as HOP
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
@@ -1581,6 +1582,21 @@ class Callers:
 
 
 @dataclass
+class OtherRows:
+    """What other rows a selection of the mover's waited on (O1, design H; KNOWN_ISSUES.md K77): its statements'
+    ``NOT EXISTS`` terms read against the rows file's linked rows and their histories, from *since* to *before* (a late
+    value's move) or *until* (the window's end).  *then* is what is read where H does not hold: the mover's callers
+    (U1), or the stop it said."""
+
+    owner: str
+    subject: str
+    since: str
+    before: str | None
+    until: str
+    then: Callers | T.Said
+
+
+@dataclass
 class CallerPasses:
     """Which way each pass of one caller of the mover went on the row (U2): through its call into the mover, or not."""
 
@@ -2492,8 +2508,8 @@ def across_sends(entries: list[str]) -> dict[str, str]:
 
 def _f3(state: dict | None) -> str:
     """The kind of an attribute's H2 try that is no statuslog row (``Rerun._attribute_tries``): "span" (the object's
-    life, asked of F3's writers), "run" (a run found in it), "open" (the life, not searched whole), "made" (a birth's
-    row); "" for a row."""
+    life, asked of F3's writers, or around the value for one writing the time it runs), "run" (a run found in it),
+    "open" (the life, not searched whole), "made" (a birth's row); "" for a row."""
     return (state or {}).get("f3", "")
 
 
@@ -3188,6 +3204,7 @@ class Rerun:
             Branch: self.branch, Settled: self.settled, Pair: self.pair, FalseAtom: self.false_atom,
             Reproduce: self.reproduce, Field: self.field,
             Stuck: self.stuck, Passes: self.passes, Callers: self.callers, CallerPasses: self.caller, ArmCaller: self.arm_caller,
+            OtherRows: self.other_rows,
             Blocked: self.blocked, Input: self.input, Rows: self.rows,
             Late: self.late, Missed: self.missed, Ordered: self.ordered,
         }
@@ -5028,7 +5045,8 @@ class Rerun:
         A writer on no history row of the object is read where the map says more of it: a birth (``born``) wrote as the
         row was made, a try at the row's creation that asks nothing, after the rows; one that marks its runs by the
         object's key (``key_marks``) is asked over the object's life, from its creation to when the value was read
-        (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run.  Any other stops."""
+        (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run -- or, where its write is
+        the time it runs (``attr_time.NOW``), around the value alone (``windows.near_value``).  Any other stops."""
         fragment = mapdump.fragment()
         found = AT.arms(fragment, subject, readings, born=lambda owner, b: born(b, birth_marks(owner, subject)))
         self.need(T.Said("a-writer-of-in-the-map-to", {"subject": subject, "value": value}), found)
@@ -5060,12 +5078,21 @@ class Rerun:
         tries: list[tuple[dict | None, W.Asking | None, list | None]] = [
             (s, W.at_transition(s), AT.readings_of(readings, arms)) for s, arms in rows]
         made = self._made_at(cls) if births or marked else None
-        if marked:
-            life = W.lifetime(made, self._read_at(subject), tuple(sorted({s for a in marked for s in marks[a]})))
-            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in marked)
+        # one whose write is the time it runs ran at the value, if it wrote it: asked around the value, not over the life
+        # (windows.near_value; tmaeno's OK 2026-11-15 14:44:05)
+        near = {a: w for a in marked if a.outcome in AT.NOW
+                if (w := W.near_value(attr, value, tuple(sorted(marks[a])))) is not None}
+        spanned = [a for a in marked if a not in near]
+        if spanned:
+            life = W.lifetime(made, self._read_at(subject), tuple(sorted({s for a in spanned for s in marks[a]})))
+            names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in spanned)
             self.need(T.Said("the-object-s-life-to-ask-over", {"names": names, "life_why": life.why}), life.window)
             self.say(f"F3: {names} asked over {life.why}")
-            tries.insert(0, ({"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, marked)))
+            tries.insert(0, ({"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, spanned)))
+        for a, asking in near.items():
+            self.say(f"F3: {a.owner.split('::')[-1]}:{a.line} writes the time it runs: asked over {asking.why}")
+            end = asking.window[1] if asking.window else value
+            tries.insert(0, ({"status": None, "time": end, "f3": "span"}, asking, AT.readings_of(readings, [a])))
         if births:
             names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
             self.need(T.Said("when-the-row-was-made-for-the", {"names": names}), made)
@@ -6173,7 +6200,8 @@ class Rerun:
                 moving = [p for p in found if p.last[:19] >= q.before]
                 found = [p for p in found if p.last[:19] < q.before]
                 self.say(f"{len(moving)} pass(es) ending at {q.before} or later, the one that moved it on among them, not read")
-            if not found and since is not None and self._waker_turn(q, since, func):
+            if not found and since is not None and (self._waker_turn(q, since, func) or self._hop_turn(
+                    q.owner, q.subject or self.args.subject, since, q.before, None, func)):
                 return None
             if not found and (up := self._callers_of_mover(q, since, "before")) is not None:
                 return up
@@ -6181,8 +6209,11 @@ class Rerun:
                 self.need(T.Said("a-pass-of-before-the-one-that-2", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "q_unsure": q.unsure}), found, "K45")
             self.need(T.Said("a-pass-of-before-the-one-that", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "func_2": func}), found, "K45")
         if not found and since is not None and q.before is None:
-            # a stuck value's stay: A2 stops the branch where no row the mover takes it by came, else U1 reads on
+            # a stuck value's stay: A2 stops the branch where no row the mover takes it by came, H where the other rows
+            # its selection waits on had not moved on; else U1 reads on
             self._waker_turn(q, since, func)
+            self._hop_turn(q.owner, q.subject or self.args.subject, since, None,
+                           q.asking.window[1] if q.asking.window is not None else None, func)
         if not found and (up := self._callers_of_mover(q, since, "window")) is not None:
             return up
         self.need(T.Said("a-pass-in-the-window-that-holds-the-key", {"func": func, "unkeyed": unkeyed}) if unkeyed
@@ -6306,6 +6337,120 @@ class Rerun:
             "reader": where, "column": column, "earlier": earlier,
             "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func})]}))
         return True
+
+    def _hop_turn(self, owner: str, subject: str, since: str, before: str | None, until: str | None, func: str) -> bool:
+        """H (out/gm/qk-design.md "H", tmaeno's OK 2026-11-15 13:27:03; KNOWN_ISSUES.md K77): where the mover *owner*
+        took the row only at the move (*before*; O1) or no pass of it took the row in the stay (S2), and one of its
+        statements selecting the value holds a ``NOT EXISTS`` term on
+        other rows that the map structures (:func:`hop.subquery_terms`), the term held once the other objects whose
+        transitions write its columns had all moved on (:func:`hop.carriers`): read from the rows file's ``linked``
+        rows of such an object, by a column the term correlates on, and their ``statuslogs`` (:func:`hop.read_rows`).
+        Late: where every such row had reached a value its carriers record by the move, and the last did inside the
+        stay, the stay waited on them -- an END naming the last row and the next question (why it moved on only then),
+        True.  Stuck, one rule to the window's end: rows not moved on by then stop the branch, named.  Anything else
+        (no such term, no carrier, no linked rows, the term holding from the stay's start, rows not moved on at a late
+        value's move) is said and leaves the branch as it was (False)."""
+        if not self.logs.needs_window:
+            return False
+        until = before or until
+        if until is None:
+            return False
+        fragment = mapdump.fragment()
+        terms = self._hop_terms(owner, subject)
+        if not terms:
+            return False
+        start, end = W.when(since), W.when(until)
+        moved = next((W.when(s.get("time_extended") or str(s["time"])) for s in self.data.get("statuslog", {}).get("states", [])
+                      if before is not None and str(s["time"])[:19] == before[:19] and s["status"] != self.args.observed), end)
+        linked = self.data.get("linked") or []
+        statuslogs = self.data.get("statuslogs") or {}
+        for term in terms:
+            inner_cls = sorted({s.partition(".")[0] for s in term.inner})
+            outers = {o for _, o in term.correlation}
+            entries = [e for e in linked if str((e.get("via") or {}).get("from", "")) in outers
+                       and str(self._row_value(str(e["via"]["from"]))) in {str(a) for a in e.get("asked") or []}]
+            if not entries:
+                self.say(f"H: {term.where}'s {term.polarity} term on {', '.join(inner_cls)}: the rows file links no rows of the row "
+                         f"by {', '.join(sorted(outers))}: not read")
+            for cls in sorted({str(e.get("class", "")) for e in entries}):
+                hist = PT.history_of_class(cls)
+                log = statuslogs.get(cls) or {}
+                if hist is None or not log.get("by_key"):
+                    self.say(f"H: {term.where}'s {term.polarity} term on {', '.join(inner_cls)}: the rows file links {cls}'s rows "
+                             "but holds no history of them: not read")
+                    continue
+                car = HOP.carriers(getattr(fragment, "junctions", None) or [], getattr(fragment, "reach_graph", None) or [],
+                                   term.tested, hist.subject)
+                if car is None:
+                    self.say(f"H: {term.where}'s {term.polarity} term on {', '.join(inner_cls)}: no function within {HOP.DEPTH} "
+                             f"calls above its columns' writers records {hist.subject}: not read")
+                    continue
+                via = next(e["via"] for e in entries if e.get("class") == cls)
+                key_attr = str(log.get("key", "")).partition(".")[2].lower()
+                made: dict[str, datetime.datetime | None] = {}
+                for e in entries:
+                    if e.get("class") != cls:
+                        continue
+                    for r in e.get("rows") or []:
+                        low = {k.lower(): v for k, v in r.items()}
+                        if low.get(key_attr) is None:
+                            continue
+                        born = low.get(hist.created.lower()) if hist.created else None
+                        made[str(low[key_attr])] = W.when(str(born).replace("T", " ")) if born else None
+                history = {k: HOP.states_of(log["by_key"].get(k)) for k in made}
+                reading = HOP.read_rows(history, made, car.values, moved)
+                carriers = [f"{o.split('::')[-1]} ({', '.join(sorted(vs))})" for o, vs in car.carriers]
+                values = sorted(car.values)
+                said_via = f"{via['from']} -> {via['to']}"
+                premises = [T.Said("h-carried-by", {"inner": sorted(term.tested), "writers": [w.split("::")[-1] for w in car.writers],
+                                                    "carriers": carriers, "status": hist.subject}),
+                            T.Said("h-rows-stand-for-the-term-s", {"cls": cls, "via": said_via, "inner": ", ".join(inner_cls)})]
+                if before is None:
+                    if not reading.open:
+                        self.say(f"H: {term.where}'s {term.polarity} term held by {until} ({len(reading.reached)} {cls} row(s) by "
+                                 f"{said_via} in {values}) and the value has not moved on: why {func} did not take it is not read here")
+                        return False
+                    shown = [f"{k} {v or 'no row'}" for k, v in reading.open[:6]] + (["..."] if len(reading.open) > 6 else [])
+                    first = reading.open[0][0]
+                    nxt = HOP.current_stay(history.get(first, []), end)
+                    self.need(T.Said("h-rows-it-waits-on", {
+                        "where": term.where, "polarity": term.polarity, "inner": ", ".join(inner_cls), "until": until,
+                        "n": len(reading.open), "total": len(made) - reading.made_later, "cls": cls, "via": said_via, "values": values,
+                        "open": shown,
+                        "next": T.Said("h-next-stuck", {"status": hist.subject, "cls": cls, "key": first, "value": nxt[0], "since": nxt[1][:23]})
+                        if nxt else T.Said("h-next-none", {"cls": cls, "key": first}),
+                        "premises": premises}), None, "K77")
+                if reading.open:
+                    shown = [f"{k} {v or 'no row'}" for k, v in reading.open[:6]]
+                    self.say(f"H: {term.where}'s {term.polarity} term: {len(reading.open)} {cls} row(s) by {said_via} not in {values} at "
+                             f"the move ({', '.join(shown)}): the term is not read as having held then")
+                    continue
+                turn = reading.turn
+                if turn is None:
+                    continue
+                at, key, value, host = turn
+                if at <= start:
+                    self.say(f"H: {term.where}'s {term.polarity} term held from the stay's start: the last {cls} row by {said_via} "
+                             f"reached {value} at {at:%Y-%m-%d %H:%M:%S} ({key}), before {since}")
+                    continue
+                stay = HOP.longest_stay(history.get(key, []), start, at)
+                born = made.get(key)
+                delta = (moved - at).total_seconds()
+                premises.append(T.Said("h-a-later-write-not-read", {"delta": f"{delta:.1f}"}))
+                self.end(T.Said("h-ran-after-other-rows-moved-on", {
+                    "mover": func, "delta": f"{delta:.1f}", "where": term.where, "polarity": term.polarity,
+                    "inner": ", ".join(inner_cls), "at": f"{at:%Y-%m-%d %H:%M:%S.%f}"[:23],
+                    "n": len(reading.reached), "cls": cls, "via": said_via, "values": values, "key": key, "value": value,
+                    "machine": host.split(".")[0] or "an unnamed host", "since": since[:19],
+                    "later": T.Said("h-made-later", {"n": reading.made_later, "cls": cls}) if reading.made_later else "",
+                    "next": T.Said("h-next-late", {"status": hist.subject, "cls": cls, "key": key, "held": stay[0], "since": stay[1],
+                                                   "until": stay[2],
+                                                   "made": T.Said("h-made-at", {"at": f"{born:%Y-%m-%d %H:%M:%S}"})
+                                                   if born is not None and born > start else ""})
+                    if stay else T.Said("h-next-none", {"cls": cls, "key": key}),
+                    "premises": premises}))
+                return True
+        return False
 
     def _stay_edges(self, fn: R.Function, owner: str, arms: list[int], subject: str, key: str, found: list,
                     since: str, whole: frozenset[int] | set[int] = frozenset()) -> tuple[list, list]:
@@ -7869,7 +8014,7 @@ class Rerun:
         return Passes(q.mover, self._runs_of(found, q.mover, asking), list(arms.values()), self.args.key, asking,
                       since=since, before=before, unsure=unsure, subject=q.subject, entries=_entries_of(q.writers, q.mover))
 
-    def _why_late(self, q: Missed, ordered: list) -> Callers | None:
+    def _why_late(self, q: Missed, ordered: list) -> Callers | OtherRows | None:
         """Judgement 1: why the mover that moved the value on did it only then, where a statement of its own took the
         row.  One that returns the first rows of an order goes on to L3 (lost on order); one that took the row in no
         such order goes to its callers' passes before the move (U1: what it took the row by is what they handed it,
@@ -7885,13 +8030,40 @@ class Rerun:
         held = f"held for the row {_spans_words(spans, (q.since, q.moved))}" if spans else "held for the row at times not known"
         said = T.Said("why-took-it-only-at-and-it", {"name": name, "q_moved": q.moved, "where": where, "held": held})
         entries = _entries_of(q.writers, q.mover)
+        since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
+        then: Callers | T.Said = said
         if entries and self.logs.needs_window:
-            self.say(f"{said}: its callers' passes before are read (KNOWN_ISSUES.md K55)")
-            since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
             arms = list(arms_of(q.writers, q.mover, q.subject, q.observed).values())
-            return Callers(q.mover, arms, q.subject, self.args.key, (since, before), "statement", entries, before=before)
+            then = Callers(q.mover, arms, q.subject, self.args.key, (since, before), "statement", entries, before=before)
+        # H: a statement of its waiting on other rows answers first (KNOWN_ISSUES.md K77)
+        if self._hop_terms(q.mover, q.subject) and self.logs.needs_window:
+            self.say(f"{said}: what other rows it waited on is read first")
+            return OtherRows(q.mover, q.subject, since, before, before, then)
+        if isinstance(then, Callers):
+            self.say(f"{said}: its callers' passes before are read (KNOWN_ISSUES.md K55)")
+            return then
         self.need(said, None)
         return None
+
+    def other_rows(self, q: OtherRows):
+        """O1 (design H, KNOWN_ISSUES.md K77): :meth:`_hop_turn` for the mover's statements; where it does not hold,
+        what *q* says is read next."""
+        self.start("O1", "what other rows its selection waited on")
+        func = q.owner.split("::")[-1]
+        if self._hop_turn(q.owner, q.subject, q.since, q.before, q.until, func):
+            return None
+        if isinstance(q.then, Callers):
+            self.say(f"{func}: its callers' passes before are read (KNOWN_ISSUES.md K55)")
+            return q.then
+        self.need(q.then, None)
+        return None
+
+    def _hop_terms(self, owner: str, subject: str) -> list[HOP.Term]:
+        """The ``NOT EXISTS`` terms the map structures in *owner*'s statements selecting *subject* at the observed value."""
+        sites = getattr(mapdump.fragment(), "read_sites", None) or []
+        if not sites:
+            return []
+        return [t for t in HOP.subquery_terms(sites, owner, subject, self.args.observed) if t.polarity == "NOT EXISTS"]
 
     def _row_of(self, cls: str) -> dict:
         """The rows file's row of the class: the one its ``classes`` says is of it (A1 answers a row of a class)."""

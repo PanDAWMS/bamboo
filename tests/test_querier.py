@@ -6948,6 +6948,11 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                     N(subject="JediTaskSpec.cpuTimeUnit", owner="pandajedi/r.py::Refiner.extract", branches=[branch(202, "runtime(c)", pair("can", [upd]))]),
                     N(subject="JediTaskSpec.cpuTimeUnit", owner="pandaserver/m.py::initialize_cpu_time_task", branches=[branch(408, "runtime(c)", pair("", why="not followed"))]),
                     N(subject="JediTaskSpec.cpuTime", owner="pandajedi/d.py::Dog.massage", branches=[branch(520, "runtime(t)", pair("", why="not followed"))]),
+                    # on no row of the task and marked by its key: one writing the time it runs (409), one not (31);
+                    # a placed writer beside them, so not every writer writes the time
+                    N(subject="JediTaskSpec.lockedTime", owner="pandajedi/r.py::Refiner.extract", branches=[branch(212, "runtime(f)", pair("can", [upd]))]),
+                    N(subject="JediTaskSpec.lockedTime", owner="pandaserver/m.py::initialize_cpu_time_task", branches=[branch(409, "runtime(naive_utcnow())", pair("", why="not followed"))]),
+                    N(subject="JediTaskSpec.lockedTime", owner="pandaserver/m.py::changeTaskSplitRulePanda", branches=[branch(31, "runtime(l)", pair("", why="not followed"))]),
                 ],
                 reach_graph=[N(owner="pandaserver/t.py::TaskModule.updateTask_JEDI", history=[N(line=1570, values=["runtime(taskSpec.status)"])]),
                              N(owner="pandaserver/t.py::TaskModule.mark", history=[N(line=9, values=["defined"])]),
@@ -6996,6 +7001,12 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                 "a birth": ("JediTaskSpec.taskName", "n", [reading("pandajedi/r.py::extract", 126), reading("pandaserver/s.py::getTasksToRefine_JEDI", 1188)]),
                 "marked by the key": ("JediTaskSpec.cpuTimeUnit", "x", [reading("pandajedi/r.py::extract", 202), reading("pandaserver/m.py::initialize_cpu_time_task", 408)]),
                 "marked by a job's": ("JediTaskSpec.cpuTime", "5", [reading("pandajedi/d.py::massage", 520)]),
+                "marked, one timed": ("JediTaskSpec.lockedTime", "2026-10-29 09:00:00", [
+                    reading("pandajedi/r.py::extract", 212), reading("pandaserver/m.py::initialize_cpu_time_task", 409),
+                    reading("pandaserver/m.py::changeTaskSplitRulePanda", 31)]),
+                "marked, one timed, not a time": ("JediTaskSpec.lockedTime", "soon", [
+                    reading("pandajedi/r.py::extract", 212), reading("pandaserver/m.py::initialize_cpu_time_task", 409),
+                    reading("pandaserver/m.py::changeTaskSplitRulePanda", 31)]),
             }
             got = {}
 
@@ -7011,7 +7022,9 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
 
             for name, (subject, value, readings) in asks.items():
                 tries_of(name, subject, value, readings)
-            got["F3 said"] = [x for x in r.lines if x.startswith("F3") or "408 is on no" in x]
+            got["F3 said"] = [x for x in r.lines if (x.startswith("F3") or "408 is on no" in x) and "lockedTime" not in x
+                              and "409" not in x and "Panda:31" not in x]
+            got["F3 said, timed"] = [x for x in r.lines if x.startswith("F3") and ("409" in x or "Panda:31" in x)]
             got["key marks"] = [list(rerun.key_marks(f"p.py::{f}", 1, cls, "53")) for f, cls in (
                 ("changeTaskSplitRulePanda", "JediTaskSpec"), ("initialize_cpu_time_task", "JobSpec"), ("massage", "JediTaskSpec"),
                 ("odd", "JediTaskSpec"), ("odd2", "JediTaskSpec"), ("none", "JediTaskSpec"))]
@@ -7059,6 +7072,27 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
         "history call (not followed); its runs are marked by the object's key",
         "F3: initialize_cpu_time_task:408 asked over the object's life, from the row's creation at 2026-10-29 07:08:39 to "
         "when the value was read at 2026-10-29 14:02:50, on every machine, for '; jediTaskID=53; siteID='"]
+    # one of them writing the time it runs ran at the value, if it wrote it: asked around the value alone, for its own
+    # mark; the other over the life, for its own; the placed writer's rows after (tmaeno's OK 2026-11-15 14:44:05)
+    life = "from the row's creation at 2026-10-29 07:08:39 to when the value was read at 2026-10-29 14:03:01, on every machine"
+    assert got["marked, one timed"][:2] == [
+        [None, ["2026-10-29 08:50:00", "2026-10-29 09:10:00"], None, "span", "2026-10-29 09:10:00",
+         [["initialize_cpu_time_task", [409]]], ["; jediTaskID=53; siteID="]],
+        [None, ["2026-10-29 07:08:39", "2026-10-29 14:03:01"], None, "span", "2026-10-29 14:03:01",
+         [["changeTaskSplitRulePanda", [31]]], ["changeTaskSplitRulePanda < jediTaskID=53 >"]]]
+    assert got["marked, one timed"][2:] == got["any row"]
+    # a value that is no time gives no time to ask around: both over the life
+    assert got["marked, one timed, not a time"][0] == [
+        None, ["2026-10-29 07:08:39", "2026-10-29 14:03:01"], None, "span", "2026-10-29 14:03:01",
+        [["initialize_cpu_time_task", [409]], ["changeTaskSplitRulePanda", [31]]],
+        ["; jediTaskID=53; siteID=", "changeTaskSplitRulePanda < jediTaskID=53 >"]]
+    assert got["F3 said, timed"] == [
+        f"F3: changeTaskSplitRulePanda:31 asked over the object's life, {life}, for 'changeTaskSplitRulePanda < jediTaskID=53 >'",
+        "F3: initialize_cpu_time_task:409 writes the time it runs: asked over lockedTime='2026-10-29 09:00:00' less and plus "
+        "10 min, from 2026-10-29 08:50:00 to 2026-10-29 09:10:00: when it ran, if it wrote the value, on every machine, for "
+        "'; jediTaskID=53; siteID='",
+        f"F3: initialize_cpu_time_task:409, changeTaskSplitRulePanda:31 asked over the object's life, {life}, for "
+        "'; jediTaskID=53; siteID=', 'changeTaskSplitRulePanda < jediTaskID=53 >'"]
     # the text around the key's hole of the mark as the rows print it: a job's key at the first hole takes the
     # function's name; no text for a mark not by the class's key, a prefix of other holes, or no prints
     assert got["key marks"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["initialize_cpu_time_task < PandaID=53; jediTaskID="], [], [], [], []]
@@ -14673,3 +14707,151 @@ def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_
     assert "JobSpec.modificationTime held v until a" in late[1][0] and "held the value the stay began with" not in late[1][0], got
     assert got["before the turn"] == [False, []], got
     assert got["stuck"][0] == "stop" and "the window's end: none" in got["stuck"][1], got
+
+
+def test_a_selection_waiting_on_other_rows_is_read_at_their_last_move_and_the_question_goes_on_to_them(tmp_path):
+    """H (KNOWN_ISSUES.md K77): a mover's statement selecting the value with a NOT EXISTS term the map structures
+    (``rows``) waits on the rows its correlation links; their carriers are the functions nearest the writers of the
+    term's tested columns that record the linked class's status.  Late: every linked row in a carrier value by the move,
+    the last inside the stay -- an END naming it, how long the mover took after, and the next question (its longest
+    stay).  A linked row not moved on at the move, or the last move before the stay, leaves the branch as it was.
+    Stuck: rows not moved on at the window's end stop it, named."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import hop as HOP
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import render as T
+
+            got = {}
+            tree = N(node="all", items=[N(node="null", subject="JediDatasetSpec.masterID", items=[], values=[]),
+                                        N(node="compare", subject="JediDatasetSpec.nFilesToBeUsed", items=[],
+                                          values=[N(columns=["JediDatasetSpec.nFilesFinished"])])], subject="", values=[])
+            rows = N(op="not exists", correlated=["JediDatasetSpec.jediTaskID=JediTaskSpec.jediTaskID"], tree=tree)
+            term = N(node="other", text="NOT EXISTS (...)", rows=rows, items=[], subject="", values=[])
+            bare = N(node="other", text="x IN (SELECT ...)", items=[], subject="", values=[])
+            site = N(owner="t.py::M.sel", name="panda:t.py::sel@10", selects=["JediTaskSpec.status=running"],
+                     condition_trees=[N(tree=N(node="all", items=[term, bare], subject="", values=[]))])
+            other = N(owner="t.py::M.other", name="panda:t.py::other@20", selects=["JediTaskSpec.status=running"],
+                      condition_trees=[N(tree=term)])
+            terms = HOP.subquery_terms([site, other], "t.py::sel", "JediTaskSpec.status", "running")
+            got["terms"] = [(t.where, t.polarity, sorted(t.inner), sorted(t.tested), t.correlation) for t in terms]
+            got["no term at another value"] = HOP.subquery_terms([site], "t.py::sel", "JediTaskSpec.status", "ready")
+
+            junctions = [N(subject="JediDatasetSpec.nFilesFinished", owner="j.py::J.propagate"),
+                         N(subject="JediDatasetSpec.type", owner="j.py::J.insert")]
+            graph = [N(owner="j.py::J.archive", calls=[N(to="j.py::J.propagate")],
+                       history=[N(subject="JobSpec.jobStatus", values=["finished", "failed"])]),
+                     N(owner="j.py::J.kill", calls=[N(to="j.py::J.archive")],
+                       history=[N(subject="JobSpec.jobStatus", values=["cancelled"])]),
+                     N(owner="j.py::J.propagate", calls=[], history=[])]
+            car = HOP.carriers(junctions, graph, terms[0].tested, "JobSpec.jobStatus")
+            got["carriers"] = [car.writers, [(o, sorted(v)) for o, v in car.carriers], sorted(car.values)]
+            got["no carrier"] = HOP.carriers(junctions, graph, {"JediDatasetSpec.type"}, "JobSpec.jobStatus")
+
+            t = lambda s: datetime.datetime.fromisoformat(s)
+            h = lambda *xs: [{"status": s, "time": a[:19], "time_extended": a, "host": "h1.x"} for s, a in xs]
+            hist = {"1": h(("running", "2026-01-01 00:10:00"), ("finished", "2026-01-01 01:00:00")),
+                    "2": h(("activated", "2026-01-01 00:05:00"), ("running", "2026-01-01 03:00:00"),
+                           ("failed", "2026-01-01 04:00:00"), ("failed", "2026-01-01 04:00:05"))}
+            made = {"1": t("2026-01-01 00:01:00"), "2": t("2026-01-01 00:02:00"), "3": t("2026-01-01 06:00:00")}
+            vals = frozenset({"finished", "failed"})
+            r = HOP.read_rows(hist, made, vals, t("2026-01-01 05:00:00"))
+            got["read"] = [[(f"{a:%H:%M:%S}", k, v) for a, k, v, _ in r.reached], list(r.open), r.made_later]
+            r2 = HOP.read_rows(hist, made, vals, t("2026-01-01 03:30:00"))
+            got["open"] = [list(r2.open), r2.turn]
+            got["longest"] = HOP.longest_stay(hist["2"], t("2026-01-01 00:00:00"), t("2026-01-01 04:00:00"))
+            got["current"] = HOP.current_stay(hist["2"], t("2026-01-01 03:30:00"))
+
+            class Stopped(Exception):
+                pass
+
+            def rerun(states, linked_rows, by_key):
+                q = RR.Rerun.__new__(RR.Rerun)
+                q.args = N(observed="running", key="100")
+                q.logs = N(needs_window=True)
+                q.data = {"statuslog": {"states": states},
+                          "linked": [{"class": "JobSpec", "via": {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"},
+                                      "asked": [100], "rows": linked_rows}],
+                          "statuslogs": {"JobSpec": {"key": "JobSpec.PandaID", "by_key": by_key}}}
+                q._row_value = lambda s, q_=None: 100
+                said, ends = [], []
+                q.say = said.append
+                q.end = lambda what: ends.append(T.text(what))
+
+                def need(what, cond, code=None):
+                    if not cond:
+                        raise Stopped(code, T.text(what))
+                    return cond
+                q.need = need
+                return q, said, ends
+
+            RR.mapdump.fragment = lambda: N(read_sites=[site], junctions=junctions, reach_graph=graph)
+            jobs = [{"PandaID": 1, "creationTime": "2026-01-01T00:01:00"}, {"PandaID": 2, "creationTime": "2026-01-01T00:02:00"}]
+            moved = [{"status": "running", "time": "2026-01-01 00:00:30", "time_extended": "2026-01-01 00:00:30.0"},
+                     {"status": "prepared", "time": "2026-01-01 04:00:35", "time_extended": "2026-01-01 04:00:35.0"}]
+            q, said, ends = rerun(moved, jobs, hist)
+            ok = q._hop_turn("t.py::sel", "JediTaskSpec.status", "2026-01-01 00:00:30", "2026-01-01 04:00:35", None, "sel")
+            got["late"] = [ok, ends, said]
+            # a linked row not moved on at the move: the term is not read as having held
+            q, said, ends = rerun(moved, [*jobs, {"PandaID": 3, "creationTime": "2026-01-01T00:03:00"}],
+                                  {**hist, "3": h(("running", "2026-01-01 00:04:00"))})
+            got["open at the move"] = [q._hop_turn("t.py::sel", "JediTaskSpec.status", "2026-01-01 00:00:30",
+                                                   "2026-01-01 04:00:35", None, "sel"), ends, said]
+            # the last move before the stay: it held from the stay's start
+            q, said, ends = rerun(moved, jobs, hist)
+            got["before the stay"] = [q._hop_turn("t.py::sel", "JediTaskSpec.status", "2026-01-01 04:00:10",
+                                                  "2026-01-01 04:00:35", None, "sel"), ends, said]
+            # stuck: rows not moved on at the window's end stop it, named
+            q, said, ends = rerun(moved[:1], jobs, hist)
+            try:
+                q._hop_turn("t.py::sel", "JediTaskSpec.status", "2026-01-01 00:00:30", None, "2026-01-01 03:30:00", "sel")
+                got["stuck"] = ["no stop", said]
+            except Stopped as e:
+                got["stuck"] = list(e.args)
+            # stuck with every row moved on: not read here
+            q, said, ends = rerun(moved[:1], jobs, hist)
+            got["stuck, all moved on"] = [q._hop_turn("t.py::sel", "JediTaskSpec.status", "2026-01-01 00:00:30", None,
+                                                      "2026-01-01 05:00:00", "sel"), said]
+            print(json.dumps(got, default=str))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["terms"] == [["sel@10", "NOT EXISTS",
+                             ["JediDatasetSpec.jediTaskID", "JediDatasetSpec.masterID", "JediDatasetSpec.nFilesFinished",
+                              "JediDatasetSpec.nFilesToBeUsed"],
+                             ["JediDatasetSpec.masterID", "JediDatasetSpec.nFilesFinished", "JediDatasetSpec.nFilesToBeUsed"],
+                             [["JediDatasetSpec.jediTaskID", "JediTaskSpec.jediTaskID"]]]], got
+    assert got["no term at another value"] == [], got
+    # the nearest level that records the status wins: archive, not kill a call further
+    assert got["carriers"] == [["j.py::propagate"], [["j.py::archive", ["failed", "finished"]]], ["failed", "finished"]], got
+    assert got["no carrier"] is None, got
+    # a row entering the value it holds at the end: 2's first failed row, not the repeated one; 3, made later, not read
+    assert got["read"] == [[["01:00:00", "1", "finished"], ["04:00:00", "2", "failed"]], [], 1], got
+    assert got["open"] == [[["2", "running"]], None], got
+    # activated 2 h 55 min, running 1 h: the longest is activated
+    assert got["longest"] == ["activated", "2026-01-01 00:05:00.000", "2026-01-01 03:00:00.000"], got
+    assert got["current"] == ["running", "2026-01-01 03:00:00.000"], got
+    ok, ends, _ = got["late"]
+    assert ok is True and len(ends) == 1, got
+    assert ends[0].startswith("sel moved it on 35.0 s after sel@10's NOT EXISTS term on JediDatasetSpec began to hold at "
+                              "2026-01-01 04:00:00.000: the last of the row's 2 JobSpec row(s) by JediTaskSpec.jediTaskID -> "
+                              "JobSpec.jediTaskID to reach one of failed, finished was 2, failed at 2026-01-01 04:00:00.000 on h1"), got
+    # made after the stay began (00:00:30): said; its longest stay up to its move, activated, is where the question goes
+    assert ("next: why JobSpec 2 (made at 2026-01-01 00:02:00, after the stay began) held activated from "
+            "2026-01-01 00:05:00.000 to 2026-01-01 03:00:00.000, the longest of its JobSpec.jobStatus stays") in ends[0], got
+    assert "written by propagate, which archive (failed, finished) reach as they record JobSpec.jobStatus" in ends[0], got
+    ok, ends, said = got["open at the move"]
+    assert ok is False and ends == [] and any("1 JobSpec row(s)" in s and "3 running" in s for s in said), got
+    ok, ends, said = got["before the stay"]
+    assert ok is False and ends == [] and any("held from the stay's start" in s for s in said), got
+    code, text = got["stuck"]
+    assert code == "K77" and "did not hold up to 2026-01-01 03:30:00, the window's end: 1 of the row's 2 JobSpec" in text, got
+    assert "(2 running): it waits on them -- next: why JobSpec 2 has not left running since 2026-01-01 03:00:00.000" in text, got
+    ok, said = got["stuck, all moved on"]
+    assert ok is False and any("and the value has not moved on" in s for s in said), got

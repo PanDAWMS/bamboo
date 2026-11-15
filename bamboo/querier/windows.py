@@ -116,6 +116,21 @@ def value_now(column: str, value: str) -> Asking:
     return Asking((t, t), None, T.Said("value-now", {"column": column, "value": value}), holds_write=True)
 
 
+def near_value(column: str, value: str, strings: tuple[str, ...]) -> Asking | None:
+    """H2's F3 for one writer whose write of *column* is the time it runs (:func:`value_now` for one writer, KNOWN_ISSUES.md
+    K37; tmaeno's OK 2026-11-15 14:44:05): if it wrote *value*, it ran at it, on its own clock, which its log's times are
+    on too -- so it is asked from the value less SLACK to the value plus SLACK, on every machine, for *strings*, not over
+    the object's life.  It does not hold the write (``holds_write``): another writer may have written the value.  None
+    where the value is not a time."""
+    try:
+        t = when(value)
+    except ValueError:
+        return None
+    lo, hi = _down(t - SLACK), _down(t + SLACK)
+    return Asking((lo, hi), None, T.Said("near-value", {"column": column, "value": value, "slack": _minutes(SLACK),
+                                                        "lo": lo, "hi": hi, "strings": list(strings)}), strings)
+
+
 def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> Asking:
     """H2's F3, for an attribute's writer on no history row of the object that marks its runs by the object's key
     (``attr_time``, KNOWN_ISSUES.md K37): from the row's creation *made* to when the value was read *read*, on every

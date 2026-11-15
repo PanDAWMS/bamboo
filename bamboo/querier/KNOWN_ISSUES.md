@@ -685,6 +685,52 @@ ahead, K of its own group's M with a key ahead)"; the END's "read as now: ..." a
 *Revisit:* when a stuck case's first-rows statement is read (part B); when the calls that passed the row over are
 read; when PanDA answers a history held at a moment.
 
+### K77. A selection waiting on other rows is read at their last move, by function, from the rows the file links
+
+A mover's statement that selects the value can hold a term on other rows: prepareTasksToBeFinished_JEDI takes a task
+only where `NOT EXISTS` a dataset of it with files left (3694 on pin d, 3696 on v88).  The map held such a term as
+`other`, its text only, so the turn read nowhere: L2's judgement 1 said "held for the row at times not known" and sent
+the mover to its callers, who print no key (U2, K55).  MT-running-late stopped there although its one job finished 19.7
+s before the move.
+
+Now (design H, the analyzer handover's out/gm/qk-design.md "H", tmaeno's OK 2026-11-15 13:27:03; `hop.py`,
+`Rerun._hop_turn`, step O1 `Rerun.other_rows`): where the map structures the term (a condition node's `rows`: op,
+`correlated` pairs, inner tree), its tested columns' writers (junctions) are followed up the reach graph to the nearest
+functions that record the history of a class the rows file links to the row by a correlated column -- the carriers,
+each with the values it records (archiveJob: cancelled, closed, failed, finished, merging; propagateResultToJEDI, which
+writes the files' counts, is one call below).  The linked rows (`linked`) and their histories (`statuslogs`) say when
+the last of them entered a carrier value; late, inside the stay and every linked row in one by the move: an END naming
+that row, how long the mover took after it, and the next question -- the row's longest stay up to then, and its making
+where it came after the stay began.  Stuck: rows not in a carrier value at the window's end stop the branch (K77),
+named.  O1 is read before U1 where the mover's statement holds such a term; passes() reads it where no pass took the
+row.  It assumes:
+
+- *A carrier's values are its function's, not its arms'.*  archiveJob records merging too, and which of its arms
+  write which counts (propagateResultToJEDI treats a merging job's files apart) is not read; a row entering merging
+  can read as having moved on.  A row's entry into the value it holds at the end is read, not an earlier carrier value
+  (a scout job merging, then finished by its merge job's end, entered finished).
+- *The linked rows stand for the term's rows.*  The term counts a dataset's files; the rows file links the task's jobs.
+  Which job held which file is not read, and a job holding none (a build job, a merge job) is counted with the rest.
+- *A write of the term's columns comes with its carrier's transition.*  propagateResultToJEDI's update can be queued
+  (`insert_to_query_pool`, async) and run later; the END names how long after the last transition the move came.
+- *The term's other conditions are not read*: masterID, type and status of the inner rows hold as the selection needs.
+- *Only `NOT EXISTS` is read*; `EXISTS` and `IN (SELECT ...)` are left as before.
+
+*Shows:* "== O1 what other rows its selection waited on"; "H: ..." lines saying why it does not read (no carrier, no
+linked rows or history, a linked row not moved on at the move -- MT-scouting-late's 5 running jobs: it moved by the
+early count of finished scouts, another statement --, the term holding from the stay's start); the END "... moved it on
+N s after ...'s NOT EXISTS term on ... began to hold at T: the last of the row's N C row(s) by ... -- next: ...";
+stuck, the stop "... did not hold up to ..., the window's end: ... it waits on them".
+*Why not further now:* the map holds no term's structure yet (its H-a, x13_cx/subq/design.md, awaiting tmaeno's OK),
+nor the counts' writer in propagateResultToJEDI (a SET built from a dict's keys, same design); until both land H reads
+nothing (the 4 live cases L2's judgement 1 sends to their callers print the same on dump x13a3Bd).  On a probe dump
+that injects both: of the 8 live cases reaching 3694, MT-running-late STOP -> END, MT-scouting-late read and refused,
+6 the same (their movers' passes are found, so S2 reads them first; a stuck case's term is not read there).  The
+next question is named, not run; the rows a job's task and a task's parent need come by rows asks once the harness
+reads their histories (its stage 1).
+*Revisit:* when the map's H-a lands (the shape read here is its proposal); when EXISTS or IN terms are met; when a
+next question is to be run in the same process.
+
 ## Row values at a step's time (`held.py`)
 
 ### K49. A guard over a column the rows file holds is read in it, by the map's ways and the direction of their changes
@@ -801,7 +847,14 @@ the value then held need not be.  An arm whose function marks its runs by the ob
 creation to when the value was read, on every machine (F3, `windows.lifetime`), for its mark as its rows' prefix
 prints it with the key (`key_marks`: "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
 siteID="), not the key alone -- a task's ID is on every line of the calls listing it (getTasksToBeProcessed_JEDI), and
-the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Each run found there whose mark holds
+the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Since 2026-11-15 (tmaeno's OK,
+14:44:05), such an arm whose write is the time it runs (`attr_time.NOW`) is asked around the value alone, from the value
+less SLACK to the value plus SLACK, for its own marks (`windows.near_value`).  If it wrote the value, it ran then, on
+its own clock, which its log's times use too.  The window does not hold the write (`holds_write`): another arm may
+have written the value.  The premise is that the run's records span the write's time within SLACK.  killJob writes a
+job's endTime this way (pin s 1021, 1024), but the map gives the value as `runtime(currentTime)`: it does not resolve
+the local to `naive_utcnow()` (below).  So NR-J-7422160126-endTime is still asked over its 47 h life; the
+resolution is asked of the map (11-15).  Each run found there whose mark holds
 the key is read as a row is, by its first record's time among the rows (`_runs_as_rows`), asked for the same marks; a
 run naming the key in its lines alone is another call's.  A life with no run, its logs shown to
 name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
