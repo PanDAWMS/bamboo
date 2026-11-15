@@ -430,6 +430,12 @@ TEMPLATES: dict[str, str] = {
     "kept-off-by-the-lock": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} did not take it: {callee} skips a row locked less than {span} ago ({term}; {bound}) and its take locks it ({sets})",
     "one-process-a-label": "one process of {agent} selects for {label} on each of {machines:join=, } (no two of its cycles there overlap; two processes taking turns would not show)",
     "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
+    # M3(a)-cap: the first selection below its cap after the statement's turn took the row
+    "ran-when-the-first-selection-below-its-cap-took-it": "{caller} ran on the row when {agent}'s first selection below its cap took it: {where} returns at most {cap} row(s) and began to return the row at {turn}; from then {full} selection(s) on {machines} machine(s) returned {cap} (rows ahead of it) and {empty} none; {machine}'s cycle {mark} returned {count} at {at}, fewer than {cap}: every row selectable then, and the pass on it began at {first}; premises: {premises:join=; }",
+    "held-from-the-stay-s-start": "{column} held the value the stay began with: none of {arms:join=, } wrote it in the stay",
+    "an-empty-selection-lost-the-rows": "the {n} selection(s) that returned none ran beside one of {callee} that took the same rows",
+    "the-row-s-label-by-the-take-s-place": "{agent}'s lines name no label: the selection for the row's {keys:join=, } (read at as_of) is selection {place} of each cycle's {width}, the only one cycle {mark} returned rows at",
+    "another-width-another-label": "the {n} selection(s) of {agent}'s cycles of another width than {width} are another label's (one of the row's below its cap would have taken it)",
     # U3: which call ran an arm with no guard of its own (KNOWN_ISSUES.md K56)
     "the-arm-s-run-mark": "which row {fn}'s call handed it: no mark the map records for {fn} reads a row's identity in its run {token!r} (KNOWN_ISSUES.md K56)",
     "a-call-handing-the-mark-on": "a call of {fn}'s whose caller's run marks hold the row its run's mark holds: none of {sites:join=, } does (KNOWN_ISSUES.md K56)",
