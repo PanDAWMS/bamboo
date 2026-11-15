@@ -221,10 +221,16 @@ its 51 not-settled judgements lacking rows (JediDatasetSpec 50, FileSpec 1) all 
 (`out/nrow/nr0-summary.txt`); JediFileSpec and T_TASK appear there only in refused ones; the FileSpec one's rows
 are in its file's `linked` (the harness's reading of f99a537's ask, 10-29).  The fetch that answers
 them is the harness's (stage 2); until it reads them the file keeps its sections as now.  A stop no other rule
-names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
-walk does not read as a row's attribute asks nothing.
+names, with rows asked at one of the first three places, has the code `rows` -- not `asks`, which the harness records
+the logs for (`Rerun.rows_code`).  Each ask carries its place (`place`: `loop`, `call`, `answers`, `linked`).  The 4th
+place's asks alone do not code a stop: its statement stays not settled whatever the rows, so a stop beside them is not
+one for them (NT-pending-late, r4x38, was coded `rows` though its stop is two U2 branches, K55 and a log ask; tmaeno's
+OK 2026-11-15 18:34).  The first place need not stop either: a loop over a collection the file lacks leaves what it
+binds unknown (`Walk.elements` gives None) and the walk goes on, so a stop after it for another reason is coded `rows`
+all the same; none on v88's r5 (its only rows asks are the 4th place's, 2 questions).  An iterable the walk does not
+read as a row's attribute asks nothing.
 
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+*Shows:* `rows_asks` in result.json (`path`, `count`); each ask's `place` in the rows-asks file; a stop coded `rows`.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
 a comparison that takes the row where some joined row holds the terms, which is not built.

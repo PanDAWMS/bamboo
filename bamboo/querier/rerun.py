@@ -3032,10 +3032,18 @@ class Rerun:
             n = len({ask.key for ask, _ in unanswered})
             raise Stop(T.at(self.hop, T.Said("ask-s-of-the-logs-not-in", {"n": n, "asks": self.args.asks})), "asks")
 
-    def ask_rows(self, rows: dict, why: str) -> None:
+    def ask_rows(self, rows: dict, why: str, place: str) -> None:
         """Keep *rows*, what the rows file does not have said as a fetch can answer it -- a collection of a row, the
-        rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1)."""
-        self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str), {"rows": rows, "step": self.hop, "why": why})
+        rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1), with the *place*
+        that asks it (K36's four: ``loop``, ``call``, ``answers``, ``linked``)."""
+        self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str),
+                                  {"rows": rows, "step": self.hop, "why": why, "place": place})
+
+    def rows_code(self) -> str | None:
+        """The code of a stop no other rule names: ``rows`` where rows are asked at a place whose answer a step reads.
+        Not for the 4th place's alone (``ask_linked``): its statement stays not settled whatever the rows, so a stop
+        beside it is not one for them (KNOWN_ISSUES.md K36)."""
+        return "rows" if any(a["place"] != "linked" for a in self.rows_asks.values()) else None
 
     def ask_collection(self, iterable: str, step, env: E.Env) -> None:
         """A row's collection a walk's loop runs over and the rows file does not have (``Walk.elements``): the row by
@@ -3050,7 +3058,7 @@ class Rerun:
         row = env.table.get(name, {})
         key = {n: row[n].value for n in (x.partition(".")[2] for x in _identity_attrs(cls)) if n in row}
         self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": attr, "entity": None},
-                      f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have")
+                      f"@{step.line} {step.owner.split('::')[-1]} loops over {iterable}, which the rows file does not have", "loop")
 
     def ask_linked(self, st, subjects: list[str], q: Missed) -> list[str]:
         """The rows of a class *st* compares (*subjects*) and the rows file has no row of (``rows-no-row``): the rows of
@@ -3097,7 +3105,7 @@ class Rerun:
                 self.ask_rows({"kind": "collection", "row": {"entity": cls, "key": key}, "attr": None, "entity": lacked, "where": by,
                                "via": via},
                               f"{where} compares {lacked}'s {compared} with the row's, and neither the rows file's rows nor its "
-                              f"linked hold {lacked}'s")
+                              f"linked hold {lacked}'s", "linked")
         return list(dict.fromkeys(notes))
 
     def window(self, asking: W.Asking) -> Window | None:
@@ -7584,7 +7592,7 @@ class Rerun:
             self.ask_rows({"kind": "statement", "method": callee, "site": sites, "tables": at_call, "binds": binds,
                            "at": [p.first for p in q.passes]},
                           f"the rows {callee} returned in each pass, their history and the tables' counts (the rows file lacks "
-                          f"{', '.join(lacking)})")
+                          f"{', '.join(lacking)})", "call")
         self.need(T.Said("the-rows-returned-in-each-pass-the", {"callee": callee}), jobs and history)
         self.say(f"rows: {self.data['job_rows']['source']}")
         counts = self.need(T.Said("the-tables-rows-of-the-key-by"),
@@ -8795,7 +8803,7 @@ class Rerun:
             if ask not in answers:
                 # no db_read form: both are windows over the history; the structure lets a fetch answer by the parts
                 self.ask_rows({"kind": "sql", "name": ask, "sql": sql, "binds": {}, "question": PT.asked(questions[ask])},
-                              f"L3's answer {ask!r}, not in the rows file")
+                              f"L3's answer {ask!r}, not in the rows file", "answers")
         # the statement's other order beside it, counted where the rows file answers its questions -- under their names
         # or the ones L3 gave them before -- and never asked
         beside = next((qs for qs in (questions_of(other), questions_of(other, named=False)) if all(a in answers for a in qs)), None)
@@ -8860,7 +8868,7 @@ def main() -> None:
         r.say(f"STOP {stop}; HAND used {len(r.hand_used)} time(s) {r.hand_used}")
         # rows asked and no other rule naming the stop: answering them may move it -- not "asks", which the harness
         # records the logs for
-        outcome = {"kind": "stop", "step": r.hop, "record": stop.said, "code": stop.code or ("rows" if r.rows_asks else None)}
+        outcome = {"kind": "stop", "step": r.hop, "record": stop.said, "code": stop.code or r.rows_code()}
     r.stamp("end")
     if args.out:
         _write(args.out, "\n".join(r.lines) + "\n")

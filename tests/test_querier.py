@@ -3758,9 +3758,10 @@ def test_a_class_a_statement_compares_and_the_rows_file_lacks_is_asked_by_the_st
     by_id = {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"}
     assert asked == [
         {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1, "jediTaskID": 5},
-                  "via": [by_id, {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}]}, "step": "M2", "why": why},
+                  "via": [by_id, {"from": "JobSpec.jediTaskID", "to": "FileSpec.jediTaskID"}]}, "step": "M2", "why": why,
+         "place": "linked"},
         {"rows": {"kind": "collection", "row": row, "attr": None, "entity": "FileSpec", "where": {"PandaID": 1}, "via": [by_id]},
-         "step": "M2", "why": why},
+         "step": "M2", "why": why, "place": "linked"},
     ]
 
 
@@ -6598,7 +6599,32 @@ def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_att
     asked = json.loads(out.splitlines()[-1])
     # once, by the job's key the dump names; a local name is no row to ask of
     assert asked == [{"rows": {"kind": "collection", "row": {"entity": "JobSpec", "key": {"PandaID": 7}}, "attr": "Files", "entity": None},
-                      "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have"}]
+                      "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have", "place": "loop"}]
+
+
+def test_a_stop_is_coded_rows_only_by_rows_asked_where_a_step_reads_them(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import rerun
+
+            r = object.__new__(rerun.Rerun)
+            r.hop = "U1"
+            codes = []
+            for places in ((), ("linked",), ("linked", "linked"), ("linked", "loop"), ("call",), ("answers",)):
+                r.rows_asks = {}
+                for i, place in enumerate(places):
+                    r.ask_rows({"kind": "collection", "n": i}, "why", place)
+                codes.append(r.rows_code())
+            print(json.dumps(codes))
+            """,
+        )
+    )
+    # the 4th place's rows (ask_linked) no step reads: a stop beside them alone is not one for them (NT-pending-late,
+    # r4x38: two U2 branches, one ask of JediDatasetSpec's rows by jediTaskID); with a place a step reads, rows
+    assert json.loads(out.splitlines()[-1]) == [None, None, None, "rows", "rows", "rows"]
 
 
 def test_l3_asks_the_rows_ahead_under_the_order_that_took_the_row_and_counts_the_other_only_beside(tmp_path):
