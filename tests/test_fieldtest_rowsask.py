@@ -270,7 +270,9 @@ async def test_a_statements_answer_lays_out_as_the_tasks_fetch_lays_out_its_jobs
     )
     got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
     assert [c[0] for c in panda.calls] == ["db_read", "job_history"]
-    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), SPELLINGS)
+    sections, left_out = RB.answered(
+        [_doc(got)], "JediTaskSpec", str(TID), SPELLINGS, TABLES
+    )
     assert left_out == []
     for name in ("job_rows", "job_statuslog", "counts"):
         assert sections[name] == fetched[name], name
@@ -291,11 +293,13 @@ async def test_the_key_jobs_files_answer_lays_out_as_the_jobs_fetch_lays_them_ou
     got = await RA.answer(
         line, RA.plan(line, TABLES, SITES), _job_panda().parts(), TABLES
     )
-    sections, left_out = RB.answered([_doc(got)], "JobSpec", str(PID), SPELLINGS)
+    sections, left_out = RB.answered(
+        [_doc(got)], "JobSpec", str(PID), SPELLINGS, TABLES
+    )
     assert left_out == [] and sections == {
         k: fetched[k] for k in ("files", "collections")
     }
-    other, why = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
+    other, why = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS, TABLES)
     assert (
         other == {}
         and "no section of the rows file holds the rows of JobSpec.Files" in why[0]
@@ -335,7 +339,7 @@ async def test_a_joined_classs_rows_are_a_linked_entry_per_table_as_the_class_sp
     row = {"datasetid": 11, "jeditaskid": TID, "type": "input", "nfiles": 3}
     got = await _joined_answer({"JEDI_Datasets": [row]})
     sections, left_out = RB.answered(
-        [_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS
+        [_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES
     )
     assert left_out == []
     assert sections["linked"] == [
@@ -354,7 +358,9 @@ async def test_a_joined_classs_rows_are_a_linked_entry_per_table_as_the_class_sp
 
 async def test_a_joined_table_with_no_row_is_an_entry_too_so_the_querier_does_not_ask_again():
     got = await _joined_answer({"JEDI_Datasets": []})
-    sections, _ = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS)
+    sections, _ = RB.answered(
+        [_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES
+    )
     assert [(e["table"], e["rows"]) for e in sections["linked"]] == [
         ("JEDI_Datasets", [])
     ]
@@ -389,7 +395,7 @@ async def test_an_ask_no_rule_reads_asks_nothing_and_is_left_out_with_its_why():
     line = _line({"kind": "sql", "name": "w", "sql": "WITH ...", "binds": {}})
     got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
     assert panda.calls == [] and got["steps"] == []
-    sections, left_out = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS)
+    sections, left_out = RB.answered([_doc(got)], "JobSpec", "1", SPELLINGS, TABLES)
     assert sections == {} and left_out == [
         "sql w: a window over the history no call reads: listed for a hand (hand-r<n>.json in the records directory)"
     ]
@@ -401,3 +407,97 @@ def test_a_round_of_answers_is_one_past_the_last(tmp_path):
     (tmp_path / "rows-r3.json").write_text("{}")
     (tmp_path / "records-r7.jsonl").write_text("")
     assert RA.next_round(tmp_path) == 4
+
+
+#: design H's asks: a job's task and a task's parent, each joined by its link's pair
+TASK_OF_JOB = {
+    "kind": "collection",
+    "row": {"entity": "JobSpec", "key": {"PandaID": PID}},
+    "attr": None,
+    "entity": "JediTaskSpec",
+    "where": {"jediTaskID": TID},
+    "via": [{"from": "JobSpec.jediTaskID", "to": "JediTaskSpec.jediTaskID"}],
+}
+PARENT = 52757000
+PARENT_OF_TASK = {
+    "kind": "collection",
+    "row": {"entity": "JediTaskSpec", "key": {"jediTaskID": TID}},
+    "attr": None,
+    "entity": "JediTaskSpec",
+    "where": {"jediTaskID": PARENT},
+    "via": [{"from": "JediTaskSpec.parent_tid", "to": "JediTaskSpec.jediTaskID"}],
+}
+
+
+def test_a_joined_class_whose_histories_a_call_reads_has_them_follow_its_rows():
+    for ask, value in ((TASK_OF_JOB, TID), (PARENT_OF_TASK, PARENT)):
+        got = _plan(ask)
+        assert [(c.part, c.request) for c in got.calls] == [
+            (
+                "db_read",
+                {"tables": ["JEDI_Tasks"], "where": [["jediTaskID", "=", value]]},
+            )
+        ]
+        assert (got.histories, got.rows_role) == ("JediTaskSpec", "collection")
+    # no call reads a dataset's history
+    datasets = _plan(S1_ASK)
+    assert (datasets.histories, datasets.rows_role) == (None, "")
+
+
+def test_an_ask_naming_its_columns_reads_them_with_those_it_selects_by_and_those_its_histories_need():
+    got = _plan({**PARENT_OF_TASK, "columns": ["status", "jediTaskID"]})
+    assert got.calls[0].request["columns"] == ["status", "jediTaskID", "creationDate"]
+    datasets = _plan({**S1_ASK, "columns": ["masterID", "type"]})
+    assert datasets.calls[0].request["columns"] == ["masterID", "type", "jediTaskID"]
+    assert "columns" not in _plan(S1_ASK).calls[0].request
+
+
+async def test_a_tasks_history_is_asked_one_task_per_call():
+    panda = _task_panda()
+    await FE.HISTORY["JediTaskSpec"]([TID, PARENT], None, FE.Record({}), panda.parts())
+    assert panda.calls == [("task_history", TID), ("task_history", PARENT)]
+
+
+async def test_a_parents_row_is_a_linked_entry_and_its_history_is_in_statuslogs_by_its_key():
+    panda = _task_panda()
+    panda.tables["JEDI_Tasks"] = [
+        {"jeditaskid": PARENT, "status": "done", "creationdate": "2026-09-20 00:00:00"}
+    ]
+    line = _line(PARENT_OF_TASK)
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
+    assert [c[0] for c in panda.calls] == ["db_read", "task_history"]
+    assert panda.calls[1] == ("task_history", PARENT)
+    sections, left_out = RB.answered(
+        [_doc(got)], "JediTaskSpec", str(TID), SPELLINGS, TABLES
+    )
+    assert left_out == []
+    (entry,) = sections["linked"]
+    assert (entry["class"], entry["asked"]) == ("JediTaskSpec", [PARENT])
+    assert [r["jediTaskID"] for r in entry["rows"]] == [PARENT]
+    log = sections["statuslogs"]["JediTaskSpec"]
+    assert log["key"] == "JediTaskSpec.jediTaskID"
+    assert list(log["by_key"]) == [str(PARENT)]
+    parent = log["by_key"][str(PARENT)]
+    assert [s["status"] for s in parent["states"]] == ["running", "finished"]
+    assert parent["as_of"] == "2026-10-13 10:00:00"
+
+
+def test_the_rows_steps_statuslogs_are_laid_over_the_fetchs_by_class_and_key():
+    key = "JediTaskSpec.jediTaskID"
+    fetched = {"JediTaskSpec": {"key": key, "by_key": {"1": {"states": ["a"]}}}}
+    laid = {
+        "JediTaskSpec": {
+            "key": key,
+            "by_key": {"1": {"states": ["b"]}, "2": {"states": ["c"]}},
+        },
+        "JobSpec": {"key": "JobSpec.PandaID", "by_key": {"3": {"states": []}}},
+    }
+    assert RB.lay_statuslogs(fetched, laid) == {
+        "JediTaskSpec": {
+            "key": key,
+            "by_key": {"1": {"states": ["b"]}, "2": {"states": ["c"]}},
+        },
+        "JobSpec": {"key": "JobSpec.PandaID", "by_key": {"3": {"states": []}}},
+    }
+    # the fetch's is not changed in place
+    assert fetched["JediTaskSpec"]["by_key"] == {"1": {"states": ["a"]}}

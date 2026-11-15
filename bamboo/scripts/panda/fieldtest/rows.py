@@ -16,7 +16,8 @@ step's answer to an ask naming its join (``via``, :func:`answered`) is laid
 there too, an entry per table asked, those with no row as well: the querier
 asks no rows ``linked`` holds by the ask's pair for the row's value.
 ``statuslogs`` holds each class's status histories by the key of the row each
-belongs to.  Both say again what the sections above say, so a reader can move
+belongs to, each with the source and bounds of the call that read it, the rows
+step's laid over the fetch's.  Both say again what the sections above say, so a reader can move
 to them; the sections above stay as they were until it has.
 
 **Columns.**  The querier reads a row by the spec class's attribute
@@ -400,7 +401,7 @@ def build(record: dict, spellings: dict[str, dict[str, str]], tables: Tables) ->
                 out["task_params"] = params
         _task_sections(out, laid, left_out)
     out["linked"] = linked(laid, cls, int(q["key"]), raw, read, spellings, tables)
-    out["statuslogs"] = statuslogs(laid, int(q["key"]), tables)
+    out["statuslogs"] = statuslogs(record["steps"], int(q["key"]), tables)
 
     if other:
         out["about"] += (
@@ -432,7 +433,11 @@ def _job_files(
 
 
 def answered(
-    docs: list[dict], key_class: str, key: str, spellings: dict[str, dict[str, str]]
+    docs: list[dict],
+    key_class: str,
+    key: str,
+    spellings: dict[str, dict[str, str]],
+    tables: Tables,
 ) -> tuple[dict, list[str]]:
     """The sections the answers to the querier's rows asks give, round by round (a later round's over an
     earlier's), and what is left out and why.
@@ -442,11 +447,13 @@ def answered(
     a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`).  The rows of
     another row's attribute have no section yet, and are left out; an sql ask no call answers is left out with
     its why (a hand's answer is laid by :func:`hand_answers`).  *spellings* holds the classes the answers'
-    rows are of, those it can.
+    rows are of, those it can.  Every status history an answer read is in ``statuslogs``, by its class and
+    the key of its row (:func:`statuslogs`; a job's task's and a task's parent's, design H).
     """
     out: dict[str, Any] = {}
     left_out: list[str] = []
     linked_by: dict[tuple, dict] = {}
+    logs: dict[str, dict] = {}
     for doc in docs:
         for a in doc["answers"]:
             ask = a["ask"]["rows"]
@@ -455,6 +462,7 @@ def answered(
                 left_out.append(f"{name}: {a['why']}")
                 continue
             laid = Laid({"steps": a["steps"]})
+            logs = lay_statuslogs(logs, statuslogs(a["steps"], key, tables))
             if ask["kind"] == "statement":
                 _task_sections(out, laid, left_out)
             elif ask["kind"] == "collection":
@@ -480,6 +488,8 @@ def answered(
                     )
     if linked_by:
         out["linked"] = list(linked_by.values())
+    if logs:
+        out["statuslogs"] = logs
     return out, left_out
 
 
@@ -716,25 +726,38 @@ def linked(
     return out
 
 
-def statuslogs(laid: Laid, key: int, tables: Tables) -> dict:
-    """Each class's status histories that were answered, by the key of the row each belongs to; every key asked is there."""
-    out = {}
-    for cls, (part, kind) in HISTORIES.items():
-        states, source = states_of(laid.responses.get(part), kind)
+def statuslogs(steps: list[dict], key: int | str, tables: Tables) -> dict:
+    """Each class's status histories that were answered, by the key of the row each belongs to, each with the source
+    and bounds of the call that read it (a rows step's answer reads one task's per call); every key asked is there."""
+    part_of = {part: (cls, kind) for cls, (part, kind) in HISTORIES.items()}
+    out: dict[str, dict] = {}
+    for step in steps:
+        if step["part"] not in part_of:
+            continue
+        cls, kind = part_of[step["part"]]
+        response, request = step["response"], step["request"]
+        states, source = states_of(response, kind)
         if states is None:
             continue
-        request = laid.requests[part]
+        mine = request.get("task_id", key)
         by_key: dict[str, list[dict]] = {
-            str(k): [] for k in request.get("job_ids") or [request.get("task_id")]
+            str(k): [] for k in request.get("job_ids") or [mine]
         }
         for s in states:
-            by_key.setdefault(str(s.get("pandaid", key)), []).append(
+            by_key.setdefault(str(s.get("pandaid", mine)), []).append(
                 {k: v for k, v in s.items() if k != "pandaid"}
             )
-        out[cls] = {
-            "key": f"{cls}.{tables.key[cls]}",
-            "source": source,
-            **bounds_of(laid.responses[part]),
-            "by_key": by_key,
-        }
+        read = {"source": source, **bounds_of(response)}
+        entry = out.setdefault(cls, {"key": f"{cls}.{tables.key[cls]}", "by_key": {}})
+        entry["by_key"].update({k: {**read, "states": v} for k, v in by_key.items()})
+    return out
+
+
+def lay_statuslogs(built: dict, laid: dict) -> dict:
+    """The fetch's ``statuslogs`` with the rows step's *laid* over it: a class's key read again is the later's."""
+    out = {cls: {**e, "by_key": dict(e["by_key"])} for cls, e in built.items()}
+    for cls, e in laid.items():
+        out.setdefault(cls, {"key": e["key"], "by_key": {}})["by_key"].update(
+            e["by_key"]
+        )
     return out
