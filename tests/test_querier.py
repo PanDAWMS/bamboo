@@ -14266,3 +14266,183 @@ def test_an_agent_s_cycles_tell_the_selection_a_pass_belongs_to_and_its_lock_the
     assert got["n_between"] == 9 and got["kept"] == [True, ""], got
     assert got["short"][0] is False and "after the lock had ended" in got["short"][1], got
     assert got["long"][0] is False and "before the lock" in got["long"][1], got
+
+
+def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
+    """M3(a)-1 (stay_value.before): a time column of the row while its status held the value -- the time of the
+    history row that began the stay where every arm writing the value writes the column the time it runs in the same
+    pass, and no other arm of the column may write it while the value holds; each arm left out says why."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import stay_value as SV
+
+            def pair(caller, call):
+                return N(caller=caller, call=call)
+
+            def br(line, outcome, history=(), pre=()):
+                return N(line=line, other_lines=[], outcome=outcome, history=list(history), row_precondition=list(pre))
+
+            def src(kind, name="", site_owner="", site_line=None):
+                return N(kind=kind, name=name, site_owner=site_owner, site_line=site_line)
+
+            def kf(owner, statement, table, term, writes, sources, routes_open=False):
+                return N(owner=owner, statement=statement, table=table, term=term, writes=writes, sources=sources,
+                         routes_open=routes_open)
+
+            S, C = "JobSpec.jobStatus", "JobSpec.modificationTime"
+            hist = pair("m.py::getJobs", 2910)
+            status = [N(owner="m.py::getJobs", subject=S, branches=[br(2455, "sent", [hist])]),
+                      N(owner="m.py::updateJobStatus", subject=S, branches=[br(242, "runtime(jobStatus)")])]
+            column = [
+                N(owner="m.py::getJobs", subject=C, branches=[br(2452, "runtime(CURRENT_DATE)", [hist])]),
+                N(owner="m.py::lockForFinisher", subject=C, branches=[br(895, "runtime(CURRENT_DATE)")]),
+                N(owner="m.py::forWaiting", subject=C, branches=[br(287, "runtime(CURRENT_DATE)")]),
+                N(owner="m.py::copyMeta", subject=C, branches=[br(1710, "runtime(job.modificationTime)")]),
+                N(owner="m.py::resetDefined", subject=C, branches=[br(396, "runtime(CURRENT_DATE)", pre=["jobStatus IN (assigned,defined)"])]),
+                N(owner="m.py::kill", subject=C, branches=[br(1094, "runtime(job.modificationTime)")]),
+            ]
+            kfs = [
+                kf("m.py::getJobs", 2498, "jobsActive4", "PandaID=:PandaID", {S: [2455], C: [2452]}, [src("parameter")]),
+                kf("m.py::lockForFinisher", 906, "jobsActive4", "PandaID=:PandaID", {C: [895]},
+                   [src("rows", site_owner="m.py::lockForFinisher", site_line=900)]),
+                kf("m.py::forWaiting", 297, "jobsDefined4", "jobStatus=:jobStatus", {C: [287]}, [src("constant", "'waiting'")]),
+                kf("m.py::copyMeta", 1711, "metaTable", "PandaID=:PandaID", {C: [1710]}, [src("parameter")]),
+                # a term whose rows come from another function's statement, the routes into it not all placed
+                kf("m.py::kill", 1096, "jobsActive4", "PandaID=:PandaID", {C: [1094]},
+                   [src("rows", site_owner="m.py::main", site_line=1190)], routes_open=True),
+            ]
+            reads = {("m.py::lockForFinisher", 900): N(restricts=[f"{S}=transferring"]),
+                     ("m.py::main", 1190): N(restricts=[f"{S}=activated"])}
+            got = {}
+
+            def run(column, kfs, value="sent"):
+                b = SV.before(status, column, S, value, C, kfs, lambda k: True, lambda o, line: reads.get((o, line)),
+                              {"jobsactive4", "jobsdefined4"}, lambda o, b: False)
+                return [b.known, list(b.starts), list(b.lacking), list(b.runtime), list(b.left), [list(x) for x in b.out]]
+
+            got["all"] = run(column, kfs)
+            got["kill placed"] = run(column, [*kfs[:4], kf(*[getattr(kfs[4], f) for f in ("owner", "statement", "table", "term", "writes", "sources")])])
+            got["no time"] = SV.before(status, [N(owner="m.py::x", subject=C, branches=[br(1, "runtime(job.gshare)")])], S, "sent", C,
+                                       [], lambda k: True, lambda o, line: None, set(), lambda o, b: False)
+            got["lacking"] = run(column[1:], kfs)
+            got["asked"] = [sorted(SV.asked_values(["jobStatus IN (assigned, defined)"], "jobStatus")),
+                            SV.asked_values(["prodSourceLabel=managed"], "jobStatus")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    known, starts, lacking, runtime, left, out_ = got["all"]
+    # getJobs writes sent and the time it runs in the pass of the same history call; the run-time status write is said
+    assert starts == ["getJobs:2455 with 2452"] and lacking == [] and runtime == ["updateJobStatus:242"], got
+    # every arm but kill's is left out, each with why; kill's term comes from another function's rows through routes
+    # the map does not all place: it may write the column while the value holds, and the value is not known
+    assert known is False and left == ["kill:1094"], got
+    assert dict(map(tuple, out_)) == {
+        "getJobs:2452": "its statement at 2498 writes jobStatus too",
+        "lockForFinisher:895": "its statement at 906 takes the rows of lockForFinisher@900 (jobStatus in ['transferring'])",
+        "forWaiting:287": "its statement at 297 asks jobStatus in ['waiting']",
+        "copyMeta:1710": "it writes ['metaTable'], which hold no row of JobSpec",
+        "resetDefined:396": "its row precondition asks jobStatus in ['assigned', 'defined']",
+    }, got
+    # every route placed: main's rows at activated take no sent row, and the column held the stay's start all the stay
+    assert got["kill placed"][0] is True and got["kill placed"][4] == [], got
+    assert ["kill:1094", "its statement at 1096 takes the rows of main@1190 (jobStatus in ['activated'])"] in got["kill placed"][5], got
+    # a column no arm writes the time it runs is not read here
+    assert got["no time"] is None, got
+    # the value's arm without the column's time in its pass: not known, said
+    assert got["lacking"][0] is False and got["lacking"][1] == [] and got["lacking"][2] == ["getJobs:2455"], got
+    assert got["asked"] == [["assigned", "defined"], None], got
+
+
+def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_path):
+    """M2 (value_reach): the writers the rows of a statement selecting the value reach -- the movers, what the rows are
+    handed to, and what those call up to DEPTH calls, not through the statement's own function.  A writer they do not
+    reach is left out only where the object's rows come to it from statements selecting other values alone, no API
+    endpoint reaches it, and every statement selecting the value has its callers complete and every crossing placed;
+    one also handed the object by its key, or by no statement the map places, may hold any value and stays."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import value_reach as VR
+
+            def node(owner, *to):
+                return N(owner=owner, calls=[N(to=t) for t in to])
+
+            def site(owner, selects, to, crossing=None, result="rows", keys=()):
+                return N(owner=owner, selects=selects, crosses_to=to, crossing_selects=crossing or {}, result=result,
+                         keys=list(keys))
+
+            S = "JediTaskSpec.status"
+            graph = [
+                node("j/Cmd.py::CmdThread.runImpl", "j/Buf.py::Buf.updateTask", "j/Buf.py::Buf.retryTask"),
+                node("j/Buf.py::Buf.updateTask", "s/db.py::Db.updateTask"),
+                node("j/Buf.py::Buf.retryTask", "s/db.py::Db.retryTask"),
+                node("j/Refiner.py::RefinerThread.runImpl", "j/Buf.py::Buf.updateTask", "s/spec.py::Spec.setOnHold"),
+                node("j/Deep.py::a", "j/Deep.py::b"), node("j/Deep.py::b", "j/Deep.py::c"),
+                node("j/Deep.py::c", "j/Deep.py::d"), node("j/Deep.py::d", "j/Deep.py::e"),
+                node("s/api.py::kill", "s/db.py::Db.killTask"),
+            ]
+            calls = VR.calls_of(graph)
+            entered = VR.entered([N(function="s/api.py::kill")], calls)
+            sites = [
+                site("s/db.py::getTasksToRefine", [f"{S}=registered", f"{S}=staged"], ["j/Refiner.py::runImpl"]),
+                # another object's rows (a DEFT task's) say nothing of the task's value
+                site("s/db.py::getNewTasks", [], ["j/Refiner.py::runImpl"], keys=["T_TASK.vo"]),
+                # a function also handed the task by its key may hold any value: it, and what it calls, stay
+                site("s/db.py::getExhausted", [f"{S}=exhausted"], ["j/Mixed.py::run"]),
+                site("s/db.py::getTaskWithID", [], ["j/Mixed.py::run"], keys=["JediTaskSpec.jediTaskID"]),
+                site("s/db.py::getReassigning", [f"{S}=reassigning"], ["j/Dog.py::doActionForReassign"]),
+                # a statement that also selects the value is not another value's; an aggregate hands on no row
+                site("s/db.py::getTasksToExec", [f"{S}=aborting", f"{S}=finishing"], ["j/Cmd.py::runImpl"]),
+                site("s/db.py::count", [f"{S}=ready"], ["j/Stats.py::report"], result="aggregate"),
+                # a crossing whose routes select no status hands on none of the values
+                site("s/db.py::getStaged", [f"{S}=staged"], ["j/Kill.py::kill"], {"j/Kill.py::kill": ["JediTaskSpec.lockedBy=x"]}),
+            ]
+            other = VR.other_values(sites, S, "aborting", calls)
+            read = N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True, crosses_open=[])
+            r = VR.reach([read], ["j/Cmd.py::runImpl"], ["j/Cmd.py::runImpl"], calls, entered, other)
+            got = {"reads": list(r.reads), "closed": r.closed, "other": sorted(other),
+                   "out": {o: r.leaves_out(o) for o in ["j/Cmd.py::runImpl", "s/db.py::updateTask", "s/db.py::retryTask",
+                                                         "s/db.py::getTasksToExec", "j/Refiner.py::runImpl",
+                                                         "j/Dog.py::doActionForReassign", "s/spec.py::setOnHold",
+                                                         "s/db.py::killTask", "j/Stats.py::report", "j/Kill.py::kill",
+                                                         "j/Mixed.py::run"]}}
+            deep = VR.reach([read], ["j/Deep.py::a"], [], calls, entered, frozenset(["j/Deep.py::d", "j/Deep.py::e"]))
+            got["deep"] = {o: deep.leaves_out(o) for o in ["j/Deep.py::d", "j/Deep.py::e"]}
+            opened = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=False, crosses_open=[])],
+                              [], [], calls, entered, other)
+            crossing = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True,
+                                   crosses_open=[N()])], [], [], calls, entered, other)
+            none = VR.reach([], [], [], calls, entered, other)
+            got["open"] = [opened.closed, list(opened.open), crossing.closed, list(crossing.open), none.closed,
+                           opened.leaves_out("j/Refiner.py::runImpl"), none.leaves_out("j/Refiner.py::runImpl")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["reads"] == ["getTasksToExec@4564"] and got["closed"] is True, got
+    # the refiner and the watchdog get tasks from other values' statements alone, and the setter only the refiner calls;
+    # the task buffer is also called by the commando, which gets the value's rows
+    assert got["other"] == ["j/Dog.py::doActionForReassign", "j/Refiner.py::runImpl", "s/spec.py::setOnHold"], got
+    # what the value's rows reach stays, so does a writer reached by both; one only other values reach is left out; one
+    # no selecting statement reaches (the value's own statement's function, a command's, an aggregate's, a crossing
+    # selecting no status) takes its row by another key and stays, and so does one an API endpoint reaches
+    assert got["out"] == {"j/Cmd.py::runImpl": False, "s/db.py::updateTask": False, "s/db.py::retryTask": False,
+                          "s/db.py::getTasksToExec": False, "j/Refiner.py::runImpl": True,
+                          "j/Dog.py::doActionForReassign": True, "s/spec.py::setOnHold": True,
+                          "s/db.py::killTask": False, "j/Stats.py::report": False, "j/Kill.py::kill": False,
+                          "j/Mixed.py::run": False}, got
+    # three calls deep is reached, the fourth is not
+    assert got["deep"] == {"j/Deep.py::d": False, "j/Deep.py::e": True}, got
+    # callers not complete, a crossing not placed, or no selecting statement: nothing is left out
+    assert got["open"] == [False, ["getTasksToExec@4564: callers not complete"], False,
+                           ["getTasksToExec@4564: a crossing not placed"], False, False, False], got

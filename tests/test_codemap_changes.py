@@ -809,3 +809,73 @@ def test_a_definition_in_a_cycle_is_read_whole_whichever_definition_of_the_cycle
 
     assert _cycle_changes(tmp_path / "ab", ["enter_a", "enter_b"]) == whole
     assert _cycle_changes(tmp_path / "ba", ["enter_b", "enter_a"]) == whole
+
+
+ROWS = """\
+class TaskSpec(object):
+    _attributes = ("jediTaskID", "status")
+
+    def __init__(self):
+        for attr in self._attributes:
+            object.__setattr__(self, attr, None)
+
+    def pack(self, values):
+        for i in range(len(self._attributes)):
+            object.__setattr__(self, self._attributes[i], values[i])
+
+
+class Plain(object):
+    def pack(self, values):
+        self.values = values
+
+
+def fill(cur, tasks):
+    res = cur.fetchone()
+    spec = TaskSpec()
+    spec.pack(res)
+    tasks.append(spec)
+    plain = Plain()
+    plain.pack(res)
+    tasks.append(plain)
+"""
+
+
+def test_a_spec_s_row_read_on_the_object_sets_every_column_from_the_row_it_is_handed(
+    tmp_path,
+):
+    """``spec.pack(res)`` (callfacts.ROW_READ on a class declaring its columns) is said once, as what it does: every
+    column from the row it is handed, the value ``res`` -- a reader takes a field ``f`` as ``res`` stepped by ``.f``.
+    A ``pack`` of a class declaring no columns is read in its body: ``self.values = values``."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "rows.py").write_text(ROWS)
+    tree = ast.parse(ROWS)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/rows.py"
+    module = SourceModule(
+        package=PACKAGE, rel_path=file, tree=tree, source=ROWS, blob_sha=blob_sha(ROWS)
+    )
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "fill"
+    )
+
+    def between(name: str, cls: str) -> list[tuple]:
+        made = next(s for s in func.body if ast.unparse(s) == f"{name} = {cls}()")
+        put = next(s for s in func.body if ast.unparse(s) == f"tasks.append({name})")
+        return [
+            (
+                change.kind,
+                change.key,
+                change.what,
+                None if change.value is None else ast.unparse(change.value),
+            )
+            for change in changes.object_changes(calls, file, func, name, made, put)
+        ]
+
+    assert between("spec", "TaskSpec") == [("row", "*", "spec.pack", "res")]
+    assert between("plain", "Plain") == [("store", ".values", "", "values")]

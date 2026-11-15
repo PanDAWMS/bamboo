@@ -73,6 +73,7 @@ from bamboo.codemap.models import (
     FIELD_ASSIGN,
     FIELD_AUGMENTED,
     FIELD_CLASS,
+    FIELD_ROW,
     FIELD_SETATTR,
     KEY_ATTRIBUTE,
     KEY_CALL,
@@ -110,7 +111,7 @@ from bamboo.codemap.models import (
     WriteFrom,
 )
 from bamboo.codemap.panda import changes as changes_mod
-from bamboo.codemap.panda import flow, sqltext
+from bamboo.codemap.panda import flow, specwrites, sqltext
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 #: The classes ``self`` can be in the function a reading is in, where the call entering it says
@@ -235,6 +236,30 @@ class _Change(NamedTuple):
 
 def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
     return _Way(_STOP, name=name, stop=stop, what=what, at=at)
+
+
+def _own_level(change: _Change) -> _Change:
+    """*change*, with the ways of the value it stores carrying no changes of their own: a record of a record,
+    repeated at every level wherever the value is put.  What it drops is said (:func:`_uncarried`)."""
+    return change._replace(value=_without_changes(change.value))
+
+
+def _without_changes(ways: Iterable[_Way]) -> tuple[_Way, ...]:
+    """*ways* carrying no changes of their own, and a stop for each whose dropped changes may have changed it."""
+    ways = tuple(ways)
+    return tuple(way._replace(changes=()) for way in ways) + tuple(
+        stop for way in ways for stop in _uncarried(way)
+    )
+
+
+def _uncarried(way: _Way) -> tuple[_Way, ...]:
+    """A stop naming where *way*'s own changes were made, where a stored value does not carry them and they may have
+    changed it in place: not where it holds nothing that changes in place by itself (:func:`_fixed`).  It keeps the
+    calls *way* came back through (its route), so a reader that rules the way out rules the stop out with it."""
+    if way.kind == _STOP or not way.changes or _fixed(way):
+        return ()
+    sites = ", ".join(dict.fromkeys(change.at for change in way.changes))
+    return (_stop("uncarried", way.name, sites)._replace(route=way.route),)
 
 
 #: A comprehension and the name its value's ``through`` is called by, as Python names its code.
@@ -797,6 +822,16 @@ def _with_functions(func: ast.AST) -> Iterable[tuple[ast.AST, ast.AST]]:
         todo.extend((child, onward) for child in ast.iter_child_nodes(node))
 
 
+def _with_methods(tree: ast.AST) -> Iterable[tuple[ast.AST, ast.AST]]:
+    """:func:`_with_functions` of *tree*, and of each class in it: every node, a method's with the method."""
+    scopes = [tree]
+    while scopes:
+        for node, inner in _with_functions(scopes.pop()):
+            if isinstance(node, ast.ClassDef):
+                scopes.append(node)
+            yield node, inner
+
+
 def _parameters(func: ast.AST) -> set[str]:
     arguments = getattr(func, "args", None)
     if arguments is None:
@@ -947,6 +982,7 @@ class _Reader:
         self._owners: dict[int, str] = {}
         self._classes: Optional[dict[str, tuple[str, ast.ClassDef]]] = None
         self._stored: Optional[dict[str, list[tuple[str, str]]]] = None
+        self._changed_others: Optional[dict[str, list[tuple[str, bool]]]] = None
 
     def filled(self, file: str, func: ast.AST):
         held = self._filled.get(id(func))
@@ -1171,15 +1207,23 @@ class _Reader:
         self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()
     ) -> Optional[list[_Way]]:
         """The ways of a literal holding values -- a list's, a tuple's or a set's elements, a dict's values and keys,
-        no ``*`` or ``**`` among them -- or of an ``if`` expression, read here, not asked of the carry, which says
-        only where a source or a part of it sits: each element's ways at its place (:func:`_at`) -- ``[i]`` of a list
-        or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key at ``[key]`` --;
-        either branch's of an ``if`` expression.  ``[taskSpec.site]`` holds ``taskSpec.site``, not ``taskSpec``.
-        ``None`` for another expression, an empty literal too (:func:`_empty_literal`)."""
+        no ``*`` or ``**`` among them -- or of an ``if`` expression or an ``or`` / ``and``, read here, not asked of the
+        carry, which says only where a source or a part of it sits: each element's ways at its place (:func:`_at`) --
+        ``[i]`` of a list or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key
+        at ``[key]`` --; either branch's of an ``if`` expression; each operand's of an ``or`` or an ``and``, whose
+        value is one of them (``spec.nFiles or 0`` holds ``spec.nFiles`` or ``0``).  ``[taskSpec.site]`` holds
+        ``taskSpec.site``, not ``taskSpec``.  ``None`` for another expression, an empty literal too
+        (:func:`_empty_literal`)."""
         if isinstance(expr, ast.IfExp):
             return self.read(expr.body, at, file, func, selves=selves) + self.read(
                 expr.orelse, at, file, func, selves=selves
             )
+        if isinstance(expr, ast.BoolOp):
+            return [
+                way
+                for one in expr.values
+                for way in self.read(one, at, file, func, selves=selves)
+            ]
         if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
             if not expr.elts or any(isinstance(one, ast.Starred) for one in expr.elts):
                 return None
@@ -1593,7 +1637,11 @@ class _Reader:
         return self._lowlink.read(self._hops, key, read, again=())
 
     def _made(self, raw: Iterable[changes_mod.ObjectChange]) -> tuple[_Change, ...]:
-        """*raw*, each once, a store's value read as a way."""
+        """*raw*, each once, a store's value read as a way -- with what changed the value in place before it was put
+        (:attr:`_Way.changes`): ``datasetSpec.pack(resDs)`` at 1711 on the object made at 1710 that 1712 appends to
+        ``taskSpec.datasetSpecList``, the row read naming which rows filled this object.  An object a corpus class
+        builds only, and one level: the values those changes store do not carry theirs (:func:`_own_level`).  Any
+        other value carries none; what is dropped is said (:func:`_uncarried`)."""
         seen: set[tuple] = set()
         made: list[_Change] = []
         for one in raw:
@@ -1606,8 +1654,17 @@ class _Reader:
                 read = self._safely(one.value, one.value, one.file, one.func)
                 if one.element:
                     read = self._stepped(read, one.element)
-                # Its own way's end, not what was done to the stored value before: a record of a record.
-                value = tuple(way._replace(changes=()) for way in read)
+                value = tuple(
+                    way._replace(changes=tuple(map(_own_level, way.changes)))
+                    if way.kind == KEY_OBJECT
+                    else way._replace(changes=())
+                    for way in read
+                ) + tuple(
+                    stop
+                    for way in read
+                    if way.kind != KEY_OBJECT
+                    for stop in _uncarried(way)
+                )
             made.append(
                 _Change(
                     f"{one.file}:{one.line}",
@@ -2111,7 +2168,8 @@ class _Reader:
 
     def _stores(self) -> dict[str, list[tuple[str, str]]]:
         """``{field: [(file:line, class)]}``: each store of a field of the corpus -- ``class`` the method's whose
-        ``self`` it is stored on, empty for another object (``x.f = v``, ``setattr(x, "f", v)``)."""
+        ``self`` it is stored on, empty for another object (``x.f = v``, ``setattr(x, "f", v)``,
+        ``object.__setattr__(x, "f", v)``: :func:`callfacts.named_write`)."""
         if self._stored is None:
             self._stored = {}
             for file, tree in self.trees.items():
@@ -2123,14 +2181,13 @@ class _Reader:
                     elif isinstance(node, ast.AugAssign):
                         stored = [(node.target, "")]
                     elif (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "setattr"
-                        and len(node.args) == 3
-                        and isinstance(node.args[1], ast.Constant)
-                        and isinstance(node.args[1].value, str)
+                        (written := callfacts.named_write(node, me)) is not None
+                        and written.value is not None
+                        and written.holder is not None
+                        and isinstance(written.name, ast.Constant)
+                        and isinstance(written.name.value, str)
                     ):
-                        stored = [(node.args[0], node.args[1].value)]
+                        stored = [(written.holder, written.name.value)]
                     for target, named in stored:
                         if named:
                             holder, field = target, named
@@ -2143,6 +2200,47 @@ class _Reader:
                             (f"{file}:{getattr(node, 'lineno', 0)}", self.class_owner(file, inner) if own else "")
                         )
         return self._stored
+
+    def _changed_on_others(self) -> dict[str, list[tuple[str, bool]]]:
+        """``{field: [(file:line, said)]}``: each place the corpus changes in place what a field holds on an object
+        other than its method's ``self`` -- a builtin container's method changing it (:data:`callfacts.BUILTIN_METHODS`)
+        or an item stored or deleted: ``taskSpec.datasetSpecList.append(datasetSpec)``, ``x.f[k] = v`` -- *said*
+        where the object's class is declared (:meth:`Types.declared`), which :func:`changes.class_field_changes`
+        then reads for its class."""
+        if self._changed_others is None:
+            self._changed_others = {}
+            putting = frozenset(name for _kind, name in callfacts.BUILTIN_METHODS)
+            for file, tree in self.trees.items():
+                for node, inner in _with_methods(tree):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in putting
+                    ):
+                        held = node.func.value
+                    elif isinstance(node, ast.Subscript) and isinstance(
+                        node.ctx, (ast.Store, ast.Del)
+                    ):
+                        held = node.value
+                    else:
+                        continue
+                    me = (
+                        _first_positional(inner)
+                        if _method_class(inner) is not None
+                        else None
+                    )
+                    if not isinstance(held, ast.Attribute) or (
+                        isinstance(held.value, ast.Name) and held.value.id == me
+                    ):
+                        continue
+                    try:
+                        said = bool(self.calls.types.declared(file, inner, held.value))
+                    except Exception:  # noqa: BLE001 -- a holder not read is not said
+                        said = False
+                    self._changed_others.setdefault(held.attr, []).append(
+                        (f"{file}:{node.lineno}", said)
+                    )
+        return self._changed_others
 
     def _field_from(self, owner: str, field: str) -> FieldFrom:
         """What *field* of an object of *owner* may hold: each binding of it in the class's methods and body and in
@@ -2209,26 +2307,38 @@ class _Reader:
                             stops.append(
                                 KeyStop(kind="bound", name=field, what="a loop's or a with's target", at=[f"{file}:{node.lineno}"])
                             )
-                    elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "setattr":
-                        if len(node.args) == 3 and isinstance(node.args[0], ast.Name) and node.args[0].id == me:
-                            name = node.args[1]
+                    elif (written := callfacts.named_write(node, me)) is not None:
+                        if (
+                            written.value is not None
+                            and isinstance(written.holder, ast.Name)
+                            and written.holder.id == me
+                        ):
+                            name = written.name
                             if isinstance(name, ast.Constant):
                                 if name.value == field:
                                     bindings.append(
                                         self._binding(
-                                            file, node, owner_of(file, method), FIELD_SETATTR, node.args[2], inner, immutable
+                                            file,
+                                            node,
+                                            owner_of(file, method),
+                                            FIELD_SETATTR,
+                                            written.value,
+                                            inner,
+                                            immutable,
                                         )
                                     )
                             else:
-                                keyed = self._set_by_keyword(file, method, inner, node, field, family)
-                                if keyed is None:
-                                    stops.append(
-                                        KeyStop(kind="computed", name=field, what=ast.unparse(node), at=[f"{file}:{node.lineno}"])
-                                    )
-                                elif keyed:
-                                    bindings.append(
-                                        _field_binding(file, node, owner_of(file, method), FIELD_SETATTR, keyed, inner, immutable)
-                                    )
+                                bound_by, stopped_by = self._set_by_name(
+                                    file,
+                                    method,
+                                    inner,
+                                    written,
+                                    field,
+                                    family,
+                                    immutable,
+                                )
+                                bindings += bound_by
+                                stops += stopped_by
                     elif isinstance(node, ast.Attribute) and node.attr == "__dict__" and isinstance(node.value, ast.Name) and node.value.id == me:
                         through_dict = True
                 if through_dict:
@@ -2257,9 +2367,36 @@ class _Reader:
                             )
                         ]
                     changes += self._made(raw)
+        # What the field holds, changed in place on an object of the class outside its methods -- an expression
+        # declared one: ``taskSpec.datasetSpecList.append(datasetSpec)`` (changes.class_field_changes).
+        try:
+            raw = changes_mod.class_field_changes(self.calls, *place, field)
+        except Exception as error:  # noqa: BLE001 -- as _changed
+            raw = [
+                changes_mod.ObjectChange(
+                    place[0],
+                    place[1].lineno,
+                    CHANGE_UNREAD,
+                    changes_mod.EVERY,
+                    f"{type(error).__name__}: {error}",
+                )
+            ]
+        changes += self._made(raw)
         outside = sorted(at for at, stored_on in self._stores().get(field, ()) if not stored_on)
         if outside:
             stops.append(KeyStop(kind="outside", name=field, what="stored on another object, by the name", at=outside))
+        unsaid = sorted(
+            at for at, said in self._changed_on_others().get(field, ()) if not said
+        )
+        if unsaid:
+            stops.append(
+                KeyStop(
+                    kind="outside",
+                    name=field,
+                    what="changed in place on another object whose class is not said, by the name",
+                    at=unsaid,
+                )
+            )
         if bindings and all(immutable) and not stops:
             # Each binding holds a value nothing changes in place -- a text, a number, a column's value, a parameter
             # annotated so: the field is only bound again, as its bindings say, and what it is handed to keeps a
@@ -2316,6 +2453,103 @@ class _Reader:
         if handed is None:
             return None
         return self._keywords_handed(file, method, handed, field, family, 1)
+
+    def _set_by_name(
+        self,
+        file: str,
+        method: ast.AST,
+        inner: ast.AST,
+        written: callfacts.NamedWrite,
+        field: str,
+        family: list[tuple[str, ast.ClassDef]],
+        immutable: list[bool],
+    ) -> tuple[list[FieldBinding], list[KeyStop]]:
+        """What a write of ``self``'s attribute by a computed name binds *field* to: over a parameter's ``P.items()``,
+        each caller's keyword (:meth:`_set_by_keyword`); on a spec, as its role says (:func:`specwrites.write_at`) --
+        a ``__setattr__``'s write is its caller's assignment, binding nothing here; one in ``__init__``, in
+        ``__setstate__`` or over names read binds the value it writes; a copy read off the other object by the name it
+        sets binds that object's field of the name; a field the names leave out is not bound.  Else, or where the
+        names are not read and leave the field out, a stop: the name may be any.
+
+        A value ``__setstate__`` restores (what ``__getstate__`` of an object of its class saved) or one a copy reads
+        off an object declared of the field's classes puts the field's own value back: it holds what the field's other
+        bindings put there, so they say whether anything changes it in place (:func:`_immutable`)."""
+        call, owner = written.call, owner_of(file, method)
+        stop = KeyStop(
+            kind="computed",
+            name=field,
+            what=ast.unparse(call),
+            at=[f"{file}:{call.lineno}"],
+        )
+        keyed = self._set_by_keyword(file, method, inner, call, field, family)
+        if keyed is not None:
+            return (
+                [
+                    _field_binding(
+                        file, call, owner, FIELD_SETATTR, keyed, inner, immutable
+                    )
+                ]
+                if keyed
+                else []
+            ), []
+        spec = specwrites.write_at(self.calls.types, file, inner, call)
+        if spec is not None and spec.role == specwrites.MECHANISM:
+            return [], []
+        if spec is None or spec.names is None:
+            return [], [stop]
+        if field not in spec.names:
+            return [], ([stop] if spec.reason else [])
+        assert written.value is not None
+        if spec.role in (specwrites.CONSTRUCT, specwrites.RESTORE, specwrites.NAMES):
+            bound = self._binding(
+                file, call, owner, FIELD_SETATTR, written.value, inner, immutable
+            )
+            if spec.role == specwrites.RESTORE:
+                # Put back: the field's other bindings decide.
+                immutable[-1] = True
+            return [bound], []
+        copies = (
+            _copied_values(inner, written.value) if spec.role == specwrites.COPY else []
+        )
+        if copies and all(
+            len(one.args) > 1 and ast.dump(one.args[1]) == ast.dump(written.name)
+            for one in copies
+        ):
+            # Read off the other object by the name it is set by: that object's field of the name.
+            ways: list[_Way] = []
+            for copied in copies:
+                ways += self._of_field(
+                    self._safely(copied.args[0], call, file, inner), field
+                )
+            bound = _field_binding(
+                file, call, owner, FIELD_SETATTR, ways, inner, immutable
+            )
+            if all(self._of_family(file, inner, one.args[0], family) for one in copies):
+                # Put back: the field's other bindings decide.
+                immutable[-1] = True
+            return [bound], []
+        row = _row_parameter(inner) if spec.role == specwrites.READS_ROW else None
+        if row is not None:
+            # The row's item of the field's name (callfacts.ROW_READ): its reader names the column on its table.
+            ways = self._of_field([self._parameter(file, inner, row)], field)
+            bound = _field_binding(file, call, owner, FIELD_ROW, ways, inner, immutable)
+            # A column's value, as a rows way's is (:func:`_immutable`): nothing changes it in place.
+            immutable[-1] = True
+            return [bound], []
+        return [], [stop]
+
+    def _of_family(
+        self,
+        file: str,
+        func: ast.AST,
+        expression: ast.expr,
+        family: list[tuple[str, ast.ClassDef]],
+    ) -> bool:
+        """Whether *expression*, read in *func* of *file*, is declared an object of *family*'s classes only."""
+        declared = self.calls.types.declared(file, func, expression)
+        return bool(declared) and set(_selves_key(tuple(declared or ()))) <= set(
+            _selves_key(tuple(family))
+        )
 
     def _keywords_handed(
         self,
@@ -2676,22 +2910,59 @@ def _items_of_parameter(method: ast.AST, call: ast.Call) -> Optional[str]:
     return held.id
 
 
+def _row_parameter(func: ast.AST) -> Optional[str]:
+    """The row a spec's row read is handed (:data:`callfacts.ROW_READ`): ``values`` of ``pack(self, values)``, its
+    parameter after the object."""
+    arguments = getattr(func, "args", None)
+    positional = (
+        [*arguments.posonlyargs, *arguments.args] if arguments is not None else []
+    )
+    return positional[1].arg if len(positional) > 1 else None
+
+
+def _copied_values(func: ast.AST, value: ast.expr) -> list[ast.Call]:
+    """The ``getattr(other, name)`` calls a copy by name writes (:data:`specwrites.COPY`): *value* itself, or each
+    binding of the local it names in *func* (``pack_gs``' ``val = getattr(gshare, attr)``)."""
+    if not isinstance(value, ast.Name):
+        values = [value]
+    elif isinstance(func, _FUNCTIONS):
+        values = list(pathcond.assigned_expressions(func).get(value.id, []))
+    else:
+        values = []
+    return [
+        one
+        for one in values
+        if isinstance(one, ast.Call)
+        and isinstance(one.func, ast.Name)
+        and one.func.id == "getattr"
+        and one.args
+    ]
+
+
 def _immutable(func: ast.AST, ways: list[_Way]) -> bool:
     """Whether every way of a field's binding ends at a value nothing can change in place: a literal or a column's
     value, through no call and stepped into nothing; or a parameter of *func* itself annotated with such types only
     (``job_status: str``).  A way that stops says nothing, so it is not."""
     return bool(ways) and all(
-        not one.steps
-        and not one.through
-        and (
-            one.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
-            or (
-                one.kind == KEY_PARAMETER
-                and not one.route
-                and callfacts.immutable_annotation(_annotation(func, one.name))
-            )
+        _fixed(one)
+        or (
+            not one.steps
+            and not one.through
+            and one.kind == KEY_PARAMETER
+            and not one.route
+            and callfacts.immutable_annotation(_annotation(func, one.name))
         )
         for one in ways
+    )
+
+
+def _fixed(way: _Way) -> bool:
+    """Whether *way* ends at a value nothing can change in place by itself: a literal or a column's value, through
+    no call and stepped into nothing."""
+    return (
+        not way.steps
+        and not way.through
+        and way.kind in (KEY_CONSTANT, KEY_ROWS, KEY_SEQUENCE)
     )
 
 

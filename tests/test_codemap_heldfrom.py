@@ -17,6 +17,7 @@ from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
     Branch,
+    FieldFrom,
     GuardFrom,
     HeldSource,
     JunctionNode,
@@ -444,6 +445,17 @@ PLACED = {
                 spec = self.specs["a"]
                 if spec == "i":  # T9
                     self.i = 1  # R9
+                count = taskSpec.nFiles or 0
+                if count == 2:  # T10
+                    self.j = 1  # R10
+                both = taskSpec.first and jobSpec.PandaID
+                if both == 3:  # T11
+                    self.k = 1  # R11
+                total = 0
+                for f in jobSpec.Files:
+                    total += f.fsize or 0
+                if total == 4:  # T12
+                    self.m = 1  # R12
 
             def pseudo(self, jobSpec):
                 made = []
@@ -457,10 +469,14 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
     tmp_path: Path,
 ) -> None:
     """The shapes the carry answered with a source or a part of it: a list, a tuple and a dict literal, an ``if``
-    expression, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it sits; what the carry
-    alone says sits at a field's element (T7) is a value not read, not the task.  A field read as itself holds its
-    own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them."""
-    arms = tuple(("extractCommon", f"R{n}") for n in (1, 2, 4, 5, 6, 7, 8, 9))
+    expression, an ``or`` and an ``and``, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it
+    sits; what the carry alone says sits at a field's element (T7) is a value not read, not the task.  A field read
+    as itself holds its own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them.  An
+    ``or`` or an ``and`` is one of its operands (T10, T11), also where a ``+=`` adds it (T12,
+    ``nFiles += datasetSpec.nFiles or 0``)."""
+    arms = tuple(
+        ("extractCommon", f"R{n}") for n in (1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+    )
     fragment = _build(tmp_path, PLACED, arms)
 
     def held(marker: str, name: str) -> set[tuple]:
@@ -501,6 +517,17 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
         ("parameter", "jobSpec", (".PandaID",), ()),
     }
     assert held("T9", "spec") == {("self_field", "self.specs", ("['a']",), ())}
+    assert held("T10", "count") == {
+        ("parameter", "taskSpec", (".nFiles",), ()),
+        ("constant", "0", (), ()),
+    }
+    assert held("T11", "both") == {
+        ("parameter", "taskSpec", (".first",), ()),
+        ("parameter", "jobSpec", (".PandaID",), ()),
+    }
+    assert ("parameter", "jobSpec", (".Files", "[*]", ".fsize"), ()) in held(
+        "T12", "total"
+    )
 
 
 DICT_KEYS = {
@@ -2294,3 +2321,301 @@ def test_a_way_through_a_factory_reads_the_changes_of_the_family_the_factory_han
     }
     assert changed("brokered") == {store["# B"]}
     assert changed("watched") == {store["# D"]}
+
+
+FIELDS_SPEC = "pandaserver/taskbuffer/JediTaskSpec.py"
+FIELDS_PROXY = "pandaserver/taskbuffer/db_proxy_mods/task_complex_module.py"
+
+FIELDS = {
+    FIELDS_SPEC: """\
+        class JediTaskSpec(object):
+            _attributes = ("jediTaskID", "status")
+            _renames = {"jediTaskID": "status", "status": "jediTaskID"}
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)  # INIT
+                object.__setattr__(self, "datasetSpecList", [])  # LIST
+
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)  # MECHANISM
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    attr = self._attributes[i]
+                    val = values[i]
+                    object.__setattr__(self, attr, val)  # PACK
+
+            def copyAttributes(self, oldTaskSpec: "JediTaskSpec"):
+                for attr in self._attributes:
+                    self.__setattr__(attr, getattr(oldTaskSpec, attr))  # COPY
+
+            def copyRenamed(self, other):
+                for attr in self._attributes:
+                    renamed = self._renames[attr]
+                    val = getattr(other, attr)
+                    setattr(self, renamed, val)  # RENAMED
+        """,
+    FIELDS_PROXY: """\
+        from pandaserver.taskbuffer.JediTaskSpec import JediTaskSpec
+
+
+        class JediDatasetSpec(object):
+            _attributes = ("datasetID", "nFiles")
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], values[i])
+
+            def __setstate__(self, state):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], state[i])  # RESTORE
+
+            def copyFrom(self, other: "JediDatasetSpec"):
+                for attr in self._attributes:
+                    setattr(self, attr, getattr(other, attr))  # COPIED
+
+
+        class LooseSpec(object):
+            _attributes = ("nFiles",)
+
+            def __init__(self):
+                for attr in self._attributes:
+                    object.__setattr__(self, attr, None)
+
+            def pack(self, values):
+                for i in range(len(self._attributes)):
+                    object.__setattr__(self, self._attributes[i], values[i])
+
+            def copyLoose(self, other):
+                for attr in self._attributes:
+                    setattr(self, attr, getattr(other, attr))  # LOOSE
+
+
+        class TaskModule:
+            def getTasks(self, rows):
+                retTasks = []
+                for res in rows:
+                    taskSpec = JediTaskSpec()
+                    taskSpec.pack(res)
+                    retTasks.append(taskSpec)
+                    datasetSpec = JediDatasetSpec()
+                    row = list(res)
+                    row.append(0)  # PAD
+                    datasetSpec.pack(row)  # FILL
+                    taskSpec.datasetSpecList.append(datasetSpec)  # APPEND
+                return retTasks
+
+            def unsaid(self, thing, datasetSpec):
+                thing.datasetSpecList.append(datasetSpec)  # UNSAID
+
+            def leak(self, datasetSpec: JediDatasetSpec, loose: LooseSpec):
+                unknown_function(datasetSpec.nFiles)  # LEAK
+                unknown_function(loose.nFiles)  # LEAK_LOOSE
+
+            def hold(self, holder: Holder, values):
+                names = list(values)
+                names.append(1)  # NAMES
+                holder.items.append(names)  # PUT_NAMES
+                spec = JediDatasetSpec()
+                spec.pack(values)  # SPEC_FILL
+                holder.items.append(spec)  # PUT_SPEC
+
+            def names_of(self, values):
+                names = list(values)
+                names.append(2)  # CALLED_NAMES
+                return names
+
+            def hold_called(self, holder: Holder, values):
+                holder.items.append(self.names_of(values))  # PUT_CALLED
+
+
+        class Holder(object):
+            def __init__(self):
+                self.items = []
+        """,
+}
+
+
+@pytest.fixture(scope="module")
+def spec_fields(tmp_path_factory: pytest.TempPathFactory) -> dict[str, FieldFrom]:
+    """The FieldFroms of the spec's fields, read as the build reads them."""
+    tmp_path: Path = tmp_path_factory.mktemp("fields")
+    modules = []
+    for rel, text in FIELDS.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(text))
+        parsed = calls_mod.parsed(path)
+        assert parsed is not None
+        _source, tree = parsed
+        modules.append(
+            SourceModule(
+                package="pandaserver",
+                rel_path=rel,
+                tree=tree,
+                source=textwrap.dedent(text),
+                blob_sha=blob_sha(text),
+            )
+        )
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    assert calls is not None
+    trees = {module.rel_path: module.tree for module in modules}
+    with sql.across_calls(calls):
+        attributor = attribution.SpecAttributor(
+            progress.spec_attributes(modules), attribution.class_bases(modules)
+        )
+        sites = sqlwrite.read_site_nodes(
+            sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+        )
+        record = reach.ReachGraph(reach.graph(calls, "m", "v", _DatabaseLeaves()))
+        reader = heldfrom._Reader(calls, record, sites, set(), trees)
+        made = {
+            field: reader._field_from(f"{FIELDS_SPEC}::JediTaskSpec", field)
+            for field in ("status", "datasetSpecList")
+        }
+        made["nFiles"] = reader._field_from(
+            f"{FIELDS_PROXY}::JediDatasetSpec", "nFiles"
+        )
+        made["loose"] = reader._field_from(f"{FIELDS_PROXY}::LooseSpec", "nFiles")
+        made["items"] = reader._field_from(f"{FIELDS_PROXY}::Holder", "items")
+        return made
+
+
+def test_a_field_a_spec_sets_around_its_own_setattr_is_bound(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``object.__setattr__(self, "datasetSpecList", [])`` binds the field as ``setattr`` does
+    (:func:`callfacts.named_write`); a computed name binds as the spec's write of it says (:mod:`specwrites`):
+    ``__init__``'s first value, a copy's other object's field of the name, nothing for ``__setattr__``'s own write
+    -- its caller's assignment -- and a field the names leave out is not bound by them.  ``pack``, the spec's row
+    read (callfacts.ROW_READ), binds each column to the row it is handed, stepped by the field's name."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_SPEC}:{_line(FIELDS_SPEC, marker, FIELDS)}"
+
+    listed = spec_fields["datasetSpecList"]
+    assert [(one.at, one.how) for one in listed.bindings] == [(at("LIST"), "setattr")]
+    assert [one for one in listed.stops if one.kind == "computed"] == []
+    status = spec_fields["status"]
+    assert [(one.at, one.how) for one in status.bindings] == [
+        (at("INIT"), "setattr"),
+        (at("PACK"), "row"),
+        (at("COPY"), "setattr"),
+    ]
+    (first,), (row,), (copied,) = (one.sources for one in status.bindings)
+    assert (first.kind, first.name) == ("constant", "None")
+    assert (row.kind, row.name, row.steps) == ("parameter", "values", [".status"])
+    assert (copied.kind, copied.name, copied.steps) == (
+        "parameter",
+        "oldTaskSpec",
+        [".status"],
+    )
+    # A copy read off the other object by another name than it sets (``WorkQueue``'s ``attr_wq``): the name may be
+    # any of the other object's.
+    assert [(stop.kind, stop.at) for stop in status.stops] == [
+        ("computed", [at("RENAMED")])
+    ]
+
+
+def test_what_a_field_holds_changed_on_an_object_of_its_class_outside_its_methods_is_a_change(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``taskSpec.datasetSpecList.append(datasetSpec)``, ``taskSpec`` made a ``JediTaskSpec`` in another class's
+    method, changes what the field holds (:func:`changes.class_field_changes`): a change of the record, its value
+    the object put.  Where the object's class is not said, the change is named by the attribute's name: a stop."""
+    listed = spec_fields["datasetSpecList"]
+    proxy = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'APPEND', FIELDS)}"
+    assert [(one.at, one.kind, one.what) for one in listed.changes] == [
+        (proxy, "method", "append")
+    ]
+    ((put,),) = [one.value for one in listed.changes]
+    assert (put.kind, put.name) == ("object", "JediDatasetSpec")
+    assert [(one.kind, one.at) for one in listed.stops] == [
+        ("outside", [f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'UNSAID', FIELDS)}"])
+    ]
+
+
+def test_a_value_put_by_a_change_keeps_what_changed_it_before(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """The object 1712 appends to ``taskSpec.datasetSpecList`` was filled at 1711 by ``datasetSpec.pack(res)``: the
+    change's value keeps that row read, which names the rows that filled this object -- not every caller's of
+    ``pack``.  One level: the row it was filled from does not carry its own change (PAD) here, and a stop says
+    so."""
+    ((put,),) = [one.value for one in spec_fields["datasetSpecList"].changes]
+    fill = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'FILL', FIELDS)}"
+    assert [(one.at, one.kind, one.key, one.what) for one in put.changes] == [
+        (fill, "row", "*", "datasetSpec.pack")
+    ]
+    ((row,),) = [one.value for one in put.changes]
+    assert (row.name, row.changes) == ("rows", [])
+    pad = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'PAD', FIELDS)}"
+    assert [(one.kind, one.what) for one in put.changes[0].value_stops] == [
+        ("uncarried", pad)
+    ]
+
+
+def test_only_an_object_a_change_stores_carries_its_own_changes(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """A list a change stores (PUT_NAMES) carries no changes of its own: where they may have changed it (NAMES), a
+    stop says so.  An object a corpus class builds (PUT_SPEC) carries its own (SPEC_FILL)."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, marker, FIELDS)}"
+
+    stored = {one.at: one for one in spec_fields["items"].changes}
+    names, spec = stored[at("PUT_NAMES")], stored[at("PUT_SPEC")]
+    assert [one.changes for one in names.value] == [[]]
+    assert [(one.kind, one.what) for one in names.value_stops] == [
+        ("uncarried", at("NAMES"))
+    ]
+    assert [[change.at for change in one.changes] for one in spec.value] == [
+        [at("SPEC_FILL")]
+    ]
+    assert spec.value_stops == []
+
+
+def test_the_stop_for_what_a_value_drops_keeps_the_calls_it_came_back_through(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``names_of`` returns a list it changed (CALLED_NAMES), stored at PUT_CALLED: the value carries none of its
+    own changes, and the stop saying so keeps the call the value came back through, as the value's way does -- a
+    reader that rules that call out rules the stop out with it."""
+
+    def at(marker: str) -> str:
+        return f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, marker, FIELDS)}"
+
+    stored = {one.at: one for one in spec_fields["items"].changes}
+    called = stored[at("PUT_CALLED")]
+    assert [one.route for one in called.value] == [[at("PUT_CALLED")]]
+    assert [(one.kind, one.what, one.at) for one in called.value_stops] == [
+        ("uncarried", at("CALLED_NAMES"), [at("PUT_CALLED")])
+    ]
+
+
+def test_a_column_a_row_read_fills_holds_its_value_nothing_changes_in_place(
+    spec_fields: dict[str, FieldFrom],
+) -> None:
+    """``nFiles`` is bound to ``None`` in ``__init__`` and to the row's item in ``pack``: a column's value, as a rows
+    way's is, which nothing changes in place -- so ``datasetSpec.nFiles`` handed where it is not followed (LEAK)
+    changes nothing it holds.  ``__setstate__`` (RESTORE) and a copy off another ``JediDatasetSpec`` (COPIED) put
+    the field's own value back: the other bindings decide.  A copy off an object whose class is not said (LOOSE) may
+    bring anything, so what ``loose.nFiles`` is handed to may change it."""
+    files = spec_fields["nFiles"]
+    assert [one.how for one in files.bindings] == [
+        "setattr",
+        "row",
+        "setattr",
+        "setattr",
+    ]
+    assert files.changes == []
+    loose = spec_fields["loose"]
+    assert [one.how for one in loose.bindings] == ["setattr", "row", "setattr"]
+    leak = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'LEAK_LOOSE', FIELDS)}"
+    assert [(one.at, one.kind) for one in loose.changes] == [(leak, "unread")]

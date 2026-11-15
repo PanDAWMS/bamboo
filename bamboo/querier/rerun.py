@@ -133,7 +133,9 @@ from bamboo.querier import render as T
 from bamboo.querier import reproduce as P
 from bamboo.querier import rows as R
 from bamboo.querier import sources as SR
+from bamboo.querier import stay_value as SV
 from bamboo.querier import value_diff as V
+from bamboo.querier import value_reach as VR
 from bamboo.querier import windows as W
 from bamboo.querier.recorded import EDGE, RecordedLogs
 from bamboo.querier.records import (
@@ -873,6 +875,28 @@ def keyed_arms(writers: list, rs, subject: str, arms) -> tuple[list[int], dict[i
             {line: said for line, said in sorted(through.items()) if line not in own})
 
 
+def _before_gaps(found: SV.Before) -> list[T.Said]:
+    """Why ``stay_value`` does not settle a column all the stay: the arms writing the value without the column's time,
+    and those that may write the column while the value holds."""
+    out = []
+    if not found.starts and not found.lacking:
+        out.append(T.Said("before-no-start"))
+    if found.lacking:
+        out.append(T.Said("before-written-without", {"arms": list(found.lacking)}))
+    if found.left:
+        out.append(T.Said("before-may-be-written", {"arms": list(found.left)}))
+    return out
+
+
+def _held_before_said(subject: str, observed: str, found: SV.Before, start: str) -> T.Said:
+    """The words for a column ``stay_value`` settles all the stay, with the premises it rests on."""
+    premises = []
+    if found.runtime:
+        premises.append(T.Said("before-premise-runtime", {"arms": list(found.runtime), "observed": observed}))
+    return T.Said("held-before", {"subject": subject, "value": start, "observed": observed, "starts": list(found.starts),
+                                  "out": len(found.out), "premises": premises})
+
+
 def _by_line(said: dict[int, list[str]]) -> str:
     """``keyed_arms``' *unread*, *unpersisted* or *through* as a mover's line says it: "4300: PandaID=:PandaID (no bind
     found)"."""
@@ -975,6 +999,22 @@ class ReadAgain:
 _AGAIN: list = [None, {}, {}]
 
 
+def _again_index() -> tuple[dict, dict]:
+    """The read KeyFroms reading a statement's rows again, by that statement's ``(owner, line)``, each with its
+    ``same_rows`` source, and the read sites by ``(owner, line)``: built once per dump's ``key_froms``."""
+    kfs = key_froms()
+    if _AGAIN[0] is not kfs:
+        again: dict[tuple, list] = {}
+        for kf in kfs:
+            if getattr(kf, "reads", False):
+                for s in kf.sources:
+                    if s.kind == KEY_ROWS and getattr(s, "same_rows", False):
+                        again.setdefault((s.site_owner, s.site_line), []).append((kf, s))
+        sites = {(r.owner, r.anchor.line_start): r for r in getattr(mapdump.fragment(), "read_sites", None) or []}
+        _AGAIN[:] = [kfs, again, sites]
+    return _AGAIN[1], _AGAIN[2]
+
+
 def read_again(writers: list, writing: set[str], subject: str, observed: str, rs):
     """``_reached``'s ways through the statements that read *rs*'s rows again: a read KeyFrom (``reads``) with a
     ``rows`` source at *rs*'s owner and line that is ``same_rows`` -- its statement names them by every column of the
@@ -988,19 +1028,10 @@ def read_again(writers: list, writing: set[str], subject: str, observed: str, rs
     writers among the junctions the rows reach (``reaches``).  One hop: a statement reading those rows once more is not
     followed.  A call is taken whatever test it runs under, and a function reached may write other rows than those it
     is handed (KNOWN_ISSUES.md K31).  Yields as ``_reached``, *rs* the statement: it is the one whose rows were taken."""
-    kfs = key_froms()
-    if _AGAIN[0] is not kfs:
-        again: dict[tuple, list] = {}
-        for kf in kfs:
-            if getattr(kf, "reads", False):
-                for s in kf.sources:
-                    if s.kind == KEY_ROWS and getattr(s, "same_rows", False):
-                        again.setdefault((s.site_owner, s.site_line), []).append((kf, s))
-        sites = {(r.owner, r.anchor.line_start): r for r in getattr(mapdump.fragment(), "read_sites", None) or []}
-        _AGAIN[:] = [kfs, again, sites]
+    again, sites = _again_index()
     asked = f"{subject}={observed}"
     reader = f"{rs.owner.split('::')[-1]}@{rs.line}"
-    for kf, s in _AGAIN[1].get((rs.owner, rs.line), []):
+    for kf, s in again.get((rs.owner, rs.line), []):
         if asked in (getattr(s, "never_at", None) or []):
             continue
         said = f"{reader} selects the value, and {kf.owner.split('::')[-1]}@{kf.statement} reads its rows again"
@@ -1009,7 +1040,7 @@ def read_again(writers: list, writing: set[str], subject: str, observed: str, rs
                 if owner in writing:
                     yield Way(owner, f"{said} and hands them to it", rs)
             continue
-        site = _AGAIN[2].get((kf.owner, kf.statement))
+        site = sites.get((kf.owner, kf.statement))
         if site is None:
             continue
         r = ReadAgain(site.owner, site.anchor.line_start, list(site.region), list(site.crosses_to))
@@ -1033,6 +1064,35 @@ def movers_of(follow, writers: list, subject: str, observed: str) -> dict[str, s
     for way in _reached(follow, writers, subject, observed):
         found.setdefault(way.owner, way.why)
     return found
+
+
+#: ``[the fragment, its reach graph as calls, the functions its API endpoints reach]``, built once per dump
+_REACH: list = [None, {}, frozenset()]
+
+
+def value_reach_of(follow, subject: str, observed: str, movers) -> VR.Reach:
+    """M2 (:mod:`value_reach`): where the rows of the statements selecting *subject*=*observed* go -- *movers*
+    (``movers_of``), the functions the statements hand the rows to holding the value (``crossing_values``) or a
+    statement reading their rows again hands them to (``read_again``'s), and what those call."""
+    fragment = mapdump.fragment()
+    if _REACH[0] is not fragment:
+        calls = VR.calls_of(getattr(fragment, "reach_graph", None) or [])
+        _REACH[:] = [fragment, calls, VR.entered(getattr(fragment, "endpoints", None) or [], calls)]
+    asked = f"{subject}={observed}"
+    statements = [rs for rs in follow.reader_statements if asked in rs.selects and rs.result != RESULT_AGGREGATE]
+    crossed = [c for rs in statements for c in rs.crosses_to if asked in crossing_values(rs, c)]
+    again, sites = _again_index()
+    for rs in statements:
+        for kf, s in again.get((rs.owner, rs.line), []):
+            if asked in (getattr(s, "never_at", None) or []):
+                continue
+            # the statement's own function is a mover only where read_again places an arm (in movers); what it hands
+            # the rows to is reached
+            crossed += list(getattr(s, "reaches", None) or [])
+            if (site := sites.get((kf.owner, kf.statement))) is not None:
+                crossed += list(site.crosses_to)
+    other = VR.other_values(getattr(fragment, "read_sites", None) or [], subject, observed, _REACH[1])
+    return VR.reach(statements, crossed, movers, _REACH[1], _REACH[2], other)
 
 
 def elsewhere_of(follow, writers: list, subject: str, observed: str) -> dict[str, list[int]]:
@@ -1826,6 +1886,8 @@ class Missed:
     gaps: dict = field(default_factory=dict)
     #: the logs the map's reading names, for a mover whose prints it places nowhere (judgement 3, as S1's)
     reader_log_files: list = field(default_factory=list)
+    #: where the rows of the statements selecting the value go (:mod:`value_reach`); None: not read
+    reach: VR.Reach | None = None
 
 
 @dataclass
@@ -3089,6 +3151,7 @@ class Rerun:
             "wrote": self.result.get("wrote"),
             "moved_by": self.result.get("moved_by"),
             "movers": _movers_json(self.result.get("movers")),
+            "held_before": self.result.get("held_before"),
         }
 
     def looked_up_with(self, side: V.Side, step, depth: int = 2, seen: set[str] | None = None) -> list[str]:
@@ -4432,19 +4495,31 @@ class Rerun:
             return site_fn
         return R.function(w.via.candidate.rel, w.via.candidate.func, w.via.candidate.lines)
 
-    def _which_wrote(self, subject: str, value: str, key: str, state: dict | None = None) -> Wrote | OneOf:
+    def _which_wrote(self, subject: str, value: str, key: str, state: dict | None = None, reach: VR.Reach | None = None,
+                     before: str = "") -> Wrote | OneOf:
         """H1 and H2: the map's writers of ``subject=value``, and which of them the run of the key at the statuslog
         row *state* shows ran -- or, where that decides nothing, the arms left (:class:`OneOf`).
 
         *state* is the statuslog row of *value* unless given: ``--late`` asks it at the row after the observed one.
         Every candidate's logs are asked, at the row's time, on the machine that wrote the row.  A *subject* the
         statuslog's rows hold beside the status (``JobSpec.computingSite``) is asked over the window they bound, on
-        every machine (``W.value_held``).
+        every machine (``W.value_held``).  *reach* is where the rows of the statements selecting the value *before*
+        go (late, M2): a writer it leaves out did not move the row on from it, and is no candidate -- unless it leaves
+        out every one, which it then says.
         """
         # H1
         self.start("H1", "candidates")
         readings = self._writers(subject, value, key)
         self.say(f"{len(readings)} reading(s) from the map for {subject}={value}")
+        if reach is not None and (out := [r for r in readings if reach.leaves_out(r.owner)]):
+            names = [f"{Path(r.file).name}::{r.owner.split('::')[-1]}" for r in out]
+            if len(out) == len(readings):
+                self.say(f"no read of {before!r}'s rows ({', '.join(reach.reads)}) reaches any of them: all kept (M2)")
+            else:
+                readings = [r for r in readings if r not in out]
+                self.say(f"{len(out)} left out, no read of {before!r}'s rows ({', '.join(reach.reads)}) reaching them, "
+                         f"only reads of other values, and no API endpoint (M2): {', '.join(names)}")
+                self.result["left_out_by_reach"] = {"before": before, "reads": list(reach.reads), "owners": names}
         attr = subject.split(".")[-1]
 
         # H2
@@ -5621,6 +5696,8 @@ class Rerun:
         keyed = by_key_of(writers, movers, q.subject, q.observed)
         owners = owners_of([*movers, *keyed])
         wakes = wakers_of(follow, writers, q.subject, q.observed)
+        # M2: where the selecting statements' rows go; a writer by its key they do not reach is left out (value_reach)
+        value_reach = value_reach_of(follow, q.subject, q.observed, movers)
         self.say(f"selected by {follow.selected_by}; guarded by {[g.owner for g in follow.guarded_by]}")
         for owner, why in movers.items():
             self.say(f"  mover {owner}: {why}")
@@ -5649,6 +5726,12 @@ class Rerun:
                            "readings": [{"statement": s or None, "verdict": v.replace(" ", "-") if v else v} for s, v in mine],
                            "premises": None, **({"gaps": _gaps_json(gaps[owner])} if gaps.get(owner) else {})}
             entries.append(entry)
+            if owner in keyed and value_reach.leaves_out(owner):
+                told = T.Said("not-reached-from-the-value-s-reads", {"observed": q.observed, "reads": list(value_reach.reads)})
+                self.say(f"  {owner.split('::')[-1]}: {T.text(told)}")
+                entry["verdict"] = "not-reached"
+                entry["reasons"].append({"code": "M2", "record": told})
+                continue
             if owner in elsewhere:
                 to_key, said, reach = elsewhere[owner]
                 entry["reasons"].append({"code": "K16" if to_key else "K14", "record": said})
@@ -7032,10 +7115,18 @@ class Rerun:
         follow = self.need(T.Said("the-map-s-answer-to-what-moves"), inv.hops[0].strategy.follow_up)
         asked = f"{q.subject}={q.observed}"
         statements = [rs for rs in follow.reader_statements if asked in rs.selects]
+        # M2: every mover in the window -- by the statements that select the value, by the writes that require it, and
+        # every other writer of another value, which takes a row by its key; and where the selecting statements' rows
+        # go, which leaves out a writer they do not reach (value_reach)
+        strategy_mod.attach_mover_gaps(inv.hops[0].strategy, R.ROOTS)
+        gaps = map_gaps(follow)
+        writers = asyncio.run(self._writers_of(q.subject))
+        movers = movers_of(follow, writers, q.subject, q.observed)
+        reach = value_reach_of(follow, q.subject, q.observed, movers)
         # what moved it on is who wrote the next value at the row's time: the question type Asked's H1 and H2.  The
         # mover need not ask on the observed value (the adder takes a job by its key from a report), and a run's
         # mark need not name it (the adder's is the PandaID, one run for every function of a pass)
-        w = self._which_wrote(q.subject, after["status"], q.key, after)
+        w = self._which_wrote(q.subject, after["status"], q.key, after, reach=reach, before=q.observed)
         if isinstance(w, OneOf):
             # the one arm H2 left goes on as the mover, what every END rests on; several are not walked for each (K38)
             w = self._the_arm_left(q.subject, after["status"], w)
@@ -7048,18 +7139,22 @@ class Rerun:
         self.result["moved_by"] = {"owner": owner, "line": w.chosen.line, "run": {
             "log": run.log.name, "machine": run.machine or None, "token": run.token, "first": run.first, "last": run.last},
             **({"rests": [T.to_json(s) for s in self.rests]} if self.rests else {})}
-        # M2: every mover in the window -- by the statements that select the value, by the writes that require it, and
-        # every other writer of another value, which takes a row by its key
-        strategy_mod.attach_mover_gaps(inv.hops[0].strategy, R.ROOTS)
-        gaps = map_gaps(follow)
-        writers = asyncio.run(self._writers_of(q.subject))
-        movers = movers_of(follow, writers, q.subject, q.observed)
+        # M2: the arm of a writer that prints nothing, read at its caller's call (a setter: JediTaskSpec.setOnHold at
+        # TaskRefiner's 318), is the chain's write; the mover is the caller, whose run H2 read -- where the rows of the
+        # value's reads reach it and it writes the subject itself
+        if w.via is not None and VR.bare(caller := w.via.candidate.owner) in reach.reached \
+                and arms_of(writers, caller, q.subject, q.observed):
+            self.say(f"the mover is its caller {caller}:{w.via.line}, whose run H2 read: "
+                     f"{', '.join(reach.reads)} reach it (M2)")
+            owner = caller
+            self.result["moved_by"]["mover"] = caller
         owners = list(dict.fromkeys(j.owner for j in writers))
         by_key = by_key_of(writers, movers, q.subject, q.observed)
         refusing = [o for o in owners if o not in movers and o not in by_key and refused_arms(writers, o, q.subject, q.observed)]
         return Missed(q.subject, q.observed, after["status"], since, moved, statements, owner, w.question,
                       movers=movers, paths=paths_of(follow, writers, q.subject, q.observed), by_key=by_key,
-                      refusing=refusing, writers=writers, gaps=gaps, reader_log_files=list(follow.reader_log_files))
+                      refusing=refusing, writers=writers, gaps=gaps, reader_log_files=list(follow.reader_log_files),
+                      reach=reach)
 
     def missed(self, q: Missed):
         self.start("L2", "why the others passed it over")
@@ -7216,6 +7311,12 @@ class Rerun:
                 said = [T.Said("writes-refuse-a-row", {"observed": q.observed,
                                                        "arms": refused_arms(q.writers, owner, q.subject, q.observed)})]
                 reasons.append({"code": "write-refuses", "record": said[0]})
+            elif owner not in q.movers and q.reach is not None and q.reach.leaves_out(owner):
+                # M2: no read of the value's rows reaches it, only reads of other values, and no API endpoint: not a
+                # mover off the value (value_reach)
+                verdict = "not reached"
+                said = [T.Said("not-reached-from-the-value-s-reads", {"observed": q.observed, "reads": list(q.reach.reads)})]
+                reasons.append({"code": "M2", "record": said[0]})
             elif not armed and owner not in guarded:
                 if paths and all(kinds.get((st.owner, st.line)) == "refused" for st in paths):
                     verdict = "refused"
@@ -7236,7 +7337,7 @@ class Rerun:
                 gap = T.Said("map-could-not-read-all", {"gaps": gaps})
                 said.append(gap)
                 reasons.append({"code": "map-gap", "record": gap})
-            if verdict not in ("moved it", "write refuses", "refused"):
+            if verdict not in ("moved it", "write refuses", "refused", "not reached"):
                 # what keeps each statement from a verdict: a value the rows file does not hold, a run-time key
                 for st in paths:
                     where = f"{st.owner.split('::')[-1]}@{st.line}"
@@ -7258,7 +7359,7 @@ class Rerun:
                             "verdict": verdict.replace(" ", "-"), "reasons": reasons, "premises": premises,
                             **({"gaps": gaps} if gaps else {})})
         self.result["movers"] = entries
-        left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "did not run")]
+        left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "not reached", "did not run")]
         self.say(f"not ruled out: {len(left)} mover(s)")
         return out
 
@@ -7427,12 +7528,58 @@ class Rerun:
     def _held(self, subject: str, q: Missed) -> tuple[bool, object]:
         """``(known, value)`` of *subject* for the row over the window: the asked subject holds the observed value;
         another, what the rows file holds (``None`` there is SQL's NULL), its ``after`` only at the window's end
-        (``_after``); a column it lacks is not known."""
+        (``_after``), or, late, the value the map says it held all the stay (``_before``); a column it lacks is not
+        known."""
         if subject == q.subject:
             return True, q.observed
         cls, _, attr = subject.partition(".")
         row = self._row_of(cls)
-        return (True, row[attr]["value"]) if attr in row else self._after(subject, q)
+        if attr in row:
+            return True, row[attr]["value"]
+        known, value = self._after(subject, q)
+        if known:
+            return known, value
+        found = self._before(subject, q)
+        return (True, found[1]) if found is not None and found[0].known else (False, None)
+
+    def _before(self, subject: str, q: Missed) -> tuple[SV.Before, str] | None:
+        """M3(a)-1 (``stay_value``): what the map says of *subject*, a column of the asked row the rows file holds only
+        after the move (late's ``after``), all the stay at the observed value, with the time of the statuslog row
+        that began the stay -- the value it held where the map says ``known``; None where it does not apply: stuck
+        (``after`` is read at the window's end), another class, a column the row holds, a history whose rows' time
+        part H does not state is the write's (``History.at_write``), no such statuslog row.  Each is read once and
+        kept in the result (``held_before``)."""
+        cls, _, attr = subject.partition(".")
+        if q.at_end or cls != q.subject.partition(".")[0] or attr in self._row_of(cls) or attr not in self._read()[1]:
+            return None
+        if not getattr(PT.history(q.subject), "at_write", False):
+            return None
+        cache: dict[tuple, tuple[SV.Before, str] | None] = self.__dict__.setdefault("_befores", {})
+        key = (subject, q.subject, q.observed, q.since, q.moved)
+        if key in cache:
+            return cache[key]
+        states = [s for s in self.data.get("statuslog", {}).get("states", [])
+                  if s.get("status") == q.observed and _when(s.get("time_extended") or s["time"]) <= q.since]
+        if not states:
+            cache[key] = None
+            return None
+        start = states[-1]["time"]
+        fragment = mapdump.fragment()
+        sites = {(r.owner, r.anchor.line_start): r for r in getattr(fragment, "read_sites", None) or []}
+        row_tables = {t.name.lower() for t in getattr(fragment, "tables", None) or [] if t.rows_of == cls}
+        found = SV.before(q.writers, asyncio.run(self._writers_of(subject)), q.subject, q.observed, subject,
+                          getattr(fragment, "key_froms", None) or [], lambda kf: not never_runs(kf),
+                          lambda owner, line: sites.get((owner, line)), row_tables,
+                          lambda owner, b: born(b, birth_marks(owner, subject)))
+        if found is None:
+            cache[key] = None
+            return None
+        cache[key] = (found, start)
+        self.result.setdefault("held_before", {})[subject] = {
+            "known": found.known, "value": start if found.known else None, "starts": list(found.starts),
+            "lacking": list(found.lacking), "runtime": list(found.runtime), "left": list(found.left),
+            "out": [list(x) for x in found.out]}
+        return cache[key]
 
     def _history_rows(self, subject: str, q: Missed) -> list[tuple[object, datetime.datetime]] | None:
         """``(value, written at)`` of each row of the row's status history the subject's column reads, written
@@ -7473,7 +7620,12 @@ class Rerun:
             if attr in row or self._after(subject, q)[0]:
                 return None
             if owner == q.subject.partition(".")[0] and attr in self._read()[1]:
-                return "after-only", T.Said("after-only-why")
+                before = self._before(subject, q)
+                if before is None:
+                    return "after-only", T.Said("after-only-why")
+                if before[0].known:
+                    return None
+                return "after-only", T.Said("after-only-before-why", {"value": q.observed, "why": _before_gaps(before[0])})
             return "rows-no-column", T.Said("rows-no-column-why", {"attr": attr})
         found = PT.history_by_table(owner)
         if found is None or found.subject.partition(".")[0] != q.subject.partition(".")[0]:
@@ -7810,6 +7962,9 @@ class Rerun:
         unanswered = {x: found for x in sorted(_statement_subjects(st)) if (found := self._unanswered_why(x, q))}
         if unanswered:
             said.append("not compared: " + "; ".join(f"{x} ({why})" for x, (_, why) in unanswered.items()))
+        for x in sorted(_statement_subjects(st)):
+            if (before := self._before(x, q)) is not None and before[0].known:
+                said.append(T.text(_held_before_said(x, q.observed, *before)))
         if kind == "refused":
             return kind, said
         by_call, calls = self._routes(st, q)

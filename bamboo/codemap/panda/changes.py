@@ -114,10 +114,11 @@ from bamboo.codemap.models import (
     CHANGE_ESCAPED,
     CHANGE_INNER,
     CHANGE_METHOD,
+    CHANGE_ROW,
     CHANGE_STORE,
     CHANGE_UNREAD,
 )
-from bamboo.codemap.panda import flow, sql
+from bamboo.codemap.panda import flow, specwrites, sql
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls, Placed
@@ -136,8 +137,7 @@ _BY_NAME = frozenset(
 )
 #: Placed outside the corpus: a library's.
 _OUTSIDE = frozenset({UNPLACED_OUTSIDE, UNPLACED_NO_INIT})
-#: Builtins writing an attribute by the name they are handed second.
-_NAMED_WRITES = frozenset({"setattr", "delattr"})
+#: The methods writing an attribute by the name they are handed: in one, the write is its caller's assignment.
 _SETATTR_METHODS = frozenset({"__setattr__", "__delattr__"})
 #: The attribute whose store gives an object another class's attributes, and the one holding them all.
 _CLASS, _DICT = "__class__", "__dict__"
@@ -314,6 +314,17 @@ def call_changes(
     return _reading(calls)._call_changes(file, func, call, holds, bound)
 
 
+def class_field_changes(
+    calls: "Calls", file: str, cls: ast.ClassDef, field: str
+) -> list[ObjectChange]:
+    """Each place the corpus may change in place what *field* holds on an object of *cls* -- ``self`` in a method of
+    its family, or an expression declared one of it anywhere (:meth:`_Reading.by_field`):
+    ``taskSpec.datasetSpecList.append(datasetSpec)`` in ``getTasksToBeFinished_JEDI``, ``taskSpec`` made there a
+    ``JediTaskSpec``.  An object whose class is not said is not taken for it: its reader names those apart."""
+    reading = _reading(calls)
+    return reading.by_field((field, reading.family(((file, cls),))))
+
+
 def chain_steps(chain: ast.expr) -> Optional[tuple[str, tuple[str, ...]]]:
     """The name *chain* starts at and the keys of its steps from it, as :class:`ObjectChange` says a key:
     ``("m", ("'k'", ".x"))`` for ``m['k'].x``, ``("job", ())`` for ``job``; ``None`` where it starts at no name."""
@@ -478,13 +489,12 @@ class _Reading:
             file, func, called.id
         ):
             return self._builtin_handed(file, call, held_by)
-        if isinstance(called, ast.Attribute) and called.attr in _SETATTR_METHODS:
-            off_class = isinstance(called.value, ast.Name) and (
-                called.value.id == "object"
-                or self.types.class_named(file, called.value) is not None
+        written = callfacts.named_write(call, _me(func))
+        if written is not None:
+            # ``x.__setattr__(name, v)``, or read off a class -- ``object.__setattr__(self, name, value)``.
+            return self._set_by_name(
+                file, call, held_by, written.holder, written.position
             )
-            obj = call.args[0] if off_class and call.args else called.value
-            return self._set_by_name(file, call, held_by, obj, 1 if off_class else 0)
         try:
             placed = self.calls.callees(file, func, call, bound)
         except Exception:  # noqa: BLE001 -- a placing that fails says nothing
@@ -561,9 +571,10 @@ class _Reading:
         self, file: str, call: ast.Call, held_by
     ) -> "Change | list[_Follow]":
         name = call.func.id  # type: ignore[attr-defined]
-        if name in _NAMED_WRITES:
+        written = callfacts.named_write(call)
+        if written is not None:
             return self._set_by_name(
-                file, call, held_by, call.args[0] if call.args else None, 1
+                file, call, held_by, written.holder, written.position
             )
         if name == _VARS:
             return Change(file, call.lineno, EVERY, COMPUTED, name)
@@ -757,13 +768,10 @@ class _Reading:
             file, func, called.id
         ):
             return self._builtin(file, func, call)
-        if isinstance(called, ast.Attribute) and called.attr in _SETATTR_METHODS:
+        written = callfacts.named_write(call)
+        if written is not None:
             # Read off a class -- ``object.__setattr__(self, name, value)`` -- the object comes first.
-            off_class = isinstance(called.value, ast.Name) and (
-                called.value.id == "object"
-                or self.types.class_named(file, called.value) is not None
-            )
-            return self._named_write(file, func, call, 1 if off_class else 0)
+            return self._named_write(file, func, call, written.position)
         try:
             placed = self.calls.callees(file, func, call, bound)
         except Exception:  # noqa: BLE001 -- a placing that fails says nothing
@@ -794,8 +802,9 @@ class _Reading:
         self, file: str, func: ast.AST, call: ast.Call
     ) -> tuple[dict[str, Change], Optional[Change], list[Target]]:
         name = call.func.id  # type: ignore[attr-defined]
-        if name in _NAMED_WRITES:
-            return self._named_write(file, func, call, 1)
+        written = callfacts.named_write(call)
+        if written is not None:
+            return self._named_write(file, func, call, written.position)
         if name == _VARS:
             return {}, Change(file, call.lineno, EVERY, COMPUTED, name), []
         said = callfacts.BUILTIN_FUNCTIONS.get(name)
@@ -1206,20 +1215,11 @@ class _Reading:
             file, func, called.id
         ):
             return _builtin_changes(file, func, call, holds)
-        if isinstance(called, ast.Attribute) and called.attr in _SETATTR_METHODS:
+        written = callfacts.named_write(call, _me(func))
+        if written is not None and written.holder is not None:
             # Read off a class -- ``object.__setattr__(self, name, value)`` -- the object comes first.
-            off_class = isinstance(called.value, ast.Name) and (
-                called.value.id == "object"
-                or self.types.class_named(file, called.value) is not None
-            )
             return self._named_change(
-                file,
-                func,
-                call,
-                holds,
-                call.args[0] if off_class and call.args else called.value,
-                int(off_class),
-                bound,
+                file, func, call, holds, written.holder, written.position, bound
             )
         try:
             placed = self.calls.callees(file, func, call, bound)
@@ -1229,6 +1229,19 @@ class _Reading:
             return unread(placed.unplaced or "run apart")
         if _on_driver(placed):
             return self._driver_changes(file, func, call, handed, parts, holds)
+        if on_object and self._reads_row(call, placed):
+            # A spec's row read (callfacts.ROW_READ): every column from the row it is handed, by its name.
+            return [
+                ObjectChange(
+                    file,
+                    line,
+                    CHANGE_ROW,
+                    EVERY,
+                    ast.unparse(called),
+                    func=func,
+                    value=call.args[0],
+                )
+            ]
         targets = list(placed.targets)
         found: list[ObjectChange] = []
         if not targets or placed.unplaced == UNPLACED_OPEN:
@@ -1369,6 +1382,25 @@ class _Reading:
             for one in parts
         ]
         return found
+
+    def _reads_row(self, call: ast.Call, placed: "Placed") -> bool:
+        """Whether *call* hands one row to a spec's row read (:data:`callfacts.ROW_READ`) and lands at nothing
+        else: ``datasetSpec.pack(resDs)``."""
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr in callfacts.ROW_READ
+            and len(call.args) == 1
+            and not isinstance(call.args[0], ast.Starred)
+            and not call.keywords
+            and bool(placed.targets)
+            and placed.unplaced != UNPLACED_OPEN
+            and all(
+                getattr(target.func, "name", "") in callfacts.ROW_READ
+                and target.cls is not None
+                and specwrites.is_spec(self.types, target.file, target.cls)
+                for target in placed.targets
+            )
+        )
 
     def _named_change(
         self,
@@ -1649,6 +1681,15 @@ def _puts_it(meant: callfacts.Meaning, call: ast.Call, holds) -> Optional[bool]:
     )
 
 
+def _me(func: ast.AST) -> Optional[str]:
+    """*func*'s first positional parameter: the object ``super().__setattr__`` writes in a method."""
+    arguments = getattr(func, "args", None)
+    positional = (
+        [*arguments.posonlyargs, *arguments.args] if arguments is not None else []
+    )
+    return positional[0].arg if positional else None
+
+
 def _root_name(node: ast.AST) -> Optional[str]:
     """``varMap`` of ``varMap[":id"]``, of ``self.x`` none: the local a store or a method lands on."""
     while isinstance(node, (ast.Subscript, ast.Attribute)):
@@ -1801,18 +1842,28 @@ def _builtin_changes(
     """A builtin function reads, copies, counts or calls with what it is handed: a change only where it writes an
     attribute by the name it is handed (``setattr``, ``delattr``) or hands back what holds them all (``vars``)."""
     name = call.func.id  # type: ignore[attr-defined]
-    if name in _NAMED_WRITES and call.args and _is_object(call.args[0], holds):
-        named = call.args[1] if len(call.args) > 1 else None
+    written = callfacts.named_write(call)
+    if (
+        written is not None
+        and written.holder is not None
+        and _is_object(written.holder, holds)
+    ):
+        named = written.name
         key = (
             f".{named.value}"
             if isinstance(named, ast.Constant) and isinstance(named.value, str)
             else EVERY
         )
-        if name == "setattr":
-            value = call.args[2] if len(call.args) > 2 else None
+        if written.value is not None:
             return [
                 ObjectChange(
-                    file, call.lineno, CHANGE_STORE, key, name, func=func, value=value
+                    file,
+                    call.lineno,
+                    CHANGE_STORE,
+                    key,
+                    name,
+                    func=func,
+                    value=written.value,
                 )
             ]
         return [ObjectChange(file, call.lineno, CHANGE_DELETE, key, name, func=func)]
