@@ -524,6 +524,17 @@ def module_of(file: str) -> str:
     return file.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
 
 
+def _dotted_path(expression: ast.expr) -> Optional[str]:
+    """``a.b.c`` for the attribute chain ``a.b.c`` of names, else None."""
+    parts: list[str] = []
+    while isinstance(expression, ast.Attribute):
+        parts.append(expression.attr)
+        expression = expression.value
+    if not isinstance(expression, ast.Name):
+        return None
+    return ".".join([expression.id, *reversed(parts)])
+
+
 def read_outside(module: str, *names: str) -> bool:
     """Whether the definition *names* of *module* -- a function or a class, or a class and its method -- is one the
     corpus holds and the map reads as outside it (:data:`callfacts.READ_OUTSIDE`): ``naive_utcnow`` of
@@ -2643,6 +2654,8 @@ class Types:
         self.recorded: Recorded = recorded or {}
         self.parsed: dict[str, Optional[ast.Module]] = {}
         self._imports: dict[str, dict[str, tuple[str, str]]] = {}
+        #: :meth:`dotted_imports` per file.
+        self._dotted: dict[str, frozenset[str]] = {}
         #: :meth:`_module_bound` per file.
         self._module_bindings: dict[str, dict[str, list[ast.expr]]] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
@@ -2798,7 +2811,22 @@ class Types:
         return module.split(".")[0] not in self.roots or read_outside(module, *names)
 
     def module_named(self, file: str, expression: ast.expr) -> Optional[str]:
-        """The file of the module *expression* names in *file*, when it names one."""
+        """The file of the module *expression* names in *file*, when it names one.
+
+        A name an import binds, or the full dotted path of a module the file imports by it: under ``import
+        pandaserver.dataservice.ErrorCode``, ``pandaserver.dataservice.ErrorCode`` is that module as ``ErrorCode`` is
+        under ``from pandaserver.dataservice import ErrorCode`` -- read the one way only, ``adder_gen``'s
+        ``ddmErrorCode = pandaserver.dataservice.ErrorCode.EC_Adder`` was a run-time value where the other spelling
+        is 200.  A path is read where the file imports it, or a module below it (:meth:`dotted_imports`).
+        """
+        if isinstance(expression, ast.Attribute):
+            path = _dotted_path(expression)
+            if path is None or self.imports(file).get(path.partition(".")[0]) != (path.partition(".")[0], ""):
+                return None
+            imported = self.dotted_imports(file)
+            if path not in imported and not any(one.startswith(f"{path}.") for one in imported):
+                return None
+            return self.module_file(path)
         if not isinstance(expression, ast.Name):
             return None
         held = self.imports(file).get(expression.id)
@@ -2818,6 +2846,20 @@ class Types:
             if self.tree(candidate) is not None:
                 return candidate
         return None
+
+    def dotted_imports(self, file: str) -> frozenset[str]:
+        """The dotted module names *file* imports whole, without ``as``: ``import a.b.c`` binds ``a`` and makes
+        ``a.b.c`` (and ``a.b``) a path to read the module by, which :meth:`imports` keeps only as ``a``."""
+        if file not in self._dotted:
+            tree = self.tree(file)
+            self._dotted[file] = frozenset(
+                alias.name
+                for node in (walk(tree) if tree is not None else ())
+                if isinstance(node, ast.Import)
+                for alias in node.names
+                if alias.asname is None and "." in alias.name
+            )
+        return self._dotted[file]
 
     def imports(self, file: str) -> dict[str, tuple[str, str]]:
         """``{local name: (module, attribute)}`` for every import in *file*.

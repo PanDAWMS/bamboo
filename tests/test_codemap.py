@@ -5694,6 +5694,25 @@ def test_the_key_half_of_the_loop_is_not_a_value():
     assert bound == []
 
 
+def test_a_module_constant_read_by_its_full_dotted_path_is_its_value():
+    """``adder_gen`` imports ``pandaserver.dataservice.ErrorCode`` whole and writes ``ddmErrorCode =
+    pandaserver.dataservice.ErrorCode.EC_Adder``: the constant ``ErrorCode.EC_Adder`` is under ``from
+    pandaserver.dataservice import ErrorCode``, 200 either way.  A path the file imports no module by is not read."""
+    dotted, imported, not_imported = _settled(
+        "import pandaserver.dataservice.ErrorCode\n"
+        "from pandaserver.dataservice import ErrorCode\n"
+        "def f(self):\n"
+        "    a = pandaserver.dataservice.ErrorCode.EC_Adder\n"
+        "    b = ErrorCode.EC_Adder\n"
+        "    c = pandaserver.dataservice.Other.EC_Adder\n",
+        ("EC_Adder = 200\n", "pandaserver/dataservice/ErrorCode.py"),
+        ("EC_Adder = 7\n", "pandaserver/dataservice/Other.py"),
+    )
+
+    assert dotted == imported == ["200"]
+    assert not_imported == []
+
+
 def _settled_by_name(caller: str) -> dict[str, list[str]]:
     """:func:`_settled`, by the name each assignment in ``f`` binds, on a tree with its parents, as a build reads it."""
     modules = [
