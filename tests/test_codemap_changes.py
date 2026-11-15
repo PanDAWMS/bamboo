@@ -879,3 +879,84 @@ def test_a_spec_s_row_read_on_the_object_sets_every_column_from_the_row_it_is_ha
 
     assert between("spec", "TaskSpec") == [("row", "*", "spec.pack", "res")]
     assert between("plain", "Plain") == [("store", ".values", "", "values")]
+
+
+SLOTS = """\
+class Bridge:
+    class holder:
+        def __init__(self, name, parent):
+            self.name = name
+            self.parent = parent
+
+    def __getattribute__(self, name):
+        method = Bridge.holder(name, self)
+        setattr(self, name, method)
+        return method
+
+
+class FileSpec:
+    def set_id(self, value):
+        self.PandaID = value
+
+
+class JobSpec:
+    def addFile(self, file):
+        file.set_id(object.__getattribute__(self, "PandaID"))
+
+
+class LockedMap(dict):
+    def put(self, key, value):
+        dict.__setitem__(self, key, value)
+
+    def peek(self, key):
+        return dict.__getitem__(self, key)
+
+
+def read(job: JobSpec, file: FileSpec, entries: LockedMap):
+    job.addFile(file)
+    entries.peek("a")
+    entries.put("a", 1)
+    if job.x and entries:
+        pass
+"""
+
+
+def test_a_builtin_class_s_method_read_off_the_class_runs_the_builtin_s_own_not_a_corpus_method_of_the_name(
+    tmp_path: Path,
+) -> None:
+    """``object.__getattribute__(self, "PandaID")`` in ``JobSpec.addFile`` runs object's slot: it is placed outside
+    the corpus, not at every ``__getattribute__`` of it by the name -- ``Bridge``'s keeps what it is handed, and read
+    so the job escaped.  ``dict.__setitem__(self, key, value)`` in a dict's subclass changes the object it is handed
+    first, as a dict's method changes the dict; ``dict.__getitem__`` reads it."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "slots.py").write_text(SLOTS)
+    tree = ast.parse(SLOTS)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/slots.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=SLOTS, blob_sha=blob_sha(SLOTS))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    (got,) = [
+        node
+        for node in ast.walk(functions["addFile"])
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "object.__getattribute__"
+    ]
+    placed = calls.callees(file, functions["addFile"], got)
+    assert (placed.targets, placed.unplaced) == ((), "outside the corpus")
+    read = functions["read"]
+    (test,) = [node for node in ast.walk(read) if isinstance(node, ast.If)]
+    line = {text.strip(): number for number, text in enumerate(SLOTS.splitlines(), 1)}
+
+    def found(name: str) -> list[tuple]:
+        return [
+            (change.kind, change.key, change.what, [one.removeprefix(f"{file}:") for one in change.via])
+            for change in changes.object_changes(calls, file, read, name, read.args, test)
+        ]
+
+    assert found("job") == []
+    assert found("entries") == [
+        ("method", "*", "dict.__setitem__", [str(line['entries.put("a", 1)'])]),
+    ]

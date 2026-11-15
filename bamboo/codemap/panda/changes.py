@@ -1221,6 +1221,9 @@ class _Reading:
             return self._named_change(
                 file, func, call, holds, written.holder, written.position, bound
             )
+        slot = callfacts.builtin_slot(self.types, file, func, call)
+        if slot is not None:
+            return _slot_changes(file, func, call, slot, holds)
         try:
             placed = self.calls.callees(file, func, call, bound)
         except Exception:  # noqa: BLE001 -- a placing that fails says nothing
@@ -1834,6 +1837,30 @@ def _parts_inside(values: list[ast.expr], holds) -> list[ast.AST]:
         for one in ast.walk(value)
         if isinstance(getattr(one, "parent", None), _HOLDERS) and _part_of(one, holds)
     ]
+
+
+def _slot_changes(
+    file: str, func: ast.AST, call: ast.Call, slot: callfacts.Slot, holds
+) -> list[ObjectChange]:
+    """What a builtin class's method read off the class does to the object (:func:`callfacts.builtin_slot`): the
+    builtin's own runs, no method of the corpus of the name -- ``object.__getattribute__(self, "PandaID")`` in
+    ``JobSpec.addFile`` keeps nothing, where ``ConBridge.__getattribute__``, read by its name, kept the job.  One that
+    takes the object it runs on first and may change it (``dict.__setitem__(self, item, entry)``) changes that
+    argument as a builtin container's method changes the object it is called on -- a part of it inside -- and keeps
+    what else it is handed; any other changes nothing it is handed."""
+    if not slot.changes:
+        return []
+    what = f"{slot.cls}.{slot.name}"
+    first = call.args[0] if call.args else None
+    rest = [*call.args[1:], *(keyword.value for keyword in call.keywords)]
+    found: list[ObjectChange] = []
+    if first is not None and _is_object(first, holds):
+        found.append(ObjectChange(file, call.lineno, CHANGE_METHOD, EVERY, what, func=func))
+    elif first is not None and _part_of(first, holds):
+        found.append(ObjectChange(file, call.lineno, CHANGE_INNER, _first_step(first, holds), what, func=func))
+    if any(_is_object(one, holds) for one in rest):
+        found.append(ObjectChange(file, call.lineno, CHANGE_ESCAPED, EVERY, f"kept by {what}", func=func))
+    return found
 
 
 def _builtin_changes(

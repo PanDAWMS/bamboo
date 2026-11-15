@@ -77,6 +77,10 @@ _FORWARDING = (UNPLACED_FORWARDED, UNPLACED_GETATTRIBUTE)
 BUILTIN = "<builtins>"
 #: The names Python's builtins hold: a call of one no scope binds is the builtin's (:meth:`Types.is_builtin`).
 _BUILTIN_NAMES = frozenset(dir(builtins))
+#: The builtin classes by their names (``object``, ``dict``, ``Exception``): a method read off one no scope binds
+#: runs the builtin's own, never a method of the corpus of the name (:meth:`Calls._place`,
+#: :func:`callfacts.builtin_slot`).
+BUILTIN_CLASSES = frozenset(name for name in _BUILTIN_NAMES if isinstance(getattr(builtins, name), type))
 #: The standard library's container classes, by the module they are imported from (:data:`callfacts.CONTAINERS`).
 _LIBRARY_CONTAINERS = {(one.module, name) for name, one in callfacts.CONTAINERS.items() if one.module == "collections"}
 #: The library classes whose ``start()`` runs the object's ``run`` on another
@@ -904,6 +908,15 @@ class Calls:
             if cls is None:
                 return Placed((), UNPLACED_RECEIVER)
             return self._after(cls, called.attr, bound)
+        if (
+            isinstance(receiver, ast.Name)
+            and receiver.id in BUILTIN_CLASSES
+            and (func is None or self.types.is_builtin(file, func, receiver.id))
+        ):
+            # ``object.__getattribute__(self, name)``, ``dict.__setitem__(self, k, v)``: a builtin class's method read
+            # off the class runs the builtin's slot, not a method of the corpus of the name (JobSpec.addFile's read
+            # of its raw PandaID is no call of ConBridge.__getattribute__).
+            return Placed((), UNPLACED_OUTSIDE)
         module = self.types.module_named(file, receiver)
         if module is not None:
             return self._module_member(module, called.attr)

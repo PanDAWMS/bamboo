@@ -1248,6 +1248,42 @@ BUILTIN_CLASS_FUNCTIONS: dict[tuple[str, str], Function] = {
 KEYED_BY_ELEMENTS = frozenset({("dict", "fromkeys")})
 
 
+class Slot(NamedTuple):
+    """A builtin class's method read off the class (:func:`builtin_slot`): the builtin's own runs, never a method of
+    the corpus of the name.  *instance*: it takes the object it runs on first, as a method of the type does
+    (``dict.__setitem__(self, k, v)``, ``object.__getattribute__(self, name)``), not as a class's or a static method
+    (``dict.fromkeys(xs)``, ``object.__new__(cls)``); *changes*: it may change that object -- not where it reads
+    (:data:`BUILTIN_CLASS_FUNCTIONS`, a method of :data:`BUILTIN_METHODS` that changes nothing)."""
+
+    cls: str
+    name: str
+    instance: bool
+    changes: bool
+
+
+def builtin_slot(types: "Types", file: str, func: Optional[ast.AST], call: ast.Call) -> Optional[Slot]:
+    """The :class:`Slot` *call* runs where it calls a method read off a builtin class no scope binds there
+    (:data:`calls.BUILTIN_CLASSES`); ``None`` for any other call.  Which methods take the object is Python's own say:
+    a method or a slot of the type (``method_descriptor``, ``wrapper_descriptor``)."""
+    import builtins
+    import inspect
+    import types as python_types
+
+    from bamboo.codemap.calls import BUILTIN_CLASSES
+
+    called = call.func
+    if not isinstance(called, ast.Attribute) or not isinstance(called.value, ast.Name):
+        return None
+    cls, name = called.value.id, called.attr
+    if cls not in BUILTIN_CLASSES or (func is not None and not types.is_builtin(file, func, cls)):
+        return None
+    found = inspect.getattr_static(getattr(builtins, cls), name, None)
+    instance = isinstance(found, (python_types.MethodDescriptorType, python_types.WrapperDescriptorType))
+    known = BUILTIN_METHODS.get((cls, name))
+    reads = (cls, name) in BUILTIN_CLASS_FUNCTIONS or (known is not None and not known.changes)
+    return Slot(cls, name, instance, instance and not reads)
+
+
 def builtin_function(
     types: "Types", file: str, func: ast.AST, call: ast.Call
 ) -> Optional[Function]:
@@ -1520,6 +1556,12 @@ def meaning(
     copied = round_trip(call)
     if copied is not None:
         return Meaning(PROTOCOL, assumption=PICKLE_ROUND_TRIP, copied_from=copied)
+    slot = builtin_slot(calls.types, file, func, call)
+    if slot is not None:
+        # A builtin class's method read off the class (``object.__getattribute__(self, name)``): the builtin's own
+        # runs.  One that changes nothing puts nothing anywhere; one that changes the object it is handed first has no
+        # receiver a Method could say it of (bamboo.codemap.panda.changes reads it).
+        return Meaning(BUILTIN, Method()) if not slot.changes else _UNKNOWN
     from bamboo.codemap.calls import BUILTIN as BUILTIN_CLASS
     from bamboo.codemap.calls import UNPLACED_NO_METHOD
 
