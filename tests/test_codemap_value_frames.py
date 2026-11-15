@@ -209,6 +209,7 @@ def test_a_length_limit_counts_where_the_spec_cuts_by_it():
 
 
 def test_the_attribute_slice_records_the_frames_of_a_run_time_write():
+    """The write is the one binding of ``msg`` reaching it, spelled whole, and its frames are that text's."""
     specs = "class JediTaskSpec(object):\n    _attributes = ('jediTaskID', 'status')\n"
     writer = (
         "class W:\n"
@@ -224,5 +225,5 @@ def test_the_attribute_slice_records_the_frames_of_a_run_time_write():
     (junction,) = [j for j in junctions if j.owner.startswith("pandajedi/jediorder/W.py")]
 
     assert [(b.outcome, b.value_frames) for b in junction.branches] == [
-        ("runtime(msg)", ["merge_{}"])
+        ("runtime(f'merge_{s}')", ["merge_{}"])
     ]

@@ -1690,8 +1690,15 @@ def _outcomes(
                         # was bound: ``newTaskStatus = "exhausted"`` sits in
                         # the block that also records why, and the bind is
                         # further down, after the chain has closed.  A
-                        # parameter's was chosen by the call.
-                        chosen = (_statement_at(func, one.line) if one.line is not None else None) or site
+                        # parameter's was chosen by the call.  The one binding
+                        # reaching, choosing no value, chose nothing: every way
+                        # to the bind passes it, and the value is decided where
+                        # it is put -- ``throttleTasks_JEDI`` builds the reason
+                        # it logs after ``releaseTime = throttledTime + ...``.
+                        alone = len(reached) == 1 and not one.values
+                        chosen = (
+                            (_statement_at(func, one.line) if one.line is not None and not alone else None) or site
+                        )
                         if one.values:
                             found.extend(_Outcome(outcome, 1, site, list(extra), chosen) for outcome in one.values)
                         else:

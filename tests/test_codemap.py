@@ -1371,7 +1371,8 @@ def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
     there.  A local is a step in a computation, not a place a value lives, so a
     passthrough onto one is an edge whose far end cannot exist -- and the
     reference gate would not catch it, because it excuses a passthrough landing
-    off the promoted set as a provenance terminal.
+    off the promoted set as a provenance terminal.  The one binding reaching
+    the write says what the local holds: the call, decided when it runs.
     """
     source = (
         "def refine(self, taskSpec, incoming):\n"
@@ -1380,7 +1381,41 @@ def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
     )
     _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
 
+    assert _outcomes(junctions) == [("runtime(compute(incoming))", 2)]
+
+
+def test_a_local_two_unsettled_bindings_reach_stays_the_name():
+    """Which of the two the write takes is the run's: the name is the value, as it was."""
+    source = (
+        "def refine(self, taskSpec, incoming):\n"
+        "    if incoming:\n"
+        "        newStatus = compute(incoming)\n"
+        "    else:\n"
+        "        newStatus = fallback(taskSpec)\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
     assert _outcomes(junctions) == [("runtime(newStatus)", 2)]
+
+
+def test_a_local_bound_once_under_a_test_is_its_call_at_each_write_below():
+    """``killJob``'s ``currentTime = naive_utcnow()`` and, under the same test, ``job.endTime = currentTime`` and
+    ``job.modificationTime = currentTime``: each write is the call the one binding made, not a name a reader cannot
+    place (``pathcond.reaching_values``)."""
+    source = (
+        "def kill(self, taskSpec):\n"
+        "    if taskSpec.jediTaskID:\n"
+        "        currentStatus = pick_status(taskSpec)\n"
+        "        if taskSpec.oldStatus in [None, 'NULL']:\n"
+        "            taskSpec.oldStatus = currentStatus\n"
+        "        taskSpec.status = currentStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+    outcomes = {j.subject: [(b.outcome, b.tier) for b in j.branches] for j in junctions}
+
+    assert outcomes["JediTaskSpec.oldStatus"] == [("runtime(pick_status(taskSpec))", 2)]
+    assert outcomes["JediTaskSpec.status"] == [("runtime(pick_status(taskSpec))", 2)]
 
 
 def test_a_parameter_reaching_the_write_is_an_outcome_beside_the_literal():
@@ -3883,6 +3918,178 @@ class Knight:
     ]
 
 
+def test_a_line_naming_the_local_a_tier_two_outcome_is_spelled_through_is_named_for():
+    """The branch is ``runtime(pick_status(incoming))``, the one binding reaching the write, and the line logs the
+    local: still one fact, joined through the binding rather than by the name."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming):
+        newTaskStatus = pick_status(incoming)
+        taskSpec.status = newTaskStatus
+        tmpLog.info(f"set task_status={newTaskStatus} sourceLabel={self.label}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == [
+        "set task_status={} sourceLabel={}"
+    ]
+
+
+def test_a_line_logging_a_local_bound_two_ways_is_not_tied_by_one_of_their_spellings():
+    """``getOutputFiles_JEDI``'s ``fileDatasetID`` is bound four ways, one of them ``int(val)``: a line logging it
+    holds none of them by name, and a branch spelled ``runtime(int(val))`` from another local is not its value."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming, other):
+        newTaskStatus = pick_status(incoming)
+        taskSpec.status = newTaskStatus
+        if other:
+            shown = pick_status(incoming)
+        else:
+            shown = other
+        tmpLog.info(f"picked {shown} for the task")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_a_local_bound_once_to_the_text_another_write_writes_is_not_tied_by_the_text():
+    """``getOutputFiles_JEDI`` logs ``fileDatasetID = int(val)`` and writes a file ID from another ``int(val)``: the
+    same text, another value.  A line is tied by a binding it shares with the write, never by the spelling."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming):
+        shown = pick_status(incoming)
+        tmpLog.info(f"picked {shown} for the task")
+        taskSpec.status = pick_status(incoming)
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_past_the_merge_with_the_parameter_logs_the_binding_the_write_reads_and_one_above_it_does_not():
+    """``upsert_workflow_entities`` writes the ``workflow_id`` it bound from the insert: its last line, past the merge
+    with the parameter, can log that binding; a line above the insert logs only the parameter."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, newStatus, fresh):
+        tmpLog.info(f"asked for {newStatus}")
+        if fresh:
+            newStatus = pick_status(fresh)
+            taskSpec.status = newStatus
+        tmpLog.info(f"done with {newStatus}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(fresh))"]
+    assert [e.template for e in status[0].branches[0].emits] == ["done with {}"]
+
+
+def test_a_line_logging_a_name_another_loop_binds_again_is_not_tied_to_the_write_of_the_name():
+    """``updateWorkers`` writes the ``panda_id`` of the IDs it was handed and logs the ``panda_id`` of the rows it
+    reads back in a later loop: one name, two bindings, and the line shares none with the write."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, wanted, rows):
+        for status in wanted:
+            taskSpec.status = status
+        for (status,) in rows:
+            tmpLog.info(f"row has {status}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(status)"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_an_expression_of_a_local_another_loop_binds_is_not_tied_by_the_text():
+    """``insertFilesForDataset_JEDI`` logs ``fileVal['lfn']`` of a file it skips and writes ``fileVal["lfn"]`` of the
+    files it keeps, each from its own loop: the same text, read through two bindings."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, files, produced):
+        for item in files:
+            if item["name"] not in produced:
+                tmpLog.info(f"{item['name']} skipped")
+        for item in files:
+            taskSpec.status = item["name"]
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(item['name'])"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_another_slot_of_the_unpacking_that_binds_the_written_local_is_not_tied():
+    """``insertFilesForDataset_JEDI`` unpacks ``..., dsStateInDB, nFilesToUseDS, ... = resDs``, writes the
+    ``nFilesToUseDS`` it bound there and logs ``ds.state={dsStateInDB}``: one statement binds both, and only the
+    written slot holds the value the branch decided at that statement.  The SQL slice places such a branch at the
+    unpacking, beside a binding that chooses a value, so the rule is asked here of a branch on that line."""
+    source = '''
+def f(res, fresh, varMap):
+    if fresh:
+        status = "ready"
+    else:
+        shown, status = res
+        tmpLog.info(f"state={shown} in DB")
+        tmpLog.info(f"status={status} in DB")
+    varMap[":status"] = status
+'''
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    (unpacking,) = [n for n in ast.walk(func) if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Tuple)]
+    other, own = [n for n in ast.walk(func) if isinstance(n, ast.FormattedValue)]
+    held = emit._Held(func, values.resolver(None))
+    spelled = {"status": [unpacking.lineno]}
+
+    def line_of(node):
+        return next(one for one in pathcond.ancestors(node) if isinstance(one, ast.stmt))
+
+    assert not emit._holds_the_read_value(other.value, line_of(other), spelled, held)
+    assert emit._holds_the_read_value(own.value, line_of(own), spelled, held)
+
+
+def test_a_line_logging_a_call_the_write_also_makes_is_not_tied():
+    """Two calls of one function are two evaluations: a line interpolating ``pick_status()`` does not show what the
+    write's own call returned, however alike the two are spelled."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = pick_status()
+        tmpLog.info(f"now {pick_status()}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status())"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_the_name_a_written_local_was_bound_from_is_tied_where_it_shares_a_binding():
+    """``increaseRamLimitJobJEDI_xtimes`` binds ``nextLimit = minimumRam`` and writes the column from it: a line
+    logging ``minimumRam`` past its last binding shows the value written, through the one binding the branch was
+    spelled from."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, base, cap):
+        limit = base * 2
+        if cap:
+            limit = min(limit, cap)
+        tmpLog.info(f"new limit {limit}")
+        nextLimit = limit
+        taskSpec.status = nextLimit
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(limit)"]
+    assert [e.template for e in status[0].branches[0].emits] == ["new limit {}"]
+
+
 def test_the_line_reporting_how_many_rows_changed_is_kept_apart():
     """The only trace a compare-and-set leaves when it loses.
 
@@ -4501,6 +4708,26 @@ def test_a_value_decided_at_run_time_is_recorded_not_dropped():
     branch = junctions[0].branches[0]
     assert branch.tier == 2
     assert branch.outcome == "runtime(newStatus)"
+
+
+def test_a_bind_filled_from_a_local_bound_once_to_a_call_is_that_call():
+    """``varMap[":modificationTime"] = timeNow`` after ``timeNow = naive_utcnow()``: the bind is the clock.  The one
+    binding chose no value, so the value is decided where the bind is put, as before: its lines and tests are the
+    put's, and what the code writes between the two is about the write (``throttleTasks_JEDI``'s reason)."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID):\n"
+        "        timeNow = naive_utcnow()\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET modificationTime=:modificationTime WHERE jediTaskID=:jediTaskID'\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        varMap[':modificationTime'] = timeNow\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = [b for j in junctions if j.subject.endswith(".modificationTime") for b in j.branches]
+
+    assert (branch.outcome, branch.tier, branch.line) == ("runtime(naive_utcnow())", 2, 7)
 
 
 def test_clearing_a_column_is_spelled_the_way_the_attribute_slice_spells_it():

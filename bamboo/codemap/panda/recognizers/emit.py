@@ -30,7 +30,11 @@ which counted ``status`` inside ``task_status`` and would have counted every
 line mentioning a status anywhere.  What ties a line to a junction is that it
 interpolates the value: either an attribute of the right spec class, or a local
 holding one of the values this junction writes.  ``TaskRefiner`` logs the local
-and is only reachable by the second.
+and is only reachable by the second.  A value the branch could only spell
+(``runtime(<expr>)``) is tied by a binding the line and the write share, not
+by the spelling: the same text in another place is another value, and a line
+the branch's run prints with another value hands the reader a wrong one --
+which no width argument below covers.
 
 **A line under one arm is not evidence for the other.**  ``ContentsFeeder``
 writes ``set task_status=`` in three arms of one function.  Attaching all three
@@ -45,13 +49,14 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from bamboo.codemap import values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
+    Branch,
     Emit,
     JunctionNode,
     SourceModule,
@@ -64,10 +69,13 @@ from bamboo.codemap.pathcond import (
     ancestors,
     assigned_expressions,
     attach_parents,
+    bindings,
     exclusive,
     functions_with_owner,
+    held_at,
     literal_values,
     path_condition,
+    reaching_values,
     targets_of,
     written_value,
 )
@@ -225,8 +233,9 @@ def _names_the_value(
     attributor: SpecAttributor,
     spec_class: str,
     attribute: str,
-    outcomes: set[str],
+    branches: list[Branch],
     settle,
+    held: _Held,
 ) -> bool:
     """Whether *message* interpolates the value this junction settles.
 
@@ -234,29 +243,180 @@ def _names_the_value(
     back (``{taskSpec.status}``); it logs the local that was just assigned to
     it, tied by the values that local can hold rather than by its name; or the
     branch could not value the local at all and recorded ``runtime(<expr>)``,
-    in which case the outcome names the very expression the line interpolates.
+    in which case the line names that value where it holds what the branch
+    reads, by a binding the two share and never by the text
+    (:func:`_holds_the_read_value`).
 
     The third is not a weaker version of the second -- it is what is left when
     the second fails, and it is exactly where the line is most worth having,
     since the map has nothing else to say about that branch's value.
+    *held* holds the bindings read so far, a function's lines being asked
+    about at every junction it writes.
     """
     if not isinstance(message, ast.JoinedStr):
         return False
-    unvalued = {m.group(1) for o in outcomes if (m := _RUNTIME.match(o))}
+    outcomes = {b.outcome for b in branches}
+    spelled: dict[str, list[Optional[int]]] = {}
+    for branch in branches:
+        if m := _RUNTIME.match(branch.outcome):
+            spelled.setdefault(m.group(1), []).append(branch.line)
+    at = next((one for one in ancestors(message) if isinstance(one, ast.stmt)), None)
     for part in message.values:
         if not isinstance(part, ast.FormattedValue):
             continue
-        held = part.value
-        if isinstance(held, ast.Attribute) and held.attr == attribute:
-            if attributor.class_of(held.value, func, owner) == spec_class:
+        shown = part.value
+        if isinstance(shown, ast.Attribute) and shown.attr == attribute:
+            if attributor.class_of(shown.value, func, owner) == spec_class:
                 return True
-        if ast.unparse(held) in unvalued:
-            return True
-        if isinstance(held, ast.Name):
-            reached = {value for value, _conditions, _line in literal_values(func, held.id, settle)}
+        if isinstance(shown, ast.Name):
+            reached = {value for value, _conditions, _line in literal_values(func, shown.id, settle)}
             if reached & outcomes:
                 return True
+        if at is not None and spelled and _holds_the_read_value(shown, at, spelled, held):
+            return True
     return False
+
+
+def _holds_the_read_value(
+    shown: ast.expr, at: ast.stmt, spelled: dict[str, list[Optional[int]]], held: _Held
+) -> bool:
+    """Whether *shown*, interpolated at *at*, holds what a branch recorded as ``runtime(<S>)`` reads where it reads
+    it (:meth:`_Held.read_at`): tied by a binding the two share, as the same text elsewhere is another value.
+
+    A local the line names holds it where a binding of the local reaching the line is one that holds the value
+    there: ``killJob``'s ``currentTime = naive_utcnow()``.  ``upsert_workflow_entities`` writes the ``workflow_id``
+    it bound from the insert, and its last line, past the merge with the parameter, logs that binding; the lines
+    above the insert log the parameter, which the write never reads.  ``getOutputFiles_JEDI``'s ``fileDatasetID =
+    int(val)`` is not the ``int(val)`` its file ID is written from, ``updateWorkers``' ``panda_id`` of the rows it
+    reads back is not the one of the loop it writes in, and ``insertFilesForDataset_JEDI``'s ``dsStateInDB`` is
+    another slot of the one unpacking that binds the ``nFilesToUseDS`` it writes.  An expression holds it where
+    every local it reads shares a binding with the read; one that reads no local -- a call -- is another
+    evaluation, never the value read.
+    """
+    if isinstance(shown, ast.Name):
+        here = held.sites(shown.id, at)
+        for spelling, lines in spelled.items():
+            for line in lines:
+                read = held.read_at(spelling, line)
+                if read is not None and _share(here, read.holders.get(shown.id, ())):
+                    return True
+        return False
+    text = ast.unparse(shown)
+    if text not in spelled:
+        return False
+    names = sorted({one.id for one in walk(shown) if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)})
+    names = [name for name in names if held.is_local(name)]
+    if not names:
+        return False
+    for line in spelled[text]:
+        read = held.read_at(text, line)
+        if read is not None and all(_share(held.sites(name, at), held.sites(name, read.place)) for name in names):
+            return True
+    return False
+
+
+def _share(one: tuple[ast.AST, ...], other: tuple[ast.AST, ...]) -> bool:
+    return any(site is seen for site in one for seen in other)
+
+
+def _own_expressions(statement: ast.stmt) -> list[ast.expr]:
+    """The expressions *statement* itself reads, not those of the statements in its body nor its targets."""
+    found: list[ast.expr] = []
+    todo = [child for child in ast.iter_child_nodes(statement) if not isinstance(child, ast.stmt)]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, ast.expr) and not isinstance(getattr(node, "ctx", None), (ast.Store, ast.Del)):
+            found.append(node)
+        todo.extend(child for child in ast.iter_child_nodes(node) if not isinstance(child, ast.stmt))
+    return found
+
+
+class _Read(NamedTuple):
+    """Where a branch recorded as ``runtime(<S>)`` reads its value (:meth:`_Held.read_at`)."""
+
+    #: the statement that reads *S* itself: the branch's own, or the one binding that binds a local it reads whole
+    #: to *S*
+    place: ast.AST
+    #: each local that holds the value there, and the bindings of it that do
+    holders: dict[str, tuple[ast.AST, ...]]
+
+
+class _Held:
+    """What a function's lines hold, read once per function: the bindings of a local that reach a statement
+    (:func:`pathcond.held_at`, the function's entry among them), and where a branch reads the value it spells."""
+
+    def __init__(self, func: ast.FunctionDef | ast.AsyncFunctionDef, settle) -> None:
+        self.func = func
+        self.settle = settle
+        self._sites: dict[tuple[str, int], tuple[ast.AST, ...]] = {}
+        self._reads: dict[tuple[str, Optional[int]], Optional[_Read]] = {}
+        self._lines: Optional[dict[int, ast.stmt]] = None
+        self._locals: Optional[set[str]] = None
+
+    def sites(self, name: str, at: ast.AST) -> tuple[ast.AST, ...]:
+        """The bindings of *name* that can be what *at* reads."""
+        key = (name, id(at))
+        if key not in self._sites:
+            self._sites[key] = held_at(self.func, name, at).sites
+        return self._sites[key]
+
+    def is_local(self, name: str) -> bool:
+        """Whether *name* is a parameter of the function or bound in it."""
+        if self._locals is None:
+            arguments = self.func.args
+            self._locals = {one.arg for one in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]}
+            self._locals |= {one.arg for one in (arguments.vararg, arguments.kwarg) if one is not None}
+        return name in self._locals or any(not one.nested for one in bindings(self.func, name))
+
+    def read_at(self, spelled: str, line: Optional[int]) -> Optional[_Read]:
+        """Where a branch on *line* recorded as ``runtime(<spelled>)`` reads its value, and which locals hold it there.
+
+        The statement on *line*, where it binds the name *spelled* -- an unpacking's slot, a loop's target: that
+        binding holds it -- or reads *spelled* itself: a name read there is held by its bindings reaching it, an
+        expression by the names the statement binds whole to it.  Else the one binding reaching it of a local it
+        reads, where that binding binds the local whole to *spelled* -- the binding the branch was spelled through
+        (:func:`pathcond.reaching_values`).  The text is matched within that one statement, where two expressions
+        alike read the same bindings.  None where neither."""
+        key = (spelled, line)
+        if key not in self._reads:
+            self._reads[key] = self._read_at(spelled, line)
+        return self._reads[key]
+
+    def _read_at(self, spelled: str, line: Optional[int]) -> Optional[_Read]:
+        if self._lines is None:
+            self._lines = {}
+            for node in walk(self.func):
+                if isinstance(node, ast.stmt):
+                    self._lines.setdefault(node.lineno, node)
+        statement = self._lines.get(line) if line is not None else None
+        if statement is None:
+            return None
+        expressions = _own_expressions(statement)
+        named = spelled.isidentifier()
+        if named and any(one.site is statement and not one.nested for one in bindings(self.func, spelled)):
+            return _Read(statement, {spelled: (statement,)})
+        if named and any(isinstance(one, ast.Name) and one.id == spelled for one in expressions):
+            return _Read(statement, {spelled: self.sites(spelled, statement)})
+        if not named and any(ast.unparse(one) == spelled for one in expressions):
+            value = written_value(statement)
+            whole = value is not None and ast.unparse(value) == spelled
+            targets = [one.id for one in targets_of(statement) if isinstance(one, ast.Name)] if whole else []
+            return _Read(statement, dict.fromkeys(targets, (statement,)))
+        for name in sorted({one.id for one in expressions if isinstance(one, ast.Name)}):
+            reached = reaching_values(self.func, name, self.settle, statement)
+            if (
+                len(reached) == 1
+                and not reached[0].values
+                and reached[0].expression is not None
+                and reached[0].site is not None
+                and ast.unparse(reached[0].expression) == spelled
+            ):
+                site = reached[0].site
+                holders: dict[str, tuple[ast.AST, ...]] = {name: (site,)}
+                if named:
+                    holders[spelled] = self.sites(spelled, site)
+                return _Read(site, holders)
+        return None
 
 
 def _about(branch, named: set[str], names_value: bool, reports: str) -> bool:
@@ -319,15 +479,15 @@ def attach(
             if not logged:
                 continue
             counts = _row_counts(func)
+            held = _Held(func, settle)
             for junction in here:
                 spec_class, _, attribute = junction.subject.rpartition(".")
-                outcomes = {b.outcome for b in junction.branches}
                 for at_call, message in logged:
                     template = values.rendered_text(message)
                     named = values.decision_tags(template) if template else set()
                     names_value = _names_the_value(
                         message, func, owner, attributor, spec_class, attribute,
-                        outcomes, settle,
+                        junction.branches, settle, held,
                     )
                     if _reports_rows(message, counts):
                         reports = REPORTS_ROWS_CHANGED
