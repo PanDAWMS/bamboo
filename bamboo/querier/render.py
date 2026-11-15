@@ -283,7 +283,7 @@ TEMPLATES: dict[str, str] = {
     "the-same-tables": "the walk's stop and this call to name the same tables (the stop: {named}, the call: {at_call}){unread}",
     "and-read-every-proxy-method": " and read every proxy method (the stop does not read {named_unread})",
     "the-where-and-binds-of-the-call": "the WHERE and binds of the call that moved it on{failure}",
-    "lost-on-order": "lost on order: {where} returns the first rows of {other!r} or of {took!r}; under the first, at the move ({moved}) {total} row(s){mine_rank} at the call's WHERE held {observed!r} ahead of it ({how}){at_least}; its group left {observed!r}: {left} (this row to {next_value!r}){as_now}; the calls that passed it over are not read (their orders and binds); the call that took it used {took!r}",
+    "a-count-under-the-order-that-took-it": "a count of the rows ahead of it under {took!r}, the order the call that took it sorted by (KNOWN_ISSUES.md K48: not built)",
     "at-least-within-an-hour": " -- at least: the earliest entry counted, {first}, is within an hour of the lookback {lookback}",
     "read-as-now": "; read as now: {as_now:join=, }",
     "ends": "END {ends:join=\nEND }",

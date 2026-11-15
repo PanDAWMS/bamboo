@@ -6601,7 +6601,7 @@ def test_a_collection_the_rows_file_lacks_is_asked_by_its_rows_class_key_and_att
                       "step": "R2", "why": "@7 f loops over <job>.Files, which the rows file does not have"}]
 
 
-def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_the_key_and_the_key_within(tmp_path):
+def test_l3_asks_the_rows_ahead_under_the_order_that_took_the_row_and_counts_the_other_only_beside(tmp_path):
     out = _ok(
         _run(
             tmp_path,
@@ -6616,8 +6616,11 @@ def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_th
     R.function = lambda rel, func, within=(): N(rows=[N(line=12, matches=lambda rec, mode: (1, ""))])
     rerun.sqltext.cut = lambda text, lead, gap: (text, {":s": "activated", ":site": "pic", ":rt": "SCORE"})
     rerun.Rerun._row_of = lambda self, cls: {"PandaID": {"value": 7}, "currentPriority": {"value": 100}}
-    held = "q@10 held 'activated' at the move, by the order's items before the key"
-    left = "q@10 left 'activated' in the window, by the value it went to and the key"
+
+    def names(order=None):
+        under = f", under {order!r}" if order else ""
+        return (f"q@10 held 'activated' at the move{under}, by the order's items before the key",
+                f"q@10 left 'activated' in the window{under}, by the value it went to and the key")
 
     def run(took, other, answers=None, where=plain):
         r.lines, r.ends, r.rows_asks = [], [], {}
@@ -6627,10 +6630,10 @@ def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_th
         record = N(text=sql.format(where, took), span="a.log@1", stamp="2026-01-05 00:00:00,000")
         try:
             r.ordered(rerun.Ordered(st, N(records=[record]), q))
-            return ["END", f"END {r.ends[-1][1]}"]
+            return ["END", r.ends[-1][1], [], r.lines]
         except rerun.Stop as e:
             return ["STOP", str(e), [a["rows"]["question"] | {"name": a["rows"]["name"]} for a in r.rows_asks.values()],
-                    next((x for x in r.lines if "the row sorts by" in x), None)]
+                    r.lines]
 
     def at(*groups, first="2026-01-02 00:00:00"):
         return {"source": "the hand's SQL", "rows": [
@@ -6639,58 +6642,81 @@ def test_l3_counts_the_rows_held_ahead_at_the_move_by_the_orders_items_before_th
     window = {"source": "the hand's SQL", "rows": [
         {"next_value": "sent", "currentpriority": 100, "n": 3, "n_key_ahead": 1, "min_h": 1, "median_h": 1.5, "max_h": 2}]}
     groups = [(200, 5, 3, 0), (100, 4, 2, 1), (50, 9, 9, 0)]
-    alone = run("currentpriority desc, pandaid asc", "pandaid asc")
-    # the items after the key decide nothing: modificationtime is no group
-    grouped = run("pandaid asc", "currentpriority desc, pandaid asc, modificationtime asc", {held: at(*groups), left: window})
-    keyless = run("pandaid asc", "currentpriority desc", {held: at(*groups), left: window})
+    by_prio = "currentpriority desc, pandaid asc"
+    old = names()
     print(json.dumps({
-        "alone": alone,
-        "grouped": grouped,
-        "keyless": keyless,
-        "least": run("pandaid asc", "currentpriority desc, pandaid asc", {held: at(*groups, first="2025-12-28 00:30:00"), left: window}),
-        "not self": run("pandaid asc", "currentpriority desc, pandaid asc", {held: at((100, 4, 2, 0), (50, 1, 1, 1)), left: window}),
-        "lacking": run("pandaid asc", "currentpriority desc, pandaid asc",
-                       {held: {"source": "s", "rows": [{"currentpriority": 100, "n": 4}]}, left: window}),
-        "mixed": run("pandaid asc", "currentpriority desc, pandaid asc",
-                     where="(jobStatus=:s OR computingSite=:site) AND resource_type=:rt"),
+        "unanswered": run(by_prio, "pandaid asc"),
+        # the items after the key decide nothing: modificationtime is no group
+        "beside old": run("pandaid asc", by_prio + ", modificationtime asc", {old[0]: at(*groups), old[1]: window}),
+        "beside": run("pandaid asc", by_prio, dict(zip(names(by_prio), (at(*groups), window)))),
+        "taken": run("pandaid asc", by_prio, dict(zip(names("pandaid asc"), (at((100, 4, 2, 1)), window)))),
+        "keyless": run("pandaid asc", "currentpriority desc", {old[0]: at(*groups), old[1]: window}),
+        "least": run("pandaid asc", by_prio, {old[0]: at(*groups, first="2025-12-28 00:30:00"), old[1]: window}),
+        "not self": run("pandaid asc", by_prio, {old[0]: at((100, 4, 2, 0), (50, 1, 1, 1)), old[1]: window}),
+        "lacking": run("pandaid asc", by_prio, {old[0]: {"source": "s", "rows": [{"currentpriority": 100, "n": 4}]}, old[1]: window}),
+        "mixed": run("pandaid asc", by_prio, where="(jobStatus=:s OR computingSite=:site) AND resource_type=:rt"),
     }))
     """,
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # an order of the key alone is one group: the two questions asked, by their structure beside the SQL; the terms on
-    # the subject go (the history's value stands for them), those on a column the history holds are read at the move,
-    # the others on the row as it is now
-    kind, why, asks, sorts = got["alone"]
+
+    def names(order=None):
+        under = f", under {order!r}" if order else ""
+        return [f"q@10 held 'activated' at the move{under}, by the order's items before the key",
+                f"q@10 left 'activated' in the window{under}, by the value it went to and the key"]
+
+    def beside(case):
+        lines = got[case][3]
+        at = next(i for i, x in enumerate(lines) if ", beside (no call is shown to have sorted by it)" in x)
+        return lines[at:]
+
+    # the two questions asked under the order of the call that took the row, the order in their names, by their
+    # structure beside the SQL; the terms on the subject go (the history's value stands for them), those on a column
+    # the history holds are read at the move, the others on the row as it is now
+    kind, why, asks, lines = got["unanswered"]
     assert kind == "STOP" and why.startswith("L3: the answers to")
-    assert sorts.startswith("  under 'pandaid asc' the row sorts by its key alone, pandaid asc -> ")
+    assert [x for x in lines if "the row sorts by" in x] == [
+        "  under 'currentpriority desc, pandaid asc' (the call that took it sorted by it) the row sorts by currentpriority "
+        "desc -> 100; then its key pandaid asc -> 7",
+        "  under 'pandaid asc' (no call is shown to have sorted by it) the row sorts by its key alone, pandaid asc -> 7"]
     at_ask, left_ask = asks
-    assert at_ask["name"] == "q@10 held 'activated' at the move, by the order's items before the key"
-    assert at_ask["part"] == "H held at" and at_ask["group_by"] == [] and at_ask["key_order"] == "asc"
+    assert [at_ask["name"], left_ask["name"]] == names("currentpriority desc, pandaid asc")
+    assert at_ask["part"] == "H held at" and at_ask["key_order"] == "asc"
     assert at_ask["at"] == "2026-01-05 00:00:00" and at_ask["lookback"] == "2025-12-28 00:00:00"
     assert at_ask["terms_at"] == ["computingSite='pic'"] and at_ask["terms_now"] == ["resource_type='SCORE'"]
-    assert at_ask["columns"] == ["n", "n_key_ahead", "n_self", "first_entered"]
-    assert left_ask["part"] == "H moved on" and left_ask["columns"] == ["next_value", "n", "n_key_ahead", "min_h", "median_h", "max_h"]
-    assert left_ask["terms_at"] == ["computingSite='pic'"] and left_ask["terms_now"] == ["resource_type='SCORE'"]
-    # grouped by the items before the key, the key ranking within its own group: 5 in the group ahead, 2 of its own
-    kind, end = got["grouped"]
-    assert kind == "END" and end == (
-        "END lost on order: q@10 returns the first rows of 'currentpriority desc, pandaid asc, modificationtime asc' or of "
-        "'pandaid asc'; under the "
-        "first, at the move (2026-01-05 00:00:00) 7 row(s) at the call's WHERE held 'activated' ahead of it (5 in groups "
-        "ahead, 2 of its own group's 4 with a key ahead); its group left 'activated': 3 to sent after 1-2 h (1 with a key "
-        "ahead) (this row to 'sent'); read as now: resource_type='SCORE', the order's currentpriority; the calls that "
-        "passed it over are not read (their orders and binds); the call that took it used 'pandaid asc'")
+    assert at_ask["columns"] == ["currentpriority", "n", "n_key_ahead", "n_self", "first_entered"]
+    assert left_ask["part"] == "H moved on" and left_ask["terms_now"] == ["resource_type='SCORE'"]
+    # the other order is never asked: no call is shown to have sorted by it
+    assert "  under 'pandaid asc': not counted, nor asked (no answer in the rows file; no call is shown to have sorted by it)" in lines
+    # answered under the names L3 gave its questions when it counted that order alone, it is counted beside -- grouped
+    # by the items before the key, the key ranking within its own group: 5 in the group ahead, 2 of its own -- and the
+    # run still stops for the order that took the row, its questions asked
+    kind, why, asks, _ = got["beside old"]
+    assert kind == "STOP" and why.startswith("L3: the answers to") and [a["name"] for a in asks] == list(names("pandaid asc"))
+    assert beside("beside old")[-1] == (
+        "    at the move 7 row(s) ahead of it (5 in groups ahead, 2 of its own group's 4 with a key ahead); its group left "
+        "'activated': 3 to sent after 1-2 h (1 with a key ahead); read as now: resource_type='SCORE', the order's "
+        "currentpriority -- not why it waited: no call is shown to have sorted by it")
+    # under the names that hold the order the same
+    assert beside("beside")[-1] == beside("beside old")[-1]
+    # the order that took the row answered: its count is not built, no END and nothing asked
+    kind, why, asks, _ = got["taken"]
+    assert (kind, asks) == ("STOP", []) and why == (
+        "L3: a count of the rows ahead of it under 'pandaid asc', the order the call that took it sorted by "
+        "(KNOWN_ISSUES.md K48: not built)")
     # an order without the key: its ties are in an order the database picks, and none of its own group is counted ahead
-    assert "(5 in groups ahead, its own group's 4, their order among them not known)" in got["keyless"][1]
+    assert "(5 in groups ahead, its own group's 4, their order among them not known)" in beside("keyless")[-1]
     # an earliest entry within an hour of the lookback: "at least"
-    assert "-- at least: the earliest entry counted, 2025-12-28 00:30:00, is within an hour of the lookback" in got["least"][1]
-    # the row itself not in its own group: a term read as now fails for it
-    assert got["not self"][:2] == ["STOP", "L3: the row itself, once, in its own group of those that held 'activated' at "
-                                   "the move under the call's WHERE (the answer counts it 0 time(s) there, 1 in all; the "
-                                   "terms read on the row as it is now: [\"resource_type='SCORE'\"])"]
-    assert got["lacking"][1].startswith("L3: the answer to \"q@10 held 'activated' at the move, by the order's items before "
-                                        "the key\" holding the column(s) ['n_key_ahead', 'n_self', 'first_entered']")
+    assert "-- at least: the earliest entry counted, 2025-12-28 00:30:00, is within an hour of the lookback" in beside("least")[-1]
+    # an answer that does not hold is said, not counted, and stops nothing of its own
+    assert beside("not self")[-1] == (
+        "    not counted: the row itself, once, in its own group of those that held 'activated' at the move under the "
+        "call's WHERE (the answer counts it 0 time(s) there, 1 in all; the terms read on the row as it is now: "
+        "[\"resource_type='SCORE'\"])")
+    assert got["not self"][1].startswith("L3: the answers to")
+    assert beside("lacking")[-1].startswith("    not counted: the answer to \"q@10 held 'activated' at the move, by the "
+                                            "order's items before the key\" holding the column(s) ['n_key_ahead', 'n_self', 'first_entered']")
     # a term reading the subject with another column: neither the moment nor now reads it alone
     assert got["mixed"][1] == ("L3: a term of the call's WHERE on JobSpec.jobStatus alone, which the history's value stands "
                                "for ((jobStatus='activated' OR computingSite='pic') reads ['computingsite'] too)")
