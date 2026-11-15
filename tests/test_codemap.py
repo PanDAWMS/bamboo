@@ -55,7 +55,7 @@ from bamboo.codemap.models import (
     required_values,
     writes_its_value,
 )
-from bamboo.codemap.panda import attribution, promotion, sql, sqltext
+from bamboo.codemap.panda import attribution, heldfrom, promotion, sql, sqltext
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -20567,6 +20567,70 @@ def test_a_where_term_built_from_a_maps_keys_is_a_term_for_each_key_its_callers_
 
 #: A term whose binds a parameter fills (``status IN (:old___in)`` from *oldStatus*), and a caller handing it a list
 #: of literals a spec's method returns, and one more.
+_PARAMETER_TERM = '''
+class TaskModule:
+    def updateTaskOld_JEDI(self, taskSpec: JediTaskSpec, jediTaskID, oldStatus=None):
+        varMap = taskSpec.valuesMap(useSeq=False, onlyChanged=True)
+        varMap[":jediTaskID"] = jediTaskID
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} WHERE jediTaskID=:jediTaskID "
+        if oldStatus is not None:
+            names, old_map = get_sql_IN_bind_variables(oldStatus, prefix=":old_", value_as_suffix=True)
+            sql += f"AND status IN ({names}) "
+            varMap.update(old_map)
+        self.cur.execute(sql + comment, varMap)  # RUN
+'''
+
+_PARAMETER_CALLER = '''
+from pandaserver.taskbuffer.Specs import JediTaskSpec
+from pandaserver.taskbuffer.db_proxy_mods.task_module import TaskModule
+
+
+class Generator:
+    def __init__(self, proxy: TaskModule):
+        self.proxy = proxy
+
+    def run(self, taskSpec: JediTaskSpec):
+        self.proxy.updateTaskOld_JEDI(taskSpec, taskSpec.jediTaskID, oldStatus=JediTaskSpec.statusToUpdateContents() + ["pending"])
+'''
+
+
+def test_a_term_a_parameter_fills_points_at_what_each_call_hands_the_parameter(tmp_path):
+    """``updateTask_JEDI``'s ``status IN (:old___in)`` is filled from its *oldStatus*: the KeyFrom's source ends at the
+    parameter, and points at its ParameterFrom (:func:`sqlwrite.parameter_ends`), read with the guards' -- what
+    ``JobGenerator`` hands it, a spec method's list of literals and one more, element by element."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    caller = "pandajedi/jediorder/Generator.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path,
+        {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _PARAMETER_TERM, caller: _PARAMETER_CALLER},
+    )
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    trees = {module.rel_path: module.tree for module in modules}
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources([], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules)
+        ends = sqlwrite.parameter_ends(froms)
+        _guards, parameters, *_rest = heldfrom.guard_froms(
+            junctions, sites, trees, calls, record, parameters=ends
+        )
+    def_line = next(n for n, line in enumerate(_PARAMETER_TERM.split("\n"), 1) if "def updateTaskOld_JEDI" in line)
+    owner = f"{rel}::updateTaskOld_JEDI"
+    (term,) = [one for one in froms if one.owner == owner and one.term.startswith("status IN")]
+    assert [(s.kind, s.name, s.site_owner, s.site_line) for s in term.sources] == [
+        ("parameter", "oldStatus", owner, def_line)
+    ]
+    (old,) = [one for one in parameters if one.owner == owner and one.parameter == "oldStatus"]
+    assert old.line == def_line
+    assert sorted(s.name for s in old.sources if s.kind == "constant") == ["'defined'", "'pending'", "'ready'"]
+
+
+#: insertNewJob's INSERT of a job handed in, keyed by its PandaID; archiveJob's move; and an INSERT keyed by a field the
+#: function itself assigns on the object it was handed, ppEventServiceJob's jobParamsTable row.
 _READ_TWICE = '''
 class TaskModule:
     def countTasks(self, vo):

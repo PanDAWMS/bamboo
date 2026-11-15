@@ -788,6 +788,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
+        # The parameters the key records' sources end at, each pointed at its ParameterFrom: read with the guards'.
+        key_parameters = sqlwrite.parameter_ends(fragment.key_froms)
         lap("key sources")
         # Where each function holding an arm is entered from, the tests each way in sits under, and why those may not
         # be every way: a reader rules an arm out by them, reading their names with the GuardFroms below.
@@ -829,6 +831,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             writes,
             reader=values,
             entered=fragment.entered_froms,
+            parameters=key_parameters,
             fields=runnable.condition_fields(
                 fragment.junctions,
                 {module.rel_path: module.tree for module in self._modules},

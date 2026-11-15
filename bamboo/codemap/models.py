@@ -3351,13 +3351,19 @@ class KeySource(BaseModel):
     site_owner: str = Field(
         default="",
         description=(
-            "``rows`` / ``sequence``: the statement's owner.  On a :class:`HeldSource`, ``self_field``: the class whose "
-            "method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
+            "``rows`` / ``sequence``: the statement's owner.  ``parameter``: the function handed it, as "
+            ":class:`ParameterFrom` names it (``file::name``) -- where what each call hands it is found, on a "
+            ":class:`KeyFrom`'s source as on a :class:`HeldSource`.  On a :class:`HeldSource`, ``self_field``: the "
+            "class whose method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
             ":class:`FieldFrom` of a field of it is found; empty where the ``self`` is no method's."
         ),
     )
     site_line: Optional[int] = Field(
-        default=None, description="``rows`` / ``sequence``: the line the statement runs on."
+        default=None,
+        description=(
+            "``rows`` / ``sequence``: the line the statement runs on.  ``parameter``: the line of the function's "
+            "``def``, its :attr:`ParameterFrom.line`."
+        ),
     )
     paths: list[str] = Field(
         default_factory=list,

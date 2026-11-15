@@ -2267,6 +2267,14 @@ class _Reader:
                 values, _stays = held_elements(source, rest[0])
                 self.queue(values, rest[1:])
 
+    def ask_parameter(self, file: str, func: ast.AST, name: str) -> HeldSource:
+        """Read the ParameterFrom of *func*'s parameter *name*: one a way of another reader ends at (a
+        :class:`KeyFrom`'s source, :func:`sqlwrite.parameter_ends`).  The way as this reader spells it, its
+        *site_owner* and *site_line* the ParameterFrom's."""
+        (source,), _stops = _said([self._parameter(file, func, name)])
+        self.queue([source])
+        return source
+
     def ask_field(self, owner: str, field: str) -> None:
         """Read the FieldFrom of *owner*'s *field*: one a guard reading ``self.<field>`` off ``self`` names."""
         if owner:
@@ -3374,6 +3382,7 @@ def guard_froms(
     entered: Iterable[EnteredFrom] = (),
     fields: Iterable[tuple[str, str]] = (),
     reader: Optional[_Reader] = None,
+    parameters: Iterable[tuple[str, ast.AST, str]] = (),
 ) -> tuple[list[GuardFrom], list[ParameterFrom], list[SetFrom], list[WriteFrom], list[FieldFrom]]:
     """A :class:`GuardFrom` for each test on the way to each junction's arm, and to each site of *entered* (its
     :attr:`GuardFrom.calls`), and each name it reads (:func:`_names`); each of *writes*
@@ -3384,7 +3393,9 @@ def guard_froms(
     way of any ends at, and those reach; and a :class:`FieldFrom` for each field of a ``self`` or an object a way of
     any ends at -- its first step past the end, then the next ones past the FieldFroms' and ParameterFroms' ends --
     each field a test reads off ``self`` itself, and each of *fields*, ``(file::Class, field)``: the fields of
-    ``self`` the definitions the arms' conditions call read (:func:`runnable.condition_fields`).  Nothing without
+    ``self`` the definitions the arms' conditions call read (:func:`runnable.condition_fields`); and a
+    ParameterFrom for each of *parameters*, ``(file, function, parameter)``: where a :class:`KeyFrom`'s source ends
+    (:func:`sqlwrite.parameter_ends`), the per-call values of a statement's term.  Nothing without
     *calls* or *record*: the reading places calls and reads fetches by them.  *reader*: :func:`value_reader`'s,
     made here where none."""
     if calls is None or record is None:
@@ -3504,6 +3515,8 @@ def guard_froms(
                     guard.calls.append(site.line)
     for owner, field in fields:
         reader.ask_field(owner, field)
+    for file, func, name in parameters:
+        reader.ask_parameter(file, func, name)
     # The tests on the way to each place a way's object may be changed, as to an entered site's call: which change
     # a run made is read off them (``if is_fatal: self.result.set_fatal()``); and to each place a way ends at, the
     # source's own statement: which binding a run made is (``if (timeNow - modTime) > ...: ignoreTmpError = False``);

@@ -7646,6 +7646,33 @@ def attach_key_sources(
     return read
 
 
+def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str]]:
+    """``(file, function, parameter)`` for each parameter a KeyFrom's source ends at -- the function reading the
+    term's binds was handed the value there -- each once; and each such source pointed at the parameter's
+    :class:`ParameterFrom` (*site_owner*, *site_line*), as a GuardFrom's way is (:func:`heldfrom.owner_of`).  What
+    each call hands the parameter is then read once for every reader: ``updateTask_JEDI``'s ``status IN
+    (:old___in)`` from *oldStatus*, ``JobGenerator``'s ``statusForJobGenerator() + ['pending']``;
+    ``updateInFilesReturnPandaIDs``' ``dispatchDBlock=:dispatchDBlock`` from *dataset*, the Activator's."""
+    found: dict[tuple[str, int, str], tuple[str, ast.AST, str]] = {}
+    for key_from in key_froms:
+        if key_from._binds is None:
+            continue
+        func, file, _binds = key_from._binds
+        arguments = func.args
+        named = {
+            one.arg
+            for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg)
+            if one is not None
+        }
+        for source in key_from.sources:
+            if source.kind != KEY_PARAMETER or source.name not in named:
+                continue
+            source.site_owner = f"{file}::{func.name}"
+            source.site_line = func.lineno
+            found.setdefault((source.site_owner, func.lineno, source.name), (file, func, source.name))
+    return list(found.values())
+
+
 def attach_routes(key_froms: Iterable[KeyFrom], calls: Optional[Calls]) -> None:
     """Fill each KeyFrom's :attr:`~KeyFrom.routes`, :attr:`~KeyFrom.routes_open` and :attr:`~KeyFrom.out_on`: the
     routes of calls into its function, whether a call by the function's name is placed nowhere, and the routes on
