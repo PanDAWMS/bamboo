@@ -1405,6 +1405,24 @@ reads is the table between the act and the mover (tmaeno, 2026-11-15).  A stuck 
 window's end, the statuslog's as_of: none in it stops the branch the same way (MT-exhausted-stuck: no command row for
 the task from 08:31:31 to 13:58:02); a write in it with the value not moved on is not read here (U1 as before).
 
+*Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
+question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
+leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row
+that printed the column at the stay's start says none wrote it before the print (`Rerun._printed_held`): the print is
+a hole of the map's prints reading `.attr` of an object every write of which fills it from the row by its key
+(`which_ran.printed_row_column`, K71's reading; Watcher.run's `lastmod:` at 78), its runs asked by the key over the
+stay.  The turn's premises say the column held so up to the selection that took the row only where the print is at or
+after it; else the arms are named as before, the print said too.  (2) A caller asked by the key alone rules nothing
+out, except where the late question's statement it selects with has no cap and its loop over the rows prints a hole
+the map says holds the row's key, a statement of the loop's own body before any of the statement's exits
+(`Rerun._row_key_print`): from the statement's turn, every pass reaching it prints the key, so with no line holding it
+before the move, the moving pass was the first to reach it after the turn (END), and stuck, none to the window's end
+stops it (`Rerun._keyed_turn`).  A pass that stopped before the statement (an error before it) is not told from one
+that did not run, and is named.  Effect: none on the live 144 yet -- (2) needs the map to name copyArchive main's 354
+`Sent Watcher {id}` hole as JobSpec.PandaID (the map's RHC); simulated with that hole named, MJ-sent-late goes to END
+by (2) alone, its time column's arms named (on the old version (1) does not hold on peekJob's fill).  For the current
+version's cases (v88's NJ-sent), measured after their records round.
+
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
 A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's

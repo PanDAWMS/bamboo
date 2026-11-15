@@ -449,6 +449,12 @@ TEMPLATES: dict[str, str] = {
     "an-outside-writer-of-the-table": "{system} writes {table} too, with no log here",
     "a-waker-s-write-in-the-stay": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {before}, before {mover} moved it on: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
     "a-waker-s-write-in-the-window": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {until}, the window's end, with {mover} not having taken it: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
+    # M3(a)-2: a time column closed by a run of the row printing it; a pass reaching a selection told by its key line
+    "held-as-printed": "{column} held {value} until {at}: {where} printed it then on {machine}, of the row by its key, and the arms that may write it in the stay ({arms:join=, }) write the clock",
+    "for-a-print-of-the-column": "from {start} to {end}, for the key: {where}'s print of {column}",
+    "ran-at-the-first-pass-reaching-it-after-its-turn": "{caller} ran on the row at its first pass to reach {where} after its turn {turn}: {where} returns every row it holds (no cap), and a pass reaching it prints each row's key at {line} before any exit; no line of {caller}'s with the key from {turn} to {first}, its logs searched whole on every machine; premises: {premises:join=; }",
+    "a-pass-reaching-it-after-its-turn": "a pass of {caller} reaching {where} from its turn {turn} to {end}, the window's end: none -- each would print the row's key at {line}, and no line of {caller}'s holds it, its logs searched whole on every machine; premises: {premises:join=; } (KNOWN_ISSUES.md K55)",
+    "a-pass-stopped-before-it-not-told": "a pass that stopped before {where} (an error before it) is not told from one that did not run: its lines hold no key",
     "written-outside-too": "; {writers:join=, }",
     "written-here-alone": "",
     # U3: which call ran an arm with no guard of its own (KNOWN_ISSUES.md K56)

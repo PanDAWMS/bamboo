@@ -14554,3 +14554,122 @@ def test_waker_readers_take_a_movers_key_from_a_table_its_wakers_write(tmp_path)
     assert got["own_table"] is None, got
     assert got["no_insert"] is None, got
     assert got["none"] is None, got
+
+
+def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_pass_reached_the_selection(tmp_path):
+    """M3(a)-2: (1) a run of the row printing the time column at the stay's start says no arm wrote it before the
+    print, where every arm that may write it in the stay writes the clock -- Watcher.run's lastmod at 78; another value
+    printed, an arm writing something else, or a print outside the stay closes nothing.  The turn's premises say it
+    held so up to the selection that took the row only where the print is at or after it.  (2) A statement with no cap
+    whose loop over its rows prints each row's key before any exit (copyArchive main's 354 ``Sent Watcher {id}``):
+    after its turn a pass reaching it prints the key, so with none printing it before the move, the moving pass was
+    the first to reach it (END), and stuck, none to the window's end stops it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast
+            import datetime
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import stay_value as SV
+            from bamboo.querier import render as T
+
+            t = lambda s: datetime.datetime.fromisoformat(s)
+            # (1) the print closes the arms
+            hole = N(expression="str(job.modificationTime)", columns=[])
+            prints = [N(owner="a.py::W.run", statements=[N(line=78, rows=[N(holes=[hole], prefix_holes=[])], log_files=["w.log"])])]
+            RR.mapdump.fragment = lambda: N(function_prints=prints)
+            row = N(line=78, capture=lambda rec: {"str(job.modificationTime)": rec.value})
+            statement_at = RR.R.statement_at
+            RR.R.function = lambda rel, func, lines: N(node=None, row_at=lambda stmt: row)
+            RR.R.statement_at = lambda node, line: "stmt"
+            RR.R.claim = lambda xs: xs
+            RR.R.seen = lambda fn, p, mode: N(hits={78: [(0, None, None)]})
+            RR.printed_row_column = lambda fn, line, attr, keys: keys == {"pandaid"}
+            RR.of_mover = lambda run, owner: True
+            RR.passes_of = lambda fn, run, mode: ([run], "")
+
+            def held(value="2026-01-01 00:00:01", stamp="2026-01-01 00:59:59,500", outcome="runtime(naive_utcnow())"):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.args, r.mode, r.unanswered = [], N(key="7"), None, []
+                r._subject_writers = lambda s: [N(owner="b.py::updateJob", branches=[N(line=519, outcome=outcome)])]
+                r._key_columns = lambda s, k: {"JobSpec.PandaID"}
+                r.files_of = lambda owner, files, lines: files
+                r.logs = N(names=lambda files: files)
+                run = N(records=[N(stamp=stamp, value=value)], machine="h1.cern.ch")
+                r._ask = lambda key, to_hand, asking: ({"w.log": [run]}, [], {})
+                q = N(moved=t("2026-01-01 01:00:00"), subject="JobSpec.jobStatus")
+                found = SV.Before(False, ("getJob:1 with 2",), (), (), ("updateJob:519",), ())
+                got = r._printed_held("JobSpec.modificationTime", q, found, "2026-01-01 00:00:01")
+                return None if got is None else [str(got[0]), T.text(got[1])]
+            got = {"held": held(), "other value": held(value="2026-01-01 00:30:00"),
+                   "not the clock": held(outcome="passthrough(x)"), "after the move": held(stamp="2026-01-01 01:00:01,000")}
+            r = RR.Rerun.__new__(RR.Rerun)
+            said = T.Said("held-as-printed", {"column": "JobSpec.modificationTime", "value": "v", "where": "run:78",
+                                              "at": "a", "machine": "h1", "arms": ["updateJob:519"]})
+            printed = {"JobSpec.modificationTime": (t("2026-01-01 00:59:59.500"), said)}
+            assumed = {"JobSpec.modificationTime": ["updateJob:519"]}
+            got["premises"] = [[s.kind for s in r._held_premises(assumed, printed, until)]
+                               for until in ("2026-01-01 00:59:59,400", "2026-01-01 00:59:59,600")]
+            # (2) the loop prints each row's key before any exit
+            src = (
+                "def main(res):\\n"
+                "    for (id,) in res:\\n"
+                "        log(f'Sent Watcher {id}')\\n"
+                "        if id:\\n"
+                "            log(f'more {id}')\\n"
+                "        go(id)\\n"
+            )
+            node = ast.parse(src).body[0]
+            RR.R.function = lambda rel, func, lines: N(node=node)
+            RR.R.statement_at = statement_at
+
+            def key_print(columns, line=3, exits=()):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args = N(key="7")
+                r._key_columns = lambda s, k: {"JobSpec.PandaID"}
+                RR.R._prints_of = lambda owner, lines: N(statements=[N(line=line, rows=[N(holes=[N(expression="id", columns=columns)], prefix_holes=[])])])
+                st = N(rows_handled=[2, 6], exits=[N(line=x) for x in exits])
+                return r._row_key_print("c.py::main", st, "JobSpec.jobStatus")
+            got["key print"] = [key_print(["JobSpec.PandaID"]), key_print([]), key_print(["JobSpec.PandaID"], exits=(3,)),
+                                key_print(["JobSpec.PandaID"], line=5)]
+
+            def keyed(before, first):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.hop, r.hand, r.rests, r.ends, r.args = [], "U2", {}, [], [], N(key="7")
+                r._missed_q = N(subject="JobSpec.jobStatus", statements=[N(owner="c.py::main", result="rows", limits=[], line=1)])
+                r._row_key_print = lambda owner, st, subject: 3
+                r._turn = lambda st, q, at=None: (t("2026-01-01 00:30:01") if at is None or at >= t("2026-01-01 00:30:01") else None,
+                                                  assumed, printed)
+                up = N(subject="JobSpec.jobStatus", window=("2026-01-01 00:00:01", "2026-01-01 01:00:00"), before=before)
+                moving = [N(first=first)] if first else []
+                try:
+                    done = r._keyed_turn(N(owner="c.py::main"), up, moving)
+                except RR.Stop as e:
+                    return ["stop", T.text(e.args[0])]
+                return [done, [T.text(w) for _, w in r.ends]]
+            got["late"] = keyed("2026-01-01 01:00:00", "2026-01-01 00:59:59,300")
+            got["before the turn"] = keyed("2026-01-01 01:00:00", "2026-01-01 00:20:00,000")
+            got["stuck"] = keyed(None, None)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["held"] == ["2026-01-01 00:59:59.500000",
+                           "JobSpec.modificationTime held 2026-01-01 00:00:01 until 2026-01-01 00:59:59.500: run:78 printed it "
+                           "then on h1, of the row by its key, and the arms that may write it in the stay (updateJob:519) write "
+                           "the clock"], got
+    assert got["other value"] is None and got["not the clock"] is None and got["after the move"] is None, got
+    assert got["premises"] == [["held-as-printed"], ["held-from-the-stay-s-start", "held-as-printed"]], got
+    assert got["key print"] == [3, None, None, None], got
+    late = got["late"]
+    assert late[0] is True and late[1][0].startswith("main ran on the row at its first pass to reach main@1 after its turn "
+                                                      "2026-01-01 00:30:01"), got
+    assert "premises: a pass that stopped before main@1" in late[1][0], got
+    # the print (00:59:59.500) is after the moving pass's start (00:59:59,300): the column held as printed, no arm named
+    assert "JobSpec.modificationTime held v until a" in late[1][0] and "held the value the stay began with" not in late[1][0], got
+    assert got["before the turn"] == [False, []], got
+    assert got["stuck"][0] == "stop" and "the window's end: none" in got["stuck"][1], got
