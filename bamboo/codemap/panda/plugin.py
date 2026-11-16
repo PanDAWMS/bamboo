@@ -53,6 +53,7 @@ from bamboo.codemap.panda import (
     flow,
     handlermarks,
     heldfrom,
+    messages,
     mustprints,
     objects,
     offrow,
@@ -865,6 +866,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
             ),
         )
+        # Each message a run sends and the function another run takes it with: beside reach, not in it.
+        fragment.message_edges = messages.edges(self._modules, self._calls, values)
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(

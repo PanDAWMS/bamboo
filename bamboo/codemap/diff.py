@@ -389,6 +389,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: the endpoints' records of the async requests' handlers -- see "
         "MapFragment.handlers; a dump's section compare reads them"
     ),
+    "message_edges": (
+        "records beside the nodes, not nodes: a message one run sends and the function another run takes it with -- "
+        "see MessageEdge; a dump's section compare reads them"
+    ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,

@@ -4298,6 +4298,42 @@ class CoverageStat(BaseModel):
         return self.explained / self.candidates if self.candidates else 1.0
 
 
+class MessageRead(BaseModel):
+    """Where a message's receiver binds a key of it: ``task_id = int(msg_dict["taskid"])`` at 109."""
+
+    key: str = Field(description="The message's key: ``taskid``.")
+    line: int = Field(description="The binding's line in the receiver.")
+    name: str = Field(description="The name it binds: ``task_id``.")
+
+
+class MessageEdge(BaseModel):
+    """A message one run sends and the function another run processes it with (:mod:`bamboo.codemap.panda.messages`).
+
+    ``ContentsFeeder`` 785 sends ``jedi_job_generator`` for ``jediTaskID``, and
+    ``JediJobGeneratorMsgProcPlugin.process`` takes only that type, binding ``task_id`` from ``taskid``.  Not an edge
+    of reach: the receiver runs in another process, on its own run's input (``cross_run_not_reach``); a reader goes
+    from the send to the receiver's run as from a row's writer to its read site.  Which receiver listens to which
+    queue is the deployment's: the edge says the receiver takes no other type.
+    """
+
+    sender: str = Field(description="The sending function, ``file::name``.")
+    line: int = Field(description="The send's line in it.")
+    msg_type: str = Field(description="The type it sends, as the call's literal: ``jedi_job_generator``.")
+    sent: dict[str, str] = Field(
+        default_factory=dict,
+        description="Each payload key, the expression the send hands it: ``{\"taskid\": \"jediTaskID\"}``.",
+    )
+    columns: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Each payload key whose value's ways end at a statement's rows, the columns there as the tables' classes "
+            "declare them: ``{\"taskid\": [\"JediTaskSpec.jediTaskID\"]}``; a key left out where no way does."
+        ),
+    )
+    receiver: str = Field(description="The function processing only this type, ``file::name``.")
+    reads: list[MessageRead] = Field(default_factory=list, description="Where the receiver binds each key it reads.")
+
+
 class MapFragment(BaseModel):
     """What one recognizer contributes to a build.
 
@@ -4392,6 +4428,13 @@ class MapFragment(BaseModel):
             "(:func:`bamboo.codemap.panda.endpoints.handlers`): one per request type its table names "
             "(``processor.HANDLERS``), *route* ``async/<type>``, *version* ``async``.  A request is a row an "
             "endpoint inserts; which endpoint inserts which type is not read here."
+        ),
+    )
+    message_edges: list[MessageEdge] = Field(
+        default_factory=list,
+        description=(
+            "Each send of a message of a literal type and the function taking only that type "
+            "(:func:`bamboo.codemap.panda.messages.edges`): a run's hand-on to another run, beside reach."
         ),
     )
     declaration_yields: dict[str, int] = Field(

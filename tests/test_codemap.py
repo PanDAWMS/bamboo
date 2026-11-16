@@ -55,7 +55,14 @@ from bamboo.codemap.models import (
     required_values,
     writes_its_value,
 )
-from bamboo.codemap.panda import attribution, heldfrom, promotion, sql, sqltext
+from bamboo.codemap.panda import (
+    attribution,
+    heldfrom,
+    messages,
+    promotion,
+    sql,
+    sqltext,
+)
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -22280,3 +22287,88 @@ def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_
     assert arms["lockedBy"] == [(lock, [])]
     assert arms["modificationTime"] == [(lock, [])]
     assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
+
+
+#: The proxy puts the type and the task into a message; the buffer hands its own on to it; the feeder sends.
+_MESSAGE_BUFFER = '''
+import json
+
+
+class Proxy:
+    def push(self, msg_type, task_id, data=None):
+        msg_dict = {}
+        msg_dict.update({"msg_type": msg_type, "taskid": task_id})
+        self.mq.send(json.dumps(msg_dict))
+
+
+class Buffer:
+    def __init__(self):
+        self.proxy = Proxy()
+
+    def push(self, msg_type, task_id):
+        return self.proxy.push(msg_type, task_id)
+'''
+
+_MESSAGE_FEEDER = '''
+from pkg.buffer import Buffer
+
+
+class Feeder:
+    def __init__(self, tb: Buffer):
+        self.tb = tb
+
+    def run(self, jediTaskID):
+        self.tb.push("job_generator", jediTaskID)
+        self.tb.push("contents_feeder", jediTaskID)
+'''
+
+_MESSAGE_PROCS = '''
+import json
+
+
+class GeneratorProc:
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        msg_type = msg_dict["msg_type"]
+        if msg_type != "job_generator":
+            raise RuntimeError(f"got unknown msg_type {msg_type}")
+        task_id = int(msg_dict["taskid"])
+        return task_id
+
+
+class AnyProc:
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        task_id = msg_dict["taskid"]
+        return task_id
+'''
+
+
+def test_a_message_sent_with_a_literal_type_is_joined_to_the_function_taking_only_that_type(tmp_path):
+    """``ContentsFeeder`` sends ``jedi_job_generator`` through the task buffer, which hands its type on to the proxy
+    that puts it into the message; ``JediJobGeneratorMsgProcPlugin.process`` takes only that type and binds
+    ``task_id`` from ``taskid``.  The send and the receiver are joined as a :class:`MessageEdge`, beside reach: the
+    receiver runs in another process.  A type no receiver takes only, and a receiver taking any type, join
+    nothing; the buffer's own call hands a name, not a type, and is no send."""
+    files = {
+        "pkg/buffer.py": _MESSAGE_BUFFER,
+        "pkg/feeder.py": _MESSAGE_FEEDER,
+        "pkg/procs.py": _MESSAGE_PROCS,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    edges = messages.edges(modules, calls)
+
+    assert [
+        (edge.sender, edge.line, edge.msg_type, edge.sent, edge.receiver, [(r.key, r.line, r.name) for r in edge.reads])
+        for edge in edges
+    ] == [
+        (
+            "pkg/feeder.py::run",
+            _at('"job_generator"', _MESSAGE_FEEDER),
+            "job_generator",
+            {"taskid": "jediTaskID"},
+            "pkg/procs.py::process",
+            [("taskid", _at('int(msg_dict["taskid"])', _MESSAGE_PROCS), "task_id")],
+        )
+    ]
