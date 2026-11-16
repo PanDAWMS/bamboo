@@ -49,6 +49,7 @@ from bamboo.codemap.models import (
     CoverageStat,
     DiagnosticTemplate,
     EnumerationWrite,
+    HandedParameter,
     JunctionNode,
     SourceModule,
     SubjectNode,
@@ -635,6 +636,8 @@ class Resolved(NamedTuple):
     cuts: tuple[int, ...] = ()
     #: A run-time value as a base plus an offset -- see ``Branch.amount``.
     amount: Optional[ConditionValue] = None
+    #: A parameter as the call hands it -- see ``Branch.handed``.
+    handed: Optional[HandedParameter] = None
 
 
 def _runtime(value: ast.expr) -> str:
@@ -780,12 +783,14 @@ def _unsettled(
     # be is kept beside it, read back through the locals that build it: that
     # is a bound on the text, not a claim about what kind of text it is.
     reading = values.value_reading(value, func)
+    written = values.written(value, func)
     return Resolved(
         _runtime(value),
         2,
         frames=tuple(reading.frames),
         cuts=tuple(reading.cuts),
-        amount=values.written_amount(value, func),
+        amount=written.amount,
+        handed=written.handed,
     )
 
 
@@ -1244,6 +1249,7 @@ def extract(
                             value_frames=list(resolved.frames),
                             value_cuts=list(resolved.cuts),
                             amount=resolved.amount,
+                            handed=resolved.handed,
                         )
                     )
         if candidates:

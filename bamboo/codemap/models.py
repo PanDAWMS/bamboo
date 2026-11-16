@@ -895,6 +895,37 @@ class CountPrint(BaseModel):
     )
 
 
+#: :attr:`HandedParameter.none`: the signature admits ``None``.
+NONE_ADMITS = "admits"
+#: The annotation names no ``None``.
+NONE_EXCLUDES = "excludes"
+#: No annotation.
+NONE_UNANNOTATED = "unannotated"
+
+
+class HandedParameter(BaseModel):
+    """A value a branch writes that is the writing function's parameter as the call hands it, and what the signature
+    says of ``None`` (:attr:`Branch.handed`).
+
+    ``getTasksToBeFinished_JEDI`` writes ``lockedBy`` with its parameter ``pid: str``: the arm writes the caller's
+    ``pid``, a ``str`` as the annotation says.  ``getTaskWithID_JEDI``'s ``pid: str | None = None`` admits ``None``,
+    so its arm may write ``NULL``.  An annotation is not checked when the code runs: ``excludes`` is what the
+    signature says, not what every caller passes.
+    """
+
+    name: str = Field(description="``<function>.<parameter>``, as :attr:`ConditionValue.base` spells a parameter.")
+    annotation: str = Field(default="", description="The annotation as written; ``\"\"`` where there is none.")
+    none: str = Field(
+        description=(
+            f"{NONE_ADMITS!r} where the annotation names ``None`` (``None``, ``Optional[...]``, ``X | None``, "
+            f"``Union[..., None]``), is ``Any`` or ``object``, or the default is ``None``; {NONE_UNANNOTATED!r} "
+            f"where there is no annotation, or a text one does not parse; {NONE_EXCLUDES!r} otherwise.  Read at the "
+            "annotation's top, a text one parsed, and a name not followed to what it names: an alias reads as "
+            "excluding."
+        )
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -1068,10 +1099,20 @@ class Branch(BaseModel):
             "A run-time value as an amount, the way a read site's condition value is one: a base -- a clock, or "
             "``<function>.<parameter>`` -- plus an offset.  ``updateTask_JEDI``'s ``taskSpec.modificationTime = "
             "timeNow - datetime.timedelta(hours=1)`` after ``timeNow = naive_utcnow()`` is kind ``bind``, base "
-            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written_amount`); a statement's own "
+            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written`); a statement's own "
             "``modificationTime=CURRENT_DATE-1`` is kind ``clock``, base ``CURRENT_DATE``, offset -86400.  So a "
             "reader holding the time the value was made reads the value.  ``None`` where the value reads as no "
             "base and offset (a constant the outcome states, a value only said), or as a parameter as it stands."
+        ),
+    )
+    handed: Optional[HandedParameter] = Field(
+        default=None,
+        description=(
+            "Where the value written is the writing function's parameter as the call hands it -- "
+            "``getTasksToBeFinished_JEDI``'s ``runtime(pid)`` -- that parameter and what its signature says of "
+            "``None`` (:func:`bamboo.codemap.values.written`), so a reader can tell an arm that writes a value from "
+            "one that may write ``NULL``.  Apart from ``amount``, which is ``None`` there.  ``None`` for any other "
+            "value, a local rebound before the write among them."
         ),
     )
     count_prints: list[CountPrint] = Field(
@@ -2030,8 +2071,12 @@ class ConditionValue(BaseModel):
     scale_seconds: Optional[float] = Field(
         default=None,
         description=(
-            "Seconds per unit of a bind amount the statement adds to a database "
-            "clock: ``CURRENT_DATE-:days`` is ``-86400`` times the bind's value."
+            "Seconds per unit of the one value an amount waits for, where the amount is that value times this "
+            "and nothing settled beside it: a bind amount the statement adds to a database clock -- "
+            "``CURRENT_DATE-:days`` is ``-86400`` times the bind's value -- or Python's clock less a ``timedelta`` "
+            "of a parameter -- ``naive_utcnow() - datetime.timedelta(minutes=timeLimit)`` is ``-60`` times "
+            "``timeLimit`` (``needs``).  ``None`` for any other amount: ``2 * timeLimit`` minutes, or an hour "
+            "beside it."
         ),
     )
     subject: str = Field(default="", description="A ``column`` side's subject, spelled as ``ConditionNode.subject``.")

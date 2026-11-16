@@ -4844,6 +4844,34 @@ def test_a_time_a_statement_writes_is_a_clock_plus_an_offset():
     assert amounts["nFiles"] == [None]
 
 
+def test_a_bind_filled_with_a_parameter_as_handed_says_what_its_signature_says_of_none():
+    """``varMap[':lockedBy'] = pid`` under ``pid: str | None = None`` writes the caller's ``pid``, which the signature
+    says may be ``None`` (:attr:`Branch.handed`), so the arm may write ``NULL``; ``newStatus: str`` says it is a
+    text.  The database's clock is no parameter."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID: int, newStatus: str, pid: str | None = None):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,lockedBy=:lockedBy,'\n"
+        "        sqlU += 'lockedTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        varMap[':status'] = newStatus\n"
+        "        varMap[':lockedBy'] = pid\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    handed = {
+        j.subject.split(".")[-1]: [
+            None if b.handed is None else (b.handed.name, b.handed.annotation, b.handed.none) for b in j.branches
+        ]
+        for j in junctions
+    }
+
+    assert handed["status"] == [("f.newStatus", "str", "excludes")]
+    assert handed["lockedBy"] == [("f.pid", "str | None", "admits")]
+    assert handed["lockedTime"] == [None]
+
+
 def test_a_bind_filled_with_a_non_string_constant_is_settled():
     """``varMap[':frozenTime'] = None`` is decided, and ``runtime(None)`` --
     which is what the slice used to record -- says it is not."""

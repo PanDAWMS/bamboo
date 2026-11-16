@@ -304,6 +304,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "rewrites_open",
     "unset_default",
     "amount",
+    "handed",
     "count_prints",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {

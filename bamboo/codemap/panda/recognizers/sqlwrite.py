@@ -130,6 +130,7 @@ from bamboo.codemap.models import (
     DiagnosticTemplate,
     EntityNode,
     GuardRead,
+    HandedParameter,
     HeldSource,
     JoinPair,
     JunctionNode,
@@ -1646,6 +1647,8 @@ class _Outcome(NamedTuple):
     cuts: tuple[int, ...] = ()
     #: A run-time value as a base plus an offset -- see ``Branch.amount``.
     amount: Optional[ConditionValue] = None
+    #: A parameter as the call hands it -- see ``Branch.handed``.
+    handed: Optional[HandedParameter] = None
 
 
 def _outcomes(
@@ -1748,7 +1751,7 @@ def _outcomes(
                                     chosen,
                                     tuple(reading.frames),
                                     tuple(reading.cuts),
-                                    values.written_amount(held, func),
+                                    *values.written(held, func),
                                 )
                             )
                     continue
@@ -1765,7 +1768,7 @@ def _outcomes(
                     site,
                     tuple(reading.frames),
                     tuple(reading.cuts),
-                    values.written_amount(value, func),
+                    *values.written(value, func),
                 )
             )
         if not found:
@@ -1939,7 +1942,7 @@ def _record(
         )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
-    for outcome, tier, node, extra, decided_at, frames, cuts, amount in outcomes:
+    for outcome, tier, node, extra, decided_at, frames, cuts, amount, handed in outcomes:
         tests = path_condition(node)
         # The early exits above the write, as arm_condition adds them, less what the value's own tests say.
         condition = tests + [one for one in exits_above(node) if one not in tests and one not in extra] + extra
@@ -1960,6 +1963,8 @@ def _record(
             if held.amount != amount:
                 # Two writes of one text that read as different amounts -- or one as none -- are one amount to neither.
                 held.amount = None
+            if held.handed != handed:
+                held.handed = None  # and two parameters, or one and another value, are neither's
             held.row_precondition = [term for term in held.row_precondition if term in guards]
             if decided_at.lineno != held.line and decided_at.lineno not in held.other_lines:
                 held.other_lines = sorted([*held.other_lines, decided_at.lineno])
@@ -1984,6 +1989,7 @@ def _record(
             value_frames=list(frames),
             value_cuts=list(cuts),
             amount=amount,
+            handed=handed,
         )
         known[(outcome, tuple(condition))] = branch
         junction.branches.append(branch)
@@ -3020,9 +3026,16 @@ def _bind_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue
     if value.constant:
         return ConditionValue(kind="bind", text=side.text, constant=value.constant)
     if value.base:
-        return ConditionValue(kind="bind", text=side.text, base=value.base, offset_seconds=value.offset, needs=list(value.needs))
+        return ConditionValue(
+            kind="bind",
+            text=side.text,
+            base=value.base,
+            offset_seconds=value.offset,
+            needs=list(value.needs),
+            scale_seconds=value.scale,
+        )
     if value.offset is None:
-        return ConditionValue(kind="bind", text=side.text, needs=list(value.needs))
+        return ConditionValue(kind="bind", text=side.text, needs=list(value.needs), scale_seconds=value.scale)
     return ConditionValue(kind="bind", text=side.text, constant=_number(value.offset))
 
 

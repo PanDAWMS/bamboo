@@ -2010,7 +2010,7 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     """The time a bind holds, read through the write that reaches it, and the logging calls a record can be cut by.
 
     ``timeLimit`` is written twice and the bind reads the second; the locked
-    time waits for the caller's ``time_limit``.  Of the three prints, two
+    time waits for the caller's ``time_limit``, 60 seconds back a unit of it.  Of the three prints, two
     hold the executed text and map -- one whole, one less its comment and
     after the ``execute`` -- and the third prints another map.
     """
@@ -2049,11 +2049,22 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     assert set(trees) == {"modificationTime<:t", "lockedTime IS NULL OR lockedTime<:l"}
     (limit,) = trees["modificationTime<:t"].items[0].items
     (value,) = limit.values
-    assert (limit.node, limit.op, value.base, value.offset_seconds) == ("compare", "<", "naive_utcnow", -604800.0)
+    assert (limit.node, limit.op, value.base, value.offset_seconds, value.scale_seconds) == (
+        "compare",
+        "<",
+        "naive_utcnow",
+        -604800.0,
+        None,
+    )
     locked = trees["lockedTime IS NULL OR lockedTime<:l"]
     assert [branch.items[0].node for branch in locked.items] == ["null", "compare"]
     (waits,) = locked.items[1].items[0].values
-    assert (waits.base, waits.offset_seconds, waits.needs) == ("naive_utcnow", None, ["pick.time_limit"])
+    assert (waits.base, waits.offset_seconds, waits.needs, waits.scale_seconds) == (
+        "naive_utcnow",
+        None,
+        ["pick.time_limit"],
+        -60.0,
+    )
     assert [(one.line, one.where, one.text, one.lead, one.gap) for one in statement.printed_by] == [
         (12, "before", "whole", "", ""),
         (14, "after", "without comment", "running sql: ", " "),

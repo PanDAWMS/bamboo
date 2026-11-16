@@ -274,3 +274,129 @@ def test_the_attribute_slice_records_a_time_written_as_a_clock_plus_an_offset():
     ]
     assert amounts["JediTaskSpec.frozenTime"] == [(12, None)]
     assert amounts["JediTaskSpec.startTime"] == [(13, None)]
+
+
+def _written(signature: str, body: str) -> values.Written:
+    """``values.written`` of the one ``job.t = ...`` write in ``def f(<signature>)``."""
+    source = f"def f({signature}):\n" + textwrap.indent(textwrap.dedent(body), "    ") + "\n"
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    (write,) = [
+        node for node in ast.walk(func) if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == "job.t"
+    ]
+    return values.written(write.value, func)
+
+
+@pytest.mark.parametrize(
+    ("body", "scale"),
+    [
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=p)", -60.0),
+        ("now = naive_utcnow()\njob.t = now - datetime.timedelta(hours=p)", -3600.0),
+        ("job.t = datetime.timedelta(seconds=p) + naive_utcnow()", 1.0),
+        ("job.t = naive_utcnow() + -datetime.timedelta(days=p)", -86400.0),
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=p, seconds=0)", -60.0),
+        # No one unit: an amount computed from the parameter, a second parameter, a settled amount beside it.
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=2 * p)", None),
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=p + 5)", None),
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=p, seconds=q)", None),
+        ("job.t = naive_utcnow() - datetime.timedelta(minutes=p, hours=1)", None),
+        ("job.t = naive_utcnow() - datetime.timedelta(hours=1) - datetime.timedelta(minutes=p)", None),
+        ("job.t = naive_utcnow() - 2 * datetime.timedelta(minutes=p)", None),
+    ],
+)
+def test_a_clock_less_a_timedelta_of_a_parameter_says_the_seconds_per_unit(body, scale):
+    """``naive_utcnow() - datetime.timedelta(minutes=timeLimit)`` is the clock less ``timeLimit`` times 60 seconds: a
+    reader holding the parameter's value from a run's print and the time the value was made reads the value.  The
+    unit is said only where the offset is the parameter times it and nothing else; any other form waits for its
+    parameters as before, the unit unsaid."""
+    amount = _written("p, q", body).amount
+
+    assert amount is not None
+    assert (amount.base, amount.offset_seconds, amount.needs[0], amount.scale_seconds) == (
+        "naive_utcnow",
+        None,
+        "f.p",
+        scale,
+    )
+
+
+@pytest.mark.parametrize(
+    ("signature", "handed"),
+    [
+        ("p: str", ("str", "excludes")),
+        ("p: int = 0", ("int", "excludes")),
+        ("p: list[Optional[int]]", ("list[Optional[int]]", "excludes")),
+        ("p: Union[int, str]", ("Union[int, str]", "excludes")),
+        ("p: str | None = None", ("str | None", "admits")),
+        ("p: Optional[int]", ("Optional[int]", "admits")),
+        ("p: typing.Union[int, None]", ("typing.Union[int, None]", "admits")),
+        ("p: 'str | None'", ("'str | None'", "admits")),
+        ("p: Any", ("Any", "admits")),
+        ("p: object", ("object", "admits")),
+        ("p: str = None", ("str", "admits")),
+        ("*, p: int | str | None", ("int | str | None", "admits")),
+        ("p", ("", "unannotated")),
+        ("p: 'str |'", ("'str |'", "unannotated")),
+    ],
+)
+def test_a_value_written_as_the_parameter_handed_says_what_its_signature_says_of_none(signature, handed):
+    """``lockedBy = pid`` writes the caller's ``pid``: no amount, but the signature says whether it can be ``None``
+    -- ``pid: str`` says not, ``pid: str | None = None`` says it can.  Read at the annotation's top: a list of
+    optionals is a list."""
+    written = _written(signature, "job.t = p")
+
+    assert written.amount is None
+    assert written.handed is not None
+    assert (written.handed.name, written.handed.annotation, written.handed.none) == ("f.p", *handed)
+
+
+@pytest.mark.parametrize(
+    ("body", "name"),
+    [
+        ("q = p\njob.t = q", "f.p"),
+        ("p = p.strip()\njob.t = p", None),
+        ("if g:\n    p = 'x'\njob.t = p", None),
+        ("job.t = p.strip()", None),
+    ],
+)
+def test_a_value_is_the_parameter_handed_only_where_the_call_value_is_all_that_reaches_it(body, name):
+    """A local holding the parameter is the parameter; one the function binds again, on any way to the write, holds
+    another value, and a value made from the parameter is not it."""
+    handed = _written("p: str, g: bool", body).handed
+
+    assert (handed.name if handed is not None else None) == name
+
+
+def test_a_branch_writing_a_parameter_as_handed_says_what_its_signature_says_of_none():
+    """The attribute slice's branches carry it (:attr:`Branch.handed`): ``taskSpec.lockedBy = pid`` under ``pid:
+    str``, ``taskSpec.userName = owner`` under ``owner: Optional[str] = None``; a value made from the parameter is
+    none."""
+    specs = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'lockedBy', 'userName', 'lockedTime')\n"
+    )
+    writer = (
+        "class W:\n"
+        "    def f(self, taskSpec, pid: str, owner: Optional[str] = None):\n"
+        "        taskSpec.lockedBy = pid\n"
+        "        taskSpec.userName = owner\n"
+        "        tmpTime = pid.upper()\n"
+        "        taskSpec.lockedTime = tmpTime\n"
+    )
+    modules = [
+        _module(specs, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(writer, "pandajedi/jediorder/W.py"),
+    ]
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, "panda", "v")
+    handed = {
+        j.subject: [
+            None if b.handed is None else (b.handed.name, b.handed.annotation, b.handed.none) for b in j.branches
+        ]
+        for j in junctions
+        if j.owner.startswith("pandajedi/jediorder/W.py")
+    }
+
+    assert handed["JediTaskSpec.lockedBy"] == [("f.pid", "str", "excludes")]
+    assert handed["JediTaskSpec.userName"] == [("f.owner", "Optional[str]", "admits")]
+    assert handed["JediTaskSpec.lockedTime"] == [None]
