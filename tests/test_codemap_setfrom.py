@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach
+from bamboo.codemap import gates, reach
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
@@ -476,4 +476,18 @@ def test_a_change_runs_after_the_write_too_only_where_the_loop_keeps_the_object(
     assert [(one.kind, one.key, one.before, one.either) for one in way.after] == [
         ("store", "'n'", [ref], [ref]),
         ("escaped", "*", [ref], [ref]),
+    ]
+
+
+def test_the_gates_over_the_ways_read_the_writes_ways_too(built: MapFragment) -> None:
+    """A SetFrom's ways are read on as a guard's are, so the gates over the ways check them: checkStatus's write of
+    ``:jobStatus`` ends at the parameter ``jobStatus`` as its guard does, and with the parameter's record left out
+    the gate names the write's way beside the guard's."""
+    assert gates.guard_parameters_are_read(built).passed
+    kept = [one for one in built.parameter_froms if not one.owner.endswith("::checkStatus")]
+    failures = gates.guard_parameters_are_read(built.model_copy(update={"parameter_froms": kept})).failures
+    parameter = f"{PROXY}::checkStatus:{_line('G9') - 2} jobStatus"
+    assert sorted(failures) == [
+        f"{PROXY}::checkStatus:{_line('G9') - 1} jobStatus: {parameter}",
+        f"{PROXY}::checkStatus:{_line('W9')} jobsactive4.jobstatus: {parameter}",
     ]

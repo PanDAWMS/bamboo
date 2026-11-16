@@ -1853,7 +1853,8 @@ def with_exits_are_read(fragment: MapFragment) -> GateResult:
 
 
 def _held_ways(fragment: MapFragment):
-    """Every way of the guards', writes' and parameters' records, and of what each change on a way stores."""
+    """Every way of the records holding ways (:class:`GuardFrom`, :class:`WriteFrom`, :class:`ParameterFrom`,
+    :class:`FieldFrom`, :class:`SetFrom`), and of what each change on a way stores."""
 
     def each(where: str, sources):
         for source in sources:
@@ -1872,6 +1873,8 @@ def _held_ways(fragment: MapFragment):
             yield from each(f"{field.owner}.{field.field} {binding.at}", binding.sources)
         for change in field.changes:
             yield from each(f"{field.owner}.{field.field} {change.at}", change.value)
+    for set_ in fragment.set_froms:
+        yield from each(f"{set_.owner}:{set_.statement} {set_.column}", set_.sources)
 
 
 def printed_holes_are_rows(fragment: MapFragment) -> GateResult:
@@ -1921,8 +1924,8 @@ def _printed_problem(printed, source, statements) -> str:
 
 
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a statement's rows names a read
-    site of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at a statement's rows names a read site
+    of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
     names = {site.name for site in fragment.read_sites}
     checked, failures = 0, []
     for where, source in _held_ways(fragment):
@@ -1942,9 +1945,8 @@ def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
 
 
 def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a parameter has the
-    ParameterFrom of that function and parameter: the reader reads on there, and a missing one would end the way
-    unsaid."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at a parameter has the ParameterFrom of
+    that function and parameter: the reader reads on there, and a missing one would end the way unsaid."""
     read = {(one.owner, one.line, one.parameter) for one in fragment.parameter_froms}
     checked, failures = 0, []
     for where, source in _held_ways(fragment):
@@ -1964,9 +1966,9 @@ def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
 
 
 def guard_fields_are_read(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom`, :class:`ParameterFrom`, :class:`WriteFrom` or :class:`FieldFrom` that
-    ends at ``self.<field>``, or at ``self`` or an object a corpus class builds with a field as its first step, has
-    the FieldFrom of that class and field: the reader reads on there, and a missing one would end the way unsaid."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at ``self.<field>``, or at ``self`` or
+    an object a corpus class builds with a field as its first step, has the FieldFrom of that class and field: the
+    reader reads on there, and a missing one would end the way unsaid."""
     from bamboo.codemap.panda.heldfrom import FIELD_STEP, end_path
 
     read = {(one.owner, one.field) for one in fragment.field_froms}
