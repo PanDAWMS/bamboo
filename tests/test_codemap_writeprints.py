@@ -143,6 +143,17 @@ SOURCES = {
                 varMap = odd.valuesMap(onlyChanged=True)
                 _logger.debug(sql + str(varMap))  # P6
                 self.cur.execute(sql, varMap)  # W6
+
+            def updateKeys(self, jediTaskID, lfn):
+                varMap = {":jediTaskID": jediTaskID, ":status": "ready"}  # A11
+                sql = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status"
+                for tmpKey in ["lfn"]:
+                    tmpMapKey = f":{tmpKey}"
+                    sql += f",{tmpKey}={tmpMapKey}"
+                    varMap[tmpMapKey] = lfn
+                sql += " WHERE jediTaskID=:jediTaskID"
+                _logger.debug(sql + str(varMap))  # P7
+                self.cur.execute(sql, varMap)  # W7
         """,
 }
 
@@ -300,10 +311,14 @@ def test_a_spec_s_map_key_form_is_read_from_its_valuesmap(tmp_path: Path) -> Non
 
 def test_a_write_s_print_is_one_whose_rows_hold_its_map_and_its_binds(built: MapFragment) -> None:
     """The gate: every print a record names is one of the function's prints whose rows print a map whole, every bind
-    a key of that map or of the object's, and the statement a KeyFrom's."""
+    a key of that map or of the object's, and the statement a KeyFrom's.  updateKeys makes ``:lfn`` in a loop, a key
+    the print's map holds as computed: such a map may hold any bind, so ``:lfn`` is inconclusive, not a failure."""
+    (keys,) = _of(built, "updateKeys")
+    assert sorted(bind.bind for bind in keys.binds) == [":lfn", ":status"]
     result = gates.write_prints_are_rows(built)
     assert result.passed, result.failures
-    assert result.checked == 3
+    assert result.checked == 4
+    assert result.inconclusive == [f"{PROXY}::updateKeys:{_line('W7')}: bind :lfn may be a computed key"]
     (one,) = _of(built, "updateStatus")
     wrong = one.model_copy(update={"binds": [*one.binds, WriteBind(column="JEDI_Tasks.nothing", bind=":nothing")]})
     others = [other for other in built.write_prints if other is not one]

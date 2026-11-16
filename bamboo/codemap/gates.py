@@ -1927,19 +1927,22 @@ def write_prints_are_rows(fragment: MapFragment) -> GateResult:
     """(i) Every print a :class:`WritePrint` names is a print statement of the map whose every row prints a map whole
     (its entries read), every bind a key that map holds -- or, where the record names the map's object, an entry of
     that object's ``valuesMap`` --, and its statement a :class:`KeyFrom`'s: the reader reads each bind's value off that
-    hole of a run's line."""
+    hole of a run's line.  A map with an entry whose key is made at run time (``setScoutJobData_JEDI``'s
+    ``varMap[tmpScoutKey]``, ``tmpScoutKey = f":{scoutKey}"`` in a loop) may hold any bind: a bind none of its spelled
+    keys is, is inconclusive, not a failure."""
     statements = {
         f"{node.owner.partition('::')[0]}:{statement.line}": statement
         for node in fragment.function_prints
         for statement in node.statements
     }
     keyed = {(one.owner, one.statement) for one in fragment.key_froms}
-    checked, failures = 0, []
+    checked, failures, unknown = 0, [], []
     for record in fragment.write_prints:
         checked += 1
-        problem = _write_print_problem(record, statements, keyed)
+        problem, open_binds = _write_print_problem(record, statements, keyed)
         if problem:
             failures.append(f"{record.owner}:{record.statement}: {problem}")
+        unknown += [f"{record.owner}:{record.statement}: bind {bind} may be a computed key" for bind in open_binds]
     return GateResult(
         gate="write-prints-are-rows",
         passed=not failures,
@@ -1948,27 +1951,36 @@ def write_prints_are_rows(fragment: MapFragment) -> GateResult:
         question="does a record of where a write's values print name a print, or a key, the print's rows do not hold?",
         finding="a write's values are said to print where the print's rows do not put them",
         failures=failures,
+        inconclusive=unknown,
     )
 
 
-def _write_print_problem(record, statements, keyed) -> str:
+def _write_print_problem(record, statements, keyed) -> tuple[str, list[str]]:
+    """The record's first problem, or ``""``; and the binds a key made at run time leaves open."""
     if (record.owner, record.statement) not in keyed:
-        return "the statement has no KeyFrom"
+        return "the statement has no KeyFrom", []
     file = record.owner.partition("::")[0]
+    open_binds: list[str] = []
     for printed in record.printed_by:
         statement = statements.get(f"{file}:{printed.line}")
         if statement is None:
-            return f"print {printed.line} is no print statement of the map"
+            return f"print {printed.line} is no print statement of the map", []
         for row in statement.rows or [None]:
             held = [hole for hole in row.holes if hole.entries is not None] if row is not None else []
             if not held:
-                return f"print {printed.line}: a row prints no map"
-            keys = {entry.key for hole in held for entry in hole.entries or () if entry.key and not entry.computed}
-            objects = {entry.row for hole in held for entry in hole.entries or () if entry.row}
+                return f"print {printed.line}: a row prints no map", []
+            entries = [entry for hole in held for entry in hole.entries or ()]
+            keys = {entry.key for entry in entries if entry.key and not entry.computed}
+            objects = {entry.row for entry in entries if entry.row}
+            computed = any(entry.computed for entry in entries)
             for bind in record.binds:
-                if bind.bind not in keys and not (record.object_map and record.object_map in objects):
-                    return f"bind {bind.bind} is no key of the printed map"
-    return ""
+                if bind.bind in keys or (record.object_map and record.object_map in objects):
+                    continue
+                if not computed:
+                    return f"bind {bind.bind} is no key of the printed map", []
+                if bind.bind not in open_binds:
+                    open_binds.append(bind.bind)
+    return "", open_binds
 
 
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
