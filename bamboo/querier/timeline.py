@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
+from typing import Any
 
 #: the bounds of a value nothing bounds
 LOW = datetime.datetime.min
@@ -93,11 +94,31 @@ class Timeline:
     #: a column tested ``IS NULL``: the arms read as writing a value they know only at run time, as one that is not
     #: None (``runtime(pid)``), "func:line" each
     premised: tuple[str, ...] = ()
+    #: the writes a print reached whose statement's guard the pass's printed values read false: not written, each
+    #: ``(at, "func:line", machine, the guard with its values)`` (bundle A, A-1)
+    not_run: tuple[tuple[datetime.datetime, str, str, Any], ...] = ()
+    #: arms writing the status from a value known only at run time whose write the records show as the stay began,
+    #: read as having written the value seen (A-3), "func:line" each
+    begun_runtime: tuple[str, ...] = ()
+    #: arms writing the status from a value known only at run time, in no function of an arm that may begin it with
+    #: the value itself, of which no write was read as it began: read, as M3(a)-1 reads them, as not having begun it --
+    #: a premise said with *begun_by* (A-3), "func:line" each
+    runtime_unread: tuple[str, ...] = ()
+    #: the row's value of the column as the rows file read it, where every arm of the column writes the clock with one
+    #: offset: ``(written at, the value, the arms, when it was read)`` -- the last write was then, and none since
+    #: (bundle A, A-4: P24, NT-scouting-late's assessmentTime 19:53:41 by prepareTasksToBeFinished_JEDI:3744 or
+    #: getAchievedTasks_JEDI:3283)
+    row_value: tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str] | None = None
+
+    def read(self) -> bool:
+        """Whether the records or the row read anything of the column: a write, an arm shown not to, the row's value."""
+        return bool(self.writes or self.absent or self.row_value)
 
     def pieces(self, assume: bool = False) -> list[tuple[datetime.datetime, datetime.datetime, datetime.datetime,
                                                           datetime.datetime, tuple[Opening, ...]]]:
         """``(from, to, lo, hi, opens)`` over [start, end], cut at each write read: the bounds the writes read leave,
-        and the arms that may write it in the piece (none where *assume* names them as having not)."""
+        and the arms that may write it in the piece (none where *assume* names them as having not).  From the row's
+        value's write on (*row_value*), the column holds that value and no arm writes it."""
         out = []
         lo, hi = self.first_assumed if assume else self.first
         at = self.start
@@ -109,7 +130,18 @@ class Timeline:
             lo, hi = (w.lo, w.hi) if w.how == RAN else (min(lo, w.lo), max(hi, w.hi))
             at = w.at
         out.append((at, self.end, lo, hi, opens))
-        return out
+        if self.row_value is None:
+            return out
+        since, value = self.row_value[0], self.row_value[1]
+        held = []
+        for a, z, plo, phi, popens in out:
+            if z <= since:
+                held.append((a, z, plo, phi, popens))
+            elif a >= since:
+                held.append((a, z, value, value, ()))
+            else:
+                held += [(a, since, plo, phi, popens), (since, z, value, value, ())]
+        return held
 
 
 def fold(writes, lo: datetime.datetime, hi: datetime.datetime) -> tuple[datetime.datetime, datetime.datetime]:
@@ -132,7 +164,8 @@ def first_bounds(begun: datetime.datetime, since: datetime.datetime, starts: boo
                  opens, start: tuple[datetime.datetime, datetime.datetime] | None = None) -> tuple[datetime.datetime, datetime.datetime]:
     """The column's bounds as the stay began at *begun*: *begun* itself where an arm writing the value and the column
     may have begun it (*starts*) -- *start*, where the column's arm of that pass writes another value than the clock
-    (the states of a column tested ``IS NULL``); where one writing the value alone may have (*lacking*), or none
+    (the states of a column tested ``IS NULL``; the clock with an offset, bundle A's A-2); where one writing the value
+    alone may have (*lacking*), or none
     writing both is read, what the writes read from *since* to *begun* leave, from no bound, widened by *opens* -- the
     last write before the stay may be older than *since*, and is then not read."""
     ways = []
