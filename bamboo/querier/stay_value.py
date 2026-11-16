@@ -20,7 +20,9 @@ out/gm/qk-design.md "M3(a)-1 v2", tmaeno's OK 2026-11-14), where the rows file h
     the status filled only by other literals, or one every source of which is a selecting statement's rows restricting
     the status to other values -- lockJobsForFinisher's 906 by the PandaIDs its 900 selects at transferring;
   - every statement writing it there writes a table that holds no row of the class (the map's ``TableRecord.rows_of``)
-    -- archiveJob's job.modificationTime copied to metaTable and jobParamsTable.
+    -- archiveJob's job.modificationTime copied to metaTable and jobParamsTable.  A statement whose table the map does
+    not read (``''``: updateTask_JEDI's UPDATE built from ``bindUpdateChangesExpression``) is not known to write
+    another table, and leaves the arm.
   The others may write the column in the stay: the value is then not known, and they are said.
 """
 from __future__ import annotations
@@ -145,7 +147,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
             elif statements and all(offs := [_statement_off(terms, subject, value, read_at)
                                              for terms in _by_statement(statements).values()]):
                 out.append((name, "; ".join(sorted(set(offs)))))
-            elif statements and not {kf.table.lower() for kf in statements if kf.table} & row_tables:
+            elif statements and all(kf.table for kf in statements) and not {kf.table.lower() for kf in statements} & row_tables:
                 out.append((name, f"it writes {sorted({kf.table for kf in statements if kf.table})}, which hold no row of "
                                   f"{column.partition('.')[0]}"))
             else:

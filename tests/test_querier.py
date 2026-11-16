@@ -14489,6 +14489,681 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
     assert got["asked"] == [["assigned", "defined"], None], got
 
 
+def test_timeline_bounds_say_where_a_time_term_surely_held(tmp_path):
+    """Q1 part 1 (timeline): a time column kept as bounds over the stay.  A write a print of its statement's binds shows
+    (ran) sets them, one the pass only reached widens them, an arm not read writes at any moment; a term
+    ``col < clock + offset`` surely holds where the most the column may hold is below it, and surely fails where the
+    least is not.  NT-tobroken: the stay began at 20:29:16.42, so ``modificationtime < now - 5 min`` surely held from
+    20:34:16.42 to the mover's own write -- where the arm not read is named as having not written it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from bamboo.querier import timeline as TL
+
+            def t(s, day="2026-11-13"):
+                return D.datetime.fromisoformat(f"{day} {s}")
+
+            H, Z = D.timedelta(hours=1), D.timedelta(0)
+            start, end = t("20:29:16.423630"), t("20:34:45.105988")
+            since = start - D.timedelta(minutes=10)
+            ran = TL.Write(t("20:22:05.542"), t("20:22:05.542"), t("20:22:05.542"), TL.RAN, ("lock:2099",), "lock:2166", "m82")
+            old = TL.Write(t("20:23:17.396"), t("20:23:17.396") - H, t("20:23:17.396"), TL.REACHED, ("upd:1441", "upd:1443"),
+                           "upd:1424", "m82")
+            unread = TL.Write(t("20:23:17.396"), TL.LOW, TL.HIGH, TL.REACHED, ("upd:1441", "upd:1443"), "upd:1424", "m82")
+            mover = TL.Write(t("20:34:44.342"), t("20:34:44.342"), t("20:34:44.342"), TL.RAN, ("cmd:4595",), "cmd:4611", "m89")
+            opens = [TL.Opening("staged:5710", None, None), TL.Opening("preassign:4902", Z, Z)]
+
+            def line(writes, opens, starts=True, lacking=True):
+                return TL.Timeline(start, end, TL.first_bounds(start, since, starts, lacking, writes, opens),
+                                   TL.first_bounds(start, since, starts, lacking, writes, []), tuple(writes), tuple(opens))
+
+            def spans(found):
+                return [[str(a), str(b)] for a, b in found]
+
+            five = -D.timedelta(minutes=5)
+            got = {}
+            tl = line([ran, old, mover], opens)
+            got["strict"] = spans(TL.surely_true("<", five, tl.pieces()))
+            got["assumed"] = spans(TL.surely_true("<", five, tl.pieces(assume=True)))
+            got["unread"] = spans(TL.surely_true("<", five, line([ran, unread, mover], opens).pieces(assume=True)))
+            # only an arm writing both may have begun the stay: its start, whatever came before
+            got["starts only"] = spans(TL.surely_true("<", five, line([unread, mover], [], lacking=False).pieces()))
+            # NT-pending: refreshed within 20 minutes all the stay, then not
+            p0 = t("05:47:37.091349", "2026-11-15")
+            locks = [TL.Write(x, x, x, TL.RAN, ("lock:2099",), "lock:2166", "m") for x in
+                     (t("06:07:06.165", "2026-11-15"), t("06:26:44.318", "2026-11-15"), t("06:46:43.466", "2026-11-15"))]
+            twenty = -D.timedelta(minutes=20)
+
+            def pending(end, opens=()):
+                first = TL.first_bounds(p0, p0 - D.timedelta(minutes=10), True, False, locks, list(opens))
+                return TL.Timeline(p0, end, first, first, tuple(locks), tuple(opens))
+
+            moved = t("07:07:11.369830", "2026-11-15")
+            got["pending true"] = spans(TL.surely_true("<", twenty, pending(moved).pieces()))
+            got["pending false all"] = [TL.surely_false_all("<", twenty, pending(t("07:06:00", "2026-11-15")).pieces()),
+                                        TL.surely_false_all("<", twenty, pending(moved).pieces())]
+            # an arm not read that writes the clock: never surely below the clock less a margin, still surely not below
+            clock = [TL.Opening("lockTask:2755", Z, Z)]
+            got["pending open clock"] = [TL.surely_true("<", twenty, pending(moved, clock).pieces()),
+                                         TL.surely_false_all("<", twenty, pending(t("07:06:00", "2026-11-15"), clock).pieces())]
+            # col >= clock - 30 days: surely above it where the least is
+            got["above"] = spans(TL.surely_true(">", -D.timedelta(days=30), pending(moved).pieces()))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # an arm not read whose value is not read either (CURRENT_DATE-1) may write any value at any moment: nothing sure
+    assert got["strict"] == [], got
+    # named as having not, the most the column held in the stay is its start; the mover's own write ends it
+    assert got["assumed"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:44.342000"]], got
+    # a write before the stay whose value is not read leaves the start open where an arm writing the value alone may
+    # have begun the stay
+    assert got["unread"] == [], got
+    assert got["starts only"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:44.342000"]], got
+    assert got["pending true"] == [["2026-11-15 07:06:43.466000", "2026-11-15 07:07:11.369830"]], got
+    assert got["pending false all"] == [True, False], got
+    assert got["pending open clock"] == [[], True], got
+    assert got["above"] == [["2026-11-15 05:47:37.091349", "2026-11-15 07:07:11.369830"]], got
+
+
+def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_path):
+    """Q1 part 1 (Rerun._timeline): each arm M3(a)-1 leaves as may writing the column in the stay is read from the
+    records -- its must prints whose hole the map names as the written row's key, under any mark (the lock UPDATE's
+    binds under its caller's mark, updateTask_JEDI's mark) -- shown absent where judgement 3's premises hold, open
+    otherwise; two arms one print reads are one write.  A term on the column is compared on it; inside a turn the open
+    arms are named as having not written it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap.models import MustName, PrintRow, SkeletonHole
+            from bamboo.querier import stay_value as SV
+            from bamboo.querier import timeline as TL
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-13 {s}")
+
+            C, S = "JediTaskSpec.modificationTime", "JediTaskSpec.status"
+            before = SV.Before(False, ("prep:3971 with 3839",), ("feed:742",), (),
+                               ("lock:2099", "upd:1441", "upd:1443", "err:767", "staged:5710"), ())
+
+            def br(line, outcome):
+                return N(line=line, outcome=outcome)
+
+            writers = [N(owner="t.py::lock", branches=[br(2099, "runtime(CURRENT_DATE)")]),
+                       N(owner="t.py::upd", branches=[br(1441, "runtime(timeNow - datetime.timedelta(hours=1))"),
+                                                       br(1443, "runtime(naive_utcnow())")]),
+                       N(owner="t.py::err", branches=[br(767, "runtime(CURRENT_DATE)")]),
+                       N(owner="t.py::staged", branches=[br(5710, "runtime(CURRENT_DATE-1)")])]
+            m82 = "aipanda082.cern.ch"
+
+            def rerun(hits, missed=()):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args, r.result = N(key="53641080"), {}
+                r._before = lambda subject, q: (before, "2026-11-13 20:29:16")
+                r._subject_writers = lambda subject: writers
+                r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
+
+                def column_writes(j, b, keys, window, ws, missed_out=None):
+                    if missed_out is not None and b.line in missed:
+                        missed_out.append(("an ask", "why"))
+                    return hits[b.line]
+
+                r._column_writes = column_writes
+                return r
+
+            q = N(subject=S, observed="tobroken", since=t("20:29:16.423630"), moved=t("20:34:45.105988"), writers=[])
+            term = N(node="compare", op="<", values=[N(base="CURRENT_DATE", offset_seconds=-300.0)], subject=C, settled=True,
+                     text="modificationtime<:timeLimit")
+            got = {}
+            hits = {2099: ([(t("20:22:05.542"), m82, "lock:2166", TL.RAN)], True),
+                    1441: ([(t("20:23:17.396"), m82, "upd:1424", TL.REACHED)], True),
+                    1443: ([(t("20:23:17.396"), m82, "upd:1424", TL.REACHED)], True),
+                    767: ([], True), 5710: ([], False)}
+            r = rerun(hits)
+            tl = RR.Rerun._timeline(r, C, q)
+            got["writes"] = [[w.how, list(w.arms), w.machine, w.lo == w.hi] for w in tl.writes]
+            got["absent"], got["open"] = list(tl.absent), [[o.arm, o.lo] for o in tl.opens]
+            got["result"] = r.result["timelines"][C]["open"]
+            got["strict"] = RR.Rerun._timeline_spans(r, term, q)
+            got["false"] = RR.Rerun._timeline_false(r, term, q)
+            # the words: writes in the 10 min before the stay are said to be before it, and counted apart
+            got["words"] = RR.T.text(RR._timeline_said(C, tl))
+            got["gaps"] = RR.T.text(RR._timeline_gaps(tl)[0])
+            # updateTask_JEDI shown not to have written: named as having not, the open arm leaves the stay's start
+            r = rerun({**hits, 1441: ([], True), 1443: ([], True)})
+            got["strict2"] = RR.Rerun._timeline_spans(r, term, q)
+            r._assuming = {}
+            got["assumed2"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q)]
+            got["assuming"] = r._assuming
+            # P3: the arm writing the status alone shown not to write it as the stay began, so the one writing the column
+            # in the same pass did: the column held the stay's start, and the term holds 5 min after it
+            q3 = N(subject=S, observed="tobroken", since=q.since, moved=q.moved,
+                   writers=[N(owner="t.py::prep", branches=[br(3971, "'tobroken'")]),
+                            N(owner="t.py::feed", branches=[br(742, "'tobroken'")])])
+            begin = {3971: ([(t("20:29:16.0"), "aipanda091.cern.ch", "prep:3856", TL.REACHED)], True), 742: ([], True)}
+            r = rerun({**hits, **begin})
+            tl3 = RR.Rerun._timeline(r, C, q3)
+            got["begun_by"] = [list(tl3.begun_by), [str(x) for x in tl3.first]]
+            r._assuming = {}
+            got["p3"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q3)]
+            got["p3_words"] = RR.T.text(RR._timeline_said(C, tl3)).rpartition("; ")[2]
+            # one not shown either way, and no print of it naming the row while prep's does: named as having not begun
+            # it, where the open arms are; nothing sure without that
+            r = rerun({**hits, **begin, 742: ([], False)})
+            tl4 = RR.Rerun._timeline(r, C, q3)
+            got["p3_strict"] = RR.Rerun._timeline_spans(r, term, q3)
+            r._assuming = {}
+            got["p3_open"] = [list(tl4.begun_by), list(tl4.begun_assumed),
+                              [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q3)], r._assuming]
+            got["p3_premises"] = [RR.T.text(p) for p in RR.Rerun._held_premises(r, r._assuming, {}, "2026-11-13 20:34:44")]
+            st3 = N(condition_trees=[N(entry="e", tree=N(node="all", items=[term]))])
+            r._assuming = None
+            got["p3_terms"] = [RR.T.text(x) for x in RR.Rerun._timeline_terms(r, st3, q3)]
+            # nobody's print names the row as it began: none is named
+            r = rerun({**hits, 3971: ([], False), 742: ([], False)})
+            got["p3_none"] = list(RR.Rerun._timeline(r, C, q3).begun_assumed)
+            # one whose logs there are not in the records is not named: its ask stays
+            r = rerun({**hits, **begin, 742: ([], False)}, missed=(742,))
+            got["p3_asked"] = list(RR.Rerun._timeline(r, C, q3).begun_assumed)
+            # W: updateTask_JEDI 1441's value is its time less 1 h (Branch.amount), so the entry print reaching it and 1443
+            # bounds the write to [t - 1 h, t]: with the open arm named, the term holds from 5 min after the stay's start
+            hour = N(base="naive_utcnow", offset_seconds=-3600.0, scale_seconds=None, needs=[])
+            writers[1].branches[0].amount = hour
+            r = rerun(hits)
+            tlw = RR.Rerun._timeline(r, C, q)
+            got["w_write"] = [str(tlw.writes[1].lo), str(tlw.writes[1].hi)]
+            r._assuming = {}
+            got["w"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q)]
+            writers[1].branches[0].amount = None
+            got["w_offsets"] = [str(RR._written_offset(x)) for x in (
+                br(1, "runtime(naive_utcnow())"), N(outcome="x", amount=hour),
+                N(outcome="x", amount=N(base="naive_utcnow", offset_seconds=-3600.0, scale_seconds=60.0, needs=[])),
+                N(outcome="x", amount=N(base="f.time_limit", offset_seconds=0.0, scale_seconds=None, needs=[])),
+                N(outcome="x"))]
+            # what M3(a)-1 settles, or a timeline that reads nothing, is read as before
+            r = rerun({2099: ([], False), 1441: ([], False), 1443: ([], False), 767: ([], False), 5710: ([], False)})
+            got["nothing"] = RR.Rerun._timeline_spans(r, term, q)
+            # the hole a must name reads: the logger's mark, the printed bind map
+            hole = SkeletonHole(expression="taskSpec.jediTaskID", group=1)
+            row = N(map_rows=[PrintRow(text="start", capture="start", prefix=r"updateTask_JEDI\\ <\\ jediTaskID=.*?\\ >\\ ",
+                                       prefix_capture=r"updateTask_JEDI\\ <\\ jediTaskID=(.*?)\\ >", prefix_holes=[hole])])
+            mark = MustName(line=1424, expression="taskSpec.jediTaskID", column="JediTaskSpec.jediTaskID", row="written",
+                            part="mark")
+            started = N(text="start", token="updateTask_JEDI < jediTaskID=53641080 >")
+            bind = MustName(line=2166, expression="str(var_map)", column="JediTaskSpec.jediTaskID", row="written", part="bind",
+                            bind=":jediTaskID")
+            locked = N(text="UPDATE ATLAS_PANDA.JEDI_Tasks  SET lockedBy=:newLockedBy WHERE jediTaskID=:jediTaskID /* x */"
+                            "{':jediTaskID': 53641080, ':newLockedBy': '53641081'}",
+                       token="getTasksToBeProcessed_JEDI < jediTasks=[53641080] >")
+            got["holes"] = [RR._hole_holds(row, started, mark, "53641080"), RR._hole_holds(row, started, mark, "53641081"),
+                            RR._hole_holds(N(map_rows=[]), locked, bind, "53641080"),
+                            RR._hole_holds(N(map_rows=[]), locked, bind, "53641081")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the lock UPDATE's binds ran it at its time; the entry print of updateTask_JEDI reads both its arms, one write,
+    # whose value is not read (timeNow - 1 h is no clock the querier reads)
+    assert got["writes"] == [["ran", ["lock:2099"], "aipanda082", True],
+                             ["reached", ["upd:1441", "upd:1443"], "aipanda082", False]], got
+    assert got["absent"] == ["err:767"] and got["open"] == [["staged:5710", None]] and got["result"] == ["staged:5710"], got
+    # the start not bounded above: nothing sure, nothing false all the window
+    assert got["strict"] == [] and got["false"] == "", got
+    assert got["words"].startswith("JediTaskSpec.modificationTime over the stay (2026-11-13 20:29:16 .. 2026-11-13 20:34:45) "
+                                   "and the 10 min before it, from the records: written at 20:22:05.542 by lock:2099 "
+                                   "(ran: lock:2166 on aipanda082, before the stay); 20:23:17.396 by upd:1441/upd:1443 "
+                                   "(reached: upd:1424 on aipanda082, before the stay); shown not written by err:767"), got
+    assert got["gaps"] == "the records show 0 write(s) of it in the stay (2 more in the 10 min before it) and 1 arm(s) not writing it", got
+    assert got["strict2"] == [], got
+    assert got["assumed2"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["assuming"] == {"JediTaskSpec.modificationTime": ["staged:5710"]}, got
+    assert got["begun_by"] == [["prep:3971 with 3839"], ["2026-11-13 20:29:16.423630", "2026-11-13 20:29:16.423630"]], got
+    # the open arm staged:5710 named as having not written it: 5 min after the stay's start, the hand's reading
+    assert got["p3"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["p3_words"] == ("the stay begun by prep:3971 with 3839 (the other arms writing the value shown not to then, "
+                               "judgement 3)"), got
+    assert got["p3_strict"] == [], got
+    assert got["p3_open"] == [[], ["feed:742"], [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]],
+                              {"JediTaskSpec.modificationTime": ["staged:5710"]}], got
+    assert got["p3_premises"] == [
+        "none of feed:742 began the stay (they print nothing naming the row as it began, while another arm that may have does)",
+        "none of staged:5710 wrote JediTaskSpec.modificationTime in the stay, besides the 2 write(s) the records show"], got
+    assert got["p3_terms"] == ["modificationtime<:timeLimit: surely held for the row from 2026-11-13 20:34:16.423630 to 2026-11-13 20:34:45.105988, "
+                               "on the writes the records show, where none of staged:5710 wrote "
+                               "JediTaskSpec.modificationTime in the stay and none of feed:742 began the stay"], got
+    assert got["p3_none"] == [] and got["p3_asked"] == [], got
+    assert got["nothing"] is None, got
+    assert got["w_write"] == ["2026-11-13 19:23:17.396000", "2026-11-13 20:23:17.396000"], got
+    assert got["w"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["w_offsets"] == ["0:00:00", "-1 day, 23:00:00", "None", "None", "None"], got
+    assert got["holes"] == [True, False, True, False], got
+
+
+def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
+    """R (the map's batch 2, Branch.count_prints; RR._landed): the first count print of the write's statement in the
+    run after the write's print and before that print's next record says whether the write landed -- none or not one:
+    it did not (the lock's ``failed to lock jediTaskID={}``); one or some: it did (lockTask_JEDI's ``done with {}``,
+    a reached write then ran) -- and none printed there says nothing.  A record a longer print reads is that one's."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            RR.R.statement_at = lambda node, line: line
+            fn = N(node=None, row_at=lambda stmt: N(line=stmt))
+            b = N(count_prints=[N(line=2770, rows="one"), N(line=2778, rows="not_one")])
+            # the write's print at 2751 on records 0 and 6; done with at 2, locked by another (also read as done with) at 8
+            sn = N(hits={2751: [(0, "lockTask_JEDI", None), (6, "lockTask_JEDI", None)],
+                         2770: [(2, "done with ", None), (8, "done with ", None)],
+                         2778: [(8, "done with  locked by another  at ", None)]})
+            got = {"first": RR._landed(fn, sn, 0, 2751, b), "second": RR._landed(fn, sn, 6, 2751, b),
+                   "none": RR._landed(fn, N(hits={2751: [(0, "x", None)]}), 0, 2751, b),
+                   "no_counts": RR._landed(fn, sn, 0, 2751, N())}
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"first": True, "second": False, "none": None, "no_counts": None}, got
+
+
+def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):
+    """M3(a)-1: a statement whose table the map does not read (``''``: updateTask_JEDI's UPDATE built from
+    bindUpdateChangesExpression) is not known to write another table, so its arm may write the column in the stay; one
+    writing a known table that holds no row of the class is left out, as before."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import stay_value as SV
+
+            def br(line, outcome):
+                return N(line=line, other_lines=[], outcome=outcome, history=[], row_precondition=[])
+
+            S, C = "JediTaskSpec.status", "JediTaskSpec.modificationTime"
+            status = [N(owner="t.py::prep", subject=S, branches=[br(3971, "tobroken")])]
+            column = [N(owner="t.py::upd", subject=C, branches=[br(1443, "runtime(naive_utcnow())")]),
+                      N(owner="t.py::meta", subject=C, branches=[br(10, "runtime(CURRENT_DATE)")])]
+            kfs = [N(owner="t.py::upd", statement=1484, table="", term="", writes={C: [1443]}, sources=[N(kind="parameter")],
+                     routes_open=False),
+                   N(owner="t.py::meta", statement=12, table="metaTable", term="jediTaskID=:jediTaskID", writes={C: [10]},
+                     sources=[N(kind="parameter")], routes_open=False)]
+            b = SV.before(status, column, S, "tobroken", C, kfs, lambda k: True, lambda o, line: None, {"jedi_tasks"},
+                          lambda o, b: False)
+            print(json.dumps([list(b.left), [list(x) for x in b.out]]))
+            """,
+        )
+    )
+    left, out_ = json.loads(out.splitlines()[-1])
+    assert left == ["upd:1443"], (left, out_)
+    assert out_ == [["meta:10", "it writes ['metaTable'], which hold no row of JediTaskSpec"]], out_
+
+
+def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
+    """Q1 part 2 (Rerun._call_tied): a caller whose own runs print no key is read by the runs of the key of the
+    functions it calls (the map's reach_graph), a machine's runs a minute or less apart one pass of it; a callee reached
+    through the calls into the mover and through others alike tells no way and is left out.  Where the stay began in a
+    pass of a call the caller makes before its call into the mover, and the mover's run is the next on that machine, the
+    mover took the row in the step after it (P8, NT-scouted): the step is the nearest callee, and its end is its own
+    run's.  Otherwise the passes are said with the way each took (P22, NT-assigning)."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+
+            def node(owner, *calls):
+                return N(owner=owner, calls=[N(to=t, line=ls[0], lines=list(ls)) for t, ls in calls])
+
+            got = {}
+            graph = {n.owner: n for n in [node("a::A.f", ("b::B.g", (10, 12)), ("c::C.h", (20,))),
+                                          node("b::B.g", ("d::D.k", (5,))), node("c::C.h", ("d::D.k", (7,)))]}
+            RR._reach_nodes = lambda: graph
+            got["reach"] = {k: [sorted(v[0]), v[1]] for k, v in RR._callees_by_line("a::A.f").items()}
+            got["others"] = RR._others_reaching("d::D.k", {"a::A.f", "b::B.g"}, graph)
+            got["bursts"] = RR._bursts(["2026-11-13 14:34:02,000", "2026-11-13 14:34:02,197", "2026-11-13 14:35:06,139"],
+                                       RR.datetime.timedelta(minutes=1))
+
+            RR._reach_nodes = lambda: {}
+            RR.R.function = lambda rel, name, lines=(), within=(): N(node=N(name=name, lineno=61))
+            RR.pathcond.qualified_name = lambda node: "PostProcessor.start"
+            reached = {"s/tcm.py::TCM.prepareTasksToBeFinished_JEDI": ({75}, 3),
+                       "s/tcm.py::TCM.setScoutJobData_JEDI": ({75}, 4),
+                       "s/tcm.py::TCM.getTasksToBeFinished_JEDI": ({80}, 3),
+                       "s/m.py::M.update_task_queued_activated_times": ({75, 80}, 4)}
+            RR._callees_by_line = lambda owner: reached
+            RR.R._prints_of = lambda o, lines=(): N(statements=[N(log_files=["panda-JediDBProxy.log"])])
+            RR.prints_key = lambda o, lines, columns: True
+            RR.key_marks = lambda *a: ()
+
+            def run(token, *stamps, machine="aipanda086.cern.ch"):
+                return N(token=token, machine=machine, found_by=[N(stamp=s) for s in stamps])
+
+            day = "2026-11-13 "
+            runs = [run("prepareTasksToBeFinished_JEDI < vo=atlas label=managed pid=p >", day + "14:34:02,134", day + "14:34:02,138"),
+                    run("setScoutJobData_JEDI < jediTaskID=53631608 >", day + "14:34:02,001", day + "14:34:02,106"),
+                    run("update_task_queued_activated_times < jediTaskID=53631608 >", day + "14:34:02,179"),
+                    run("getTasksToBeFinished_JEDI < vo=atlas label=managed pid=p >", day + "14:35:06,139")]
+
+            def rerun(runs):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.logs = N(names=lambda files: list(files))
+                r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
+                r.files_of = lambda owner, today, lines: ["panda-PostProcessor.log"]
+                r._keep_unanswered = lambda missed: None
+                r.say = lambda *a: None
+                r.ended = []
+                r.end = lambda said: r.ended.append(said)
+                r._step_end = lambda bare, files, since, until, key: day + "14:35:06,032"
+                r._ask = lambda key, names, asking, owners=None, whole=False, quiet=False: ({"panda-JediDBProxy.log": runs}, [], {})
+                return r
+
+            c = RR.Caller("j/PostProcessor.py::start", [80], 1, "none")
+            up = RR.Callers("s/tcm.py::getTasksToBeFinished_JEDI", [], "JediTaskSpec.status", "53631608",
+                            (day + "14:34:02", day + "14:35:06"), "statement", [], before=day + "14:35:06")
+            r = rerun(runs)
+            got["p8"] = [RR.Rerun._call_tied(r, c, up), T.text(r.ended[0])]
+            # the stay began before that pass: the passes, each with its way
+            r = rerun(runs)
+            got["p22"] = [RR.Rerun._call_tied(r, c, RR.replace(up, window=(day + "14:20:00", day + "14:35:06"))),
+                          T.text(r.ended[0])]
+            # no run of the key but the mover's own: not read
+            r = rerun(runs[3:])
+            got["none"] = [RR.Rerun._call_tied(r, c, up), r.ended]
+            # a callee's log not in the records may hold a pass: nothing read, nothing ended, the ask kept
+            r = rerun(runs)
+            r._ask = lambda key, names, asking, owners=None, whole=False, quiet=False: (
+                {"panda-JediDBProxy.log": runs}, [(N(key="k"), "why")], {})
+            kept = []
+            r._keep_unanswered = lambda missed: kept.extend(missed)
+            got["missed"] = [RR.Rerun._call_tied(r, c, up), r.ended, len(kept)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["reach"] == {"b::B.g": [[10, 12], 1], "c::C.h": [[20], 1], "d::D.k": [[10, 12, 20], 2]}, got
+    assert got["missed"] == [False, [], 1], got
+    assert got["others"] == 1, got
+    assert got["bursts"] == [["2026-11-13 14:34:02,000", "2026-11-13 14:34:02,197"],
+                             ["2026-11-13 14:35:06,139", "2026-11-13 14:35:06,139"]], got
+    ok, said = got["p8"]
+    assert ok and said.startswith(
+        "getTasksToBeFinished_JEDI took the row at 2026-11-13 14:35:06,139 on aipanda086 in the step after "
+        "prepareTasksToBeFinished_JEDI's in one pass of start, which calls prepareTasksToBeFinished_JEDI at [75] before "
+        "getTasksToBeFinished_JEDI at [80]: the stay began in that step, at 2026-11-13 14:34:02, and the step went on "
+        "to 2026-11-13 14:35:06,032, 64.0 s after"), said
+    # the helper reached through both calls tells no way
+    assert "update_task_queued_activated_times" not in said and "one process of start on aipanda086" in said, said
+    ok, said = got["p22"]
+    assert ok and said.startswith("start's passes on the row, read by its callees' runs: aipanda086 2026-11-13 14:34:02,001 "
+                                  ".. 2026-11-13 14:34:02,138: setScoutJobData_JEDI [75], prepareTasksToBeFinished_JEDI [75] "
+                                  "(not into the mover); aipanda086 2026-11-13 14:35:06,139 .. 2026-11-13 14:35:06,139: "
+                                  "getTasksToBeFinished_JEDI [80] (it called the mover)"), said
+    assert said.endswith("not known: why each pass took its way, which start's own log (panda-PostProcessor.log) would say"), said
+    assert got["none"] == [False, []], got
+
+
+def test_a_cycle_s_label_is_taken_from_a_row_every_pass_prints(tmp_path):
+    """P7 (agents.cycle_rows): the label of an agent's cycle is the loop's element a row before the selecting call
+    prints on every pass to it -- reached from the loop's body through with- and try-bodies only.  A row printed only
+    on the way that skips the call (TaskCommando's "failed to get lock") gives none: the cycles that call it would
+    otherwise read as no label's, and the take that moved the row as not the row's label's."""
+    corpus = _corpus(tmp_path)
+    (corpus / "pandajedi" / "jediorder").mkdir(parents=True, exist_ok=True)
+    (corpus / "pandajedi" / "jediorder" / "Cmd.py").write_text(textwrap.dedent('''\
+        class Cmd:
+            def start(self):
+                while True:
+                    for prod_source_label in self.labels:
+                        got_lock = self.tb.lockProcess(prod_source_label)
+                        if not got_lock:
+                            self.log.debug(f"skip since failed to get lock for label={prod_source_label}")
+                            continue
+                        self.log.debug("getting tasks")
+                        task_list = self.tb.getTasks(prod_source_label)
+                        self.log.debug(f"got {len(task_list)} tasks")
+
+
+        class Post:
+            def start(self):
+                while True:
+                    for prod_source_label in self.labels:
+                        try:
+                            with self.lock:
+                                self.log.info(f"preparing for label={prod_source_label}")
+                                task_list = self.tb.getTasks(prod_source_label)
+                        except Exception:
+                            self.log.error(f"failed for label={prod_source_label}")
+                        self.log.info(f"got {len(task_list)} tasks")
+        '''))
+    out = _ok(_run(tmp_path, """
+        import json
+        from bamboo.querier import agents as AG
+        from bamboo.querier import rows as R
+
+        R.ROWS_FROM = "walk"
+        rel = "pandajedi/jediorder/Cmd.py"
+        got = {}
+        for name, call in (("Cmd.start", 10), ("Post.start", 21)):
+            sel = AG.Selection("w", "taskList", f"{rel}::{name}", rel, call, call, call, "getTasks")
+            crows = AG.cycle_rows(sel)
+            got[name] = [[r.line for r in crows.before], crows.label]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # the lock line is printed only where the call is skipped: no label
+    assert got["Cmd.start"] == [[7, 9], ""], got
+    # a line in a with-body inside a try-body is printed on every pass to the call
+    assert got["Post.start"] == [[20], "prod_source_label"], got
+
+
+def test_a_selection_passed_over_is_read_on_the_statement_s_terms_then(tmp_path):
+    """P5 (Rerun._passed_refused): an agent's selection that ran after the row became selectable and did not take it is
+    read on the selecting statement's terms over its own span: a term every build requires, comparing a column with the
+    clock, surely false from the selection's start to its count -- on the column's timeline (its open arms named as
+    having not written it), or on the one value M3(a)-1 reads it held.  One selection not so read reads none.  P6
+    (Rerun._own_cycles): a mover that takes its rows itself from a worker's list is read by its agent's cycles."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+            from bamboo.querier import timeline as TL
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-13 {s}")
+
+            C = "JediTaskSpec.modificationTime"
+            term = N(node="compare", op="<", values=[N(base="CURRENT_DATE", offset_seconds=-300.0)], subject=C, settled=True,
+                     text="tabT.modificationtime<:timeLimit")
+            tree = N(node="all", items=[term, N(node="other", subject="JediTaskSpec.status", text="x", settled=False)])
+            st = N(owner="s/tcm.py::getTasksToExecCommand_JEDI", condition_trees=[N(entry="e", tree=tree)], conditions=["e"])
+            q = N(subject="JediTaskSpec.status", statements=[st], since=t("20:29:16.423630"), moved=t("20:34:45.105988"))
+            start = t("20:29:16.423630")
+            ran = TL.Write(t("20:22:05.542"), t("20:22:05.542"), t("20:22:05.542"), TL.RAN, ("lock:2099",), "lock:2166", "m82")
+            # only an arm writing the status and the column may have begun the stay: it held the stay's start
+            tl = TL.Timeline(start, q.moved, (TL.LOW, TL.HIGH), (start, start), (ran,), (TL.Opening("staged:5710", None, None),))
+            # one writing the status alone may have: the least is the write before the stay's
+            lacking = TL.Timeline(start, q.moved, (TL.LOW, TL.HIGH), (t("20:22:05.542"), start), (ran,),
+                                  (TL.Opening("staged:5710", None, None),))
+
+            def rerun(timeline, held=(False, None)):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r._missed_q = q
+                r._timeline = lambda subject, q: timeline
+                r._held = lambda subject, q: held
+                r._leaf = lambda node, q: None
+                r.__dict__["_timelines"] = {(C,): timeline}
+                return r
+
+            def pick(after, at):
+                return N(machine="aipanda089.cern.ch", after=f"2026-11-13 {after}", at=f"2026-11-13 {at}")
+
+            sel = N(callee="getTasksToExecCommand_JEDI")
+            up = N(subject="JediTaskSpec.status")
+            early = [pick("20:30:58,100", "20:30:58,400"), pick("20:33:35,100", "20:33:35,600")]
+            got = {}
+            r = rerun(tl)
+            said, premises = RR.Rerun._passed_refused(r, sel, early, up)
+            got["early"] = [T.text(said), [T.text(p) for p in premises]]
+            # a selection after the term turned true: none read
+            got["late"] = list(RR.Rerun._passed_refused(r, sel, [*early, pick("20:34:20,000", "20:34:21,000")], up))
+            got["lacking"] = list(RR.Rerun._passed_refused(rerun(lacking), sel, early, up))
+            # no timeline: the one value M3(a)-1 reads (the stay's start)
+            r = rerun(None, (True, "2026-11-13 20:29:16.423630"))
+            said, premises = RR.Rerun._passed_refused(r, sel, early, up)
+            got["held"] = [T.text(said), premises]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    said, premises = got["early"]
+    assert said == ("; the 2 selection(s) on 1 machine(s) from 2026-11-13 20:30:58,100 to 2026-11-13 20:33:35,600 before "
+                    "the take did not take it: getTasksToExecCommand_JEDI's statement refused the row then (e: "
+                    "tabT.modificationtime<:timeLimit false then, on its writes the records show)"), said
+    assert premises == ["none of staged:5710 wrote JediTaskSpec.modificationTime in the stay, besides the 1 write(s) the "
+                        "records show"], premises
+    assert got["late"] == ["", []], got
+    # surely false needs the least the column held: where the stay may have begun without writing it (P3), none read
+    assert got["lacking"] == ["", []], got
+    said, premises = got["held"]
+    assert said.endswith("(e: tabT.modificationtime<:timeLimit false until 2026-11-13 20:34:16.423630)") and premises == [], said
+
+
+def test_a_cycle_s_selection_that_named_the_row_and_ran_no_pass_on_it_is_a_take(tmp_path):
+    """P17 (Rerun._unrun_takes): a write of the column the selecting function's lock sets, by that function itself, on
+    the column's timeline inside one of a machine's selections for the row's label before the move, is that selection's
+    take with no pass of the worker after it -- NT-prepared-late's aipanda088 07:09:15.636 .. .809, read from its select
+    print naming the row among its targets (_binds_name: any bind of the printed map, an IN list's ``:jediTaskID1``).
+    Not one already a take, not another function's lock, not where the machine's cycles for the label overlap."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import agents as AG
+            from bamboo.querier import render as T
+            from bamboo.querier import timeline as TL
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-14 {s}")
+
+            q = N(subject="JediTaskSpec.status")
+            lock = AG.Lock(D.timedelta(minutes=10), "lockedTime<:timeLimit", "timeLimit = now - 10 min", "lockedTime=CURRENT_DATE")
+            sel = N(callee="getTasksToBeFinished_JEDI")
+            mine = TL.Write(t("07:09:15.638"), TL.LOW, TL.HIGH, TL.REACHED, ("getTasksToBeFinished_JEDI:1628",),
+                            "getTasksToBeFinished_JEDI:1643", "aipanda088")
+            other = TL.Write(t("07:09:15.700"), TL.LOW, TL.HIGH, TL.REACHED, ("lockTask_JEDI:2755",), "lockTask_JEDI:2751", "aipanda088")
+            tl = TL.Timeline(t("07:09:13.052"), t("07:21:14.531"), (TL.LOW, TL.HIGH), (TL.LOW, TL.HIGH), (mine, other), (), ())
+            asked = []
+
+            def rerun():
+                r = RR.Rerun.__new__(RR.Rerun)
+                r._missed_q = q
+                r._timeline = lambda subject, q: asked.append(subject) or tl
+                return r
+
+            def pick(m, after, at, mark="<c>", label="user"):
+                return AG.Pick(f"aipanda0{m}.cern.ch", mark, label, f"2026-11-14 {after}", f"2026-11-14 {at}", "8")
+
+            p88 = pick(88, "07:09:15,636", "07:09:15,809")
+            p86 = pick(86, "07:19:26,318", "07:19:27,219")
+            picks = {"aipanda088.cern.ch": [p88], "aipanda086.cern.ch": [p86]}
+            spans = {"aipanda088.cern.ch": {"<c>": ("2026-11-14 07:09:12,386", "2026-11-14 07:09:15,809")}}
+            up = N(subject="JediTaskSpec.status", before="2026-11-14 07:21:14.531",
+                   window=("2026-11-14 07:09:13", "2026-11-14 07:21:14"))
+            r = rerun()
+            got = {}
+            got["unrun"] = [[p.machine, w.where] for p, w in RR.Rerun._unrun_takes(r, sel, picks, spans, "user", up, lock, [(p86, N())])]
+            got["asked"] = list(asked)
+            got["taken"] = RR.Rerun._unrun_takes(r, sel, picks, spans, "user", up, lock, [(p88, N())])
+            # another label's selection on the machine is not the row's
+            got["label"] = RR.Rerun._unrun_takes(r, sel, picks, spans, "managed", up, lock, [(p86, N())])
+            # one that began before the row could be selected did not return it
+            later = N(subject=up.subject, before=up.before, window=("2026-11-14 07:09:16", "2026-11-14 07:21:14"))
+            got["before"] = RR.Rerun._unrun_takes(r, sel, picks, spans, "user", later, lock, [(p86, N())])
+            # two processes select for the label there: which one selected is not told
+            p88d = pick(88, "07:09:14,000", "07:09:20,000", mark="<d>")
+            spans2 = {"aipanda088.cern.ch": {**spans["aipanda088.cern.ch"], "<d>": ("2026-11-14 07:09:14,000", "2026-11-14 07:09:20,000")}}
+            got["two"] = RR.Rerun._unrun_takes(r, sel, {**picks, "aipanda088.cern.ch": [p88, p88d]}, spans2, "user", up, lock,
+                                               [(p86, N())])
+            got["said"] = T.text(RR.Rerun._unrun_said(r, sel, "post_process_tasks", p88, mine,
+                                                      [N(machine="aipanda086.cern.ch", first="2026-11-14 07:21:06,298")], up))
+            text = ("SELECT tabT.jediTaskID FROM t WHERE tabT.jediTaskID IN (:jediTaskID0,:jediTaskID1) /* c */"
+                    "{':status1': 'prepared', ':jediTaskID0': 53648689, ':jediTaskID1': 53650695}")
+            got["binds"] = [RR._binds_name(N(text=text), "53650695"), RR._binds_name(N(text=text), "53650696"),
+                            RR._binds_name(N(text="no bind map here"), "53650695")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["unrun"] == [["aipanda088.cern.ch", "getTasksToBeFinished_JEDI:1643"]], got
+    assert got["asked"] == ["JediTaskSpec.lockedTime"], got
+    assert got["taken"] == [] and got["label"] == [] and got["before"] == [] and got["two"] == [], got
+    assert got["said"] == ("aipanda088's cycle <c> took it (getTasksToBeFinished_JEDI ran between 2026-11-14 07:09:15,636 and "
+                           "2026-11-14 07:09:15,809 and returned 8 row(s); getTasksToBeFinished_JEDI:1643 names the row), and no "
+                           "pass of post_process_tasks on it followed there before 2026-11-14 07:21:14.531"), got
+    assert got["binds"] == [True, False, False], got
+
+
+def test_a_mover_taking_its_rows_from_a_worker_list_is_read_by_its_agent_s_cycles(tmp_path):
+    """P6 (Rerun._own_cycles): at U1, a mover that takes its rows itself from a worker's list (``self.<field>.get()``:
+    TaskCommando's runImpl) is read by its agent's cycles before its callers, the pass that moved the row being L1's
+    run; one that takes none goes to its callers as before."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            takes = ast.parse("def runImpl(self):\\n    while True:\\n        x = self.taskList.get(1)\\n").body[0]
+            plain = ast.parse("def runImpl(self):\\n    return 1\\n").body[0]
+            got = {}
+            for name, node in (("takes", takes), ("plain", plain)):
+                RR.R.function = lambda rel, func, lines=(), within=(), node=node: N(node=node)
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.say = lambda *a: None
+                calls = []
+                r._agent_cycles = lambda c, up, moving: calls.append([c.owner, c.lines, [p.first for p in moving]]) or True
+                run = N(first="2026-11-13 20:34:44,588", machine="aipanda089.cern.ch")
+                r._missed_q = N(mover="j/TaskCommando.py::runImpl", run=run)
+                q = N(mover="j/TaskCommando.py::runImpl", before="2026-11-13 20:34:45", arms=[N(line=197)])
+                got[name] = [RR.Rerun._own_cycles(r, q), calls]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["takes"] == [True, [["j/TaskCommando.py::runImpl", [197], ["2026-11-13 20:34:44,588"]]]], got
+    assert got["plain"] == [False, []], got
+
+
 def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_path):
     """M2 (value_reach): the writers the rows of a statement selecting the value reach -- the movers, what the rows are
     handed to, and what those call up to DEPTH calls, not through the statement's own function.  A writer they do not
