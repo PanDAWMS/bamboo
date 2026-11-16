@@ -660,8 +660,8 @@ def test_names_are_read_whole_where_every_must_print_s_message_mark_and_bind_map
     tmp_path: Path,
 ) -> None:
     """With names read whole, ``[]`` says no must print reads the key; a must print through a logger whose mark this
-    reading cannot follow -- ``self.logger``, made elsewhere -- or printing a bind map no statement of the arm runs
-    with leaves the names short of whole."""
+    reading cannot follow -- ``self.logger``, made elsewhere -- or printing a map neither a statement of the arm runs
+    with nor read entry by entry where it is printed leaves the names short of whole."""
     fragment = _build(tmp_path, UNREAD_MARK, ("u", "C"), ("w", "D"))
     marked = _build(tmp_path / "marked", MARKED, ("f", "A"), ("g", "B"))
 
@@ -672,6 +672,86 @@ def test_names_are_read_whole_where_every_must_print_s_message_mark_and_bind_map
     ]
     assert _branch(marked, "A").must_names_whole is True
     assert _branch(marked, "B").must_names_whole is True
+
+
+OTHER_MAP = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def a(self, jediTaskID, status, mode):
+    tmp_log = LogWrapper(_logger, "<a>")
+    actions = {"mode": mode, "status": status}
+    tmp_log.debug(f"start {actions}")  # A
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # K
+    varMap[":status"] = status  # W
+    self.cur.execute(SQL, varMap)  # X
+
+
+def b(self, jediTaskID, status):
+    tmp_log = LogWrapper(_logger, "<b>")
+    extra = {}
+    extra["task"] = jediTaskID
+    tmp_log.debug(f"start {extra}")  # B
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # L
+    varMap[":status"] = status  # V
+    self.cur.execute(SQL, varMap)  # Y
+
+
+def c(self, jediTaskID, status, other):
+    tmp_log = LogWrapper(_logger, "<c>")
+    extra = {}
+    extra.update(other)
+    tmp_log.debug(f"start {extra}")  # C
+    varMap = {}
+    varMap[":jediTaskID"] = jediTaskID  # M
+    varMap[":status"] = status  # U
+    self.cur.execute(SQL, varMap)  # Z
+"""
+
+
+def test_a_printed_map_other_than_the_statement_s_is_read_by_the_entries_its_print_records(
+    tmp_path: Path,
+) -> None:
+    """A must print printing a map the statement does not run with is read by the entries the print's record holds
+    (:attr:`SkeletonHole.entries`), as upsert_workflow_entities' ``f"start, actions={actions_dict}"``: every key
+    spelled, it is read whole -- none holding the task, no name; ``extra["task"] = jediTaskID`` a name, said with
+    why (the entry is not followed to the write).  Entries the source does not spell (``extra.update(other)``)
+    leave the names short of whole."""
+    fragment = _build(
+        tmp_path,
+        OTHER_MAP,
+        ("a", "W"),
+        ("b", "V"),
+        ("c", "U"),
+        subject="JediTaskSpec.status",
+        key_froms=(
+            _term("a", "X", "W", "K", OTHER_MAP),
+            _term("b", "Y", "V", "L", OTHER_MAP),
+            _term("c", "Z", "U", "M", OTHER_MAP),
+        ),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+
+    assert _branch(fragment, "W").must_prints == [_line(OTHER_MAP, "A")]
+    assert _branch(fragment, "W").must_names == []
+    assert _branch(fragment, "W").must_names_whole is True
+    assert _branch(fragment, "V").must_names == [
+        MustName(
+            line=_line(OTHER_MAP, "B"),
+            expression="extra",
+            column="JediTaskSpec.jediTaskID",
+            why=mustprints.WHY_KEY_UNSHOWN,
+            part=MUST_PART_BIND,
+            bind="task",
+        )
+    ]
+    assert _branch(fragment, "V").must_names_whole is True
+    assert _branch(fragment, "U").must_prints == [_line(OTHER_MAP, "C")]
+    assert _branch(fragment, "U").must_names_whole is False
 
 
 REVERSED = """\

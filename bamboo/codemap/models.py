@@ -434,11 +434,15 @@ class MustName(BaseModel):
             f"Where the print holds the value: {MUST_PART_MESSAGE!r}, a hole of the message (read with "
             f":attr:`PrintRow.capture`); {MUST_PART_MARK!r}, a hole of the logger's mark, taken where the logger is "
             f"made (:attr:`PrintRow.prefix_capture`) -- ``create_tagged_logger(comment, f\"PandaID={{tmp_id}}\")``; "
-            f"{MUST_PART_BIND!r}, the entry *bind* of a printed bind map."
+            f"{MUST_PART_BIND!r}, the entry *bind* of a printed map: the bind map the statement runs with, or "
+            "another map the print's record reads (:attr:`SkeletonHole.entries`)."
         ),
     )
     bind: str = Field(
-        default="", description=f"The bind map's key, ``:jediTaskID``, where *part* is {MUST_PART_BIND!r}."
+        default="",
+        description=(
+            f"The printed map's key, ``:jediTaskID`` of a bind map, where *part* is {MUST_PART_BIND!r}."
+        ),
     )
 
 
@@ -1167,10 +1171,12 @@ class Branch(BaseModel):
         default=False,
         description=(
             "Whether ``must_names`` was read over every must print whole: its message (no row refused), its logger's "
-            "mark (made in the function, a mark with no hole, or a logger marking nothing) and, for an SQL arm, the "
-            "bind map its statement runs with.  Then ``[]`` says no must print's hole reads the written row's key; "
-            "``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is not read for the key "
-            "inside it."
+            "mark (made in the function, a mark with no hole, or a logger marking nothing), for an SQL arm the "
+            "bind map its statement runs with, and any other map printed whole by the entries its print's record "
+            "reads -- every key spelled, none a spec's ``valuesMap()``, none the source does not spell "
+            "(:attr:`SkeletonHole.entries`, ``entries_open``).  Then ``[]`` says no must print's hole reads the "
+            "written row's key; ``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is "
+            "not read for the key inside it."
         ),
     )
     must_hole: str = Field(

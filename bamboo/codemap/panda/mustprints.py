@@ -75,6 +75,7 @@ from bamboo.codemap.models import (
     FunctionPrintsNode,
     JunctionNode,
     KeyFrom,
+    MapEntry,
     MustName,
     PrintRow,
     SourceModule,
@@ -187,6 +188,7 @@ def _attach(
     trees = {module.rel_path: module.tree for module in modules}
     printed: dict[str, list[int]] = {}
     holes: dict[tuple[str, int], list[str]] = {}
+    maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]] = {}
     marks: dict[tuple[str, int], list[str]] = {}
     unread: dict[tuple[str, int], bool] = {}
     for node in function_prints:
@@ -195,6 +197,7 @@ def _attach(
             holes[(node.owner, statement.line)] = [
                 hole.expression for row in statement.rows for hole in row.holes
             ]
+            maps_read[(node.owner, statement.line)] = _maps_read(statement.rows)
             marks[(node.owner, statement.line)] = [
                 hole.expression for row in statement.rows for hole in row.prefix_holes
             ]
@@ -320,6 +323,7 @@ def _attach(
                 statements[id(site.func)],
                 holes,
                 marks,
+                maps_read,
             )
             each.append(names)
             whole = whole and _read_whole(
@@ -331,6 +335,7 @@ def _attach(
                 holes,
                 marks,
                 unread,
+                maps_read,
             )
         else:
             branch.must_names = _agreed(each)
@@ -347,10 +352,12 @@ def _read_whole(
     holes: dict[tuple[str, int], list[str]],
     marks: dict[tuple[str, int], list[str]],
     unread: dict[tuple[str, int], bool],
+    maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]],
 ) -> bool:
     """Whether the names of *site* were read over every must print whole (:attr:`Branch.must_names_whole`): each
-    print's message and mark have a text, a mark with holes is made in the function, and every bind map printed
-    is the one an SQL arm's statement runs with, which :func:`_key_names` reads."""
+    print's message and mark have a text, a mark with holes is made in the function, and every map printed is the
+    one an SQL arm's statement runs with or one whose every entry the print's record reads (:func:`_read_all`),
+    which :func:`_key_names` reads."""
     maps = {key.map for key in keys if key.map} if sql else set()
     for line in lines:
         where = (site.owner, line)
@@ -361,9 +368,51 @@ def _read_whole(
             return False
         for expression in holes.get(where, ()):
             name = _printed_map(expression)
-            if name and name not in maps and _is_map(site.func, name):
+            if (
+                name
+                and name not in maps
+                and _is_map(site.func, name)
+                and not _read_all(maps_read.get(where, {}).get(expression))
+            ):
                 return False
     return True
+
+
+class _MapRead(NamedTuple):
+    """The entries a hole printing a map whole may hold where it is printed, over the rows of its print, and the
+    lines where it may get entries the source does not spell (:attr:`SkeletonHole.entries`, ``entries_open``)."""
+
+    entries: list[MapEntry]
+    open: list[int]
+
+
+def _maps_read(rows: Sequence[PrintRow]) -> dict[str, Optional[_MapRead]]:
+    """Each hole of a print's *rows* whose record reads the map it prints whole, by expression: ``None`` where a
+    row's record of the same hole does not read it."""
+    found: dict[str, _MapRead] = {}
+    unread: set[str] = set()
+    for row in rows:
+        for hole in row.holes:
+            if hole.entries is None:
+                unread.add(hole.expression)
+                continue
+            held = found.setdefault(hole.expression, _MapRead([], []))
+            held.entries.extend(hole.entries)
+            held.open.extend(hole.entries_open)
+    return {
+        expression: None if expression in unread else read
+        for expression, read in found.items()
+    }
+
+
+def _read_all(read: Optional[_MapRead]) -> bool:
+    """Whether the record reads every entry a printed map may hold: each key spelled, none a spec's ``valuesMap()``
+    (a whole object, its key not read inside it), and none the source does not spell."""
+    return (
+        read is not None
+        and not read.open
+        and all(not entry.computed and not entry.row for entry in read.entries)
+    )
 
 
 def _is_map(func: ast.AST, name: str) -> bool:
@@ -647,6 +696,7 @@ def _key_names(
     statements: dict[int, Optional[ast.stmt]],
     holes: dict[tuple[str, int], list[str]],
     marks: dict[tuple[str, int], list[str]],
+    maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]],
 ) -> list[MustName]:
     """The holes of the must prints holding a key of the written row (*keys*), each where the value is.
 
@@ -656,6 +706,11 @@ def _key_names(
     = job.PandaID``.  Each said to hold the row only where it holds the value the key holds where the write counts
     (:func:`_holds_key`); a hole spelling the key, or a name bound to it, that this reading cannot show holds it is
     said with why (:data:`WHY_KEY_UNSHOWN`), so that a branch with no name holds no hole spelling the key.
+
+    A map printed whole other than the one the statement runs with is read by the entries its print's record holds
+    (:attr:`SkeletonHole.entries`): an entry with a spelled key whose value spells the key is a name of the entry
+    (part ``bind``, the entry's key as *bind*), said with why -- the entry is not followed from where it is filled
+    to the write.
     """
     names: list[MustName] = []
     for line in lines:
@@ -681,6 +736,26 @@ def _key_names(
                             bind=key.bind,
                         )
                     )
+                    continue
+                read = maps_read.get((site.owner, line), {}).get(expression)
+                if read is not None:
+                    for bind in dict.fromkeys(
+                        entry.key
+                        for entry in read.entries
+                        if not entry.computed
+                        and not entry.row
+                        and _spells_key(site.func, key, entry.expression)
+                    ):
+                        names.append(
+                            MustName(
+                                line=line,
+                                expression=expression,
+                                column=key.column,
+                                why=WHY_KEY_UNSHOWN,
+                                part=MUST_PART_BIND,
+                                bind=bind,
+                            )
+                        )
                     continue
                 if _holds_key(site.func, key, printed, expression):
                     names.append(
