@@ -12409,19 +12409,21 @@ def test_s4b_takes_the_last_binding_on_the_runs_path_by_the_callers_chain_callee
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
+        from bamboo.codemap.models import ReachCall, ReachNode
         from bamboo.querier import field_order as FO, mapdump
         from bamboo.querier import sources as SR
 
         F = "pandaserver/g2.py"
         LN = {ln!r}
         b = lambda line, owner, *src: N(at=f"{{F}}:{{line}}", owner=f"{{F}}::{{owner}}", how="assign", sources=list(src), stops=[])
-        call = lambda to, line: N(to=f"{{F}}::Gen.{{to}}", lines=[line], line=line, thread=False)
+        call = lambda to, line: ReachCall.model_construct(to=f"{{F}}::Gen.{{to}}", lines=[line], line=line, thread=False)
+        row = lambda owner, **kw: ReachNode.model_construct(owner=owner, function=owner.rpartition(".")[2], **kw)
         reach = lambda extra=(), holes=(): [
-            N(owner=f"{{F}}::Gen.run", calls=[call("report", LN["        self.report()"])], holes=[]),
-            N(owner=f"{{F}}::Gen.report", calls=[call("plug", LN["        self.plug()"])], holes=list(holes)),
-            N(owner=f"{{F}}::Gen.plug", calls=[], holes=[]),
-            N(owner=f"{{F}}::Gen.__init__", calls=[], holes=[]),
-            N(owner=f"{{F}}::Gen.other", calls=list(extra), holes=[]),
+            row(f"{{F}}::Gen.run", calls=[call("report", LN["        self.report()"])], holes=[]),
+            row(f"{{F}}::Gen.report", calls=[call("plug", LN["        self.plug()"])], holes=list(holes)),
+            row(f"{{F}}::Gen.plug", calls=[], holes=[]),
+            row(f"{{F}}::Gen.__init__", calls=[], holes=[]),
+            row(f"{{F}}::Gen.other", calls=list(extra), holes=[]),
         ]
         G = f"{{F}}::Gen"
         ffs = [
@@ -12449,7 +12451,7 @@ def test_s4b_takes_the_last_binding_on_the_runs_path_by_the_callers_chain_callee
 
         def install(**kw):
             mapdump._FRAGMENT[:] = [N(field_froms=ffs, entered_froms=[], parameter_froms=[], handler_marks=[], **kw)]
-            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._callers_in):
                 cached.cache_clear()
 
         install(reach_graph=reach())
@@ -12559,16 +12561,18 @@ def test_g1_a_change_placed_at_its_first_call_is_read_further_in_by_each_functio
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
+        from bamboo.codemap.models import ReachCall, ReachNode
         from bamboo.querier import field_order as FO, mapdump
         from bamboo.querier import sources as SR
 
         F = "pandaserver/g4.py"
         LN = {ln!r}
-        call = lambda to, line: N(to=f"{{F}}::{{to}}", lines=[line], line=line, thread=False)
+        call = lambda to, line: ReachCall.model_construct(to=f"{{F}}::{{to}}", lines=[line], line=line, thread=False)
+        row = lambda owner, **kw: ReachNode.model_construct(owner=owner, function=owner.rpartition(".")[2], **kw)
         reach = [
-            N(owner=f"{{F}}::Gen.run", calls=[call("Plugin.execute", LN["execute"])], holes=[]),
-            N(owner=f"{{F}}::Plugin.execute", calls=[call("Plugin.update", LN["update"])], holes=[]),
-            N(owner=f"{{F}}::Plugin.update", calls=[], holes=[]),
+            row(f"{{F}}::Gen.run", calls=[call("Plugin.execute", LN["execute"])], holes=[]),
+            row(f"{{F}}::Plugin.execute", calls=[call("Plugin.update", LN["update"])], holes=[]),
+            row(f"{{F}}::Plugin.update", calls=[], holes=[]),
         ]
         change = lambda line, *via: N(at=f"{{F}}:{{LN[line]}}", kind="inner", key=".result", what="",
                                       via=[f"{{F}}:{{LN[v]}}" for v in via])
@@ -12578,7 +12582,7 @@ def test_g1_a_change_placed_at_its_first_call_is_read_further_in_by_each_functio
                         change("failed", "execute", "update")])
         mapdump._FRAGMENT[:] = [N(field_froms=[ff], entered_froms=[], parameter_froms=[], handler_marks=[],
                                   reach_graph=reach)]
-        for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+        for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._callers_in):
             cached.cache_clear()
         got = {{}}
         read = []
@@ -12667,6 +12671,7 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
     out = _ok(_run(tmp_path, f"""
         import json
         from types import SimpleNamespace as N
+        from bamboo.codemap.models import ReachCall, ReachNode
         from bamboo.querier import field_order as FO, mapdump, rerun
         from bamboo.querier import sources as SR
 
@@ -12674,7 +12679,8 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
         L = {L!r}
         G, INIT, API = f"{{F}}::Gen", f"{{F}}::__init__", f"{{F}}::api"
         at = lambda k: f"{{F}}:{{L[k]}}"
-        call = lambda to, k: N(to=f"{{F}}::{{to}}", lines=[L[k]], line=L[k], thread=False)
+        call = lambda to, k: ReachCall.model_construct(to=f"{{F}}::{{to}}", lines=[L[k]], line=L[k], thread=False)
+        row = lambda owner, **kw: ReachNode.model_construct(owner=owner, function=owner.rpartition(".")[2], **kw)
         src = lambda kind, name, k, owner="": N(kind=kind, name=name, line=L[k], route=[at(k)], site_owner=owner,
                                                  steps=[], paths=[], through=[], changes=[])
         ffs = [N(owner=G, field="status", changes=[], stops=[], bindings=[
@@ -12687,11 +12693,11 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
                N(owner=API, parameter="status", line=L["api"] - 1, sources=[], stops=[N(kind="no_caller")])]
 
         def reach(callers, holes=()):
-            return [N(owner=f"{{F}}::Gen.run", calls=[call("Gen.report", "report")], holes=[],
-                      call_bindings=[N(line=L["report"], to=f"{{F}}::Gen.report", parameter="self", path="self")]),
-                    N(owner=f"{{F}}::Gen.report", calls=[], holes=list(holes)),
-                    N(owner=f"{{F}}::Gen.__init__", calls=[], holes=[]),
-                    N(owner=API, calls=[call("Gen.__init__", "api")], holes=[]), *callers]
+            return [row(f"{{F}}::Gen.run", calls=[call("Gen.report", "report")], holes=[],
+                        call_bindings=[N(line=L["report"], to=f"{{F}}::Gen.report", parameter="self", path="self")]),
+                    row(f"{{F}}::Gen.report", calls=[], holes=list(holes)),
+                    row(f"{{F}}::Gen.__init__", calls=[], holes=[]),
+                    row(API, calls=[call("Gen.__init__", "api")], holes=[]), *callers]
 
         choose = lambda ff, rel, line, keys, of_self: FO.choose(ff, rel, line, None, "map", keys, of_self)
         got = {{}}
@@ -12699,7 +12705,7 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
         def pick(name, graph, of_self=False):
             mapdump._FRAGMENT[:] = [N(field_froms=ffs, entered_froms=[], parameter_froms=pfs, handler_marks=[],
                                       reach_graph=graph)]
-            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._closure_in, FO._callers_in):
+            for cached in (SR._field_index, SR._calls_in, FO._reach_index, FO._callers_in):
                 cached.cache_clear()
             c = choose(SR._field_froms()[(G, "status")], F, L["read"], None, of_self)
             ways = SR.field_ways(G, "status", choose=choose, at=(F, L["read"]), of_self=of_self)
@@ -12708,10 +12714,11 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
                           "param": [[w.end, w.why, list(w.route)] for w in SR.param_ways(INIT, "status", entered=ways[0].entered)],
                           "off": SR.calls_off_the_path(INIT, "status", ways[0].entered)}}
 
-        thread_run = lambda *c: N(owner=f"{{F}}::thread_run", calls=list(c), holes=[])
+        thread_run = lambda *c: row(f"{{F}}::thread_run", calls=list(c), holes=[])
         pick("one call", reach([thread_run(call("Gen.__init__", "pop"), call("Gen.run", "run1"))]))
-        pick("two calls", reach([N(owner=f"{{F}}::thread_again", holes=[], calls=[
-            N(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"], thread=False),
+        pick("two calls", reach([row(f"{{F}}::thread_again", holes=[], calls=[
+            ReachCall.model_construct(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"],
+                                      thread=False),
             call("Gen.run", "run2")])]))
         # nothing the map holds calls run: the chain stops before the object is built, __init__ is placed first (c)
         pick("(c)", reach([thread_run(call("Gen.__init__", "pop"))]))
@@ -12723,18 +12730,19 @@ def test_s4b_reads_a_bindings_parameter_by_the_call_the_runs_path_entered_its_fu
         built = lambda k, how="result": N(line=L[k], name="gen", path="" if how == "result" else "other", how=how,
                                           to=[f"{{F}}::Gen.__init__"] if how == "result" else [])
         hands = lambda k, path="gen": N(line=L[k], to=f"{{F}}::Gen.run", parameter="self", path=path)
-        local = N(owner=f"{{F}}::thread_run", holes=hole, calls=[call("Gen.__init__", "pop"), call("Gen.run", "run1")],
-                  bindings=[built("pop")], call_bindings=[hands("run1")])
+        local = row(f"{{F}}::thread_run", holes=hole, calls=[call("Gen.__init__", "pop"), call("Gen.run", "run1")],
+                    bindings=[built("pop")], call_bindings=[hands("run1")])
         pick("built, open", reach([local]), of_self=True)
         pick("built, not self's", reach([local]), of_self=False)
-        again = lambda how: N(owner=f"{{F}}::thread_again", holes=hole, calls=[
-            N(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"], thread=False),
+        again = lambda how: row(f"{{F}}::thread_again", holes=hole, calls=[
+            ReachCall.model_construct(to=f"{{F}}::Gen.__init__", lines=[L["again_pop"], L["again_peek"]], line=L["again_pop"],
+                                      thread=False),
             call("Gen.run", "run2")], bindings=[built("again_pop"), built("again_peek", how)], call_bindings=[hands("run2")])
         pick("built twice", reach([again("result")]), of_self=True)
         pick("built and an alias", reach([again("alias")]), of_self=True)
         # the object run is held in a field: not told, the path is open
-        held = lambda holes: N(owner=f"{{F}}::Holder.go", holes=holes, calls=[call("Gen.__init__", "go_build"), call("Gen.run", "go_run")],
-                               bindings=[], call_bindings=[hands("go_run", "self.gen")])
+        held = lambda holes: row(f"{{F}}::Holder.go", holes=holes, calls=[call("Gen.__init__", "go_build"), call("Gen.run", "go_run")],
+                                 bindings=[], call_bindings=[hands("go_run", "self.gen")])
         pick("a field's, open", reach([held(hole)]), of_self=True)
         pick("a field's", reach([held([])]), of_self=True)
 
@@ -14909,6 +14917,75 @@ def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):
     assert out_ == [["meta:10", "it writes ['metaTable'], which hold no row of JediTaskSpec"]], out_
 
 
+def test_the_querier_walks_the_maps_calls_by_the_maps_closure(tmp_path):
+    """Batch 2 part 3 (map_reach): every walk of the map's calls further than one call is the map's closure.  A call is
+    followed only for the classes it holds for, into those it runs as: PostProcessor.start's thread start runs
+    PostProcessorThread, so WorkerThread.run's ``self.runImpl()`` goes into its runImpl alone, not every agent's.  A call
+    holding for no class goes on for any (a module function's, a ``self`` not read); one running as none enters each
+    class the callee can be.  Each call of a caller is asked on its own, and a way back into the caller goes on through
+    its other calls, inside the call.  A thread start can be cut.  Who reaches a function is asked forward, so a caller
+    whose thread runs another class is not one."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.models import Anchor, ReachCall, ReachNode
+            from bamboo.querier import map_reach as MR
+            from bamboo.querier import mapdump
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import value_reach as VR
+
+            def node(owner, classes, *calls):
+                rel, _, qual = owner.partition("::")
+                return ReachNode(map_id="m", derived_from="v", name=owner, owner=owner, function=qual.rpartition(".")[2],
+                                 classes=classes, anchor=Anchor(package="p", file=rel, line_start=1),
+                                 calls=[ReachCall(callee="x()", **c) for c in calls])
+
+            P, J, D = "o.py::PThread", "j.py::JThread", "d.py::D"
+            mapdump._FRAGMENT[:] = [N(reach_graph=[
+                node("o.py::Post.start", ["o.py::Post"], dict(to="w.py::W.run", line=92, runs_as=[P], thread=True),
+                     dict(to="d.py::D.get", line=80)),
+                node("w.py::W.run", [P, J], dict(to="o.py::PThread.runImpl", line=193, for_classes=[P]),
+                     dict(to="j.py::JThread.runImpl", line=193, for_classes=[J]), dict(to="u.py::log", line=190)),
+                node("o.py::PThread.runImpl", [P], dict(to="d.py::D.post", line=10)),
+                node("j.py::JThread.runImpl", [J], dict(to="d.py::D.gen", line=10)),
+                node("u.py::log", []),
+                node("d.py::D.get", [D], dict(to="o.py::Post.start", line=5)),
+                node("d.py::D.post", [D]), node("d.py::D.gen", [D]),
+                node("x.py::main", [], dict(to="w.py::W.run", line=3)),
+            ])]
+            got = {}
+            got["by line"] = {k: [sorted(v[0]), v[1]] for k, v in RR._callees_by_line("o.py::Post.start").items()}
+            got["as each class"] = sorted(MR.reached(["w.py::W.run"]))
+            got["from a module function"] = sorted(MR.reached(["x.py::main"], 2))
+            got["threads cut"] = MR.reached(["o.py::Post.start"], cut=MR.no_threads)
+            got["reaching gen"] = sorted(MR.reaching("d.py::D.gen", 3))
+            got["others"] = RR._others_reaching("d.py::D.gen", {"x.py::main"})
+            got["bare"] = sorted(VR.closure(["o.py::start"], 2))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the thread runs PThread: its runImpl alone, and what it calls; a module function's call goes on for the class;
+    # the call at 80 comes back into start and on through its thread start, inside the call
+    assert got["by line"] == {"w.py::W.run": [[80, 92], 1], "o.py::PThread.runImpl": [[80, 92], 2],
+                              "u.py::log": [[80, 92], 2], "d.py::D.post": [[80, 92], 3], "d.py::D.get": [[80], 1]}, got
+    # a start runs as each of its classes; a call running as none enters each class the callee can be
+    assert got["as each class"] == ["d.py::D.gen", "d.py::D.post", "j.py::JThread.runImpl", "o.py::PThread.runImpl",
+                                    "u.py::log", "w.py::W.run"], got
+    assert got["from a module function"] == ["j.py::JThread.runImpl", "o.py::PThread.runImpl", "u.py::log", "w.py::W.run",
+                                             "x.py::main"], got
+    assert got["threads cut"] == {"o.py::Post.start": 0, "d.py::D.get": 1}, got
+    # start reaches gen in three calls by the calls alone, but its thread runs PThread: not one of gen's
+    assert got["reaching gen"] == ["j.py::JThread.runImpl", "w.py::W.run", "x.py::main"], got
+    assert got["others"] == 2, got
+    # a file::function start starts as each definition of the name, and is read back so
+    assert got["bare"] == ["d.py::get", "o.py::runImpl", "o.py::start", "u.py::log", "w.py::run"], got
+
+
 def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
     """Q1 part 2 (Rerun._call_tied): a caller whose own runs print no key is read by the runs of the key of the
     functions it calls (the map's reach_graph), a machine's runs a minute or less apart one pass of it; a callee reached
@@ -14925,19 +15002,22 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
             import bamboo.querier.rerun as RR
             from bamboo.querier import render as T
 
+            from bamboo.codemap.models import ReachCall, ReachNode
+
             def node(owner, *calls):
-                return N(owner=owner, calls=[N(to=t, line=ls[0], lines=list(ls)) for t, ls in calls])
+                return ReachNode(map_id="m", derived_from="v", name=owner, owner=owner, function=owner.rpartition(".")[2],
+                                 calls=[ReachCall(callee="x()", to=t, line=ls[0], lines=list(ls)) for t, ls in calls])
 
             got = {}
-            graph = {n.owner: n for n in [node("a::A.f", ("b::B.g", (10, 12)), ("c::C.h", (20,))),
-                                          node("b::B.g", ("d::D.k", (5,))), node("c::C.h", ("d::D.k", (7,)))]}
-            RR._reach_nodes = lambda: graph
+            graph = [node("a::A.f", ("b::B.g", (10, 12)), ("c::C.h", (20,))),
+                     node("b::B.g", ("d::D.k", (5,))), node("c::C.h", ("d::D.k", (7,))), node("d::D.k")]
+            RR.mapdump._FRAGMENT[:] = [N(reach_graph=graph)]
             got["reach"] = {k: [sorted(v[0]), v[1]] for k, v in RR._callees_by_line("a::A.f").items()}
-            got["others"] = RR._others_reaching("d::D.k", {"a::A.f", "b::B.g"}, graph)
+            got["others"] = RR._others_reaching("d::D.k", {"a::A.f", "b::B.g"})
             got["bursts"] = RR._bursts(["2026-11-13 14:34:02,000", "2026-11-13 14:34:02,197", "2026-11-13 14:35:06,139"],
                                        RR.datetime.timedelta(minutes=1))
 
-            RR._reach_nodes = lambda: {}
+            RR.mapdump._FRAGMENT[:] = [N(reach_graph=[])]
             RR.R.function = lambda rel, name, lines=(), within=(): N(node=N(name=name, lineno=61))
             RR.pathcond.qualified_name = lambda node: "PostProcessor.start"
             reached = {"s/tcm.py::TCM.prepareTasksToBeFinished_JEDI": ({75}, 3),
@@ -15344,10 +15424,15 @@ def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_pa
             """
             import json
             from types import SimpleNamespace as N
+            from bamboo.codemap.models import Anchor, ReachCall, ReachNode
+            from bamboo.querier import mapdump
             from bamboo.querier import value_reach as VR
 
             def node(owner, *to):
-                return N(owner=owner, calls=[N(to=t) for t in to])
+                rel, _, qual = owner.partition("::")
+                return ReachNode(map_id="m", derived_from="v", name=owner, owner=owner, function=qual.rpartition(".")[2],
+                                 anchor=Anchor(package="p", file=rel, line_start=1),
+                                 calls=[ReachCall(callee="x()", to=t, line=1) for t in to])
 
             def site(owner, selects, to, crossing=None, result="rows", keys=()):
                 return N(owner=owner, selects=selects, crosses_to=to, crossing_selects=crossing or {}, result=result,
@@ -15362,9 +15447,11 @@ def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_pa
                 node("j/Deep.py::a", "j/Deep.py::b"), node("j/Deep.py::b", "j/Deep.py::c"),
                 node("j/Deep.py::c", "j/Deep.py::d"), node("j/Deep.py::d", "j/Deep.py::e"),
                 node("s/api.py::kill", "s/db.py::Db.killTask"),
+                *(node(o) for o in ["s/db.py::Db.updateTask", "s/db.py::Db.retryTask", "s/spec.py::Spec.setOnHold",
+                                    "j/Deep.py::e", "s/db.py::Db.killTask"]),
             ]
-            calls = VR.calls_of(graph)
-            entered = VR.entered([N(function="s/api.py::kill")], calls)
+            mapdump._FRAGMENT[:] = [N(reach_graph=graph)]
+            entered = VR.entered([N(function="s/api.py::kill")])
             sites = [
                 site("s/db.py::getTasksToRefine", [f"{S}=registered", f"{S}=staged"], ["j/Refiner.py::runImpl"]),
                 # another object's rows (a DEFT task's) say nothing of the task's value
@@ -15379,22 +15466,22 @@ def test_value_reach_leaves_out_a_writer_only_reads_of_other_values_reach(tmp_pa
                 # a crossing whose routes select no status hands on none of the values
                 site("s/db.py::getStaged", [f"{S}=staged"], ["j/Kill.py::kill"], {"j/Kill.py::kill": ["JediTaskSpec.lockedBy=x"]}),
             ]
-            other = VR.other_values(sites, S, "aborting", calls)
+            other = VR.other_values(sites, S, "aborting")
             read = N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True, crosses_open=[])
-            r = VR.reach([read], ["j/Cmd.py::runImpl"], ["j/Cmd.py::runImpl"], calls, entered, other)
+            r = VR.reach([read], ["j/Cmd.py::runImpl"], ["j/Cmd.py::runImpl"], entered, other)
             got = {"reads": list(r.reads), "closed": r.closed, "other": sorted(other),
                    "out": {o: r.leaves_out(o) for o in ["j/Cmd.py::runImpl", "s/db.py::updateTask", "s/db.py::retryTask",
                                                          "s/db.py::getTasksToExec", "j/Refiner.py::runImpl",
                                                          "j/Dog.py::doActionForReassign", "s/spec.py::setOnHold",
                                                          "s/db.py::killTask", "j/Stats.py::report", "j/Kill.py::kill",
                                                          "j/Mixed.py::run"]}}
-            deep = VR.reach([read], ["j/Deep.py::a"], [], calls, entered, frozenset(["j/Deep.py::d", "j/Deep.py::e"]))
+            deep = VR.reach([read], ["j/Deep.py::a"], [], entered, frozenset(["j/Deep.py::d", "j/Deep.py::e"]))
             got["deep"] = {o: deep.leaves_out(o) for o in ["j/Deep.py::d", "j/Deep.py::e"]}
             opened = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=False, crosses_open=[])],
-                              [], [], calls, entered, other)
+                              [], [], entered, other)
             crossing = VR.reach([N(owner="s/db.py::getTasksToExec", line=4564, callers_complete=True,
-                                   crosses_open=[N()])], [], [], calls, entered, other)
-            none = VR.reach([], [], [], calls, entered, other)
+                                   crosses_open=[N()])], [], [], entered, other)
+            none = VR.reach([], [], [], entered, other)
             got["open"] = [opened.closed, list(opened.open), crossing.closed, list(crossing.open), none.closed,
                            opened.leaves_out("j/Refiner.py::runImpl"), none.leaves_out("j/Refiner.py::runImpl")]
             print(json.dumps(got))
@@ -15683,11 +15770,17 @@ def test_a_selection_waiting_on_other_rows_is_read_at_their_last_move_and_the_qu
 
             junctions = [N(subject="JediDatasetSpec.nFilesFinished", owner="j.py::J.propagate"),
                          N(subject="JediDatasetSpec.type", owner="j.py::J.insert")]
-            graph = [N(owner="j.py::J.archive", calls=[N(to="j.py::J.propagate")],
-                       history=[N(subject="JobSpec.jobStatus", values=["finished", "failed"])]),
-                     N(owner="j.py::J.kill", calls=[N(to="j.py::J.archive")],
-                       history=[N(subject="JobSpec.jobStatus", values=["cancelled"])]),
-                     N(owner="j.py::J.propagate", calls=[], history=[])]
+            from bamboo.codemap.models import Anchor, HistoryCall, ReachCall, ReachNode
+
+            def node(owner, to, values):
+                return ReachNode(map_id="m", derived_from="v", name=owner, owner=owner, function=owner.rpartition(".")[2],
+                                 anchor=Anchor(package="p", file="j.py", line_start=1),
+                                 calls=[ReachCall(callee="x()", to=t, line=1) for t in to],
+                                 history=[HistoryCall(line=1, subject="JobSpec.jobStatus", values=values)] if values else [])
+
+            graph = [node("j.py::J.archive", ["j.py::J.propagate"], ["finished", "failed"]),
+                     node("j.py::J.kill", ["j.py::J.archive"], ["cancelled"]), node("j.py::J.propagate", [], [])]
+            RR.mapdump._FRAGMENT[:] = [N(reach_graph=graph)]
             car = HOP.carriers(junctions, graph, terms[0].tested, "JobSpec.jobStatus")
             got["carriers"] = [car.writers, [(o, sorted(v)) for o, v in car.carriers], sorted(car.values)]
             got["no carrier"] = HOP.carriers(junctions, graph, {"JediDatasetSpec.type"}, "JobSpec.jobStatus")

@@ -127,6 +127,7 @@ from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
 from bamboo.querier import hop as HOP
+from bamboo.querier import map_reach as MR
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
 from bamboo.querier import parts as PT
@@ -1202,7 +1203,7 @@ def movers_of(follow, writers: list, subject: str, observed: str) -> dict[str, s
 
 
 #: ``[the fragment, its reach graph as calls, the functions its API endpoints reach]``, built once per dump
-_REACH: list = [None, {}, frozenset()]
+_REACH: list = [None, frozenset()]
 
 
 def value_reach_of(follow, subject: str, observed: str, movers) -> VR.Reach:
@@ -1211,8 +1212,7 @@ def value_reach_of(follow, subject: str, observed: str, movers) -> VR.Reach:
     statement reading their rows again hands them to (``read_again``'s), and what those call."""
     fragment = mapdump.fragment()
     if _REACH[0] is not fragment:
-        calls = VR.calls_of(getattr(fragment, "reach_graph", None) or [])
-        _REACH[:] = [fragment, calls, VR.entered(getattr(fragment, "endpoints", None) or [], calls)]
+        _REACH[:] = [fragment, VR.entered(getattr(fragment, "endpoints", None) or [])]
     asked = f"{subject}={observed}"
     statements = [rs for rs in follow.reader_statements if asked in rs.selects and rs.result != RESULT_AGGREGATE]
     crossed = [c for rs in statements for c in rs.crosses_to if asked in crossing_values(rs, c)]
@@ -1226,8 +1226,8 @@ def value_reach_of(follow, subject: str, observed: str, movers) -> VR.Reach:
             crossed += list(getattr(s, "reaches", None) or [])
             if (site := sites.get((kf.owner, kf.statement))) is not None:
                 crossed += list(site.crosses_to)
-    other = VR.other_values(getattr(fragment, "read_sites", None) or [], subject, observed, _REACH[1])
-    return VR.reach(statements, crossed, movers, _REACH[1], _REACH[2], other)
+    other = VR.other_values(getattr(fragment, "read_sites", None) or [], subject, observed)
+    return VR.reach(statements, crossed, movers, _REACH[1], other)
 
 
 def elsewhere_of(follow, writers: list, subject: str, observed: str) -> dict[str, list[int]]:
@@ -2583,49 +2583,25 @@ def _bursts(stamps: list[str], gap: datetime.timedelta) -> list[tuple[str, str]]
     return out
 
 
-def _reach_nodes() -> dict[str, Any]:
-    """The map's ``reach_graph`` by owner."""
-    return {n.owner: n for n in getattr(mapdump.fragment(), "reach_graph", None) or []}
-
-
 def _callees_by_line(owner: str, depth: int = 6) -> dict[str, tuple[set[int], int]]:
-    """The functions *owner* (``file::Class.function``) reaches through the map's calls within *depth* calls
-    (``reach_graph``), each with the lines of *owner*'s own calls it is reached through and the fewest calls it takes:
-    AtlasProdTaskBrokerThread.runImpl reaches updateTask_JEDI through 236 and 443, and through post_process_for_error's
-    calls at 285, 300, ..."""
-    nodes = _reach_nodes()
+    """The functions *owner* (``file::Class.function``) reaches by the map's closure within *depth* calls
+    (:func:`map_reach.by_call`: each call followed for the classes it holds for, into those it runs as), each with the
+    lines of *owner*'s own calls it is reached through and the fewest calls it takes: AtlasProdTaskBrokerThread.runImpl
+    reaches updateTask_JEDI through 236 and 443, and through post_process_for_error's calls at 285, 300, ...; and
+    PostProcessor.start's ``thr.start()`` reaches PostProcessorThread's runImpl, no other agent's."""
     out: dict[str, tuple[set[int], int]] = {}
-    frontier = []
-    for call in getattr(nodes.get(owner), "calls", None) or []:
-        if call.to and call.to != owner:
-            lines = set(call.lines or [call.line])
-            out.setdefault(call.to, (set(), 1))[0].update(lines)
-            frontier.append((call.to, lines))
-    for hop in range(2, depth + 1):
-        nxt = []
-        for f, lines in frontier:
-            for call in getattr(nodes.get(f), "calls", None) or []:
-                if not call.to or call.to == owner or lines <= out.get(call.to, (set(), 0))[0]:
-                    continue
-                out.setdefault(call.to, (set(), hop))[0].update(lines)
-                nxt.append((call.to, lines))
-        frontier = nxt
+    for call, reached in MR.by_call(owner, depth):
+        lines = set(call.lines or [call.line])
+        for o, n in reached.items():
+            had, fewest = out.get(o, (set(), n))
+            out[o] = (had | lines, min(fewest, n))
     return out
 
 
-def _others_reaching(target: str, mine: set[str], nodes: dict[str, Any], depth: int = 3) -> int:
-    """How many functions outside *mine* reach *target* within *depth* calls of the map's (``reach_graph``)."""
-    callers: dict[str, set[str]] = {}
-    for n in nodes.values():
-        for call in n.calls or []:
-            if call.to:
-                callers.setdefault(call.to, set()).add(n.owner)
-    seen: set[str] = set()
-    frontier = {target}
-    for _ in range(depth):
-        frontier = {c for f in frontier for c in callers.get(f, ())} - seen
-        seen |= frontier
-    return len(seen - mine)
+def _others_reaching(target: str, mine: set[str], depth: int = 3) -> int:
+    """How many functions outside *mine* reach *target* within *depth* calls by the map's closure
+    (:func:`map_reach.reaching`)."""
+    return len(MR.reaching(target, depth) - mine)
 
 
 def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> list[Caller]:
@@ -6082,26 +6058,19 @@ class Rerun:
         A reach from *caller* gives one way in (``ReachWrite.chain``), and a second call into the same function, or a
         call into another that goes on there too (the adder's ``process_job_report`` reaches ``archiveJob`` through
         ``updateJobs`` at 471 and ``check_file_status_in_jedi`` at 400), would be missed.  So each call is asked on its
-        own, as the reach from a copy of *caller*'s row holding that call alone, by the map's own rules (the classes a
-        call holds for and enters as).  A way that comes back into *caller* and on through its other calls counts as
-        inside the call, as it runs there."""
-        graph = self._graph()
-        if graph is None or not caller.node.body or not callee.lines:
+        own (:func:`map_reach.by_call`: from a copy of *caller*'s row holding that call alone, by the map's own rules,
+        the classes a call holds for and enters as).  A way that comes back into *caller* and on through its other calls
+        counts as inside the call, as it runs there."""
+        record = MR.graph()
+        if record is None or not caller.node.body or not callee.lines:
             return []
-        RE, record, rows = graph
         start = record.function_at(caller.rel, caller.node.body[0].lineno)
         end = record.function_at(callee.rel, callee.lines[0])
         if start is None or end is None or start == end:
             return []
         if (start, end) not in self._calls_into:
-            row, file = record.rows[start], start.partition("::")[0]
-            lines: set[int] = set()
-            for n, call in enumerate(row.calls):
-                one = row.model_copy(update={"owner": f"{start}#{n}", "calls": [call]})
-                # the writes reached alone are read: a call closed by its name adds no way (by_name off)
-                reached = RE.ReachGraph([*rows, one]).reach([one.owner], RE.Destination({end: ["called"]}, []), by_name=False)
-                if any(w.function == end for w in reached.writes or []):
-                    lines.update(call.lines or [call.line])
+            file = start.partition("::")[0]
+            lines = {ln for call, reached in MR.by_call(start) if end in reached for ln in call.lines or [call.line]}
             self._calls_into[(start, end)] = [f"{file}:{line}" for line in sorted(lines)]
         return self._calls_into[(start, end)]
 
@@ -7155,10 +7124,9 @@ class Rerun:
             # only the pass that moved it: nothing read of the passes before it
             self.say(f"{func}'s callees: no pass on the row but the one that moved it")
             return False
-        graph = _reach_nodes()
         mine = {qual, *reached}
         premises: list[T.Said] = [T.Said("a-callee-run-is-the-caller-s", {
-            "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine, graph)})
+            "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine)})
             for o in sorted({q[5] for g in grouped for q in g if q[3] != mover})]
 
         def words(g: list) -> T.Said:

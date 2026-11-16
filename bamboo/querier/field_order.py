@@ -11,7 +11,7 @@ out/gm/s4b-order.md's (a)-(d)):
   that went on is before the read.  A function entered from several calls stops the chain: a binding of one of
   those callers may be the last, so nothing is off the path and nothing is chosen past it.
 * **(b) Callees at their call.**  A binding or change in a function a call goes on into (the map's ``ReachNode.calls``,
-  a thread's start aside) is placed at that call.
+  a thread's start aside, by the map's closure: :func:`map_reach.by_call`) is placed at that call.
 * **(c) ``__init__`` first.**  Where the chain stops before the call that built the object, the field as
   ``__init__`` left it is what the first function of the chain was entered with.
 * **(d) Off the run's path.**  A binding or change none of these places is not taken, and is named.  The premise is
@@ -51,6 +51,7 @@ from bamboo.codemap import pathcond
 from bamboo.codemap import reaching as RE
 from bamboo.codemap.panda import flow
 
+from . import map_reach as MR
 from . import mapdump
 from . import rows as R
 from . import sources as SR
@@ -98,25 +99,6 @@ def _reach_index(fragment_id: int) -> dict[str, Any]:
 def _reach() -> dict[str, Any]:
     fragment = mapdump.fragment()
     return _reach_index(id(fragment)) if fragment is not None else {}
-
-
-@functools.cache
-def _closure_in(fragment_id: int, owner: str) -> frozenset[str]:
-    reach = _reach_index(fragment_id)
-    seen: set[str] = set()
-    todo = [owner]
-    while todo:
-        for c in getattr(reach.get(todo.pop()), "calls", None) or []:
-            if not c.thread and c.to not in seen:
-                seen.add(c.to)
-                todo.append(c.to)
-    return frozenset(seen)
-
-
-def _closure(owner: str) -> frozenset[str]:
-    """The functions a call of *owner* goes on into, any number of calls deep (threads aside)."""
-    fragment = mapdump.fragment()
-    return _closure_in(id(fragment), owner) if fragment is not None else frozenset()
 
 
 @functools.cache
@@ -321,8 +303,10 @@ class _Path:
         held = {o for o in self.owners if o}
         # each statement's calls on into a function holding an item, with the lines it calls each at
         calls: dict[int, tuple[ast.stmt, dict[str, set[int]]]] = {}
-        for c in getattr(reach, "calls", None) or []:
-            if c.thread or not ({c.to} | _closure(c.to)) & held:
+        # what each call goes on into, any number of calls deep (threads aside), by the map's closure: the call
+        # followed for the classes it holds for, into those it runs as
+        for c, goes in MR.by_call(owner, cut=MR.no_threads):
+            if c.thread or not ({c.to} | set(goes)) & held:
                 continue
             for ln in c.lines or [c.line]:
                 if (stmt := R.statement_at(node, ln)) is not None:
