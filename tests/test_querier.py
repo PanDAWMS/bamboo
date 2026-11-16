@@ -1446,6 +1446,81 @@ def test_the_record_door_asks_an_s1_method_mark_for_its_own_rows_and_a_run_of_it
     assert "asked for" not in described
 
 
+def test_a_passed_over_selection_is_read_on_its_later_steps_keys_and_cap(tmp_path):
+    """Q1 batch 2 part 2: getTasksToBeFinished_JEDI@1644's ways after its select, its terms no tree holds, and the
+    annotated END's words."""
+    got = json.loads(_ok(_run(tmp_path, textwrap.dedent("""
+        import json
+        from types import SimpleNamespace as NS
+        from bamboo.querier import render as T, rerun as RR
+
+        def pr(line, cols):
+            return NS(kind="print", line=line, holes=[NS(columns=cols)])
+        br = NS(kind="branch", line=1658, holes=[])
+        st = NS(exits=[
+            NS(kind="continue", line=1667, no_rows=False, decided_at=1662, skeleton=[br, pr(1663, ["JediTaskSpec.jediTaskID"])]),
+            NS(kind="except", line=1662, no_rows=False, decided_at=1662, skeleton=[br, pr(1663, ["JediTaskSpec.jediTaskID"])]),
+            NS(kind="fall", line=1695, no_rows=False, decided_at=1695, skeleton=[]),
+            NS(kind="raise", line=1666, no_rows=False, decided_at=1665, skeleton=[br, pr(1664, ["X.other"])]),
+            NS(kind="return", line=1600, no_rows=True, decided_at=1599, skeleton=[])])
+        # whether a print names the key is the function's prints' (function_prints): the walk's skeleton names no column
+        steps = [(s.way, s.decided, list(s.prints)) for s in RR.later_steps(st, {1663}.__contains__)]
+        lines = RR.exit_print_lines(st)
+
+        def kf(table, term, kinds, some=False, owner="pandaserver/t.py::getTasksToBeFinished_JEDI", line=1644):
+            return NS(reads=True, statement=line, owner=owner, table=table, term=term, some_rows=some,
+                      sources=[NS(kind=k, name=n) for k, n in kinds])
+        kfs = [kf("JEDI_Tasks", "jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID", [("joined", "JEDI_AUX_Status_MinTaskID.min_jediTaskID")], True),
+               kf("JEDI_AUX_Status_MinTaskID", "min_jediTaskID<=JEDI_Tasks.jediTaskID", [("joined", "JEDI_Tasks.jediTaskID")], True),
+               kf("JEDI_Tasks", "status IN (:status1)", [("constant", "'passed'")]),
+               kf("JEDI_Tasks", "jediTaskID IN (:jediTaskID__in)", [("parameter", "target_tasks")], True),
+               kf("JEDI_Tasks", "vo=:vo", [("parameter", "vo")]),
+               kf("JEDI_Tasks", "site=:site", [("self_field", "self.site")]),
+               kf("JEDI_Tasks", "vo=:vo", [("parameter", "vo")], line=1700),
+               NS(reads=False, statement=1644, owner="pandaserver/t.py::getTasksToBeFinished_JEDI", table="JEDI_Tasks",
+                  term="lockedBy=:lockedBy", some_rows=False, sources=[NS(kind="parameter", name="pid")])]
+        terms = RR.key_terms(kfs, "panda:pandaserver/t.py::TaskComplexModule.getTasksToBeFinished_JEDI", 1644)
+
+        said = T.Said("passed-over-left", {"n": 75, "machines": 8, "start": "2026-11-13 14:05:14.000", "end": "2026-11-13 14:15:35.681",
+            "parts": [T.Said("passed-shown-part", {"n": 1, "way": "continue@1667", "prints": ["getTasksToBeFinished_JEDI:1663"],
+                                                   "times": ["aipanda088 14:06:01.123"]}),
+                      T.Said("passed-excluded-part", {"rest": "for the rest, ", "items": [T.Said("excluded-term-true", {"entry": "tabT.status IN (:status5@1607)"})]})]})
+        alone = T.Said("passed-excluded-part", {"rest": "", "items": [T.Said("excluded-step-unprinted", {
+            "way": "continue@1667", "prints": ["getTasksToBeFinished_JEDI:1663"]})]})
+        unknown = T.Said("which-left-it-out", {"n": 74, "alternatives": [
+            T.Said("left-by-a-term", {"entry": "lockedBy IS NULL OR lockedTime<:timeLimit@1642", "why": [
+                T.Said("term-open-arms", {"arms": ["unlockTasks_JEDI:847"]}),
+                T.Said("term-reached-writes", {"arms": ["getTasksToBeFinished_JEDI:1690"]})]}),
+            T.Said("left-by-a-joined-key", {"terms": [t for t, _ in terms.joined] + list(terms.either), "sources": [s for _, s in terms.joined]}),
+            T.Said("left-by-the-cap", {"limits": ["< {}"]}),
+            T.Said("left-by-a-silent-step", {"way": "fall@1695", "decided": 1695})]})
+        print(json.dumps([steps, lines, [list(map(list, terms.joined)), list(terms.either), list(terms.handed), list(terms.other)],
+                          T.text(said), T.text(unknown), T.text(alone)]))
+        """))).splitlines()[-1])
+    steps, lines, terms, said, unknown, alone = got
+    assert lines == [1663, 1664]
+    assert alone == " -- not continue@1667 (getTasksToBeFinished_JEDI:1663 names the row in none of them, searched)"
+    # the except and the continue it ends in print the same line: one way; a print naming no key column is silent; a
+    # no-rows exit is the terms' half, not a later step
+    assert steps == [["continue@1667", 1662, [1663]], ["fall@1695", 1695, []], ["raise@1666", 1665, []]]
+    # the joined pair the map records from both tables is one; constants are the trees'; a write's term, another
+    # statement's, are not this statement's reads
+    assert terms == [[["jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID", "JEDI_AUX_Status_MinTaskID.min_jediTaskID"]],
+                     ["jediTaskID IN (:jediTaskID__in)"], ["vo=:vo"], ["site=:site"]]
+    assert said == ("; the 75 selection(s) on 8 machine(s) from 2026-11-13 14:05:14.000 to 2026-11-13 14:15:35.681 before "
+                    "the take did not take it -- 1 dropped it after the select at continue@1667, printed by "
+                    "getTasksToBeFinished_JEDI:1663 (aipanda088 14:06:01.123) -- for the rest, not "
+                    "tabT.status IN (:status5@1607) (true for the row then)")
+    assert unknown.startswith("; not known: what left the row out of each of the other 74 selection(s), one of "
+                              "lockedBy IS NULL OR lockedTime<:timeLimit@1642 (not read either way then: "
+                              "unlockTasks_JEDI:847 may have written its columns in the stay, printing no line naming "
+                              "the row; getTasksToBeFinished_JEDI:1690 reached the row before it, no line saying "
+                              "whether they wrote it); "
+                              "jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID or jediTaskID IN (:jediTaskID__in) "
+                              "(against JEDI_AUX_Status_MinTaskID.min_jediTaskID, another table's column); its cap")
+    assert unknown.endswith("fall@1695 after the select (decided at 1695, printing no line naming the row) -- no log prints which")
+
+
 def test_a_head_whose_next_hole_the_map_names_and_the_key_fills_is_asked_with_the_key(tmp_path):
     out = _ok(
         _run(

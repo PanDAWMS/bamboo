@@ -97,9 +97,11 @@ from bamboo.codemap.calls import Types, call_statements
 from bamboo.codemap.models import (
     HISTORY_AFTER,
     KEY_BOUND,
+    KEY_CONSTANT,
     KEY_HANDED,
     KEY_KEPT,
     KEY_NO_USE,
+    KEY_PARAMETER,
     KEY_RETURNED,
     KEY_ROWS,
     KEY_UNKNOWN,
@@ -108,6 +110,7 @@ from bamboo.codemap.models import (
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
     REWRITE_NOT_ATTRIBUTE,
+    SKELETON_PRINT,
     Symptom,
     required_values,
 )
@@ -1484,6 +1487,99 @@ def _bare(owner: str) -> str:
     """A ``file::Class.function`` owner as H2's candidates name it, ``file::function``."""
     rel, _, qual = owner.partition("::")
     return f"{rel}::{qual.rpartition('.')[2]}"
+
+
+def _plain(owner: str) -> str:
+    """:func:`_bare`, less a repository's ``panda:`` before the file: a read site's owner and a KeyFrom's compare."""
+    rel, _, qual = owner.partition("::")
+    return f"{rel.rpartition(':')[2]}::{qual.rpartition('.')[2]}"
+
+
+@dataclass(frozen=True)
+class LaterStep:
+    """Q1 batch 2 part 2: one way the selecting statement's later steps drop a row its SELECT returned -- an exit of
+    the map's (*kind* ``@`` *line*, decided at *decided*), with the lines its way prints a hole naming the row's key
+    (*prints*; none: it drops the row in silence)."""
+
+    kind: str
+    line: int
+    decided: int
+    prints: tuple[int, ...]
+
+    @property
+    def way(self) -> str:
+        return f"{self.kind}@{self.line}"
+
+
+def exit_print_lines(st) -> list[int]:
+    """The print lines of the ways out of the statement *st* (``StatementExit.skeleton``, which
+    ``strategy.attach_reader_traces`` fills)."""
+    return sorted({s.line for e in getattr(st, "exits", None) or [] for s in e.skeleton or [] if s.kind == SKELETON_PRINT})
+
+
+def later_steps(st, keyed: Callable[[int], bool]) -> list[LaterStep]:
+    """The ways the statement *st*'s later steps drop a row its SELECT returned: the map's ``exits`` but the no-rows
+    ones (nothing came back: the terms' half), each with the print lines of its way (:func:`exit_print_lines`) that
+    *keyed* says print a hole the map names as the row's key -- the function's prints' holes (``function_prints``):
+    the walk's skeleton names no hole's column.  Ways printing the same lines are one (an ``except`` and the
+    ``continue`` it ends in)."""
+    out: dict[object, LaterStep] = {}
+    for e in getattr(st, "exits", None) or []:
+        if e.no_rows:
+            continue
+        prints = tuple(sorted({s.line for s in e.skeleton or [] if s.kind == SKELETON_PRINT and keyed(s.line)}))
+        out.setdefault(prints or (e.kind, e.line), LaterStep(e.kind, e.line, e.decided_at, prints))
+    return list(out.values())
+
+
+#: the map's ``KEY_JOINED`` (codemap-xxxix, batch 5's M-b): a term comparing the column with another table's
+KEY_JOINED = "joined"
+
+
+@dataclass(frozen=True)
+class KeyTerms:
+    """Q1 batch 2 part 2: a selecting statement's terms no condition tree holds, by where the map says each compares
+    its column with (``KeyFrom.sources``): another table's column (*joined*, ``(term, source)``), each read with the
+    terms a row need meet only one of (*either*: ``some_rows``); a value the agent hands the call (*handed*); and
+    what is none of these (*other*)."""
+
+    joined: tuple[tuple[str, str], ...] = ()
+    either: tuple[str, ...] = ()
+    handed: tuple[str, ...] = ()
+    other: tuple[str, ...] = ()
+
+
+def key_terms(key_froms: list, owner: str, line: int) -> KeyTerms:
+    """The read terms of the statement on *line* of *owner* (:class:`KeyTerms`); the terms of constants alone are
+    the condition trees' (``status IN (...)``) and left out.  A joined pair the map records from both tables is one."""
+    kfs = [kf for kf in key_froms if getattr(kf, "reads", False) and kf.statement == line and _plain(kf.owner) == _plain(owner)]
+    joined: list[tuple[str, str]] = []
+    pairs: set[frozenset[str]] = set()
+    either, handed, other = [], [], []
+    for kf in kfs:
+        kinds = {s.kind for s in kf.sources}
+        if KEY_JOINED in kinds:
+            source = next(s.name for s in kf.sources if s.kind == KEY_JOINED)
+            pair = frozenset({kf.table.lower(), source.partition(".")[0].lower()})
+            if pair not in pairs:
+                pairs.add(pair)
+                joined.append((kf.term, source))
+        elif kinds and kinds <= {KEY_CONSTANT}:
+            continue
+        elif kf.some_rows:
+            either.append(kf.term)
+        elif kinds == {KEY_PARAMETER}:
+            handed.append(kf.term)
+        else:
+            other.append(kf.term)
+    return KeyTerms(tuple(joined), tuple(either), tuple(handed), tuple(other))
+
+
+def _tree_leaves(node) -> list:
+    """The terms of a condition tree (the map's ``all``/``any`` nodes opened)."""
+    if node.node in ("all", "any"):
+        return [leaf for item in node.items for leaf in _tree_leaves(item)]
+    return [node]
 
 
 def _premise_kind(p: object) -> str:
@@ -7518,10 +7614,13 @@ class Rerun:
         passed = AG.passed_over(picks, first, label, since)
         refused: T.Said | str = ""
         refused_premises: list[T.Said] = []
+        left_unknown: list[T.Said] = []
         if passed:
             if self._cap_take(c, sel, picks, label, moving, up):
                 return True
             refused, refused_premises = self._passed_refused(sel, passed, up)
+            if not refused:
+                refused, refused_premises, left_unknown = self._passed_left(sel, passed, up, label)
             if not refused:
                 self.say(f"(C) not read: {sel.agent_name}'s cycles took the row first at {first.at} ({first.machine.split('.')[0]}), and "
                          f"the {len(passed)} selection(s) on {len({q.machine for q in passed})} machine(s) from {since} to "
@@ -7565,7 +7664,7 @@ class Rerun:
             premises.append(T.Said("ran-while-a-take-did", {"items": [
                 T.Said("a-selection-s-span", {"machine": q.machine.split(".")[0], "start": (q.after or q.at)[:23], "end": q.at[:23]})
                 for q in sorted(during, key=lambda q: q.at)]}))
-        not_known: list[T.Said] = []
+        not_known: list[T.Said] = list(left_unknown)
         for pick, w in unrun:
             premises.append(T.Said("a-cycle-s-lock-on-the-row" if w.how != TL.RAN else "a-cycle-s-lock-changed-it", {
                 "machine": w.machine, "callee": sel.callee, "after": (pick.after or pick.at)[:23], "at": pick.at[:23],
@@ -7655,6 +7754,238 @@ class Rerun:
             "end": max(p.at for p in passed)[:23], "callee": sel.callee, "terms": sorted(terms)})
         return said, [*self._held_premises({k: v for k, v in assumed.items() if v}, {}, max(p.at for p in passed)),
                       *_none_premises(used)]
+
+    def _passed_left(self, sel, passed: list, up: Callers, label: str) -> tuple[T.Said | str, list[T.Said], list[T.Said]]:
+        """Q1 batch 2 part 2 (out/gm/qk-design.md, the Q1 batch 2 design, tmaeno's OK 2026-11-16 08:49, with the later steps): why
+        the agent's selections *passed* did not take the row, where P5 (:meth:`_passed_refused`) does not read every
+        one.  Each is read on what could have left the row out of it: the selecting statement's terms every build
+        requires (surely false then: refused, P5; surely true: not it), its terms no tree holds (:func:`key_terms`:
+        another table's column, the values the agent hands the call), its cap, and the ways its later steps drop a row
+        the SELECT returned (:func:`later_steps`) -- a way printing a line naming the row is read in the records: found
+        in the selection's span on its machine, it is why; searched and found in none, not it.  What is left is (ii),
+        what no log prints, or stops the reading: (i) a log the records lack (its asks), (iii) what is not read here
+        (said).  ``(said, premises, unknown)``: an annotated END's words where each selection is refused, shown, or
+        left to (ii) alone; ``("", [], [])`` where not."""
+        q = getattr(self, "_missed_q", None)
+        if q is None or q.subject != up.subject:
+            return "", [], []
+        sts = [st for st in q.statements if st.owner.rpartition("::")[2].rpartition(".")[2] == sel.callee]
+        if len(sts) != 1:
+            self.say(f"(C) part 2: {len(sts)} statement(s) of the question select through {sel.callee}: not read")
+            return "", [], []
+        st = sts[0]
+        terms = key_terms(getattr(mapdump.fragment(), "key_froms", None) or [], st.owner, st.line)
+        if terms.other or (terms.either and not terms.joined):
+            self.say(f"(C) part 2: {sel.callee}'s terms {', '.join(terms.other or terms.either)} are not read")
+            return "", [], []
+        fixed: dict[str, T.Said] = {}
+        premises: list[T.Said] = []
+        if terms.joined:
+            fixed["joined"] = T.Said("left-by-a-joined-key", {"terms": [t for t, _ in terms.joined] + list(terms.either),
+                                                             "sources": [s for _, s in terms.joined]})
+        if terms.handed:
+            if label:
+                premises.append(T.Said("handed-keys-as-the-row-s", {"agent": sel.agent_name, "terms": list(terms.handed),
+                                                                    "label": label}))
+            else:
+                fixed["handed"] = T.Said("left-by-a-handed-key", {"terms": list(terms.handed)})
+        if st.limits:
+            fixed["cap"] = T.Said("left-by-the-cap", {"limits": list(st.limits)})
+        self._attach_exit_prints()
+        keys = self._key_columns(q.subject, self.args.key)
+        lines = exit_print_lines(st)
+        printed = (getattr(R._prints_of(_plain(st.owner), lines), "statements", None) or []) if lines else []
+        keyed = {pst.line for pst in printed if any(keys & set(h.columns or []) for r in pst.rows or []
+                                                    for h in [*(r.holes or []), *(r.prefix_holes or [])])}
+        steps = later_steps(st, keyed.__contains__)
+        fixed.update({s.way: T.Said("left-by-a-silent-step", {"way": s.way, "decided": s.decided}) for s in steps if not s.prints})
+        found = self._later_prints(st, [s for s in steps if s.prints], passed)
+        if found is None:
+            return "", [], []
+        shown, unprinted = found
+        kept, kept_used = getattr(self, "_assuming", None), self._premised_used
+        self._assuming, self._premised_used = {}, {}
+        refused: dict[str, int] = {}
+        left: dict[str, T.Said] = {}
+        left_entries: set[str] = set()
+        true_in: dict[str, int] = {}
+        n_left = 0
+        try:
+            for p in passed:
+                a, b = W.when(p.after or p.at), W.when(p.at)
+                if why := self._false_between(st, q, a, b):
+                    refused[why] = refused.get(why, 0) + 1
+                    continue
+                if id(p) in shown:
+                    continue
+                n_left += 1
+                mine = 0
+                for reading in st.condition_trees:
+                    if reading.entry not in st.conditions:
+                        continue
+                    kind, said = self._term_left(reading, q, a, b)
+                    if kind == "true":
+                        true_in[reading.entry] = true_in.get(reading.entry, 0) + 1
+                    elif kind == "ii" and isinstance(said, T.Said):
+                        left[T.text(said)] = said
+                        left_entries.add(reading.entry)
+                        mine += 1
+                    else:
+                        self.say(f"(C) part 2: the selection on {p.machine.split('.')[0]} at {p.at}: {said}")
+                        return "", [], []
+                if not mine and not fixed:
+                    self.say(f"(C) part 2: the selection on {p.machine.split('.')[0]} at {p.at} did not take the row, and "
+                             "nothing read here could have left it out")
+                    return "", [], []
+        finally:
+            assumed, self._assuming = self._assuming or {}, kept
+            used, self._premised_used = self._premised_used or {}, kept_used
+        func = sel.callee
+        parts: list[T.Said] = []
+        if refused:
+            parts.append(T.Said("passed-refused-part", {"n": sum(refused.values()), "callee": func, "terms": sorted(refused)}))
+        for s in dict.fromkeys(v[0] for v in shown.values()):
+            times = [v[1] for v in shown.values() if v[0] is s]
+            parts.append(T.Said("passed-shown-part", {"n": len(times), "way": s.way, "prints": [f"{func}:{n}" for n in s.prints],
+                                                      "times": times}))
+        excluded = [T.Said("excluded-term-true", {"entry": e}) for e, n in true_in.items() if n == n_left and e not in left_entries]
+        excluded += [T.Said("excluded-step-unprinted", {"way": s.way, "prints": [f"{func}:{n}" for n in s.prints]})
+                     for s in unprinted]
+        if excluded and n_left:
+            parts.append(T.Said("passed-excluded-part", {"items": excluded, "rest": "for the rest, " if parts else ""}))
+        said = T.Said("passed-over-left", {
+            "n": len(passed), "machines": len({p.machine for p in passed}), "start": min(p.after or p.at for p in passed)[:23],
+            "end": max(p.at for p in passed)[:23], "parts": parts})
+        unknown = [T.Said("which-left-it-out", {"n": n_left, "alternatives": [*left.values(), *fixed.values()]})] if n_left else []
+        premises += [*self._held_premises({k: v for k, v in assumed.items() if v}, {}, max(p.at for p in passed)),
+                     *_none_premises(used)]
+        return said, premises, unknown
+
+    def _attach_exit_prints(self) -> None:
+        """Part 2: what each way out of the question's selecting statements prints (``StatementExit.skeleton``), from
+        the map's walk of them (:func:`strategy.attach_reader_traces`), once: the dump keeps the exits' places only."""
+        strategy = getattr(self, "_strategy", None)
+        if strategy is None or self.__dict__.get("_exits_walked"):
+            return
+        self._exits_walked = True
+        strategy_mod.attach_reader_traces(strategy, R.ROOTS)
+
+    def _later_prints(self, st, printing: list[LaterStep], passed: list) -> tuple[dict[int, tuple[LaterStep, str]], list[LaterStep]] | None:
+        """Part 2: the selections of *passed* a printing later step dropped the row in -- its print naming the row's
+        key in the selection's span on the selection's machine, ``{id(selection): (step, "machine HH:MM:SS.mmm")}`` --
+        and the steps found in none.  The function's logs are asked by the key over the span of them all; judgement
+        3's window and logs premises must hold (a log the records lack stops on its ask).  None where they do not, or
+        a print is not read, said why."""
+        if not printing:
+            return {}, []
+        owner = _plain(st.owner)
+        rel, _, func = owner.partition("::")
+        lines = sorted({n for s in printing for n in s.prints})
+        try:
+            fn = R.function(rel, func, lines)
+        except (LookupError, ValueError, SyntaxError):
+            self.say(f"(C) part 2: {func} is not read at {lines}")
+            return None
+        rows = {}
+        for n in lines:
+            stmt = R.statement_at(fn.node, n)
+            row = fn.row_at(stmt) if stmt is not None else None
+            if row is None:
+                self.say(f"(C) part 2: {func}:{n}'s print is not read")
+                return None
+            rows[n] = row
+        today = sorted({f for pst in getattr(R._prints_of(owner, lines), "statements", None) or [] for f in pst.log_files})
+        to_hand = self.logs.names(self.files_of(owner, today, lines))
+        if not to_hand:
+            self.say(f"(C) part 2: no log of {func}'s prints at {lines} to hand")
+            return None
+        lo = min(W.when(p.after or p.at) for p in passed)
+        hi = max(W.when(p.at) for p in passed) + datetime.timedelta(seconds=1)
+        asking = W.Asking((W._down(lo), W._down(hi)), None, T.Said("for-the-later-steps", {
+            "func": func, "prints": lines, "start": W._down(lo), "end": W._down(hi)}))
+        runs, missed, holes = self._ask(self.args.key, to_hand, asking, {}, quiet=True)
+        self._stop_unanswered(missed)
+        for premise in (self._searched_whole(to_hand, asking, asking, missed, holes, None),
+                        every_log_asked(owner, lines, to_hand)):
+            if not premise["held"]:
+                self.say(f"(C) part 2: {func}'s prints at {lines} are not searched over its selections: {T.text(premise['why'])}")
+                return None
+        key = re.compile(rf"(?<![0-9]){re.escape(self.args.key)}(?![0-9])")
+        hits = []
+        for name in to_hand:
+            for run in runs.get(name, []):
+                sn = R.seen(fn, run, self.mode)
+                for n, row in rows.items():
+                    for i, _, _ in sn.hits.get(row.line, ()):
+                        record = run.records[i]
+                        if key.search(record.message):
+                            hits.append((W.when(record.stamp), (record.machine or "").split(".")[0], n, record.stamp))
+        shown: dict[int, tuple[LaterStep, str]] = {}
+        for p in passed:
+            a, b, m = W.when(p.after or p.at), W.when(p.at), p.machine.split(".")[0]
+            got = next(((n, stamp) for at, mm, n, stamp in sorted(hits) if mm == m and a <= at <= b), None)
+            if got is not None:
+                step = next(s for s in printing if got[0] in s.prints)
+                shown[id(p)] = (step, f"{m} {got[1][11:23]}")
+        unprinted = [s for s in printing if not any(v[0] is s for v in shown.values())]
+        return shown, unprinted
+
+    def _term_left(self, reading, q: Missed, a: datetime.datetime, b: datetime.datetime) -> tuple[str, T.Said | str]:
+        """Part 2: a condition tree of the selecting statement for one selection [*a*, *b*] P5 does not read false:
+        ``"true"`` where surely true then (:meth:`_true_spans`); ``"ii"`` where the columns its terms compare were
+        written in the stay by arms no line names the row in, or it turned within the span (the SELECT's own moment is
+        not printed); ``"i"`` where a log the records lack would say (its asks kept); ``"iii"`` where a term is not read
+        here.  With the words."""
+        if self._tree_true_between(reading.tree, q, a, b):
+            return "true", ""
+        arms: set[str] = set()
+        reached: set[str] = set()
+        for leaf in _tree_leaves(reading.tree):
+            nulls = leaf.node in ("null", "not_null")
+            clock = leaf.node == "compare" and leaf.settled and bool(leaf.values) and all(
+                v.base in UTC_CLOCKS and v.offset_seconds is not None for v in leaf.values)
+            if not (nulls or clock):
+                if self._truth(leaf, q)[0] is True:
+                    continue
+                return "iii", f"{reading.entry}: {leaf.text} is not read for the row"
+            tl = self._timeline(leaf.subject, q, nulls=nulls)
+            if tl is None:
+                if not nulls and self._held(leaf.subject, q)[0]:
+                    continue
+                return "iii", f"{reading.entry}: {leaf.subject} is not read over the stay"
+            open_why = self.__dict__.get("_open_why", {}).get((leaf.subject, nulls), {})
+            for o in tl.opens:
+                w = open_why.get(o.arm, "unread")
+                if w == "unasked":
+                    return "i", f"{reading.entry}: {o.arm}'s writes of {leaf.subject} are in logs the records lack (asked)"
+                if w != "unprinted":
+                    return "iii", f"{reading.entry}: {o.arm}'s writes of {leaf.subject} are not read"
+                arms.add(o.arm)
+            mine = {arm for w in tl.writes if w.how != TL.RAN and w.at <= b for arm in w.arms}
+            reached |= mine
+            if nulls and tl.first[0] != tl.first[1] and not tl.opens and not mine:
+                return "iii", f"{reading.entry}: {leaf.subject}'s state as the stay began is not read"
+        why: list[T.Said] = []
+        if arms:
+            why.append(T.Said("term-open-arms", {"arms": sorted(arms)}))
+        if reached:
+            why.append(T.Said("term-reached-writes", {"arms": sorted(reached)}))
+        if why:
+            return "ii", T.Said("left-by-a-term", {"entry": reading.entry, "why": why})
+        return "ii", T.Said("left-by-a-term-turning", {"entry": reading.entry})
+
+    def _tree_true_between(self, node, q: Missed, a: datetime.datetime, b: datetime.datetime) -> bool:
+        """Part 2: whether a condition tree is surely true for the row at every moment of [*a*, *b*]: ``all`` where
+        every item is, ``any`` where one is; a term ``IS NULL`` or ``IS NOT NULL`` on its states' timeline
+        (:meth:`_state_between`: inside a reading naming the open arms, as having not written it); any other term where
+        :meth:`_true_spans` holds it all the span."""
+        if node.node == "all":
+            return all(self._tree_true_between(item, q, a, b) for item in node.items)
+        if node.node == "any":
+            return any(self._tree_true_between(item, q, a, b) for item in node.items)
+        if node.node in ("null", "not_null"):
+            return self._state_between(node, q, a, b, node.node == "null")
+        return any(s <= a and b <= e for s, e in self._true_spans(node, q))
 
     def _state_between(self, node, q: Missed, a: datetime.datetime, b: datetime.datetime, null: bool) -> bool:
         """Q1 batch 2 part 1: whether the column a term ``IS NULL`` or ``IS NOT NULL`` tests surely is NULL (*null*), or
@@ -8259,6 +8590,7 @@ class Rerun:
         # every other writer of another value, which takes a row by its key; and where the selecting statements' rows
         # go, which leaves out a writer they do not reach (value_reach)
         strategy_mod.attach_mover_gaps(inv.hops[0].strategy, R.ROOTS)
+        self._strategy = inv.hops[0].strategy
         gaps = map_gaps(follow)
         writers = asyncio.run(self._writers_of(q.subject))
         movers = movers_of(follow, writers, q.subject, q.observed)
@@ -8819,12 +9151,19 @@ class Rerun:
         opens: list[TL.Opening] = []
         absent: list[str] = []
         premised: set[str] = set()
+        # why each open arm is: no must print names the row it writes ("unprinted"), a log of it the records lack
+        # ("unasked"), or judgement 3's premises not held otherwise ("unread") -- Q1 batch 2 part 2's (ii), (i), (iii)
+        open_why: dict[str, str] = self.__dict__.setdefault("_open_why", {}).setdefault((subject, nulls), {})
         for j in writers:
             for b in j.branches:
                 name = SV._name(j.owner, b.line)
                 if name not in before.left:
                     continue
-                got, whole = self._column_writes(j, b, keys, (since, q.moved), writers)
+                missed: list = []
+                got, whole = self._column_writes(j, b, keys, (since, q.moved), writers, missed)
+                if not whole:
+                    printed = any(n.row == MUST_ROW_WRITTEN and n.column in keys for n in getattr(b, "must_names", None) or [])
+                    open_why[name] = "unprinted" if not printed else "unasked" if missed else "unread"
                 value: Any
                 if nulls:
                     value = _null_states(b)
