@@ -340,3 +340,13 @@ def test_one_reading_says_how_each_call_makes_its_value_and_a_runnable_stops_on_
     assert stops["naive_utcnow()"] == stops["uuid.uuid4()"] == "clock"
     assert stops["time.gmtime(s)"] is None and stops["helper(s)"] is None
     assert stops["time.sleep(s)"] == "library" and stops["log.mystery(s)"] == "unplaced"
+
+
+def test_the_return_lines_of_a_tree_are_read_once_and_are_its_returns():
+    """The lines a decoder's ``return`` may be on are read once per tree (:func:`runnable._return_lines`), the same
+    lines walking it gives."""
+    tree = ast.parse(Path(runnable.__file__).read_text())
+    walked = {node.lineno for node in ast.walk(tree) if isinstance(node, ast.Return)}
+    assert walked and runnable._return_lines(tree) == walked
+    assert runnable._return_lines(tree) is runnable._return_lines(tree)
+    assert runnable._return_lines(ast.parse("x = 1\n")) == frozenset()

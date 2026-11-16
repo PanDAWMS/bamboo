@@ -3956,3 +3956,70 @@ def test_an_arm_the_constants_of_a_route_rule_out_names_the_route(tmp_path):
 
     assert sorted(locked) == [["pkg/main.py:11"], ["pkg/tb.py:4", "pkg/main.py:8"]]
     assert status == []
+
+
+_NESTED_SCOPES = '''
+import os
+
+
+def outer(a, b=lambda x: x + 1):
+    if a:
+        def inner(c):
+            return [c for c in range(3)]
+    else:
+        class Inner:
+            def method(self):
+                return self
+    try:
+        def inner(c):
+            return c
+    except ValueError:
+        pass
+    key = sorted([a, b], key=lambda one: one)
+    return inner, key
+
+
+class Top:
+    attr = 1
+
+    def run(self):
+        return outer(self.attr)
+'''
+
+
+def _own_nodes_walked(scope):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield child
+        yield from _own_nodes_walked(child)
+
+
+def _bound_defs_walked(scope):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield child
+        elif not isinstance(child, ast.Lambda):
+            yield from _bound_defs_walked(child)
+
+
+_ASKED = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.If, ast.Try, ast.For)
+
+
+@pytest.mark.parametrize(
+    "source", [_NESTED_SCOPES, Path(calls_mod.__file__).read_text()], ids=["nested", "calls-module"]
+)
+def test_a_scopes_own_nodes_and_defs_read_once_are_what_walking_it_gives_in_its_order(source):
+    """:func:`own_nodes` and :func:`bound_defs` keep what they read of a scope: the same nodes, in the same order, as
+    walking the scope gives -- on the first ask, and on the next, from what was kept.  A statement that is no scope is
+    read each time."""
+    tree = ast.parse(source)
+    asked = [node for node in ast.walk(tree) if isinstance(node, _ASKED)]
+    assert len(asked) > 5
+    for _ in range(2):
+        for node in asked:
+            assert [id(one) for one in calls_mod.own_nodes(node)] == [id(one) for one in _own_nodes_walked(node)]
+            assert [id(one) for one in calls_mod.bound_defs(node)] == [id(one) for one in _bound_defs_walked(node)]
+    if source == _NESTED_SCOPES:
+        (outer,) = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"]
+        assert [one.name for one in calls_mod.bound_defs(outer)] == ["inner", "Inner", "inner"]

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import weakref
 from typing import Iterable, Optional
 
 from bamboo.codemap import callfacts, pathcond, reach
@@ -78,17 +79,33 @@ def _definition(trees: dict[str, ast.AST], row: ReachNode) -> Optional[ast.Funct
     if tree is None or anchor is None:
         return None
     best = None
-    for node in ast.walk(tree):
+    for node in _functions_named(tree).get(row.function, ()):
         if (
-            isinstance(node, _FUNCTIONS)
-            and node.name == row.function
-            and min([node.lineno, *(one.lineno for one in node.decorator_list)])
+            min([node.lineno, *(one.lineno for one in node.decorator_list)])
             <= anchor.line_start
             <= (node.end_lineno or node.lineno)
         ):
             if best is None or node.lineno > best.lineno:
                 best = node
     return best
+
+
+#: Each tree's functions by name, in the order ``ast.walk`` meets them, kept while the tree is.
+_NAMED: "weakref.WeakKeyDictionary[ast.AST, dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _functions_named(tree: ast.AST) -> dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """*tree*'s functions by name, in ``ast.walk`` order: read once per tree, not once per reach row."""
+    found = _NAMED.get(tree)
+    if found is None:
+        found = {}
+        for node in ast.walk(tree):
+            if isinstance(node, _FUNCTIONS):
+                found.setdefault(node.name, []).append(node)
+        _NAMED[tree] = found
+    return found
 
 
 def _own_nodes(func: ast.AST) -> Iterable[ast.AST]:
