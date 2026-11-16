@@ -14672,6 +14672,21 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
             # one whose logs there are not in the records is not named: its ask stays
             r = rerun({**hits, **begin, 742: ([], False)}, missed=(742,))
             got["p3_asked"] = list(RR.Rerun._timeline(r, C, q3).begun_assumed)
+            # W: updateTask_JEDI 1441's value is its time less 1 h (Branch.amount), so the entry print reaching it and 1443
+            # bounds the write to [t - 1 h, t]: with the open arm named, the term holds from 5 min after the stay's start
+            hour = N(base="naive_utcnow", offset_seconds=-3600.0, scale_seconds=None, needs=[])
+            writers[1].branches[0].amount = hour
+            r = rerun(hits)
+            tlw = RR.Rerun._timeline(r, C, q)
+            got["w_write"] = [str(tlw.writes[1].lo), str(tlw.writes[1].hi)]
+            r._assuming = {}
+            got["w"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q)]
+            writers[1].branches[0].amount = None
+            got["w_offsets"] = [str(RR._written_offset(x)) for x in (
+                br(1, "runtime(naive_utcnow())"), N(outcome="x", amount=hour),
+                N(outcome="x", amount=N(base="naive_utcnow", offset_seconds=-3600.0, scale_seconds=60.0, needs=[])),
+                N(outcome="x", amount=N(base="f.time_limit", offset_seconds=0.0, scale_seconds=None, needs=[])),
+                N(outcome="x"))]
             # what M3(a)-1 settles, or a timeline that reads nothing, is read as before
             r = rerun({2099: ([], False), 1441: ([], False), 1443: ([], False), 767: ([], False), 5710: ([], False)})
             got["nothing"] = RR.Rerun._timeline_spans(r, term, q)
@@ -14726,7 +14741,41 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
                                "JediTaskSpec.modificationTime in the stay and none of feed:742 began the stay"], got
     assert got["p3_none"] == [] and got["p3_asked"] == [], got
     assert got["nothing"] is None, got
+    assert got["w_write"] == ["2026-11-13 19:23:17.396000", "2026-11-13 20:23:17.396000"], got
+    assert got["w"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["w_offsets"] == ["0:00:00", "-1 day, 23:00:00", "None", "None", "None"], got
     assert got["holes"] == [True, False, True, False], got
+
+
+def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
+    """R (the map's batch 2, Branch.count_prints; RR._landed): the first count print of the write's statement in the
+    run after the write's print and before that print's next record says whether the write landed -- none or not one:
+    it did not (the lock's ``failed to lock jediTaskID={}``); one or some: it did (lockTask_JEDI's ``done with {}``,
+    a reached write then ran) -- and none printed there says nothing.  A record a longer print reads is that one's."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            RR.R.statement_at = lambda node, line: line
+            fn = N(node=None, row_at=lambda stmt: N(line=stmt))
+            b = N(count_prints=[N(line=2770, rows="one"), N(line=2778, rows="not_one")])
+            # the write's print at 2751 on records 0 and 6; done with at 2, locked by another (also read as done with) at 8
+            sn = N(hits={2751: [(0, "lockTask_JEDI", None), (6, "lockTask_JEDI", None)],
+                         2770: [(2, "done with ", None), (8, "done with ", None)],
+                         2778: [(8, "done with  locked by another  at ", None)]})
+            got = {"first": RR._landed(fn, sn, 0, 2751, b), "second": RR._landed(fn, sn, 6, 2751, b),
+                   "none": RR._landed(fn, N(hits={2751: [(0, "x", None)]}), 0, 2751, b),
+                   "no_counts": RR._landed(fn, sn, 0, 2751, N())}
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"first": True, "second": False, "none": None, "no_counts": None}, got
 
 
 def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):

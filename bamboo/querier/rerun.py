@@ -422,6 +422,44 @@ def _hole_holds(row: R.Row, record, name, key: str) -> bool:
     return any(v is not None and str(v).strip().strip("'\"") == key for v in values)
 
 
+def _written_offset(b) -> datetime.timedelta | None:
+    """What the arm *b* writes, as an offset from the time it ran: the clock itself (``attr_time.NOW``), or a clock
+    plus a settled offset (``Branch.amount``, the map's batch 2 W: updateTask_JEDI 1441's ``timeNow - 1 h``,
+    ``CURRENT_DATE-1``); None where it is no such value (a parameter, a bind's scale, a value only said)."""
+    if b.outcome in AT.NOW:
+        return datetime.timedelta(0)
+    a = getattr(b, "amount", None)
+    if (a is None or a.base not in UTC_CLOCKS or a.offset_seconds is None or getattr(a, "scale_seconds", None)
+            or getattr(a, "needs", None)):
+        return None
+    return datetime.timedelta(seconds=a.offset_seconds)
+
+
+def _landed(fn, sn, i: int, line: int, b) -> bool | None:
+    """R (the map's batch 2, ``Branch.count_prints``): what the first count print of the write's statement in the run
+    after the write's print (record *i*, of the print at *line*) and before that print's next record says of the rows
+    the run changed -- False for none or not one (lockTask_JEDI's ``done with {} locked by another``, the lock's
+    ``failed to lock jediTaskID={}``), True for one or some (``done with {}``); None where none printed there.  A
+    record another print reads at least as well is not taken."""
+    nxt = min((k for k, _, _ in sn.hits.get(line, ()) if k > i), default=None)
+    first: tuple[int, str] | None = None
+    for cp in getattr(b, "count_prints", None) or []:
+        stmt = R.statement_at(fn.node, cp.line)
+        crow = fn.row_at(stmt) if stmt is not None else None
+        if crow is None:
+            continue
+        for k, literal, _ in sn.hits.get(crow.line, ()):
+            if k <= i or (nxt is not None and k >= nxt) or any(
+                    other != crow.line and any(kk == k and lit >= literal for kk, lit, _ in hs)
+                    for other, hs in sn.hits.items()):
+                continue
+            if first is None or k < first[0]:
+                first = (k, cp.rows)
+    if first is None:
+        return None
+    return first[1] in ("one", "some")
+
+
 def _binds_name(record, key: str) -> bool:
     """Whether *record*'s printed bind map (``sqltext.cut``) holds *key* as the value of any bind: the statement named
     the row (an IN list's ``:jediTaskID1``), whichever bind the write then takes it by."""
@@ -3569,8 +3607,12 @@ class Rerun:
                 done = {g for g, got in read.items() if got is True} | set(by_run)
                 a.premises = [] if a.only_way else [p for p in a.premises or [] if not _condition_read(p, done)]
             if all(got is True or g in by_run or g in only for g, got in read.items()):
-                lo, hi = w.window
-                at = (T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
+                # a birth's row asks no window (H2's scan, K37): the row says where
+                lo, hi = w.window or ("", "")
+                # a try that is no statuslog row (a birth's, F3's) has no status to name (_row_said)
+                at = (T.Said("as-the-row-was-made", {"time": w.row["time"]}) if w.row and _f3(w.row) == "made" else
+                      T.Said("at-a-try-s-row", {"row": _row_said(w.row)}) if w.row and _f3(w.row) else
+                      T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
                       T.Said("at-time", {"time": hi}) if lo == hi else T.Said("in-window", {"lo": lo, "hi": hi}))
                 via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
@@ -8716,28 +8758,28 @@ class Rerun:
         since = begun - W.SLACK
         writers = self._subject_writers(subject)
         keys = self._key_columns(q.subject, self.args.key)
-        shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, bool]]] = {}
+        shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, datetime.timedelta | None]]] = {}
         opens: list[TL.Opening] = []
         absent: list[str] = []
-        zero = datetime.timedelta(0)
         for j in writers:
             for b in j.branches:
                 name = SV._name(j.owner, b.line)
                 if name not in before.left:
                     continue
                 got, whole = self._column_writes(j, b, keys, (since, q.moved), writers)
-                now = b.outcome in AT.NOW
+                off = _written_offset(b)
                 for at, machine, where, how in got:
-                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, now))
+                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, off))
                 if not whole:
-                    opens.append(TL.Opening(name, zero if now else None, zero if now else None))
+                    opens.append(TL.Opening(name, off, off))
                 elif not got:
                     absent.append(name)
         writes = []
         for (_, at, machine, where), arms in sorted(shown.items(), key=lambda x: (x[0][1], x[0][3])):
-            nows = {now for _, _, now in arms}
-            lo, hi = (at, at) if nows == {True} else (TL.LOW, TL.HIGH)
-            ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or nows == {True})
+            offs = {off for _, _, off in arms}
+            known = [o for o in offs if o is not None]
+            lo, hi = (at + min(known), at + max(known)) if len(known) == len(offs) else (TL.LOW, TL.HIGH)
+            ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or (len(offs) == 1 and len(known) == 1))
             writes.append(TL.Write(at, lo, hi, TL.RAN if ran else TL.REACHED, tuple(n for n, _, _ in arms), where,
                                    machine.split(".")[0]))
         starts, lacking = bool(before.starts), bool(before.lacking)
@@ -8864,8 +8906,12 @@ class Rerun:
                             continue
                         held = [n for n in shown if n.line == line and _hole_holds(row, record, n, key)]
                         if held:
+                            # R: the statement's count print in the same run says whether the write landed
+                            landed = _landed(fn, sn, i, row.line, b)
+                            if landed is False:
+                                continue
                             found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}",
-                                          TL.RAN if any(n.part == MUST_PART_BIND for n in held) else TL.REACHED))
+                                          TL.RAN if landed or any(n.part == MUST_PART_BIND for n in held) else TL.REACHED))
                         elif any(n.line == line for n in named) and _binds_name(record, key):
                             found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.REACHED))
         premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),

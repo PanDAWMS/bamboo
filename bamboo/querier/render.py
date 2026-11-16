@@ -314,6 +314,8 @@ TEMPLATES: dict[str, str] = {
     "the-only-writer-left": "the one writer of the value left, none dropped by a guard: ",
     "it-has-no-guard": "it has no guard",
     "in-the-pass-of-the-row": "in the pass of the statuslog row {status!r} at {time}",
+    "as-the-row-was-made": "as the row was made, at {time}",
+    "at-a-try-s-row": "at {row}",
     "at-time": "at {time}",
     "in-window": "in {lo} .. {hi}",
     "log-on": "{log} on {machines:join=, }",
