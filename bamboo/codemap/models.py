@@ -4332,6 +4332,17 @@ class MessageEdge(BaseModel):
     )
     receiver: str = Field(description="The function processing only this type, ``file::name``.")
     reads: list[MessageRead] = Field(default_factory=list, description="Where the receiver binds each key it reads.")
+    received_as: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Each payload key whose value the receiver names rows by, the columns of the terms it fills as the "
+            "tables' classes declare them, read from the records (:func:`bamboo.codemap.panda.messages."
+            "attach_received_as`): ``{\"taskid\": [\"JediTaskSpec.jediTaskID\"]}``, ``getTaskWithID_JEDI``'s "
+            "``jediTaskID=:jediTaskID`` filled with ``int(msg_dict[\"taskid\"])``.  A message carries its values "
+            "unchanged, so the column is the one the sent value names a row of too; *columns* is read on the "
+            "sender's side, on its own.  A key left out where no term is filled with the value itself."
+        ),
+    )
 
 
 class MapFragment(BaseModel):

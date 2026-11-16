@@ -868,6 +868,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         # Each message a run sends and the function another run takes it with: beside reach, not in it.
         fragment.message_edges = messages.edges(self._modules, self._calls, values)
+        # And which column each payload key names rows by in the receiver's run, read from the key and parameter
+        # records.
+        messages.attach_received_as(fragment.message_edges, fragment.key_froms, fragment.parameter_froms)
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(

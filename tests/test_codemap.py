@@ -27,6 +27,7 @@ from bamboo.codemap.models import (
     KEY_HANDED,
     KEY_KEPT,
     KEY_NO_USE,
+    KEY_PARAMETER,
     KEY_RETURNED,
     REPORTS_ROWS_CHANGED,
     RESULT_AGGREGATE,
@@ -40,11 +41,16 @@ from bamboo.codemap.models import (
     EntryPoint,
     EnumerationWrite,
     FilterStageNode,
+    HeldSource,
+    HeldThrough,
     JunctionNode,
     KeyFrom,
+    KeySource,
     LogSiteNode,
     LoopCutNode,
     MapFragment,
+    MessageEdge,
+    ParameterFrom,
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
@@ -22372,3 +22378,84 @@ def test_a_message_sent_with_a_literal_type_is_joined_to_the_function_taking_onl
             [("taskid", _at('int(msg_dict["taskid"])', _MESSAGE_PROCS), "task_id")],
         )
     ]
+
+
+def test_a_received_key_is_the_column_of_the_terms_the_receiver_names_rows_by_with_it():
+    """``JediJobGeneratorMsgProcPlugin.process`` hands ``int(msg_dict["taskid"])`` to the buffer's
+    ``getTaskWithID_JEDI``, which hands it whole to the proxy's, whose ``jediTaskID=:jediTaskID`` reads
+    ``JEDI_Tasks``: the edge's ``taskid`` is received as ``JediTaskSpec.jediTaskID``, read from the KeyFrom and the
+    ParameterFroms alone.  A term with no class's column, a value handed on at a part of a list
+    (``target_tasks=[task_id]``), one made text, a field of the value, and an edge to another receiver name no row
+    by the key."""
+    receiver = "procs.py::process"
+    taskid = [".data", "['taskid']"]
+    decoded = [("json.loads", "decoded"), ("int", "converted")]
+
+    def received(through, paths=()):
+        return HeldSource(
+            kind=KEY_PARAMETER,
+            name="msg_obj",
+            site_owner=receiver,
+            site_line=3,
+            steps=taskid,
+            through=[HeldThrough(call=call, at="procs.py:5", gives=gives) for call, gives in through],
+            paths=list(paths),
+        )
+
+    def handed(owner, line, name):
+        return HeldSource(kind=KEY_PARAMETER, name=name, site_owner=owner, site_line=line)
+
+    def parameter(owner, line, name, source):
+        return ParameterFrom(owner=owner, line=line, parameter=name, sources=[source])
+
+    def key(owner, line, name, table, term, attr, source_attr=""):
+        source = KeySource(
+            kind=KEY_PARAMETER, name=name, site_owner=owner, site_line=line, paths=["()"], attr=source_attr
+        )
+        return KeyFrom(owner=owner, table=table, term=term, attr=attr, sources=[source])
+
+    buffer, proxy = "buffer.py::getTaskWithID_JEDI", "proxy.py::getTaskWithID_JEDI"
+    parameter_froms = [
+        parameter(buffer, 10, "jediTaskID", received(decoded)),
+        parameter(proxy, 20, "jediTaskID", handed(buffer, 10, "jediTaskID")),
+        parameter("buffer.py::getTasksToBeProcessed_JEDI", 30, "target_tasks", received(decoded, paths=["[0]"])),
+        parameter("buffer.py::getTaskName", 40, "name", received([("json.loads", "decoded"), ("f''", "text")])),
+        parameter("buffer.py::getTask", 50, "task", received(decoded)),
+    ]
+    key_froms = [
+        key(proxy, 20, "jediTaskID", "JEDI_Tasks", "jediTaskID=:jediTaskID", "JediTaskSpec.jediTaskID"),
+        key(proxy, 20, "jediTaskID", "JEDI_JobParams_Template", "jediTaskID=:jediTaskID", ""),
+        key(
+            "buffer.py::getTasksToBeProcessed_JEDI",
+            30,
+            "target_tasks",
+            "JEDI_Datasets",
+            "jediTaskID IN (:jediTaskID__in)",
+            "JediDatasetSpec.jediTaskID",
+        ),
+        key("buffer.py::getTaskName", 40, "name", "JEDI_Tasks", "taskName=:name", "JediTaskSpec.taskName"),
+        key(
+            "buffer.py::getTask",
+            50,
+            "task",
+            "JEDI_Tasks",
+            "status=:status",
+            "JediTaskSpec.status",
+            source_attr="JediTaskSpec.status",
+        ),
+    ]
+    edge = MessageEdge(
+        sender="feeder.py::run", line=7, msg_type="job_generator", sent={"taskid": "jediTaskID"}, receiver=receiver
+    )
+    elsewhere = MessageEdge(
+        sender="feeder.py::run",
+        line=9,
+        msg_type="contents_feeder",
+        sent={"taskid": "jediTaskID"},
+        receiver="other_procs.py::process",
+    )
+
+    messages.attach_received_as([edge, elsewhere], key_froms, parameter_froms)
+
+    assert edge.received_as == {"taskid": ["JediTaskSpec.jediTaskID"]}
+    assert elsewhere.received_as == {}
