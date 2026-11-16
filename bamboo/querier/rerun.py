@@ -9851,28 +9851,80 @@ class Rerun:
         stop = "; ".join(st.callers_stop) or "the map does not say it places every call"
         return "refused on a call", [*lines, f"{refusing} of {running} route(s) refuse it; {stop}"]
 
-    def _amounts_printed(self, owner: str, line: int, asking: W.Asking) -> tuple[dict[str, set[str]], list[str], bool]:
-        """What the marks of *owner*'s runs over *asking*'s window print for each parameter the map names a hole of
-        them (:func:`mark_parameters`): the values by parameter, the runs read (``log@machine``), and whether an ask of
-        its logs had no record.  Asked as S1 asks a mover's logs, over the step's own window, the logs' notes not said;
-        an ask with no record is not kept -- a run no record holds is said not read where it is used."""
-        cache: dict[tuple, tuple[dict[str, set[str]], list[str], bool]] = self.__dict__.setdefault("_amounts_cache", {})
+    def _amounts_printed(self, owner: str, line: int, asking: W.Asking, q: Missed) -> tuple[dict[str, set[str]], list[str], str]:
+        """What the marks of *owner*'s runs of the row over *asking*'s window print for each parameter the map names a
+        hole of them (:func:`mark_parameters`): the values by parameter, the runs read (``log@machine``), and why none
+        was read where none was.  Asked as S1 asks a mover's logs, over the step's own window, the logs' notes not
+        said; an ask of them with no record is not kept.
+
+        A run is the row's unless a hole of its mark whose columns the map names (``RunKey.columns``) holds another
+        value than the row held (:meth:`_held`): ``kickExhaustedTasks_JEDI < vo=atlas label=managed ... >`` selects no
+        task of another label.  Where no run of the row's is read, the function's mark itself is asked -- it holds no
+        key, so the door asks it only near the key's records (KNOWN_ISSUES.md K60) -- by its fixed head as the map
+        reads it (``kickExhaustedTasks_JEDI < vo=``), over the window, on one machine: the last one the key's own
+        records in that log are on, else the log's first JEDI machine; the ask goes to the asks file for the next
+        round (B, P29)."""
+        cache: dict[tuple, tuple[dict[str, set[str]], list[str], str]] = self.__dict__.setdefault("_amounts_cache", {})
         window = asking.window
-        if (owner, window) not in cache:
-            values: dict[str, set[str]] = {}
-            read: list[str] = []
-            names = self.logs.names(self.files_of(owner, [], [line])) if window is not None or not self.logs.needs_window else []
-            found, missed, _holes = self._ask(self.args.key, names, asking, owners_of([owner]), quiet=True) if names else ({}, [], {})
-            func = owner.rpartition("::")[2].rpartition(".")[2]
-            for name, runs in found.items():
-                for run in runs:
-                    if not of_mover(run, func) or (window is not None and not spans(run, window)):
-                        continue
-                    if got := mark_parameters(owner, [line], run):
-                        read.append(f"{name}@{run.machine}")
-                        for parameter, value in got.items():
-                            values.setdefault(parameter, set()).add(value)
-            cache[(owner, window)] = (values, sorted(set(read)), bool(missed))
+        if (owner, window) in cache:
+            return cache[(owner, window)]
+        func = owner.rpartition("::")[2].rpartition(".")[2]
+        values: dict[str, set[str]] = {}
+        read: list[str] = []
+        others = 0
+
+        def take(name: str, runs: list, where: str = "") -> None:
+            nonlocal others
+            for run in runs:
+                if not of_mover(run, func) or (window is not None and not spans(run, window)):
+                    continue
+                got = mark_parameters(owner, [line], run)
+                if not got:
+                    continue
+                if any(known and held is not None and str(held) != value
+                       for column, value in mark_columns(owner, [line], run).items()
+                       for known, held in [self._held(column, q)]):
+                    others += 1
+                    continue
+                read.append(f"{name}@{run.machine}{where}")
+                for parameter, value in got.items():
+                    values.setdefault(parameter, set()).add(value)
+
+        names = self.logs.names(self.files_of(owner, [], [line])) if window is not None or not self.logs.needs_window else []
+        owners = owners_of([owner])
+        found, missed, _holes = self._ask(self.args.key, names, asking, owners, quiet=True) if names else ({}, [], {})
+        for name, runs in found.items():
+            take(name, runs)
+        why = "an ask of its logs has no record" if missed else "no run of it in the records holds its mark"
+        heads = tuple(sorted({re.sub(r"\\(.)", r"\1", r.prefix.split(".*?")[0])
+                              for st in getattr(R._prints_of(owner, [line]), "statements", None) or []
+                              for r in st.rows or [] if getattr(r, "prefix", None)}))
+        if not read and not missed and names and heads:
+            asked = []
+            for name in names:
+                keyed_runs = found.get(name) or []
+                if keyed_runs:
+                    machine: str | None = max(keyed_runs, key=lambda r: r.last).machine
+                else:
+                    log = self.logs.log(name, self.args.key, window, machine=asking.machine, owners=owners, strings=asking.strings)
+                    machine = min(log.jedi) if log.jedi else None
+                on = f" on {machine}" if machine else ""
+                try:
+                    log = self.logs.log(name, self.args.key, window, machine=machine, owners=owners, strings=heads)
+                except Unrecorded as e:
+                    because = (f"what {func}'s runs' marks print for the amount a statement of it waits for: its mark "
+                               f"holds no key, so it is asked on its own (P29)")
+                    self._keep_unanswered([(ask, because) for ask, _ in e.asks])
+                    asked.append(f"{name}{on}")
+                    continue
+                take(name, runs_for(log, func), " by its mark asked alone")
+            if asked:
+                why = f"no run of it in the records holds its mark; its mark {list(heads)} is asked of {', '.join(asked)}"
+            elif not read:
+                why = f"no run of it in the records holds its mark, nor does the answer to its mark {list(heads)} asked alone"
+        if others and not read:
+            why += f" ({others} run(s) of another row's values left out)"
+        cache[(owner, window)] = (values, sorted(set(read)), why)
         return cache[(owner, window)]
 
     def _fill(self, st, q: Missed) -> tuple[Any, list[str]]:
@@ -9904,7 +9956,7 @@ class Rerun:
         cache: dict[tuple, tuple[Any, list[str]]] = self.__dict__.setdefault("_fill_cache", {})
         if key in cache:
             return cache[key]
-        values, read, missed = self._amounts_printed(st.owner, st.line, asking)
+        values, read, none_why = self._amounts_printed(st.owner, st.line, asking, q)
         window = asking.window or (since, end)
         fill: dict[str, float] = {}
         words = []
@@ -9919,8 +9971,7 @@ class Rerun:
             elif len(got) > 1:
                 words.append(f"{name} not read: {func}'s runs over {window[0]} .. {window[1]} print {got} ({', '.join(read)})")
             else:
-                why = "an ask of its logs has no record" if missed else "no run of it in the records holds its mark"
-                words.append(f"{name} not read: {why} over {window[0]} .. {window[1]}")
+                words.append(f"{name} not read: {none_why} over {window[0]} .. {window[1]}")
         out = copy.deepcopy(st) if fill else st
         for reading in out.condition_trees if fill else []:
             for leaf in _tree_leaves(reading.tree):

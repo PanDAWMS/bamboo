@@ -15207,6 +15207,53 @@ def test_an_amount_waiting_for_a_parameter_is_filled_from_what_the_runs_marks_pr
             r6 = RR.Rerun.__new__(RR.Rerun); r6.__dict__.update(r.__dict__)
             filled, _ = r6._fill(st("react", value(["react.timeLimit"]), value(["react.other"])), q())
             got["partly"] = [leaf_of(filled).settled, [x.offset_seconds for x in leaf_of(filled).values]]
+
+            # B-2: a hole the map names a column of the row's by holds another value: not the row's run
+            marks["kick"] = [N(mark="label={} limit={}h", key=[N(parameter="kick.prodSourceLabel", columns=["T.prodSourceLabel"]),
+                                                                N(parameter="kick.timeLimit", columns=[])])]
+            kick = lambda: st("kick", value(["kick.timeLimit"], scale=-3600.0))
+            answers["found"] = {"db.log": [run("kick < label=user limit=240h >", "2026-01-01 00:10:00", "2026-01-01 00:11:00"),
+                                           run("kick < label=managed limit=48h >", "2026-01-01 00:12:00", "2026-01-01 00:13:00", "m2")]}
+            r7 = RR.Rerun.__new__(RR.Rerun); r7.__dict__.update(r.__dict__)
+            r7._held = lambda column, q: (True, "user") if column == "T.prodSourceLabel" else (False, None)
+            filled, words = r7._fill(kick(), q())
+            got["label"] = [leaf_of(filled).values[0].offset_seconds, words]
+            # the row's label not known: no run is left out, and two values are said, not filled
+            r8 = RR.Rerun.__new__(RR.Rerun); r8.__dict__.update(r.__dict__)
+            r8._held = lambda column, q: (False, None)
+            got["label_unknown"] = r8._fill(kick(), q())[1]
+
+            # B-1: no run of the row's in the records: the mark asked by its head on the machine of the key's last run
+            from bamboo.querier.records import Unrecorded
+            R._prints_of = lambda owner, lines: N(runs=marks[owner.rpartition(".")[2]],
+                                                  statements=[N(rows=[N(prefix="kick\\\\ <\\\\ label=.*?\\\\ limit=.*?h\\\\ >")])])
+            keyed_run = run("kick < jediTaskID=7 >", "2026-01-01 00:20:00", "2026-01-01 00:30:00", "m3")
+            answers["found"] = {"db.log": [keyed_run]}
+            logged, kept = [], []
+
+            def log(name, key, window, machine=None, owners=None, strings=(), whole=False):
+                logged.append([name, list(window), machine, list(strings)])
+                if strings and answers.get("record") is None:
+                    raise Unrecorded([(("ask", name, tuple(strings), machine), "")])
+                return N(jedi=frozenset({"m5", "m4"}), runs=answers.get("record") or [])
+            RR.runs_for = lambda lg, key: lg.runs
+            r9 = RR.Rerun.__new__(RR.Rerun); r9.__dict__.update(r.__dict__)
+            r9.logs = N(names=lambda wanted: list(wanted), needs_window=True, log=log)
+            r9._held = lambda column, q: (True, "user")
+            r9._keep_unanswered = lambda asks: kept.extend(asks)
+            got["b1_asked"] = [r9._fill(kick(), q())[1], logged[:], [[a, why] for a, why in kept]]
+            # the next round: its record holds a run of the row's label
+            answers["record"] = [run("kick < label=user limit=240h >", "2026-01-01 00:40:00", "2026-01-01 00:41:00", "m3")]
+            logged.clear()
+            r10 = RR.Rerun.__new__(RR.Rerun); r10.__dict__.update(r9.__dict__); r10.__dict__.pop("_amounts_cache"); r10.__dict__.pop("_fill_cache")
+            filled, words = r10._fill(kick(), q())
+            got["b1_read"] = [leaf_of(filled).values[0].offset_seconds, words]
+            # no run of the key in the log either: the log's first JEDI machine; its record holds no run
+            answers["found"], answers["record"] = {}, []
+            logged.clear()
+            r11 = RR.Rerun.__new__(RR.Rerun); r11.__dict__.update(r9.__dict__); r11.__dict__.pop("_amounts_cache"); r11.__dict__.pop("_fill_cache")
+            answers["record"] = [run("kick < label=managed limit=48h >", "2026-01-01 00:40:00", "2026-01-01 00:41:00", "m4")]
+            got["b1_none"] = [r11._fill(kick(), q())[1], [x[2] for x in logged]]
             print(json.dumps(got))
             """,
         )
@@ -15225,6 +15272,20 @@ def test_an_amount_waiting_for_a_parameter_is_filled_from_what_the_runs_marks_pr
     assert got["missed"] == [f"timeLimit not read: an ask of its logs has no record over {window}"], got
     assert got["left"] == [True, True, True, True] and got["left_asked"] == 0, got
     assert got["partly"] == [False, [-1200.0, None]], got
+    # B-2: the managed run selects no task of the row's label: left out, and 240 h fills it
+    assert got["label"] == [-864000.0, [f"timeLimit = 240, as the marks of kick's runs over {window} print it (db.log@m1)"]], got
+    assert got["label_unknown"] == [f"timeLimit not read: kick's runs over {window} print ['240', '48'] (db.log@m1, db.log@m2)"], got
+    # B-1: the key's last run's machine; the ask kept for the next round, with why
+    why = "what kick's runs' marks print for the amount a statement of it waits for: its mark holds no key, so it is asked on its own (P29)"
+    assert got["b1_asked"] == [
+        [f"timeLimit not read: no run of it in the records holds its mark; its mark ['kick < label='] is asked of db.log on m3 over {window}"],
+        [["db.log", ["2025-12-31 23:50:00", "2026-01-01 01:00:00"], "m3", ["kick < label="]]],
+        [[["ask", "db.log", ["kick < label="], "m3"], why]]], got
+    assert got["b1_read"] == [-864000.0, [f"timeLimit = 240, as the marks of kick's runs over {window} print it (db.log@m3 by its mark asked alone)"]], got
+    # no run of the key in the log: its first JEDI machine; an answer holding another label's run only
+    assert got["b1_none"] == [[f"timeLimit not read: no run of it in the records holds its mark, nor does the answer to its mark "
+                               f"['kick < label='] asked alone (1 run(s) of another row's values left out) over {window}"],
+                              [None, "m4"]], got
 
 
 def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
