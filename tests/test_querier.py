@@ -14649,6 +14649,9 @@ def test_a_column_tested_is_null_is_kept_as_two_states_on_a_timeline(tmp_path):
             got["states"] = {o: [RR._null_states(arm(o)) == s for s in (TL.NULL_ONLY, TL.SET_ONLY, TL.EITHER)] +
                                 [RR._none_premised(arm(o))]
                              for o in ("None", "runtime(pid)", "'aipanda'", "passthrough(lockedBy)", "")}
+            # the map's batch 4 N1: a handed parameter whose signature excludes None writes a value, no premise
+            got["handed"] = {none: RR._none_premised(N(outcome="runtime(pid)", handed=N(none=none)))
+                             for none in ("excludes", "admits", "unannotated")}
             print(json.dumps(got))
             """,
         )
@@ -14672,6 +14675,7 @@ def test_a_column_tested_is_null_is_kept_as_two_states_on_a_timeline(tmp_path):
         "passthrough(lockedBy)": [False, False, True, False],
         "": [False, False, True, False],
     }, got
+    assert got["handed"] == {"excludes": False, "admits": True, "unannotated": True}, got
 
 
 def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_path):
@@ -15290,7 +15294,7 @@ def test_a_selection_passed_over_is_refused_on_a_column_tested_is_null(tmp_path)
     assert said.endswith("(e: lockedBy IS NULL false then, on its writes the records show; lockedTime<:timeLimit false then, "
                          "on its writes the records show)"), said
     assert premises == ["the value read:2163 write(s) to JediTaskSpec.lockedBy, known only at run time, is not None (the map "
-                        "does not say whether it can be)"], premises
+                        "does not rule None out)"], premises
     # P5 names the open arms as having not written the column: the one writing either state is named
     said, premises = got["either"]
     assert "lockedBy IS NULL false then" in said, said

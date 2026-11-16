@@ -439,7 +439,8 @@ def _written_offset(b) -> datetime.timedelta | None:
 def _null_states(b) -> tuple[datetime.datetime, datetime.datetime]:
     """The states a write of a column tested ``IS NULL`` leaves (:data:`timeline.NULL`, Q1 batch 2 part 1): the literal
     ``None`` NULL; another literal, or a value known at run time (``runtime(pid)``, read as one that is not None: a
-    premise, :func:`_none_premised`), a value; any other (a value handed through, none read) either."""
+    premise where the map does not rule None out, :func:`_none_premised`), a value; any other (a value handed through,
+    none read) either."""
     outcome = str(b.outcome or "").strip()
     if outcome == "None":
         return TL.NULL_ONLY
@@ -449,9 +450,15 @@ def _null_states(b) -> tuple[datetime.datetime, datetime.datetime]:
 
 
 def _none_premised(b) -> bool:
-    """Whether :func:`_null_states` reads the arm *b*'s value, known only at run time, as one that is not None: the map
-    does not say whether it can be (getTaskWithID_JEDI's ``pid`` may be None, getTasksToBeFinished_JEDI's may not)."""
-    return str(b.outcome or "").strip().startswith("runtime(")
+    """Whether :func:`_null_states` reads the arm *b*'s value, known only at run time, as one that is not None on a
+    premise: where the map does not rule None out.  The map says what the signature of a parameter the arm writes as
+    handed says of None (``Branch.handed``, its batch 4 N1): getTasksToBeFinished_JEDI's ``pid: str`` excludes it, so
+    that arm writes a value with no premise; getTaskWithID_JEDI's ``pid: str | None`` admits it, and a parameter with
+    no annotation or a value that is no parameter (``runtime(commandMap['oldStatus'])``) says nothing -- premises."""
+    if not str(b.outcome or "").strip().startswith("runtime("):
+        return False
+    # models.NONE_EXCLUDES on the map's batch 4
+    return getattr(getattr(b, "handed", None), "none", None) != "excludes"
 
 
 def _none_premises(used: dict[str, list[str]]) -> list[T.Said]:
