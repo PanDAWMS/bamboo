@@ -7170,7 +7170,7 @@ class _Filled:
             return True
         if not isinstance(value, ast.Name):
             return False
-        bound = [site_of(one).lineno for one in reaching_definitions(self.func, value.id, at)]
+        bound = [getattr(site_of(one), "lineno", 0) for one in reaching_definitions(self.func, value.id, at)]
         line = getattr(at, "lineno", 0)
         return bool(bound) and any(
             isinstance(node, ast.Call)

@@ -1619,7 +1619,7 @@ def _attach_not_run_on(junctions, calls) -> None:
     """Fill ``Branch.not_run_on`` for every junction's branches (:func:`sqlwrite.routes_ruling_out`), each function's
     routes read once for all its junctions -- the function holding the junction's anchor, of the owner's name."""
     named: dict[tuple[str, str], list] = {}
-    held_by: dict[int, tuple[str, ast.AST, list]] = {}
+    held_by: dict[int, tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, list]] = {}
     for junction in junctions:
         file, _, name = junction.owner.partition("::")
         if (file, name) not in named:

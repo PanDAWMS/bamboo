@@ -2172,7 +2172,7 @@ def joined_terms(sql: str) -> tuple[JoinedTerm, ...]:
             comparison = column.parent
             ops = _JOINED_OPS.get(type(comparison))
             # Read from the left side, once; the right side's reading is the mirror.
-            if ops is None or comparison.this is not column or _filtering(column) is None:
+            if comparison is None or ops is None or comparison.this is not column or _filtering(column) is None:
                 continue
             other = comparison.expression
             if not isinstance(other, exp.Column) or column.table == other.table:
@@ -2189,7 +2189,7 @@ def joined_terms(sql: str) -> tuple[JoinedTerm, ...]:
     return tuple(found)
 
 
-def _every_row(node: exp.Expression) -> bool:
+def _every_row(node: exp.Expr) -> bool:
     """Whether no ``OR`` nor ``NOT`` stands between *node* and the clause it is a term of."""
     walk = node.parent
     while walk is not None and not isinstance(walk, (exp.Where, exp.Join, exp.Select)):
