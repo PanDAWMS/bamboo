@@ -14983,10 +14983,12 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
                 r._subject_writers = lambda subject: writers
                 r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
 
-                def column_writes(j, b, keys, window, ws, missed_out=None):
+                def column_writes(j, b, keys, window, ws, missed_out=None, subject=""):
                     if missed_out is not None and b.line in missed:
                         missed_out.append(("an ask", "why"))
-                    return hits[b.line]
+                    got, whole = hits[b.line]
+                    # no value read off a print of the statement's bind map: printed ()
+                    return [w if len(w) == 5 else (*w, ()) for w in got], whole
 
                 r._column_writes = column_writes
                 return r
@@ -15452,6 +15454,86 @@ def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
     )
     got = json.loads(out.splitlines()[-1])
     assert got == {"first": True, "second": False, "none": None, "no_counts": None}, got
+
+
+def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
+    """The bind-print part (the map's WritePrint; RR._printed_write): updateTask_JEDI prints its UPDATE's text and the
+    map of the task's changed fields at 1483 before it runs them, so the call's record of 1483 after the write's must
+    print (1424) and before that print's next record holds the value the column was written with -- the arm at 1441
+    or 1443, whichever ran.  The map an object's ``valuesMap(onlyChanged=True)`` that leaves the column out says the
+    statement did not write it.  On the timeline the write is at that print, RAN, with that value, the two arms one
+    write."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import timeline as TL
+
+            RR.R.statement_at = lambda node, line: line
+            fn = N(node=None, row_at=lambda stmt: N(line=stmt))
+            C = "JediTaskSpec.modificationTime"
+            wp = N(owner="t.py::upd", statement=1484, arms={C: [1441, 1443]},
+                   binds=[N(column=C, bind=":modificationTime"), N(column="JediTaskSpec.status", bind=":status")],
+                   printed_by=[N(line=1483, lead="", gap="")], object_map="taskSpec", only_changed=True)
+            RR.write_prints = lambda owner: [wp] if owner == "t.py::upd" else []
+            mark = "updateTask_JEDI < jediTaskID=1 > UPDATE ATLAS_PANDA.JEDI_Tasks SET {} WHERE jediTaskID=:jediTaskID "
+            recs = [N(text=mark.format("x") , stamp="2026-11-15 06:46:49,940"),
+                    N(text=mark.format("modificationTime=:modificationTime") + str({":modificationTime":
+                          D.datetime(2026, 11, 15, 6, 46, 49, 943316), ":jediTaskID": 1}), stamp="2026-11-15 06:46:49,944"),
+                    N(text=mark.format("x"), stamp="2026-11-15 07:07:22,100"),
+                    N(text=mark.format("status=:status") + str({":status": "running", ":jediTaskID": 1}),
+                      stamp="2026-11-15 07:07:22,105")]
+            run = N(records=recs)
+            sn = N(hits={1424: [(0, "start", None), (2, "start", None)], 1483: [(1, "", None), (3, "", None)]})
+            b41, b67 = N(line=1441), N(line=1467)
+
+            def said(x):
+                return None if x is None else [str(x[0]), "unwritten" if x[1] is RR.UNWRITTEN else str(x[1]), x[2]]
+
+            got = {"value": said(RR._printed_write(fn, sn, run, 0, 1424, "t.py::upd", b41, C)),
+                   # the second call's map holds the status alone: changed fields only, so it wrote no modificationTime
+                   "unwritten": said(RR._printed_write(fn, sn, run, 2, 1424, "t.py::upd", b41, C)),
+                   "other_arm": said(RR._printed_write(fn, sn, run, 0, 1424, "t.py::upd", b67, C)),
+                   "other_owner": said(RR._printed_write(fn, sn, run, 0, 1424, "t.py::err", b41, C)),
+                   # no print of it between the write's print and that print's next record
+                   "none": said(RR._printed_write(fn, N(hits={1424: [(0, "start", None), (1, "start", None)],
+                                                              1483: [(3, "", None)]}), run, 0, 1424, "t.py::upd", b41, C))}
+            # the timeline: the two arms read off the one print, a write RAN at it with the printed value
+            v = D.datetime(2026, 11, 15, 6, 46, 49, 943316)
+            at = D.datetime(2026, 11, 15, 6, 46, 49, 944000)
+            from bamboo.querier import stay_value as SV
+            before = SV.Before(False, (), ("feed:742",), (), ("upd:1441", "upd:1443"), ())
+            writers = [N(owner="t.py::upd", branches=[N(line=1441, outcome="runtime(timeNow - datetime.timedelta(hours=1))"),
+                                                       N(line=1443, outcome="runtime(naive_utcnow())")])]
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.args, r.result = N(key="1"), {}
+            r._before = lambda subject, q, nulls=False: (before, "2026-11-15 06:00:00")
+            r._subject_writers = lambda subject: writers
+            r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
+            hits = {1441: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))],
+                    1443: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))]}
+            r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="": (hits[b.line], True)
+            q = N(subject="JediTaskSpec.status", observed="pending", since=D.datetime(2026, 11, 15, 6, 0, 0),
+                  moved=D.datetime(2026, 11, 15, 7, 7, 11, 370000), writers=[])
+            tl = RR.Rerun._timeline(r, C, q)
+            got["writes"] = [[str(w.at), w.how, list(w.arms), str(w.lo), str(w.hi), w.where] for w in tl.writes]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        "value": ["2026-11-15 06:46:49.944000", "2026-11-15 06:46:49.943316", 1483],
+        "unwritten": ["2026-11-15 07:07:22.105000", "unwritten", 1483],
+        "other_arm": None,
+        "other_owner": None,
+        "none": None,
+        "writes": [["2026-11-15 06:46:49.944000", "ran", ["upd:1441", "upd:1443"], "2026-11-15 06:46:49.943316",
+                    "2026-11-15 06:46:49.943316", "upd:1483"]],
+    }, got
 
 
 def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):

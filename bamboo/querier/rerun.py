@@ -504,9 +504,12 @@ def _none_premises(used: dict[str, list[str]]) -> list[T.Said]:
 
 def _write_bounds(value, at: datetime.datetime) -> tuple[datetime.datetime, datetime.datetime]:
     """The bounds an arm's write at *at* leaves: *value* an offset from the time it ran (:func:`_written_offset`), the
-    states of a column tested ``IS NULL`` (:func:`_null_states`), or None, not read."""
+    time its statement's printed bind map holds (:func:`_printed_write`), the states of a column tested ``IS NULL``
+    (:func:`_null_states`), or None, not read."""
     if isinstance(value, datetime.timedelta):
         return at + value, at + value
+    if isinstance(value, datetime.datetime):
+        return value, value
     return value if value is not None else (TL.LOW, TL.HIGH)
 
 
@@ -533,6 +536,85 @@ def _landed(fn, sn, i: int, line: int, b) -> bool | None:
     if first is None:
         return None
     return first[1] in ("one", "some")
+
+
+#: a write whose statement's printed bind map leaves its column out: an object's ``valuesMap(onlyChanged=True)`` holds
+#: only the attributes changed, so the statement ran without writing that column (:func:`_printed_write`)
+UNWRITTEN = object()
+
+_WP: list = [None, {}]
+
+
+def write_prints(owner: str) -> list:
+    """The installed dump's ``write_prints`` of *owner* (``file::function``, as :func:`_bare` spells it): the map's
+    ``WritePrint``, a write statement whose function prints its text and the bind map it runs with, and the column each
+    bind writes.  None before an install or from a dump that has none."""
+    wps = getattr(mapdump.fragment(), "write_prints", None) or []
+    if _WP[0] is not wps:
+        index: dict[str, list] = {}
+        for wp in wps:
+            index.setdefault(_bare(wp.owner), []).append(wp)
+        _WP[:] = [wps, index]
+    held: dict[str, list] = _WP[1]
+    return held.get(_bare(owner), [])
+
+
+def _printed_write(fn, sn, run, i: int, line: int, owner: str, b, subject: str) -> tuple[datetime.datetime, Any, int] | None:
+    """The value the write of *subject* by the arm *b* ran with, read off the print of its statement's text and bind
+    map (the map's ``WritePrint``; out/gm/qk-design.md, the bind-print part, tmaeno's OK 2026-11-16 15:1x): the first
+    record of a print the WritePrint names after the write's print (record *i* of *run*, of the print at *line*) and
+    before that print's next record, cut as the map cuts it (``sqltext.cut``).  ``(at, value, the print's line)``
+    where the map printed holds the column's bind: a time the map reads off its ``str()``, None, or the text it keeps
+    (updateTask_JEDI's 1483 ``':modificationTime': datetime.datetime(2026, 11, 15, 6, 46, 49, 943316)``, the arm at
+    1441 or 1443, whichever ran); *value* :data:`UNWRITTEN` where the map is an object's
+    ``valuesMap(onlyChanged=True)`` that leaves it out.  None where the statement's arms do not hold *b*, it binds the
+    column to no one key, or no such print is read.  A record another print reads at least as well is not taken, as
+    :func:`_landed`."""
+    nxt = min((k for k, _, _ in sn.hits.get(line, ()) if k > i), default=None)
+    for wp in write_prints(owner):
+        if b.line not in (wp.arms.get(subject) or ()):
+            continue
+        binds = {w.bind for w in wp.binds if w.column == subject}
+        if len(binds) != 1:
+            continue
+        bind = binds.pop()
+        for p in wp.printed_by:
+            stmt = R.statement_at(fn.node, p.line)
+            prow = fn.row_at(stmt) if stmt is not None else None
+            if prow is None:
+                continue
+            for k, literal, _ in sorted(sn.hits.get(prow.line, ())):
+                if k <= i or (nxt is not None and k >= nxt) or any(
+                        other != prow.line and any(kk == k and lit >= literal for kk, lit, _ in hs)
+                        for other, hs in sn.hits.items()):
+                    continue
+                record = run.records[k]
+                got = sqltext.cut(record.text, p.lead, p.gap)
+                if got is None:
+                    continue
+                if bind in got[1]:
+                    return W.when(record.stamp), got[1][bind], p.line
+                if wp.object_map and wp.only_changed:
+                    return W.when(record.stamp), UNWRITTEN, p.line
+                break
+    return None
+
+
+def _hashable(value) -> bool:
+    try:
+        hash(value)
+    except TypeError:
+        return False
+    return True
+
+
+def _printed_bounds(value, nulls: bool):
+    """What a value read off a write's printed bind map (:func:`_printed_write`) says of the column after it: a time,
+    itself; None or another value of a column tested ``IS NULL``, its state.  None where it says nothing the timeline
+    reads (a text kept, a value not a time)."""
+    if nulls:
+        return TL.NULL_ONLY if value is None else TL.SET_ONLY
+    return value if isinstance(value, datetime.datetime) else None
 
 
 def _binds_name(record, key: str) -> bool:
@@ -9463,7 +9545,7 @@ class Rerun:
                 if name not in before.left:
                     continue
                 missed: list = []
-                got, whole = self._column_writes(j, b, keys, (since, q.moved), writers, missed)
+                got, whole = self._column_writes(j, b, keys, (since, q.moved), writers, missed, subject)
                 if not whole:
                     printed = any(n.row == MUST_ROW_WRITTEN and n.column in keys for n in getattr(b, "must_names", None) or [])
                     open_why[name] = "unprinted" if not printed else "unasked" if missed else "unread"
@@ -9476,8 +9558,10 @@ class Rerun:
                 else:
                     value = _written_offset(b)
                     opening = TL.Opening(name, value, value)
-                for at, machine, where, how in got:
-                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, value))
+                for at, machine, where, how, bound in got:
+                    # a value its statement's printed bind map holds stands for the arm's own (the bind-print part)
+                    read = _printed_bounds(bound[0], nulls) if bound else None
+                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, value if read is None else read))
                 if not whole:
                     opens.append(opening)
                 elif not got:
@@ -9584,11 +9668,16 @@ class Rerun:
         return absent, unread
 
     def _column_writes(self, j, b, keys: set[str], window: tuple[datetime.datetime, datetime.datetime],
-                       writers: list, missed_out: list | None = None) -> tuple[list[tuple[datetime.datetime, str, str, str]], bool]:
-        """The writes of the arm *b* of *j* the records show over *window*, ``(at, machine, print "func:line", how)``
-        each: a record of one of its must prints whose hole the map names as the written row's key (``MustName.row``
-        ``written``, its column among *keys*) holding the key, under any mark (:func:`_hole_holds`) -- the statement's
-        bind map printed ran it (``timeline.RAN``), its message or mark reached it (``REACHED``).  A bind map print the map
+                       writers: list, missed_out: list | None = None, subject: str = ""
+                       ) -> tuple[list[tuple[datetime.datetime, str, str, str, tuple]], bool]:
+        """The writes of the arm *b* of *j* the records show over *window*, ``(at, machine, print "func:line", how,
+        printed)`` each: a record of one of its must prints whose hole the map names as the written row's key
+        (``MustName.row`` ``written``, its column among *keys*) holding the key, under any mark (:func:`_hole_holds`) --
+        the statement's bind map printed ran it (``timeline.RAN``), its message or mark reached it (``REACHED``).  Where
+        the map's ``WritePrint`` says the statement's text and bind map print in the call, the value of *subject* it ran
+        with is read off that print (:func:`_printed_write`): the write is at that print, *printed* ``(value,)``; one
+        whose object's changed fields leave the column out wrote none of it -- not a write, though its run was read.
+        *printed* is ``()`` where none is read.  A bind map print the map
         cannot show holds the value the write counts (``row`` ''), one holding the key among its values, reached it: the
         statement it prints named the row, and the write that takes its rows may have run on it (P17,
         getTasksToBeFinished_JEDI's select print 1643 naming the row among its targets).  A record another print of the
@@ -9611,7 +9700,8 @@ class Rerun:
         self._keep_unanswered(missed)
         if missed_out is not None:
             missed_out += missed
-        found = []
+        found: list[tuple[datetime.datetime, str, str, str, tuple]] = []
+        unwritten = False  # a run read whose statement's printed map shows it did not write the column
         for line in sorted({n.line for n in names}):
             try:
                 fn = R.function(rel, func, within=[line])
@@ -9637,16 +9727,26 @@ class Rerun:
                             landed = _landed(fn, sn, i, row.line, b)
                             if landed is False:
                                 continue
-                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}",
-                                          TL.RAN if landed or any(n.part == MUST_PART_BIND for n in held) else TL.REACHED))
+                            how = TL.RAN if landed or any(n.part == MUST_PART_BIND for n in held) else TL.REACHED
+                            # the bind-print part: the value its statement ran with, off the print of its bind map
+                            printed = _printed_write(fn, sn, run, i, row.line, j.owner, b, subject) if subject else None
+                            if printed is not None and printed[1] is UNWRITTEN:
+                                unwritten = True
+                                continue
+                            if printed is not None and _hashable(printed[1]):
+                                found.append((printed[0], record.machine or "", f"{func.rpartition('.')[2]}:{printed[2]}",
+                                              how, (printed[1],)))
+                                continue
+                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", how, ()))
                         elif any(n.line == line for n in named) and _binds_name(record, key):
-                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.REACHED))
+                            found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.REACHED, ()))
         premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),
                     "logs": every_log_asked(j.owner, [b.line], to_hand),
                     "prints": prints_naming(writers, j.owner, [b.line], keys)}
         # a run of its own in the window whose must prints are not read in it: a reading missed, not a run absent
         own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
-        return sorted(set(found)), bool(shown) and all(p["held"] for p in premises.values()) and (bool(found) or not own)
+        return (sorted(set(found), key=lambda f: f[:4]),
+                bool(shown) and all(p["held"] for p in premises.values()) and (bool(found) or unwritten or not own))
 
     def _timeline_spans(self, t, q: Missed) -> list | None:
         """Where a term comparing a time column with the clock surely holds for the row, on the column's timeline
