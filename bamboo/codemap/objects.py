@@ -188,11 +188,25 @@ class _Link(NamedTuple):
     handed: str = ""
 
 
+#: What :func:`_held_steps` gave for a function's row, its starts and the paths handed back, with the sites it capped
+#: in the order it capped them: a reader following many objects through the same functions keeps one
+#: (:func:`follow`'s *kept*).
+HeldKept = dict[tuple[str, frozenset[str], frozenset[str]], tuple[dict[str, Optional[tuple[str, int, str]]], bool, tuple["Site", ...]]]
+
+
 def follow(
-    rows: dict[str, ReachNode], owner: str, path: str, states: int = MAX_STATES
+    rows: dict[str, ReachNode],
+    owner: str,
+    path: str,
+    states: int = MAX_STATES,
+    kept: Optional[HeldKept] = None,
 ) -> ObjectReach:
     """What is assigned on the object *owner* names *path*, and the holes it reaches, reading at most *states*
-    (function, path) states; see the module docstring."""
+    (function, path) states; see the module docstring.
+
+    *kept*, where given, keeps what each function's bindings hold from the paths it is asked of, for every follow
+    the reader asks over the same *rows*: one object's walk asks the functions it passes again with what the others
+    asked them (:func:`_held_kept`)."""
     assigned: dict[str, dict[Site, None]] = defaultdict(dict)
     holes: dict[Site, None] = {}
     came_from: dict[Site, None] = {}
@@ -245,7 +259,7 @@ def follow(
         if row is None:
             continue
         functions[at] = None
-        steps, spent = _held_steps(row, {start}, extra[state], capped)
+        steps, spent = _held_kept(kept, row, {start}, extra[state], capped)
         held = set(steps)
         rooted: dict[str, list[str]] = defaultdict(
             list
@@ -397,6 +411,30 @@ def _hand_back(
             returned[link.caller].setdefault(name, (link.line, link.to, link.handed))
             added = True
     return added
+
+
+def _held_kept(
+    kept: Optional[HeldKept],
+    row: ReachNode,
+    start: set[str],
+    returned: set[str],
+    capped: dict[Site, None],
+) -> tuple[dict[str, Optional[tuple[str, int, str]]], bool]:
+    """:func:`_held_steps`, read once per (function, starts, paths handed back) where *kept* is given.  Its steps
+    are only read, never changed, by :func:`follow`; the sites it caps are added to *capped* again, in the order it
+    capped them, so *capped* reads as if it had run."""
+    if kept is None:
+        return _held_steps(row, start, returned, capped)
+    key = (row.owner, frozenset(start), frozenset(returned))
+    got = kept.get(key)
+    if got is None:
+        added: dict[Site, None] = {}
+        steps, spent = _held_steps(row, start, returned, added)
+        got = kept[key] = (steps, spent, tuple(added))
+    steps, spent, sites = got
+    for site in sites:
+        capped[site] = None
+    return steps, spent
 
 
 def _held(row: ReachNode, start: set[str]) -> tuple[set[str], bool]:

@@ -722,3 +722,32 @@ def test_a_walrus_handed_in_as_itself_writes_where_its_statement_does():
     assert reaching(target, [one, walrus]) == [walrus]
     held = pathcond.held_at(func, "n", target)
     assert (held.kind, held.sites) == (pathcond.HELD_COMPUTED, (walrus,))
+
+
+def test_a_flow_read_again_is_kept_by_what_it_was_asked_and_only_for_that():
+    """A flow is kept by its scope and every write it was asked with, the nodes themselves: the same ask answers
+    as before, an ask with a killer more is a flow of its own, and a tree parsed again -- equal text, new nodes --
+    is never answered from the old one's flow."""
+    source = (
+        "def f(c):\n"
+        "    x = 1\n"
+        "    if c:\n"
+        "        x = 2\n"
+        "    else:\n"
+        "        del x\n"
+        "    use(x)\n"
+    )
+    answers = []
+    for _ in range(2):
+        tree = ast.parse(source)
+        pathcond.attach_parents(tree)
+        func = tree.body[0]
+        one, two, gone = func.body[0], func.body[1].body[0], func.body[1].orelse[0]
+        target = func.body[2]
+        first = reaching(target, [one, two])
+        again = reaching(target, [one, two])
+        killed = reaching(target, [one, two], [gone])
+        assert first == again == [one, two]
+        assert killed == [two]
+        answers.append(first)
+    assert all(a is not b for a, b in zip(answers[0], answers[1], strict=True))

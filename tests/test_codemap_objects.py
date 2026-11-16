@@ -2381,3 +2381,48 @@ def test_a_new_object_is_perhaps_one_beyond_a_hole_only_where_it_meets_a_hole_it
             ]
         },
     )
+
+
+def test_a_follow_keeping_what_functions_hold_answers_as_one_that_reads_them_again(tmp_path):
+    """A reader following many objects through the same functions keeps what each function's bindings hold from
+    the paths it is asked of (follow's *kept*): the answers, and the sites capped past the parts cap, are the same
+    as reading every function again, for the first follow and for every one after it."""
+    rows = _adder(tmp_path)
+    kept: objects.HeldKept = {}
+    asks = [
+        ("pkg/adder.py::Adder.process", "self.job"),
+        ("pkg/adder.py::Adder.run", "self.job"),
+        ("pkg/adder.py::Adder.process", "self.job"),
+    ]
+    for owner, path in asks:
+        assert objects.follow(rows, owner, path, kept=kept) == objects.follow(rows, owner, path)
+    assert kept
+
+    owned = """\
+class FileSpec:
+    def setOwner(self, owner):
+        self._owner = owner
+
+
+class Job:
+    def __init__(self):
+        self.Files = []
+
+    def addFile(self, file: FileSpec):
+        file.setOwner(self)
+        self.Files.append(file)
+
+
+class Runner:
+    def run(self, job: Job, f: FileSpec):
+        job.addFile(f)
+        deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": job}}}}}}}
+        return deep
+"""
+    fragment = _build(tmp_path / "owned", spec=SPEC, owned=owned)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    kept = {}
+    plain = objects.follow(rows, "pkg/owned.py::Runner.run", "job")
+    assert plain.capped
+    for _ in range(2):
+        assert objects.follow(rows, "pkg/owned.py::Runner.run", "job", kept=kept) == plain

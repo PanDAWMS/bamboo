@@ -5794,14 +5794,38 @@ class _PathCarry:
             for write in self.writes
             if write.forced or (write.name in names and (write.mentions & names or write.inner_calls & values))
         ]
+        # A write is worked out again only where a name its value is read from grew since it was last worked out:
+        # with the same names it gives what it gave (what a callee keeps is summarised once for what it is handed),
+        # so the writes grow as they do when every one is worked out each round.
+        grown: dict[str, int] = {}
+        reads = [self._reads(write) for write in live]
+        last: list[Optional[tuple[int, ...]]] = [None] * len(live)
         growing = True
         while growing:
             growing = False
-            for write in live:
+            for index, write in enumerate(live):
+                mark = tuple(grown.get(name, 0) for name in reads[index])
+                if mark == last[index]:
+                    continue
+                last[index] = mark
                 new = write.forced | self._value(write)
                 if not new <= write.paths:
                     write.paths = write.paths | new
+                    grown[write.name] = grown.get(write.name, 0) + 1
                     growing = True
+
+    def _reads(self, write: _Write) -> tuple[str, ...]:
+        """The names *write*'s value is read from: those it mentions, and those the comprehensions around it bind
+        their targets from (:meth:`_comprehension` reads a name there)."""
+        names = set(write.mentions)
+        looked = write.call if write.call is not None else write.source
+        scope = getattr(looked, "parent", None)
+        while scope is not None and scope is not self.func:
+            if isinstance(scope, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                for generator in scope.generators:
+                    names.update(n.id for n in walk(generator) if isinstance(n, ast.Name))
+            scope = getattr(scope, "parent", None)
+        return tuple(sorted(names))
 
     def _value(self, write: _Write) -> _Paths:
         if write.call is not None:

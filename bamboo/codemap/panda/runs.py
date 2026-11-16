@@ -421,6 +421,8 @@ class _Reader:
         self.prints = {node.owner: node for node in fragment.function_prints}
         self.writers = history_writers(self.names.functions)
         self._follows: dict[tuple[str, str, int], objects.ObjectReach] = {}
+        # What each function's bindings hold from the paths a follow asks of it, kept across follows over self.rows.
+        self._held_kept: objects.HeldKept = {}
         self.keys = keycolumns.Reader(
             fragment, modules, calls, self.names, self.funcs, self._follow, row_items
         )
@@ -1711,7 +1713,7 @@ class _Reader:
     ) -> objects.ObjectReach:
         if (owner, path, states) not in self._follows:
             self._follows[(owner, path, states)] = objects.follow(
-                self.rows, owner, path, states
+                self.rows, owner, path, states, self._held_kept
             )
         return self._follows[(owner, path, states)]
 

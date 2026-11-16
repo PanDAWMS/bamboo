@@ -77,6 +77,7 @@ swallow (:func:`bamboo.codemap.panda.flow.swallowing_managers`), and the
 from __future__ import annotations
 
 import ast
+from collections import OrderedDict
 from typing import Collection, Iterator, Optional, Sequence
 
 from bamboo.codemap import callfacts
@@ -216,6 +217,14 @@ def _placed(node: ast.AST) -> ast.AST:
     return node
 
 
+#: The flows :func:`_writes` read last, by what it was asked: readers ask one scope with the same writes again and
+#: again (a build asks some 1.3 million times for some 90 thousand flows).  Keyed by the nodes themselves, so a
+#: node's id is never taken for another's, and bounded, so a long run does not hold every tree it read.  A flow
+#: is only read once made.
+_FLOWS: OrderedDict[tuple, Optional[tuple[_Flow, dict[int, int]]]] = OrderedDict()
+_FLOWS_KEPT = 8192
+
+
 def _writes(
     scope: ast.AST,
     sites: Sequence[ast.AST],
@@ -226,7 +235,38 @@ def _writes(
     raised: Optional[Sequence[ast.ExceptHandler]] = None,
     passing: Sequence[ast.stmt] = (),
 ) -> Optional[tuple[_Flow, dict[int, int]]]:
-    """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
+    """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own.  Read once
+    while kept (:data:`_FLOWS`)."""
+    key = (
+        scope,
+        tuple(sites),
+        tuple(killers),
+        tuple(rereads),
+        tuple(entered),
+        tuple(once),
+        None if raised is None else tuple(raised),
+        tuple(passing),
+    )
+    if key in _FLOWS:
+        _FLOWS.move_to_end(key)
+        return _FLOWS[key]
+    held = _writes_read(scope, sites, killers, rereads, entered, once, raised, passing)
+    _FLOWS[key] = held
+    if len(_FLOWS) > _FLOWS_KEPT:
+        _FLOWS.popitem(last=False)
+    return held
+
+
+def _writes_read(
+    scope: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST],
+    rereads: Sequence[ast.AST],
+    entered: Sequence[ast.AST],
+    once: Sequence[ast.AST],
+    raised: Optional[Sequence[ast.ExceptHandler]],
+    passing: Sequence[ast.stmt],
+) -> Optional[tuple[_Flow, dict[int, int]]]:
     own = [_placed(node) for node in (*sites, *killers) if _scope_of(node) is scope]
     if not own:
         return None
