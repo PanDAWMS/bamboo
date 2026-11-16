@@ -6120,6 +6120,11 @@ class SkeletonHole(BaseModel):
     against its expression -- ``prodSourceLabel`` out of ``{str(e)} :
     {self.job.prodSourceLabel} in {self.job.jobStatus}`` -- which the pattern
     alone cannot tell it.
+
+    *columns*, *stops*, *listed* and *aggregate* are read on the map's own rows
+    only, the holes of :attr:`FunctionPrintsNode.statements`
+    (:func:`bamboo.codemap.panda.runs.attach`): a skeleton ``trace.walk`` makes
+    leaves them empty, and an empty *columns* there says nothing of the value.
     """
 
     expression: str = Field(description="What fills the hole, as the source spells it.")
