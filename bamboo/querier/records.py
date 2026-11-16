@@ -447,6 +447,9 @@ class Log:
     #: a time on them is the database's within the windows' slack, not to the second (``recorded.JEDI_CLOCKS``; empty
     #: in a file handed in)
     jedi: frozenset[str] = frozenset()
+    #: the machines a recorded answer lists the log on (``listed``): every machine one of its runs may be on (empty in a
+    #: file handed in)
+    machines: frozenset[str] = frozenset()
 
     @property
     def name(self) -> str:

@@ -193,6 +193,32 @@ def surely_true(op: str, offset: datetime.timedelta, pieces) -> list[tuple[datet
     return joined
 
 
+def surely_false(op: str, offset: datetime.timedelta, pieces) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Where ``col <op> clock + offset`` surely fails, piece by piece as :func:`surely_false_between` reads one: below
+    it, up to where the least the column may hold, less the offset, is reached; above it, from where the most is."""
+    out = []
+    for p in pieces:
+        a, b = p[0], p[1]
+        if op in ("<", "<="):
+            lo, _ = bounds_at(p, a)
+            turn = _plus(lo, -offset)
+            if lo != LOW and turn >= a:
+                out.append((a, min(b, turn)))
+        elif op in (">", ">="):
+            if any(o.hi is None or o.hi > offset for o in p[4]) or p[3] == HIGH:
+                continue
+            turn = _plus(p[3], -offset)
+            if turn <= b:
+                out.append((max(a, turn), b))
+    joined: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for a, b in out:
+        if joined and a <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], b))
+        else:
+            joined.append((a, b))
+    return joined
+
+
 def surely_false_all(op: str, offset: datetime.timedelta, pieces) -> bool:
     """Whether ``col <op> clock + offset`` surely fails at every moment of the pieces."""
     return bool(pieces) and surely_false_between(op, offset, pieces, pieces[0][0], pieces[-1][1])

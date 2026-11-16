@@ -6446,6 +6446,8 @@ def test_l2_stops_on_a_late_mover_it_cannot_read_yet_and_sends_one_lost_on_order
             tmp_path,
             _M2_SETUP + """
     r.hop = "L2"
+    # logs handed in as files: no window, so no machine to read the mover's passes on (L4 is not read)
+    r.logs = N(needs_window=False)
 
     def st(line, order=False):
         return N(owner="p/w.py::moved", line=line, keys=[], restricts=["JobSpec.jobStatus=activated"], refuses=[],
@@ -15286,6 +15288,139 @@ def test_an_amount_waiting_for_a_parameter_is_filled_from_what_the_runs_marks_pr
     assert got["b1_none"] == [[f"timeLimit not read: no run of it in the records holds its mark, nor does the answer to its mark "
                                f"['kick < label='] asked alone (1 run(s) of another row's values left out) over {window}"],
                               [None, "m4"]], got
+
+
+def test_a_late_mover_took_the_row_at_its_first_pass_after_its_statement_turned(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier import timeline as TL
+            from bamboo.querier.records import Unrecorded
+
+            def D(s):
+                return datetime.datetime.fromisoformat("2026-01-01 " + s)
+
+            got = {}
+            off = datetime.timedelta(seconds=-1200)
+            # a write of the clock read (ran) at 00:10, then one that may be the clock or an hour before (reached) at 00:30
+            ran = TL.Write(D("00:10:00"), D("00:10:00"), D("00:10:00"), TL.RAN, ("a:1",), "a:1", "m1")
+            reached = TL.Write(D("00:30:00"), D("00:30:00") - datetime.timedelta(hours=1), D("00:30:00"), TL.REACHED, ("u:1",), "u:1", "m1")
+            tl = TL.Timeline(D("00:00:00"), D("01:00:00"), (TL.LOW, D("00:00:00")), (TL.LOW, D("00:00:00")), (ran, reached),
+                             (TL.Opening("x:5", None, None),))
+            spans = lambda found: [[f"{a:%H:%M}", f"{b:%H:%M}"] for a, b in found]
+            got["lt"] = spans(TL.surely_false("<", off, tl.pieces(assume=True)))
+            got["lt_open"] = spans(TL.surely_false("<", off, tl.pieces()))
+            got["gt"] = spans(TL.surely_false(">", off, tl.pieces(assume=True)))
+            # inside each span surely_false_between says so (it reads a closed stretch: a piece starting at its end is
+            # read too), and not past its end
+            got["agree"] = [TL.surely_false_between("<", off, tl.pieces(assume=True), D("00:10:01"), D("00:29:59")),
+                            TL.surely_false_between("<", off, tl.pieces(assume=True), D("00:10:01"), D("00:30:01")),
+                            TL.surely_false_between(">", off, tl.pieces(assume=True), D("00:50:00"), D("01:00:00"))]
+
+            # the statement: its time term in every build (entry e), another only in some (f)
+            leaf = N(node="compare", op="<", subject="T.modificationTime", text="modificationTime<:limit", settled=True,
+                     values=[N(base="naive_utcnow", offset_seconds=-1200.0)])
+            other = N(node="compare", op=">", subject="T.prio", text="prio>:p", settled=True, values=[N(base="", offset_seconds=None)])
+            st = N(owner="p/x.py::C.react", line=12, conditions=["e"], keys=[],
+                   condition_trees=[N(entry="e", tree=N(node="all", items=[leaf])), N(entry="f", tree=N(node="all", items=[other]))])
+
+            def q(since="00:10:00"):
+                return RR.Missed("T.status", "pending", "running", D(since), D("00:50:00"), [st], "p/x.py::C.react", None)
+
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.opened, r.ends, r.rests, r.unanswered, r.hop = [], [], [], [], [], "L2"
+            r.args, r.mode = N(key="7", asks="asks.jsonl"), "m"
+            r._timeline = lambda subject, q, nulls=False: tl
+            r._filled = lambda st, q: st
+            span, assumed, words = r._turn_of([st], q())
+            got["turn"] = [spans([span]), assumed, words]
+            got["turn_none"] = r._turn_of([st], RR.Missed("T.status", "pending", "", D("00:40:00"), D("00:50:00"), [st], "", None))[0]
+
+            # L4: the mover's passes, by its marks asked on each machine its log is listed on
+            RR.owners_of = lambda ids: {}
+            R.function = lambda rel, func, lines: "fn"
+            RR.runs_for = lambda lg, key: lg.runs
+            RR.passes_of = lambda fn, run, mode: (run.passes, "")
+            r.files_of = lambda owner, today, lines: ["db.log"]
+            r._row_mark_heads = lambda owner, lines: (("react < l=x lim=",), {"T.l": "x"})
+            r._held_premises = lambda assumed, printed, until: [f"none of {assumed['T.modificationTime']} wrote it"]
+            r._another_rows_run = lambda owner, lines, run, q: False
+            r._turned_then = lambda t: "then"
+            answers, logged = {}, []
+
+            def p(first, last, machine, key=False):
+                return N(first=f"2026-01-01 {first},000", last=f"2026-01-01 {last},000", machine=machine,
+                         records=[N(message="jediTaskID=7 done" if key else "done")])
+
+            def log(name, key, window, machine=None, owners=None, strings=(), whole=False):
+                logged.append([machine, list(window), list(strings)])
+                if machine is None:
+                    return N(machines=frozenset({"m1", "m2"}), without=frozenset(), holes=[])
+                if answers.get(machine) is None:
+                    raise Unrecorded([(N(key=f"ask-{machine}"), "")])
+                return N(runs=[N(token="react < l=x lim=20 >", passes=answers[machine])])
+            r.logs = N(names=lambda wanted: list(wanted), needs_window=True, log=log)
+
+            def walk(start="00:10:00"):
+                t = RR.Turned(q(), [st], (D(start), D("00:30:00")), {"T.modificationTime": ["x:5"]}, ["e"], None)
+                r.ends.clear(); r.unanswered.clear(); logged.clear()
+                try:
+                    went = r.turned(t)
+                except RR.Stop as stop:
+                    went = ["stop", stop.code, [[a.key, why] for _, a, why in r.unanswered]]
+                return [went, [RR.T.text(w) for _, w in r.ends]]
+
+            # every machine read: none began a pass between the turn and the pass that took the row
+            answers.update(m1=[p("00:20:00", "00:20:05", "m1"), p("00:35:00", "00:35:02", "m1", key=True)],
+                           m2=[p("00:15:00", "00:15:01", "m2"), p("00:55:00", "00:55:01", "m2")])
+            got["end"] = walk()
+            got["asked"] = list(logged)
+            # a pass began between: said, then what follows
+            answers["m2"] = [p("00:32:00", "00:32:01", "m2")]
+            got["between"] = walk()
+            # one machine's record not there: the walk stops on its ask
+            answers["m2"] = None
+            got["asks"] = walk()
+            # a pass between on a machine read answers without the ask
+            answers["m1"] = [p("00:31:00", "00:31:01", "m1"), p("00:35:00", "00:35:02", "m1", key=True)]
+            got["between_first"] = walk()
+            # false only from after the stay's start: its passes before are not read, nothing asked
+            got["late_start"] = [walk("00:12:00"), logged]
+            print(json.dumps(got, default=str))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # after the reached write the column may hold an hour before: not surely false; an open arm writing any value
+    # leaves nothing surely false below; above, false from where the most it holds is 20 min behind the clock
+    assert got["lt"] == [["00:10", "00:30"]], got
+    assert got["lt_open"] == [], got
+    assert got["gt"] == [["00:30", "00:30"], ["00:50", "01:00"]], got
+    assert got["agree"] == [True, False, True], got
+    # the turn: the end of the last stretch the every-build term was false, its open arm named, the term said
+    assert got["turn"] == [[["00:10", "00:30"]], {"T.modificationTime": ["x:5"]}, ["e"]], got
+    assert got["turn_none"] is None, got
+    end = ("react took the row at its first pass after react@12 turned for it: e surely false for the row from the stay's "
+           "start 2026-01-01 00:10:00 to 2026-01-01 00:30:00.000, so no pass of it that ended before then took it (2 read, "
+           "on m1, m2); no pass of it began between 2026-01-01 00:30:00.000 and its pass on m1 from 2026-01-01 00:35:00.000, "
+           "which took it at 2026-01-01 00:50:00, on the 2 machine(s) its log was asked of (db.log@m1, db.log@m2); premises: "
+           "none of ['x:5'] wrote it; the passes that may have selected the row are those whose marks hold the row's l=x, as "
+           "the rows file holds them")
+    assert got["end"] == [None, [end]], got
+    # the log's machines by the key, then each by the row's mark head over [turn, move]
+    window = ["2026-01-01 00:30:00", "2026-01-01 00:50:00"]
+    assert got["asked"] == [[None, window, []], ["m1", window, ["react < l=x lim="]], ["m2", window, ["react < l=x lim="]]], got
+    assert got["between"] == ["then", []], got
+    why = ("whether react began a pass between its statement's turn for the row at 2026-01-01 00:30:00.000 and the move at "
+           "2026-01-01 00:50:00: its mark holds no key, so it is asked on its own (L4)")
+    assert got["asks"] == [["stop", "asks", [["ask-m2", why]]], []], got
+    assert got["between_first"] == ["then", []], got
+    assert got["late_start"] == [["then", []], []], got
 
 
 def test_a_write_s_count_print_says_whether_it_landed(tmp_path):

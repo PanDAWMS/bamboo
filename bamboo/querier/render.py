@@ -475,6 +475,9 @@ TEMPLATES: dict[str, str] = {
     "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
     # M3(a)-cap: the first selection below its cap after the statement's turn took the row
     "ran-when-the-first-selection-below-its-cap-took-it": "{caller} ran on the row when {agent}'s first selection below its cap took it: {where} returns at most {cap} row(s) and began to return the row at {turn}; from then {full} selection(s) on {machines} machine(s) returned {cap} (rows ahead of it) and {empty} none; {machine}'s cycle {mark} returned {count} at {at}, fewer than {cap}: every row selectable then, and the pass on it began at {first}; premises: {premises:join=; }",
+    # L4: the mover's first pass after its statement turned for the row took it
+    "took-it-at-its-first-pass-after-the-turn": "{func} took the row at its first pass after {where} turned for it: {false} surely false for the row from the stay's start {since} to {turn}, so no pass of it that ended before then took it ({before} read, on {on:join=, }); no pass of it began between {turn} and its pass on {machine} from {first}, which took it at {moved}, on the {n} machine(s) its log was asked of ({logs:join=, }); premises: {premises:join=; }",
+    "its-marks-hold-the-row-s-values": "the passes that may have selected the row are those whose marks hold the row's {pairs:join=, }, as the rows file holds them",
     "held-from-the-stay-s-start": "{column} held the value the stay began with: none of {arms:join=, } wrote it in the stay",
     "an-empty-selection-lost-the-rows": "the {n} selection(s) that returned none ran beside one of {callee} that took the same rows",
     "the-row-s-label-by-the-take-s-place": "{agent}'s lines name no label: the selection for the row's {keys:join=, } (read at as_of) is selection {place} of each cycle's {width}, the only one cycle {mark} returned rows at",
