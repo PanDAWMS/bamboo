@@ -709,6 +709,8 @@ TEMPLATES: dict[str, str] = {
     "for-the-column-s-writes": "for the writes of {where} over {start} .. {end}",
     # S-3: a tested name's value, read off its callee's print inside the pass (rerun._callee_print)
     "for-a-callee-s-print": "for {callee}'s print at {line} of what its call at {at} gives, inside the pass {first} .. {last}",
+    "false-on-the-values-read": "{fn_name}'s test at {line} was false in every pass ({n}) on the values read, by {parts:rjoin=, }{whatever}: the arms were kept off there; why those values were what they were is not read here",
+    "whatever-they-held": ", whatever {unread:rjoin=, } held",
     "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{absent}{opens}{begun:join=}",
     "timeline-begun-by": "; the stay begun by {arms:join=, } (the other arms writing the value shown not to then, judgement 3)",
     "timeline-begun-unread": "; {arms:join=, }, which may have begun the stay, print nothing naming the row as it began, while another arm that may have does",

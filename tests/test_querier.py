@@ -15520,6 +15520,62 @@ def test_s3_reads_a_tested_name_off_its_callee_s_print_or_its_one_literal(tmp_pa
     assert got["truth"] is False, got
 
 
+def test_s4_says_the_part_the_values_read_make_a_guard_false_by_and_ends(tmp_path):
+    """S-3b: setScoutJobData_JEDI's test at 1226 is false on the values S-3 read whatever ``useExhausted`` holds, so S4
+    follows no name: it says ``extraInfo['nNewJobs'] > nNewJobsCutoff`` makes it false, each value with where it was
+    read, and ends.  ``scoutSucceeded`` is read but does not decide it.  An ``or`` needs each part; a test the values
+    do not make false (one part unknown, the rest true) is left to S4's walk, as before."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import evaluate as E
+
+            def env_of(**values):
+                env = E.Env()
+                for text, (value, source) in values.items():
+                    env.put(text.replace("__", "'"), value, source)
+                return env
+
+            guard = "useExhausted and scoutSucceeded and (extraInfo['nNewJobs'] > nNewJobsCutoff)"
+            env = E.Env()
+            env.put("extraInfo['nNewJobs']", 0, "get's print at 1140")
+            env.put("nNewJobsCutoff", 20, "the constant at 1225")
+            env.put("scoutSucceeded", True, "get's print at 1140")
+            test = ast.parse(guard, mode="eval").body
+            by = RR.false_by_values(test, env)
+            either = RR.false_by_values(ast.parse("a > 1 or b", mode="eval").body, env_of(a=(0, "x"), b=(False, "y")))
+            open_ = RR.false_by_values(ast.parse("u and a > 1", mode="eval").body, env_of(a=(5, "x")))
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.opened, r.ends, r.rests, r.end_code, r.hand, r.hand_used, r.hop = [], [], [], [], None, {}, [], ""
+            fn = N(name="setScoutJobData_JEDI", owner="t.py::setScout")
+            nxt = r.input(RR.Input(fn, guard, 1226, [N(first="17:20:39,615")], [env], ["exhausted"]))
+            print(json.dumps({"by": by, "either": either, "open": open_, "next": nxt,
+                              "lines": [x for x in r.lines if x.startswith(("  pass", '"use'))],
+                              "end": [str(w) for _, w in r.ends]}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["by"] == ["extraInfo['nNewJobs'] > nNewJobsCutoff"], got
+    assert got["either"] == ["a > 1", "b"] and got["open"] is None and got["next"] is None, got
+    assert got["lines"] == [
+        f"{GUARD_1226!r} at 1226: false in every pass (1) on the values read, by "
+        "[\"extraInfo['nNewJobs'] > nNewJobsCutoff\"], whatever ['useExhausted'] held",
+        "  pass 1: extraInfo['nNewJobs'] > nNewJobsCutoff is False: extraInfo['nNewJobs'] = 0 (get's print at 1140); "
+        "nNewJobsCutoff = 20 (the constant at 1225)"], got
+    assert got["end"] == [
+        "setScoutJobData_JEDI's test at 1226 was false in every pass (1) on the values read, by "
+        "\"extraInfo['nNewJobs'] > nNewJobsCutoff\", whatever 'useExhausted' held: the arms were kept off there; "
+        "why those values were what they were is not read here"], got
+
+
+GUARD_1226 = "useExhausted and scoutSucceeded and (extraInfo['nNewJobs'] > nNewJobsCutoff)"
+
+
 def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
     """The bind-print part (the map's WritePrint; RR._printed_write): updateTask_JEDI prints its UPDATE's text and the
     map of the task's changed fields at 1483 before it runs them, so the call's record of 1483 after the write's must

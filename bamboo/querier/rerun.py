@@ -3329,6 +3329,28 @@ def _items_spelled(guards: list[str], name: str) -> list[tuple[str, Any]]:
     return sorted(set(out), key=lambda x: x[0])
 
 
+def false_by_values(test: ast.AST, env: E.Env) -> list[str] | None:
+    """S-3b (qk-design.md, tmaeno "OK" 2026-11-16 16:44): the atoms of *test* whose values *env* reads make it false
+    whatever its other atoms hold, or None where *env*'s values alone do not make it false -- a path's settled atoms
+    are not read here.  Each atom with a value is read as unknown in turn and stays so where *test* is still false;
+    the rest are the ones that make it false (an ``and``'s one false part, an ``or``'s every part)."""
+    if E.truth(test, {}, env) is not False:
+        return None
+    atoms: dict[str, ast.AST] = {}
+    for atom in E.atoms(test):
+        atoms.setdefault(ast.unparse(atom), atom)  # the text E.truth looks an atom up by, as E.solve keys it
+    off: dict[str, Any] = {text: E.UNKNOWN for text, atom in atoms.items() if E.truth(atom, {}, env) is E.UNKNOWN}
+    out = []
+    for text in atoms:
+        if text in off:
+            continue
+        if E.truth(test, {**off, text: E.UNKNOWN}, env) is False:
+            off[text] = E.UNKNOWN
+        else:
+            out.append(text)
+    return out
+
+
 def _number(value):
     try:
         return float(value)
@@ -8888,6 +8910,9 @@ class Rerun:
         self.start("S4", "where the guard's name was bound")
         fn = q.fn
         test = ast.parse(E.strip_annotation(q.guard), mode="eval").body
+        by = [false_by_values(test, env) for env in q.envs]
+        if q.envs and all(b is not None for b in by):
+            return self._false_on_values(fn, q, test, by)
         names = [n.id for n in ast.walk(test) if isinstance(n, ast.Name) and n.id != "self"]
         names = list(dict.fromkeys(n for n in names if all(E.ev(ast.Name(n), env) is E.UNKNOWN for env in q.envs)))
         self.say(f"{q.guard!r} at {q.line} reads {names} (unknown from the passes)")
@@ -8910,6 +8935,30 @@ class Rerun:
             self.need(T.Said("a-way-on-from", {"name": name, "step_value": step.value}), None)
         self.say(f"stops: {step.terminal} -- {step.detail}")
         return Rows(fn, name, step, q.passes, q.envs, q.outcomes)
+
+    def _false_on_values(self, fn: R.Function, q: Input, test: ast.AST, by: list) -> None:
+        """S-3b: the guard S3 handed is false in every pass on the values read (:func:`false_by_values`), so no name it
+        reads is followed: the parts that make it false are said, each value they read in each pass with where it was
+        read, the parts no pass gives a value as ones it is false whatever they hold, and the branch ends.  Why the
+        values were what they were (nNewJobs 0) is another question, not read here."""
+        parts: dict[str, ast.AST] = {}
+        for atom in E.atoms(test):
+            parts.setdefault(ast.unparse(atom), atom)
+        deciding = list(dict.fromkeys(text for b in by for text in b))
+        unread = [text for text, atom in parts.items() if any(E.truth(atom, {}, env) is E.UNKNOWN for env in q.envs)]
+        self.say(f"{q.guard!r} at {q.line}: false in every pass ({len(q.passes)}) on the values read, by {deciding}"
+                 + (f", whatever {unread} held" if unread else ""))
+        for n, (env, b) in enumerate(zip(q.envs, by, strict=True), 1):
+            for text in b:
+                view = copy.copy(env)
+                view.used = {}
+                value = E.ev(parts[text], view)
+                read = "; ".join(f"{k} = {view.lookup(k)!r} ({source})" if view.knows(k) else f"{k}: {source}"
+                                 for k, source in list(view.used.items()))
+                self.say(f"  pass {n}: {text} is {value!r}: {read}")
+        self.end(T.Said("false-on-the-values-read", {
+            "fn_name": fn.name, "line": q.line, "n": len(q.passes), "parts": deciding,
+            "whatever": T.Said("whatever-they-held", {"unread": unread}) if unread else ""}))
 
     # ------------------------------------------------------------ Rows: what the call returned
     def rows(self, q: Rows):
