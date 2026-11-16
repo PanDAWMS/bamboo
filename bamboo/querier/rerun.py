@@ -8676,8 +8676,8 @@ class Rerun:
         return (after.get("as_of") if attr in after else None) or (self.data.get("statuslog") or {}).get("as_of")
 
     def _row_value(self, subject: str, q: Missed | None = None):
-        """The rows file's value of ``Class.attr`` for this instance, or None; under *q* at the window's end, its
-        ``after`` too (``_after``)."""
+        """The rows file's value of ``Class.attr`` for this instance, or None; under *q*, its ``after`` too where that
+        answers (``_after``: at the window's end, or a column only the row's birth writes)."""
         cls, _, attr = subject.partition(".")
         row = self._row_of(cls)
         if attr in row:
@@ -8692,13 +8692,30 @@ class Rerun:
     def _after(self, subject: str, q: Missed) -> tuple[bool, object]:
         """``(known, value)`` of *subject* from the rows file's ``after`` -- the asked row's columns as the rows file
         read them -- where that time is the moment read (``q.at_end``: stuck, read when the rows file was); late's
-        ``after`` was read after the window and answers nothing.  ``source``, ``as_of`` and ``clock`` say where and
-        when, and are no column."""
+        ``after`` was read after the window and answers nothing, but for a column only the row's birth writes
+        (:meth:`_born_only`).  ``source``, ``as_of`` and ``clock`` say where and when, and are no column."""
         cls, _, attr = subject.partition(".")
         after = self._read()[1]
-        if not q.at_end or cls != q.subject.partition(".")[0] or attr in ("source", "as_of", "clock") or attr not in after:
+        if cls != q.subject.partition(".")[0] or attr in ("source", "as_of", "clock") or attr not in after:
+            return False, None
+        if not q.at_end and not self._born_only(subject, q):
             return False, None
         return True, after[attr]
+
+    def _born_only(self, subject: str, q: Missed) -> list[str]:
+        """Q1 P10: the arms writing *subject*, a column late's ``after`` holds of the asked row, where every one of
+        them makes the row (``born``): nothing writes it after the birth, so the value read after the move is the one
+        it held all the stay.  JobSpec.creationTime is written by insertNewJob 3073, ppEventServiceJob 5111 and
+        makeFakeCoJumbo 4540, each as it inserts the job.  Empty where any arm is no birth, or the map has none."""
+        cls, _, attr = subject.partition(".")
+        if q.at_end or cls != q.subject.partition(".")[0] or attr not in self._read()[1] or mapdump.fragment() is None:
+            return []
+        cache: dict[str, list[str]] = self.__dict__.setdefault("_born_only_of", {})
+        if subject not in cache:
+            arms = [(j.owner, b) for j in asyncio.run(self._writers_of(subject)) for b in j.branches]
+            every = bool(arms) and all(born(b, birth_marks(owner, subject)) for owner, b in arms)
+            cache[subject] = [SV._name(owner, b.line) for owner, b in arms] if every else []
+        return cache[subject]
 
     def _held(self, subject: str, q: Missed) -> tuple[bool, object]:
         """``(known, value)`` of *subject* for the row over the window: the asked subject holds the observed value;
@@ -9469,6 +9486,8 @@ class Rerun:
         for x in sorted(_statement_subjects(st)):
             if (before := self._before(x, q)) is not None and before[0].known:
                 said.append(T.text(_held_before_said(x, q.observed, *before)))
+            elif arms := self._born_only(x, q):
+                said.append(T.text(T.Said("born-only-held", {"subject": x, "arms": arms})))
             elif (tl := self._timeline(x, q)) is not None and (tl.writes or tl.absent) and x not in told:
                 # Q1 part 1: what the records show of it in the stay, said once
                 told.add(x)

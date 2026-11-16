@@ -3783,6 +3783,56 @@ def test_the_window_end_reads_after_only_at_as_of(tmp_path):
     assert late_why == "written at the move or later; its row here holds only the value after" and stuck_why is None
 
 
+def test_a_column_only_the_rows_birth_writes_is_read_from_after_when_late(tmp_path):
+    """Q1 P10 (Rerun._born_only): late's ``after`` answers nothing, but a column every arm of which makes the row holds
+    the value it was born with all the stay -- JobSpec.creationTime, written by insertNewJob and ppEventServiceJob as
+    they insert the job.  An arm that is no birth (an UPDATE's KeyFrom at its line) leaves it unanswered, and so does a
+    column the map has no arm of."""
+    out = _ok(
+        _run(
+            tmp_path,
+            _M2_SETUP + """
+    from bamboo.querier import mapdump
+    from bamboo.querier import render as RN
+    del r.data["rows"]["job"]["creationTime"]
+    r.data["after"] |= {"creationTime": "2026-01-01 00:00:00", "prodSourceLabel": "managed"}
+    kf = lambda owner, subject, line, new_row: N(owner=owner, writes={subject: [line]}, new_row=new_row, routes=0)
+    mapdump._FRAGMENT[:] = [N(key_froms=[kf("db.py::insertNewJob", "JobSpec.creationTime", 3073, True),
+                                         kf("db.py::ppEventServiceJob", "JobSpec.creationTime", 5111, True),
+                                         kf("gen.py::doGenerate", "JobSpec.prodSourceLabel", 1227, None)])]
+    arm = lambda line: N(line=line, other_lines=[], outcome="runtime(x)")
+    writers = {"JobSpec.creationTime": [N(owner="db.py::insertNewJob", branches=[arm(3073)]),
+                                        N(owner="db.py::ppEventServiceJob", branches=[arm(5111)])],
+               "JobSpec.prodSourceLabel": [N(owner="gen.py::doGenerate", branches=[arm(1227)])],
+               "JobSpec.destinationSE": []}
+    async def writers_of(subject):
+        return writers.get(subject, [])
+    r._writers_of = writers_of
+    r.data["after"]["destinationSE"] = "X"
+    at = datetime.datetime(2026, 1, 3, 12)
+    stuck = rerun.Missed("JobSpec.jobStatus", "activated", "", at, at, [], "", None, at_end=True)
+    got = {s: [r._held(s, q), r._unanswered(s, q), r._born_only(s, q)]
+           for s in ("JobSpec.creationTime", "JobSpec.prodSourceLabel", "JobSpec.destinationSE")}
+    got["stuck"] = r._born_only("JobSpec.creationTime", stuck)
+    got["said"] = RN.text(rerun.T.Said("born-only-held", {"subject": "JobSpec.creationTime",
+                                                            "arms": r._born_only("JobSpec.creationTime", q)}))
+    print(json.dumps(got, default=str))
+    """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    late_why = "written at the move or later; its row here holds only the value after"
+    assert got["JobSpec.creationTime"] == [[True, "2026-01-01 00:00:00"], None, ["insertNewJob:3073", "ppEventServiceJob:5111"]], got
+    # an arm the map does not mark as making the row: not read from after
+    assert got["JobSpec.prodSourceLabel"] == [[False, None], late_why, []], got
+    # no arm of it in the map: nothing says it is only born
+    assert got["JobSpec.destinationSE"] == [[False, None], late_why, []], got
+    # stuck reads after at the window's end anyway, and names no births
+    assert got["stuck"] == [], got
+    assert got["said"] == ("JobSpec.creationTime read from the row after the move: every arm writing it makes the row "
+                           "(insertNewJob:3073, ppEventServiceJob:5111), so it held that value all the stay"), got
+
+
 def test_a_value_the_builder_read_at_as_of_is_read_as_after_is_and_not_as_the_runs(tmp_path):
     out = _ok(
         _run(

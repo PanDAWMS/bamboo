@@ -682,7 +682,8 @@ TEMPLATES: dict[str, str] = {
     "before-no-start": "no arm writing the value is read",
     "before-written-without": "{arms:join=, } write the value without writing it the time they run",
     "before-may-be-written": "{arms:join=, } may write it while the value holds",
-    "held-before": "{subject} read as {value} all the stay: the time of the statuslog row of {observed!r}, to within the pass of {starts:join=, } that wrote both; {out} other line(s) writing it left out{premises:join=}",
+    "born-only-held": "{subject} read from the row after the move: every arm writing it makes the row ({arms:join=, }), so it held that value all the stay",
+    "held-before": "{subject} read as {value} all the stay:the time of the statuslog row of {observed!r}, to within the pass of {starts:join=, } that wrote both; {out} other line(s) writing it left out{premises:join=}",
     # Q1 part 1: a time column read over the stay from the records (rerun._timeline)
     "for-the-column-s-writes": "for the writes of {where} over {start} .. {end}",
     "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{absent}{opens}{begun:join=}",
