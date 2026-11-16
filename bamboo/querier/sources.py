@@ -1213,6 +1213,74 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
     return [Way(STOP, "", s.kind, route, end_at=here)]
 
 
+#: what a parameter's signature says of None (the map's batch 4 N1, ``HandedParameter.none``): models.NONE_EXCLUDES and
+#: models.NONE_ADMITS once codemap-xxxix lands
+NONE_EXCLUDES = "excludes"
+NONE_ADMITS = "admits"
+
+
+def _declared_none(owner: str, parameter: str) -> str:
+    """What *owner*'s own signature says of *parameter*'s ``None`` (the map's ``ParameterFrom.declared``, batch 5
+    N1c); "" where the map holds no record or says nothing."""
+    pf = _callers()[0].get((owner, parameter))
+    return str(getattr(getattr(pf, "declared", None), "none", "") or "")
+
+
+def none_ways(owner: str, parameter: str, seen: frozenset = frozenset()) -> list[tuple[tuple[str, ...], str]]:
+    """N1c (the map's batch 5): each way *owner*'s *parameter* is handed in, read up the map's ``ParameterFrom``
+    records, as the calls it came in by -- the call into *owner* first, as ``CallReading.chain`` spells a route -- and
+    what it says of ``None``: :data:`NONE_EXCLUDES` where it goes through a caller's parameter whose own signature
+    excludes it (``ParameterFrom.declared``), or a field of ``self`` every binding of which is read so, or ends at a
+    literal other than ``None``; :data:`NONE_ADMITS` at the literal ``None``; "" where neither is read -- a part of the
+    value (steps), a value a call outside the corpus made of it, any other end, a stop.  getTaskWithID_JEDI's ``pid``
+    comes in as its facade's default ``None`` on fourteen ways, and as ``self.pid`` at ContentsFeeder.py:156, bound
+    only from ``ContentsFeederThread.__init__``'s ``pid: str``."""
+    pf = _callers()[0].get((owner, parameter))
+    if pf is None or (owner, parameter) in seen:
+        return [((), "")]
+    seen = seen | {(owner, parameter)}
+    whole, _parts = _ways_of_the_value(pf.sources)
+    out: list[tuple[tuple[str, ...], str]] = [] if whole and not pf.stops else [((), "")]
+    for s in whole:
+        # the caller's call that hands it in is the last of the source's route
+        call = tuple(s.route[-1:])
+        name = s.name or ""
+        if getattr(s, "steps", None) or getattr(s, "through", None):
+            out.append((call, ""))
+        elif s.kind == M.KEY_PARAMETER and s.site_owner:
+            if _declared_none(s.site_owner, name) == NONE_EXCLUDES:
+                out.append((call, NONE_EXCLUDES))
+            else:
+                out += [(call + up, said) for up, said in none_ways(s.site_owner, name, seen)]
+        elif s.kind == M.KEY_CONSTANT:
+            out.append((call, NONE_ADMITS if name == "None" else NONE_EXCLUDES))
+        elif s.kind == M.KEY_SELF_FIELD and s.site_owner and re.fullmatch(r"self\.\w+", name):
+            out.append((call, _field_none(s.site_owner, name[5:], seen)))
+        else:
+            out.append((call, ""))
+    return out
+
+
+def _field_none(cls: str, field: str, seen: frozenset) -> str:
+    """What the bindings of *cls*'s *field* say of ``None`` (:func:`none_ways`): each a parameter of its method read as
+    a way of it is, or a literal; :data:`NONE_EXCLUDES` where every one excludes it, :data:`NONE_ADMITS` where one is
+    ``None``, else "".  A way the object may be changed on is not read."""
+    said: set[str] = set()
+    for w in field_ways(cls, field, seen=seen):
+        if w.changes:
+            said.add("")
+        elif w.why == PARAMETER and w.of and not w.steps:
+            if _declared_none(w.of, w.value) == NONE_EXCLUDES:
+                said.add(NONE_EXCLUDES)
+            else:
+                said.update(v for _, v in none_ways(w.of, w.value, seen))
+        elif w.end == CONSTANT and w.value:
+            said.add(NONE_ADMITS if w.value == "None" else NONE_EXCLUDES)
+        else:
+            said.add("")
+    return NONE_EXCLUDES if said == {NONE_EXCLUDES} else NONE_ADMITS if NONE_ADMITS in said else ""
+
+
 def same_value(literal: str, printed: str) -> bool:
     """Whether a constant as written (``'60'``, ``None``, ``2``) is what a run printed (``60``, ``None``, ``2``): a
     print shows a value's ``str``."""

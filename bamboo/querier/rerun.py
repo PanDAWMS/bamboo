@@ -452,16 +452,48 @@ def _null_states(b) -> tuple[datetime.datetime, datetime.datetime]:
     return TL.EITHER
 
 
-def _none_premised(b) -> bool:
-    """Whether :func:`_null_states` reads the arm *b*'s value, known only at run time, as one that is not None on a
-    premise: where the map does not rule None out.  The map says what the signature of a parameter the arm writes as
-    handed says of None (``Branch.handed``, its batch 4 N1): getTasksToBeFinished_JEDI's ``pid: str`` excludes it, so
-    that arm writes a value with no premise; getTaskWithID_JEDI's ``pid: str | None`` admits it, and a parameter with
-    no annotation or a value that is no parameter (``runtime(commandMap['oldStatus'])``) says nothing -- premises."""
+def _none_premised(b, owner: str) -> bool:
+    """Whether :func:`_null_states` reads the arm *b* of *owner*'s, its value known only at run time, as one that is not
+    None on a premise: where the map does not rule None out.  The map says what the signature of a parameter the arm
+    writes as handed says of None (``Branch.handed``, its batch 4 N1): getTasksToBeFinished_JEDI's ``pid: str``
+    excludes it, so that arm writes a value with no premise; a parameter with no annotation or a value that is no
+    parameter (``runtime(commandMap['oldStatus'])``) says nothing -- premises.  getTaskWithID_JEDI's ``pid: str |
+    None`` admits it, yet every way it comes in on that may run the arm holds a value (N1c, :func:`_handed_excludes`):
+    no premise either."""
     if not str(b.outcome or "").strip().startswith("runtime("):
         return False
-    # models.NONE_EXCLUDES on the map's batch 4
-    return getattr(getattr(b, "handed", None), "none", None) != "excludes"
+    handed = getattr(b, "handed", None)
+    if getattr(handed, "none", None) == SR.NONE_EXCLUDES:
+        return False
+    return handed is None or not _handed_excludes(b, owner)
+
+
+@functools.cache
+def _routes_into(fragment_id: int) -> dict[str, tuple[frozenset[tuple[str, ...]], bool]]:
+    """Each function's routes of calls into it as the map's read sites in it hold them (``call_readings``' chains), and
+    whether every call is placed (``callers_complete`` of them all)."""
+    got: dict[str, tuple[frozenset[tuple[str, ...]], bool]] = {}
+    for rs in getattr(mapdump.fragment(), "read_sites", None) or []:
+        chains, complete = got.get(rs.owner, (frozenset(), True))
+        got[rs.owner] = (chains | {tuple(c.chain) for c in rs.call_readings}, complete and bool(rs.callers_complete))
+    return got
+
+
+def _handed_excludes(b, owner: str) -> bool:
+    """N1c (the map's batch 5): whether every way the parameter the arm *b* writes as handed comes in on
+    (:func:`sources.none_ways`) that may run the arm holds a value that is not None.  A way does not run it where every
+    route of calls into *owner* it is on (the call into *owner* first, the routes the map's read sites in *owner* hold,
+    every call placed) is one the arm's constants rule out (``Branch.not_run_on``); a way on no such route may run it.
+    getTaskWithID_JEDI 1847, under ``if lockTask:``: fourteen ways hand ``pid`` None and ``lockTask`` False; the one
+    left, ContentsFeeder.py:156, hands ``self.pid``, bound from a ``pid: str``."""
+    routes, complete = _routes_into(id(mapdump.fragment())).get(owner, (frozenset(), False))
+    ruled = {tuple(r) for r in getattr(b, "not_run_on", None) or []}
+    left = []
+    for chain, said in SR.none_ways(owner, b.handed.name.rpartition(".")[2]):
+        on = [r for r in routes if r[:len(chain)] == chain or chain[:len(r)] == r] if chain else []
+        if not (complete and on and all(r in ruled for r in on)):
+            left.append(said)
+    return bool(left) and all(said == SR.NONE_EXCLUDES for said in left)
 
 
 def _none_premises(used: dict[str, list[str]]) -> list[T.Said]:
@@ -9147,6 +9179,7 @@ class Rerun:
         writers = self._subject_writers(subject)
         keys = self._key_columns(q.subject, self.args.key)
         arms_by_name = {SV._name(j.owner, b.line): b for j in writers for b in j.branches}
+        owner_by_name = {SV._name(j.owner, b.line): j.owner for j in writers for b in j.branches}
         shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, Any]]] = {}
         opens: list[TL.Opening] = []
         absent: list[str] = []
@@ -9168,7 +9201,7 @@ class Rerun:
                 if nulls:
                     value = _null_states(b)
                     opening = TL.state_opening(name, value)
-                    if _none_premised(b):
+                    if _none_premised(b, j.owner):
                         premised.add(name)
                 else:
                     value = _written_offset(b)
@@ -9194,7 +9227,7 @@ class Rerun:
             mates = [f"{s.partition(' with ')[0].rpartition(':')[0]}:{line}" for s in kept
                      for line in s.partition(" with ")[2].split(",")]
             vals = [_null_states(arms_by_name[m]) if m in arms_by_name else TL.EITHER for m in mates]
-            premised.update(m for m in mates if m in arms_by_name and _none_premised(arms_by_name[m]))
+            premised.update(m for m in mates if m in arms_by_name and _none_premised(arms_by_name[m], owner_by_name[m]))
             return min(v[0] for v in vals), max(v[1] for v in vals)
 
         starts, lacking = bool(before.starts), bool(before.lacking)

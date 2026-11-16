@@ -11265,6 +11265,61 @@ class Killer:
 """
 
 
+def test_a_handed_value_admitting_none_is_read_on_the_ways_that_may_run_its_arm(tmp_path):
+    """N1c: getTaskWithID_JEDI 1847's pid, None on the ways whose lockTask rules the arm out, a str on the one left."""
+    got = json.loads(_ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import mapdump, rerun as RR, sources as SR
+
+        def src(kind, name, route, site_owner="", steps=(), through=()):
+            return N(kind=kind, name=name, route=list(route), site_owner=site_owner, paths=[], steps=list(steps),
+                     through=list(through))
+
+        def pf(owner, parameter, none, *sources):
+            return N(owner=owner, parameter=parameter, line=1, stops=[], declared=N(none=none), sources=list(sources))
+
+        P, F = "p/u.py::getTask", "p/b.py::getTask"
+        routes = [["p/b.py:233", "p/x.py:539"], ["p/b.py:233", "p/r.py:142", "p/t.py:344"],
+                  ["p/b.py:233", "p/r.py:142", "p/t.py:211"], ["p/b.py:233", "p/f.py:156", "p/m.py:55"], ["p/c.py:3586"]]
+        mapdump._FRAGMENT[:] = [N(entered_froms=[], parameter_froms=[
+            pf(P, "pid", "admits", src("parameter", "pid", ["p/b.py:233"], F), src("constant", "None", ["p/c.py:3586"])),
+            pf(F, "pid", "admits", src("constant", "None", ["p/x.py:539"]), src("constant", "None", ["p/r.py:142"]),
+               src("self_field", "self.pid", ["p/f.py:156"], "p/f.py::Feeder")),
+            pf("p/f.py::__init__", "pid", "excludes"),
+            # a value a call outside the corpus made of a parameter, and a part of a literal: neither read
+            pf("p/s.py::split", "rule", "admits", src("parameter", "m", ["p/s.py:9"], "p/g.py::gen", through=["json.dumps"]),
+               src("constant", "'x'", ["p/s.py:8"], steps=["[1]"])),
+            pf("p/g.py::gen", "m", "excludes"),
+            # no statement of it holds its routes: every way read
+            pf("p/e.py::mod", "status", "admits", src("constant", "'tobroken'", ["p/e.py:100"])),
+        ], read_sites=[N(owner=P, callers_complete=True, call_readings=[N(chain=r) for r in routes])])]
+        # Feeder's pid is bound from its __init__'s pid alone
+        SR.field_ways = lambda cls, field, steps=(), seen=frozenset(): (
+            [SR.Way(SR.STOP, "pid", SR.PARAMETER, ("p/f.py:118",), of="p/f.py::__init__")]
+            if (cls, field) == ("p/f.py::Feeder", "pid") else [SR.Way(SR.STOP, "", "no-field-from", ())])
+
+        def arm(ruled, none="admits", name="getTask.pid"):
+            return N(outcome="runtime(x)", handed=N(name=name, none=none), not_run_on=[list(r) for r in ruled])
+
+        ruled = [r for r in routes if "p/f.py:156" not in r]
+        print(json.dumps({
+            "ways": [[list(c), s] for c, s in SR.none_ways(P, "pid")],
+            "split": [[list(c), s] for c, s in SR.none_ways("p/s.py::split", "rule")],
+            "premised": [RR._none_premised(arm(ruled), P),
+                         # one route on through r.py:142 not ruled out: that way, handing None, may run the arm
+                         RR._none_premised(arm([r for r in ruled if "p/t.py:211" not in r]), P),
+                         RR._none_premised(arm([]), P), RR._none_premised(arm([], "excludes"), P),
+                         RR._none_premised(N(outcome="runtime(x)", handed=None), P),
+                         RR._none_premised(N(outcome="'x'", handed=None), P),
+                         RR._none_premised(arm([], name="mod.status"), "p/e.py::mod")]}))
+    """)).splitlines()[-1])
+    assert got["ways"] == [[["p/b.py:233", "p/x.py:539"], "admits"], [["p/b.py:233", "p/r.py:142"], "admits"],
+                           [["p/b.py:233", "p/f.py:156"], "excludes"], [["p/c.py:3586"], "admits"]]
+    assert got["split"] == [[["p/s.py:9"], ""], [["p/s.py:8"], ""]]
+    assert got["premised"] == [False, True, True, False, True, False, False]
+
+
 def test_s_ends_each_guard_term_where_the_maps_ways_end_and_a_call_by_its_runnable_record(tmp_path):
     (_corpus(tmp_path) / "pandaserver" / "k.py").write_text(_KILLER)
     lines = _KILLER.splitlines()
@@ -14837,10 +14892,10 @@ def test_a_column_tested_is_null_is_kept_as_two_states_on_a_timeline(tmp_path):
                                        lambda o, l: None, set(), lambda o, b: False) is None
             arm = lambda outcome: N(outcome=outcome)
             got["states"] = {o: [RR._null_states(arm(o)) == s for s in (TL.NULL_ONLY, TL.SET_ONLY, TL.EITHER)] +
-                                [RR._none_premised(arm(o))]
+                                [RR._none_premised(arm(o), "m.py::prepare")]
                              for o in ("None", "runtime(pid)", "'aipanda'", "passthrough(lockedBy)", "")}
             # the map's batch 4 N1: a handed parameter whose signature excludes None writes a value, no premise
-            got["handed"] = {none: RR._none_premised(N(outcome="runtime(pid)", handed=N(none=none)))
+            got["handed"] = {none: RR._none_premised(N(outcome="runtime(pid)", handed=N(name="prepare.pid", none=none)), "m.py::prepare")
                              for none in ("excludes", "admits", "unannotated")}
             print(json.dumps(got))
             """,
