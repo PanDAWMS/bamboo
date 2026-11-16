@@ -553,3 +553,114 @@ def test_a_context_manager_that_may_swallow_its_with_body_s_raise_is_listed_and_
     assert with_exits_are_read(
         fragment.model_copy(update={"swallowing_managers": []})
     ).passed
+
+
+ARMS = """\
+def reactivate(rows, cur, log, limit):
+    for row, frozen in rows:
+        flag = False
+        if frozen < limit:
+            flag = True
+            sql = "TO"  # A1
+        else:
+            sql = "TU"  # A2
+        cur.execute(sql)
+        if cur.rowcount > 0:
+            if flag:
+                log.info("timeout")  # A3
+            else:
+                log.info("reactivate")  # A4
+
+
+def rebound(rows, cur, log):
+    for row in rows:
+        flag = False
+        sql = "TU"  # B1
+        flag = cur.check(row)
+        if flag:
+            log.info("checked")  # B2
+
+
+def either(rows, cur, log):
+    flag = False
+    for row in rows:
+        sql = "TU"  # C1
+        if flag:
+            log.info("again")  # C2
+        flag = True
+
+
+def finish(tasks, spec, log, update):
+    for task in tasks:
+        if update:
+            spec.status = "done"  # D1
+        spec.save()
+        msg = f"set task_status={spec.status}"
+        log.info(msg)  # D2
+        if task.bad:
+            raise ValueError(task)
+        log.info("checked")  # D3
+        if task.skip:
+            continue
+        log.info("kept")  # D4
+    log.info("all")  # D5
+
+
+def after_loop(rows, log):
+    for row in rows:
+        flag = False
+        if row:
+            flag = True
+        else:
+            sql = "TU"  # E1
+    if flag:
+        log.info("last flagged")  # E2
+"""
+
+
+def _marked(source: str) -> dict[str, ast.stmt]:
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    lines = {text.rsplit("# ", 1)[1]: number for number, text in enumerate(source.splitlines(), 1) if "  # " in text}
+    by_line = {
+        node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.stmt) and not isinstance(node, ast.FunctionDef)
+    }
+    return {marker: by_line[line] for marker, line in lines.items()}
+
+
+def test_a_literal_an_arm_s_way_binds_keeps_it_from_a_print_the_literal_decides_against() -> None:
+    """The ``sql = "TO"`` arm runs beside ``flag = True``, the other with the turn's ``flag = False``: each is
+    followed only by the print ``if flag:`` lets through for it."""
+    arms = _marked(ARMS)
+    assert flow.ruled_out_after(arms["A1"], arms["A4"])
+    assert not flow.ruled_out_after(arms["A1"], arms["A3"])
+    assert flow.ruled_out_after(arms["A2"], arms["A3"])
+    assert not flow.ruled_out_after(arms["A2"], arms["A4"])
+
+
+def test_a_name_bound_again_after_the_arm_or_held_two_ways_rules_on_nothing() -> None:
+    """``flag = cur.check(row)`` between the arm and the test, and a ``flag`` the arm is reached with as ``False``
+    from before the loop or ``True`` from the last turn: neither test is decided."""
+    arms = _marked(ARMS)
+    assert not flow.ruled_out_after(arms["B1"], arms["B2"])
+    assert not flow.ruled_out_after(arms["C1"], arms["C2"])
+
+
+def test_a_print_past_the_loop_reads_the_last_turn_s_binding_not_the_arm_s() -> None:
+    """``if flag:`` past the loop reads what the last turn bound: the arm's turn binds ``flag = False``, a later
+    turn may bind ``True``, so the arm does not rule the print out."""
+    arms = _marked(ARMS)
+    assert flow.turn_loops(arms["E1"], arms["E2"]) == []
+    assert not flow.ruled_out_after(arms["E1"], arms["E2"])
+
+
+def test_a_print_every_way_after_a_statement_passes_in_its_turn_follows_it() -> None:
+    """``set task_status=...`` follows the arm on every way of a run that entered no handler -- ``spec.save()``
+    raises only into a handler the run shows; a ``raise``, a ``continue`` and the end of the turn leave before the
+    others, and a print past the loop is in no turn of it."""
+    arms = _marked(ARMS)
+    assert flow.passes_after(arms["D1"], arms["D2"])
+    assert not flow.passes_after(arms["D1"], arms["D3"])
+    assert not flow.passes_after(arms["D3"], arms["D4"])
+    assert not flow.passes_after(arms["D1"], arms["D5"])
+    assert not flow.passes_after(arms["A1"], arms["A3"])

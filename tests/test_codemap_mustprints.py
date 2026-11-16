@@ -861,3 +861,103 @@ def test_a_mark_holding_what_the_written_key_is_stored_from_names_the_row(
             part=MUST_PART_MARK,
         )
     ]
+
+
+AFTER = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+def commando(self, tasks, update, oldStatus):
+    tmpLog = LogWrapper(_logger, "commando")
+    for jediTaskID, commandStr in tasks:
+        tmpTaskSpec = JediTaskSpec()
+        tmpTaskSpec.jediTaskID = jediTaskID
+        if commandStr == "reassign":
+            tmpTaskSpec.status = oldStatus  # R
+            update = False
+        if update:
+            tmpTaskSpec.status = "done"  # D
+        tmpMsg = f"set task_status={tmpTaskSpec.status}"
+        tmpLog.info(tmpMsg)  # P
+        tmpLog.info(f"jediTaskID={tmpTaskSpec.jediTaskID} done")  # Q
+        tmpTaskSpec = JediTaskSpec()
+        tmpLog.info(f"next status={tmpTaskSpec.status}")  # N
+
+
+def reactivate(self, rows, timeoutDate):
+    tmpLog = LogWrapper(_logger, "reactivate")
+    for jediTaskID, frozenTime in rows:
+        timeoutFlag = False
+        if frozenTime < timeoutDate:
+            timeoutFlag = True
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # TK
+            varMap[":status"] = "exhausted"  # TO
+            sql = SQLTO
+        else:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # UK
+            varMap[":status"] = "ready"  # TU
+            sql = SQLTU
+        self.cur.execute(sql, varMap)  # X
+        tmpRow = self.cur.rowcount
+        if tmpRow > 0:
+            if timeoutFlag:
+                tmpLog.info(f"jediTaskID={jediTaskID} timeout")  # A
+            else:
+                tmpLog.info(f"jediTaskID={jediTaskID} action=reactivate")  # B
+    tmpLog.debug("done")  # E
+"""
+
+TASKS = {**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}}
+
+
+def _after(fragment: MapFragment, marker: str) -> dict[str, tuple[list[tuple[str, str, str]], bool, bool]]:
+    """The arm's after prints by marker: names as (expression, column, row), rebound, every way."""
+    branch = _branch(fragment, marker)
+    assert branch.after_prints is not None, branch.must_hole
+    markers = {number: held.rsplit("# ", 1)[-1] for number, held in enumerate(AFTER.splitlines(), 1) if "  # " in held}
+    return {
+        markers[one.line]: ([(name.expression, name.column, name.row) for name in one.names], one.rebound, one.every_way)
+        for one in branch.after_prints
+    }
+
+
+def test_a_print_after_an_arm_names_what_it_wrote_where_nothing_between_changes_it(tmp_path: Path) -> None:
+    """``set task_status={tmpTaskSpec.status}`` follows the arm on every way and states the value it wrote; the
+    store at R reaches the print only on the way that skips the arm, so it is not between them.  After
+    ``tmpTaskSpec = JediTaskSpec()`` the spelling holds another object: said with why, and rebound."""
+    fragment = _build(tmp_path, AFTER, ("commando", "D"), subject="JediTaskSpec.status", declared=TASKS)
+    after = _after(fragment, "D")
+    status, task = "JediTaskSpec.status", "JediTaskSpec.jediTaskID"
+    assert after == {
+        "P": ([("tmpTaskSpec.status", status, MUST_ROW_WRITTEN)], False, True),
+        "Q": ([("tmpTaskSpec.jediTaskID", task, MUST_ROW_WRITTEN)], False, True),
+        "N": ([("tmpTaskSpec.status", status, "")], True, True),
+    }
+    (unsaid,) = [one for one in _branch(fragment, "D").after_prints or [] if one.line == _line(AFTER, "N")]
+    assert unsaid.names[0].why == mustprints.WHY_REBOUND
+
+
+def test_an_sql_arm_s_after_prints_follow_its_run_and_not_what_its_own_way_rules_out(tmp_path: Path) -> None:
+    """The ``ready`` arm's row is written at the run X; after it, ``if timeoutFlag:`` is decided by the ``False``
+    the turn binds, so only ``action=reactivate`` follows, naming the row by the key the bind is filled with, and
+    ``done`` past the loop.  Neither follows every way: the row count test, the loop's later turns."""
+    key = KeyFrom(
+        owner=f"{FILE}::reactivate",
+        file=FILE,
+        statement=_line(AFTER, "X"),
+        table="JEDI_Tasks",
+        term="jediTaskID=:jediTaskID",
+        writes={"JediTaskSpec.status": [_line(AFTER, "TU")]},
+        sources=[KeySource(kind="loop", line=_line(AFTER, "UK"), name="jediTaskID", paths=["()"])],
+    )
+    fragment = _build(
+        tmp_path, AFTER, ("reactivate", "TU"), subject="JediTaskSpec.status", key_froms=(key,), declared=TASKS
+    )
+    assert _after(fragment, "TU") == {
+        "B": ([("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN)], False, False),
+        "E": ([], False, False),
+    }

@@ -446,6 +446,54 @@ class MustName(BaseModel):
     )
 
 
+class AfterPrint(BaseModel):
+    """A print the owner can run after an arm's write in the same call (:attr:`Branch.after_prints`), with the holes
+    holding the written row's columns.
+
+    ``TaskCommando.runImpl`` prints ``set task_status={tmpTaskSpec.status}`` at 200 after its arm at 197, on every
+    way: the line states the value the arm wrote.  ``reactivatePendingTasks_JEDI`` prints ``jediTaskID={}
+    action=reactivate`` at 4735 after the run its ``sqlTU`` arm fills, under ``if tmpRow > 0:``: the line names the
+    row the run changed.  A print reached after the arm only on a way through the next turn of a loop holding both
+    is not one (it follows the next item's arm), nor one the arm's own way rules out -- a test after it that a
+    literal the way binds decides against the print (:func:`bamboo.codemap.panda.flow.ruled_out_after`).
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    names: list[MustName] = Field(
+        default_factory=list,
+        description=(
+            "Its holes holding a column of the written row, as :attr:`Branch.must_names` reads a must print's, but "
+            "from the write to the print: the object's columns -- the written one with the value written -- and "
+            "the row's key, in the message or the logger's mark (taken where the logger is made).  A hole is said "
+            "to hold the written row (:attr:`MustName.row`) only where nothing between the write and the print "
+            "binds it again, stores to it or hands it to a call that may change it; else with why."
+        ),
+    )
+    rebound: bool = Field(
+        default=False,
+        description=(
+            "Whether the arm's object -- for an SQL arm, a name holding its row's key -- can be bound again between "
+            "the write and the print: then a hole spelling it may print another row."
+        ),
+    )
+    every_way: bool = Field(
+        default=False,
+        description=(
+            "Whether every way on from the write passes the print before the turn of the innermost loop around the "
+            "arm ends (before the call ends where none holds it), read for a run that entered no handler "
+            "(:func:`bamboo.codemap.panda.flow.passes_after`): a run with no handler's mark that wrote and lacks "
+            "the line did not go on past the write as the map reads it.  A print past the loop is never so."
+        ),
+    )
+    rows: str = Field(
+        default="",
+        description=(
+            "For one of the branch's count prints (:attr:`Branch.count_prints`), what its printing says of the rows "
+            "the run changed, as :attr:`CountPrint.rows`; empty for any other print."
+        ),
+    )
+
+
 #: :attr:`HistoryPair.row` where the history row is the arm's row: the writer
 #: is handed an attribute of the object the arm writes, bound alike at both.
 HISTORY_ROW_SAME = "same"
@@ -1136,7 +1184,11 @@ class Branch(BaseModel):
             "The lines the owner prints under a test of the row count of a run of the statement this branch's write "
             "lands at (:attr:`KeyFrom.writes`), each with what it says of the rows changed: a run's ``failed to lock "
             "jediTaskID=...`` after the lock ``UPDATE`` says the write did not land.  Its absence says the row "
-            "changed only where the line's level is in the log and the run is read past it.  Sorted by line."
+            "changed only where the line's level is in the log and the run is read past it.  Only the lines this "
+            "branch's own way can be followed by: a test after it that a literal its way binds decides against a line "
+            "keeps the line from it (:func:`bamboo.codemap.panda.flow.ruled_out_after`) -- "
+            "``reactivatePendingTasks_JEDI``'s ``sqlTU`` arms have ``action=reactivate`` and not ``timeout``, which "
+            "the same run prints after its ``sqlTO`` arms.  Sorted by line."
         ),
     )
     must_prints: Optional[list[int]] = Field(
@@ -1181,7 +1233,18 @@ class Branch(BaseModel):
     )
     must_hole: str = Field(
         default="",
-        description="Why ``must_prints`` or ``must_names`` is ``None``.",
+        description="Why ``must_prints``, ``must_names`` or ``after_prints`` is ``None``.",
+    )
+    after_prints: Optional[list[AfterPrint]] = Field(
+        default=None,
+        description=(
+            "The owner's prints that can run after this branch's write in the same call, by line -- for an SQL arm, "
+            "after a run of its statement the arm reaches -- each with the holes holding the written row's columns "
+            "(:class:`AfterPrint`).  A branch of several writes (``other_lines``) has the prints after every one, "
+            "a print being every way's only where it is so after each.  Read by "
+            ":mod:`bamboo.codemap.panda.mustprints` with the must prints.  ``None`` when not read, with "
+            "``must_hole``; ``[]`` when read and none is."
+        ),
     )
     history: Optional[list[HistoryPair]] = Field(
         default=None,

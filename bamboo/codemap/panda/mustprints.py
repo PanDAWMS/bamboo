@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -71,6 +71,7 @@ from bamboo.codemap.models import (
     MUST_PART_BIND,
     MUST_PART_MARK,
     MUST_ROW_WRITTEN,
+    AfterPrint,
     Branch,
     FunctionPrintsNode,
     JunctionNode,
@@ -81,13 +82,16 @@ from bamboo.codemap.models import (
     SourceModule,
     TableRecord,
 )
-from bamboo.codemap.panda import changes, mapentries
+from bamboo.codemap.panda import changes, flow, mapentries
 from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+#: Whether an object's attribute holds from one statement to another: ``(func, arm, printed, written, attribute)``.
+_Kept = Callable[[ast.AST, ast.stmt, ast.stmt, ast.expr, str], bool]
 
 HOLE_NO_LINE = "the branch says no line"
 HOLE_NO_MODULE = "the owner's file is not a module of this build"
@@ -226,6 +230,7 @@ def _attach(
         for branch in junction.branches:
             branch.must_prints = None
             branch.must_names = None
+            branch.after_prints = None
             branch.must_hole = ""
             sites = _sites(junction, branch, trees)
             if isinstance(sites, str):
@@ -291,9 +296,14 @@ def _attach(
         branch.must_prints = lines
         found += bool(lines)
         each: list[list[MustName]] = []
+        afters: list[dict[int, AfterPrint]] = []
+        counted: dict[int, str] = {}
+        for one in branch.count_prints:
+            counted.setdefault(one.line, one.rows)
         whole = True
         for site in reached:
             written = _written_object(site.statement, junction.subject)
+            run_by: Sequence[KeyFrom] = ()
             if written is not None:
                 names = _names(
                     site,
@@ -315,6 +325,7 @@ def _attach(
                 if not keys:
                     branch.must_hole = NAMES_NO_KEY
                     break
+                run_by = terms
             names += _key_names(
                 site,
                 keys,
@@ -326,6 +337,21 @@ def _attach(
                 maps_read,
             )
             each.append(names)
+            afters.append(
+                _after_prints(
+                    site,
+                    written,
+                    keys,
+                    run_by,
+                    statements[id(site.func)],
+                    holes,
+                    marks,
+                    maps_read,
+                    junction.subject,
+                    declarations,
+                    counted,
+                )
+            )
             whole = whole and _read_whole(
                 site,
                 keys,
@@ -340,7 +366,118 @@ def _attach(
         else:
             branch.must_names = _agreed(each)
             branch.must_names_whole = whole
+            branch.after_prints = _after_agreed(afters)
     return found
+
+
+def _after_prints(
+    site: _Site,
+    written: Optional[ast.expr],
+    keys: list[_Key],
+    terms: Sequence[KeyFrom],
+    statements: dict[int, Optional[ast.stmt]],
+    holes: dict[tuple[str, int], list[str]],
+    marks: dict[tuple[str, int], list[str]],
+    maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]],
+    subject: str,
+    declarations: dict[str, set[str]],
+    counted: dict[int, str],
+) -> dict[int, AfterPrint]:
+    """The prints after one write of a branch, by line (:attr:`Branch.after_prints`): those a way on from the write
+    reaches in one turn of each loop holding both (:func:`flow.turn_loops`) -- for an SQL arm, from a run of its
+    statement the arm reaches so -- that the arm's own way does not rule out (:func:`flow.ruled_out_after`); each
+    with its names read from the write to it, whether the object is bound again between, and whether every way on
+    from the write passes it (:func:`flow.passes_after`)."""
+    starts = [site.statement] if written is not None else _runs_after(site, terms)
+    found: dict[int, AfterPrint] = {}
+    for line, printed in statements.items():
+        if printed is None or printed is site.statement or any(printed is start for start in starts):
+            continue
+        after = [start for start in starts if reaching(printed, [start], once=flow.turn_loops(start, printed))]
+        if not after or flow.ruled_out_after(site.statement, printed):
+            continue
+        names = (
+            _names(site, written, [line], statements, holes, subject, declarations, kept=_kept_after)
+            if written is not None
+            else []
+        )
+        names += _key_names(site, keys, written is not None, [line], statements, holes, marks, maps_read, after=True)
+        # The object written, or for an SQL arm what holds each key's value: the name, or the attribute's owner.
+        objects = (
+            [written]
+            if written is not None
+            else [key.expression.value if isinstance(key.expression, ast.Attribute) else key.expression for key in keys]
+        )
+        found[line] = AfterPrint(
+            line=line,
+            names=names,
+            rebound=any(
+                _changed_between(site.func, start, printed, _object_sites(site.func, one), flow.turn_loops(start, printed))
+                for start in after
+                for one in objects
+            ),
+            every_way=all(flow.passes_after(start, printed) for start in after),
+            rows=counted.get(line, ""),
+        )
+    return found
+
+
+def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
+    """The runs of the statements an SQL arm fills (*terms*) that a way on from the arm reaches in one turn of each
+    loop holding both: where its row is written."""
+    runs: list[ast.stmt] = []
+    for record in terms:
+        ran = _statement_at(site.func, record.statement)
+        if (
+            ran is not None
+            and ran is not site.statement
+            and all(ran is not one for one in runs)
+            and reaching(ran, [site.statement], entered=[site.statement], once=flow.turn_loops(site.statement, ran))
+        ):
+            runs.append(ran)
+    return runs
+
+
+def _object_sites(func: ast.AST, held: ast.expr) -> list[ast.AST]:
+    """Where the object *held* -- a name, ``tmpTaskSpec``, or an attribute chain, ``self.job`` -- can be bound again
+    in *func*: the bindings of the chain's root name, every store to the chain."""
+    chain: set[str] = set()
+    root: ast.expr = held
+    while isinstance(root, ast.Attribute):
+        chain.add(ast.unparse(root))
+        root = root.value
+    if not isinstance(root, ast.Name):
+        return []
+    sites: list[ast.AST] = []
+    for binding in pathcond.bindings(func, root.id):  # type: ignore[arg-type]
+        if binding.nested or isinstance(binding.site, ast.arg):
+            continue
+        site = binding.site
+        statement = site if isinstance(site, (ast.stmt, ast.ExceptHandler)) else _statement_of(site)
+        if statement is not None:
+            sites.append(statement)
+    for node in walk(func):
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)) and ast.unparse(node) in chain:
+            statement = _statement_of(node)
+            if statement is not None:
+                sites.append(statement)
+    return sites
+
+
+def _after_agreed(each: list[dict[int, AfterPrint]]) -> list[AfterPrint]:
+    """The prints after every write of a branch, each with the names every one has (:func:`_agreed`), bound again
+    where after one, and every way's only where so after each."""
+    lines = sorted(set(each[0]).intersection(*each[1:])) if each else []
+    return [
+        each[0][line].model_copy(
+            update={
+                "names": _agreed([one[line].names for one in each]),
+                "rebound": any(one[line].rebound for one in each),
+                "every_way": all(one[line].every_way for one in each),
+            }
+        )
+        for line in lines
+    ]
 
 
 def _read_whole(
@@ -530,8 +667,12 @@ def _names(
     holes: dict[tuple[str, int], list[str]],
     subject: str,
     declarations: dict[str, set[str]],
+    kept: Optional["_Kept"] = None,
 ) -> list[MustName]:
-    """The holes of the must prints that read an attribute of *written*, each with whether it holds the arm's row."""
+    """The holes of the must prints that read an attribute of *written*, each with whether it holds the arm's row:
+    *kept* says whether the attribute holds between the print and the arm, :func:`_unbound_since` by default (a
+    print before the arm); :func:`_kept_after` for a print after it."""
+    held_since = kept or _unbound_since
     cls = subject.rpartition(".")[0]
     columns = declarations.get(cls, set())
     spelled = ast.unparse(written)
@@ -546,7 +687,7 @@ def _names(
             if attribute is None or attribute not in columns:
                 continue
             statement = statements.get(line)
-            same = statement is not None and _unbound_since(
+            same = statement is not None and held_since(
                 site.func, site.statement, statement, written, attribute
             )
             names.append(
@@ -697,6 +838,7 @@ def _key_names(
     holes: dict[tuple[str, int], list[str]],
     marks: dict[tuple[str, int], list[str]],
     maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]],
+    after: bool = False,
 ) -> list[MustName]:
     """The holes of the must prints holding a key of the written row (*keys*), each where the value is.
 
@@ -711,7 +853,13 @@ def _key_names(
     (:attr:`SkeletonHole.entries`): an entry with a spelled key whose value spells the key is a name of the entry
     (part ``bind``, the entry's key as *bind*), said with why -- the entry is not followed from where it is filled
     to the write.
+
+    *after*: the prints come after the write (:attr:`AfterPrint.names`), and a message's hole holds the key where
+    nothing changes it from the write to the print (:func:`_holds_key_after`, :func:`_map_holds_key_after`); a
+    mark's hole is read as before, where the logger is made.
     """
+    holds_key = _holds_key_after if after else _holds_key
+    map_holds_key = _map_holds_key_after if after else _map_holds_key
     names: list[MustName] = []
     for line in lines:
         printed = statements.get(line)
@@ -724,7 +872,7 @@ def _key_names(
                 if by_attribute and expression == spelled:
                     continue
                 if key.map and _printed_map(expression) == key.map:
-                    held = _map_holds_key(site.func, key, printed)
+                    held = map_holds_key(site.func, key, printed)
                     names.append(
                         MustName(
                             line=line,
@@ -757,7 +905,7 @@ def _key_names(
                             )
                         )
                     continue
-                if _holds_key(site.func, key, printed, expression):
+                if holds_key(site.func, key, printed, expression):
                     names.append(
                         MustName(
                             line=line,
@@ -839,6 +987,88 @@ def _map_holds_key(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
     entry = [func.args]  # type: ignore[attr-defined]
     present = not reaching(printed, [*entry, *bound], fills)
     return present and not reaching(key.at, fills, [printed])
+
+
+def _kept_after(func: ast.AST, arm: ast.stmt, printed: ast.stmt, written: ast.expr, attribute: str) -> bool:
+    """Whether *written*'s *attribute* holds at *printed*, after *arm*, what the arm left it: nothing that may change
+    it (:func:`_changes_of`) between them in the turn (:func:`_changed_between`)."""
+    sites = _changes_of(func, written, attribute)
+    return sites is not None and not _changed_between(func, arm, printed, sites, flow.turn_loops(arm, printed))
+
+
+def _holds_after(func: ast.AST, write: ast.stmt, printed: ast.stmt, expression: ast.expr) -> bool:
+    """:func:`_holds` from a write to a print after it: an attribute chain as :func:`_kept_after` reads one, a name
+    where none of its bindings is between them; anything else is not read."""
+    if isinstance(expression, ast.Attribute):
+        return _kept_after(func, write, printed, expression.value, expression.attr)
+    if isinstance(expression, ast.Name):
+        sites = _rebindings(func, expression.id, printed)
+        return not _changed_between(func, write, printed, sites, flow.turn_loops(write, printed))
+    return False
+
+
+def _holds_key_after(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
+    """:func:`_holds_key` for a hole read at *at*, after the write: the key itself unchanged from the write to *at*;
+    a name bound to it once, that binding the only one reaching *at* and taking what the key holds at the write --
+    before the write, the key unchanged from it to the write, after, from the write to it; what the key is bound
+    to once, as :func:`_bound_from` reads it either way round.  And every fill of an SQL arm's bind holding it
+    unchanged to the run."""
+    try:
+        read = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return False
+    spelled = ast.unparse(key.expression)
+    if ast.unparse(read) == spelled:
+        held = _holds_after(func, key.at, at, key.expression)
+    elif isinstance(read, ast.Name) and _single_bindings(func, read.id, spelled):
+        held = _bound_to_after(func, key.at, at, read.id, key.expression)
+    elif isinstance(key.expression, (ast.Name, ast.Attribute)):
+        held = _bound_from(func, key, at, read)
+    else:
+        return False
+    # Each fill comes before the run: what it filled lasts to the run where nothing between changes it -- not on
+    # every way into the run, which another arm's fill of the same bind reaches.
+    return held and all(_holds_after(func, one, key.at, key.expression) for one in key.filled)
+
+
+def _bound_to_after(func: ast.AST, write: ast.stmt, at: ast.stmt, name: str, expression: ast.expr) -> bool:
+    """:func:`_bound_to` for *name* read at *at* after *write*: bound to *expression* once, that binding the only one
+    reaching *at*, and the binding taking what *expression* holds at the write."""
+    spelled = ast.unparse(expression)
+    sites = _rebindings(func, name, write, entry=True)
+    made = [
+        site
+        for site in sites
+        if isinstance(site, ast.Assign)
+        and len(site.targets) == 1
+        and isinstance(site.targets[0], ast.Name)
+        and site.targets[0].id == name
+        and ast.unparse(site.value) == spelled
+    ]
+    if len(made) != 1:
+        return False
+    (bound,) = made
+    if reaching(at, [site for site in sites if site is not bound], [bound]):
+        return False
+    if reaching(bound, [write], entered=[write], once=flow.turn_loops(write, bound)):
+        return _holds_after(func, write, bound, expression)
+    return _holds(func, write, bound, expression)
+
+
+def _map_holds_key_after(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
+    """:func:`_map_holds_key` for a print after the run: the bind map the statement ran with, neither bound again nor
+    any of the key's fills run again between the run and the print."""
+    if not any(isinstance(node, ast.Name) and node.id == key.map for node in walk(key.at)):
+        return False
+    sites: list[ast.AST] = list(key.filled)
+    for binding in pathcond.bindings(func, key.map):  # type: ignore[arg-type]
+        if binding.nested:
+            continue
+        site = binding.site
+        statement = site if isinstance(site, (ast.stmt, ast.ExceptHandler)) else _statement_of(site)
+        if statement is not None:
+            sites.append(statement)
+    return not _changed_between(func, key.at, printed, sites, flow.turn_loops(key.at, printed))
 
 
 def _spells_key(func: ast.AST, key: _Key, expression: str) -> bool:
@@ -1072,6 +1302,18 @@ def _unbound_since(
     Without *entered*, *printed* need not be on every path: only whether,
     where it ran, the value lasts to the arm.
     """
+    sites = _changes_of(func, written, attribute)
+    if sites is None:
+        return False
+    if entered:
+        sites = [func.args, *sites]  # type: ignore[attr-defined]
+    return not reaching(arm, [site for site in sites if site is not printed], [printed])
+
+
+def _changes_of(func: ast.AST, written: ast.expr, attribute: str) -> Optional[list[ast.AST]]:
+    """Where *written*'s *attribute* can change in *func*, as :func:`_unbound_since` reads it: the bindings of the
+    chain's root name, every store to the chain, every call on an object of the chain or handed one that may change
+    the value.  None where the chain's root is no name."""
     chain = [ast.unparse(written) + "." + attribute]
     value = ast.Attribute(value=written, attr=attribute, ctx=ast.Load())
     root: ast.expr = written
@@ -1079,8 +1321,8 @@ def _unbound_since(
         chain.append(ast.unparse(root))
         root = root.value
     if not isinstance(root, ast.Name):
-        return False
-    sites: list[ast.AST] = [func.args] if entered else []  # type: ignore[attr-defined]
+        return None
+    sites: list[Optional[ast.AST]] = []
     for binding in pathcond.bindings(func, root.id):
         if not binding.nested:
             site = binding.site
@@ -1104,10 +1346,23 @@ def _unbound_since(
             and _may_change(func, node, value)
         ):
             sites.append(_statement_of(node))
-    return not reaching(
-        arm,
-        [site for site in sites if site is not None and site is not printed],
-        [printed],
+    return [site for site in sites if site is not None]
+
+
+def _changed_between(
+    func: ast.AST, first: ast.stmt, then: ast.stmt, sites: Sequence[ast.AST], once: Sequence[ast.AST]
+) -> bool:
+    """Whether one of *sites* can run on a way from *first* to *then* in one turn of the loops *once* -- after the
+    arm, before a print after it.  Not :func:`_unbound_since`'s question turned round: a site reaching *then* on a
+    way that never ran *first* -- ``TaskCommando.runImpl``'s ``tmpTaskSpec.status = oldStatus`` at 181, on the way
+    that skips the arm at 197 -- is not between them.  A site that is the last write before *then* on some way and
+    that *first* reaches is: the two ways make one."""
+    others = [site for site in sites if site is not first and site is not then]
+    if not others:
+        return False
+    last = reaching(then, [first, *others], once=once)
+    return any(
+        site is not first and reaching(site, [first], entered=[first], once=once) for site in last
     )
 
 

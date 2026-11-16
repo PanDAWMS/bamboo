@@ -22,6 +22,8 @@ question is :func:`runs_after`, and the others are made of it.
   with no mark hands none: every ``try`` ran to its end.
 * **Where a run would have gone.**  :func:`kept_from` reads an exit as a ``pass`` too (:func:`reaching`'s
   *passing*): what a run leaving there no longer reaches and would have, the pass's or the turn's.
+* **What a way's own literals rule out.**  The ways are path-insensitive, but a name a statement's way binds to one
+  literal decides a test after it: :func:`ruled_out_after`.
 * **Not read.**  A ``with`` whose manager swallows what its body raised, and a call that never returns.  The
   first is watched: :func:`swallowing_managers` lists each such manager of the corpus into the dump, and the
   ``with-exits-are-read`` gate fails on one (none in PanDA).
@@ -35,6 +37,7 @@ from __future__ import annotations
 import ast
 from typing import Iterable, Iterator, Optional, Sequence
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.models import SwallowingManager
 from bamboo.codemap.reaching import reaching, reaching_each, reaching_end
 
@@ -173,6 +176,74 @@ def together(
     return runs_after(
         printed, site, once=once, printed=True, raised=raised
     ) or runs_after(site, printed, once=once, raised=raised)
+
+
+def passes_after(first: ast.stmt, then: ast.stmt, *, raised: Sequence[ast.ExceptHandler] = ()) -> bool:
+    """Whether every way a call goes on by after *first* passes *then* before the turn of the innermost loop around
+    *first* ends -- before the call ends where no loop holds it: ``TaskCommando.runImpl`` prints ``set
+    task_status=...`` after its ``tmpTaskSpec.status`` arm on every way.  A *then* outside that turn -- past the
+    loop, in its ``else`` -- is passed in no turn of it.
+
+    Read for a run that entered none of the handlers but *raised* (none by default), as a reader of a run with no
+    handler's mark reads it: a statement raises only into them (:func:`reaching`'s *raised*), and a ``raise``
+    statement ends its way short of *then*.  With every statement able to raise, almost no print would follow every
+    way."""
+    _one_function(first, then)
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise ValueError("the flow answers of a function's pass")
+    loops = loops_around(first)
+    if loops and not any(then is one or _under(then, one) for one in loops[0].body):  # type: ignore[attr-defined]
+        return False
+    ends = [node for node in _own(func) if isinstance(node, (ast.Return, ast.Raise))]
+    if any(reaching_each(ends, [first], [then], entered=[first], once=loops, raised=raised)):
+        return False
+    return not reaching_end(func, [first], [then], entered=[first], once=loops, raised=raised)
+
+
+def turn_loops(first: ast.stmt, then: ast.stmt) -> list[ast.AST]:
+    """The loops around *first* whose body holds *then* too, inside out: a way from *first* to *then* stays in one
+    turn of each, and goes round any other as often as it may -- a print past the loop follows the arm's turn and
+    every later one."""
+    return [loop for loop in loops_around(first) if any(then is one or _under(then, one) for one in loop.body)]  # type: ignore[attr-defined]
+
+
+def ruled_out_after(first: ast.stmt, then: ast.stmt) -> bool:
+    """Whether a call that ran *first* cannot run *then* after it in the same turn of each loop around *first* that
+    holds *then* (:func:`turn_loops`), by the values *first*'s way gives: a test on *then*'s way reads a name that
+    holds one literal where *first* runs (:func:`pathcond.held_at`), nothing binds it again on a way from *first* to
+    *then* in that turn, and the literal decides the test against *then* (:func:`pathcond.ruled_out_at`).
+
+    ``reactivatePendingTasks_JEDI``'s ``sql = sqlTU`` arm runs with the ``timeoutFlag = False`` its turn starts
+    with, so ``if timeoutFlag:`` keeps it from the ``timeout`` print after the run, which its ``sqlTO`` arm, beside
+    ``timeoutFlag = True``, reaches.  False where no test is so decided: a test on a value computed, or on a name
+    bound to different literals on the ways to *first*, rules on nothing."""
+    _one_function(first, then)
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    once = turn_loops(first, then)
+    names = sorted(
+        {node.id for test in pathcond.tests_on(then, func) for node in ast.walk(test) if isinstance(node, ast.Name)}
+    )
+    for name in names:
+        held = pathcond.held_at(func, name, first)
+        if held.kind != pathcond.HELD_CONSTANT:
+            continue
+        # A parameter is bound as the call starts, before any turn.
+        sites = [
+            one.site if isinstance(one.site, (ast.stmt, ast.ExceptHandler)) else pathcond.site_of(one.site)
+            for one in pathcond.bindings(func, name)
+            if not one.nested and not isinstance(one.site, ast.arg)
+        ]
+        if any(
+            reaching(site, [first], entered=[first], once=once) and reaching(then, [site], once=once)
+            for site in sites
+        ):
+            continue
+        if pathcond.ruled_out_at(then, func, name, held.value):
+            return True
+    return False
 
 
 def ends_after(

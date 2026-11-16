@@ -22498,6 +22498,71 @@ def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_
     assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
 
 
+#: ``reactivatePendingTasks_JEDI``: two statements share one run, and a flag each arm's way binds to a literal
+#: chooses the count print after it.
+_COUNTED_ARMS = '''
+class TaskModule:
+    def reactivate(self, resTL, timeoutDate):
+        sqlTU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=oldStatus,oldStatus=NULL "
+        sqlTU += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        sqlTO = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus,errorDialog=:errorDialog "
+        sqlTO += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for jediTaskID, frozenTime in resTL:
+            timeoutFlag = False
+            if frozenTime < timeoutDate:
+                timeoutFlag = True
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "exhausted"
+                varMap[":oldStatus"] = "pending"
+                varMap[":errorDialog"] = "timeout"
+                sql = sqlTO
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":oldStatus"] = "pending"
+                sql = sqlTU
+            self.cur.execute(sql, varMap)
+            tmpRow = self.cur.rowcount
+            if tmpRow > 0:
+                if timeoutFlag:
+                    tmpLog.info(f"jediTaskID={jediTaskID} timeout")
+                else:
+                    tmpLog.info(f"jediTaskID={jediTaskID} action=reactivate")
+'''
+
+
+def test_a_count_print_the_arm_s_own_way_rules_out_is_not_the_arm_s(tmp_path):
+    """Both statements run at one ``execute``, and ``if tmpRow > 0`` holds both prints; but on the ``sqlTU`` arm's way
+    ``timeoutFlag`` holds the ``False`` the turn starts with, and on ``sqlTO``'s the ``True`` bound beside it, and
+    nothing binds it again before ``if timeoutFlag:``.  So each arm's count prints are only those its way can reach
+    (:func:`flow.ruled_out_after`): ``timeout`` for ``sqlTO``'s columns, ``action=reactivate`` for ``sqlTU``'s."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _COUNTED_ARMS})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    timeout, reactivate = _at("} timeout", _COUNTED_ARMS), _at("action=reactivate", _COUNTED_ARMS)
+    by_arm = {
+        (j.subject.split(".")[-1], b.line): [p.line for p in b.count_prints] for j in junctions for b in j.branches
+    }
+    new_status, error, tu = (
+        _at(spelled, _COUNTED_ARMS) for spelled in ('":newStatus"] =', '":errorDialog"] =', "sql = sqlTU")
+    )
+    assert {key: lines for key, lines in by_arm.items() if lines} == {
+        ("status", new_status): [timeout],
+        ("errorDialog", error): [timeout],
+        ("status", tu): [reactivate],
+        ("oldStatus", tu): [reactivate],
+    }
+
+
 #: The proxy puts the type and the task into a message; the buffer hands its own on to it; the feeder sends.
 _MESSAGE_BUFFER = '''
 import json

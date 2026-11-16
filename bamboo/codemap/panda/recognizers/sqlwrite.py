@@ -160,7 +160,7 @@ from bamboo.codemap.models import (
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import mapentries, sql, sqleval, sqltext
+from bamboo.codemap.panda import flow, mapentries, sql, sqleval, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 
 # The block a decision records about itself reads the same way whichever slice
@@ -8291,7 +8291,12 @@ def attach_count_prints(
     test of the row count of the statement's runs (:attr:`Branch.count_prints`, :func:`progress.count_prints`): the
     lock ``UPDATE``'s ``lockedBy``, ``lockedTime`` and ``modificationTime`` arms get ``failed to lock
     jediTaskID={}``, said where the run changed not exactly one row.  The SQL arms and the attribute arms an object's
-    write carries alike, by the lines the statement writes each subject on."""
+    write carries alike, by the lines the statement writes each subject on.
+
+    A branch gets only the prints one of its lines can be followed by in the same turn, by what its own way binds
+    (:func:`flow.ruled_out_after`): ``reactivatePendingTasks_JEDI``'s two statements share one run, and the
+    ``timeoutFlag`` each arm's way binds gives ``sqlTU``'s arms only ``action=reactivate`` and ``sqlTO``'s only
+    ``timeout``."""
     by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
     done: set[tuple[str, int]] = set()
     for key_from in key_froms:
@@ -8304,6 +8309,7 @@ def attach_count_prints(
         )
         if not printed:
             continue
+        statements = _own_statements(func)
         together = [one for one in key_froms if one.owner == key_from.owner and one.statement == key_from.statement]
         written: dict[str, set[int]] = {}
         for one in together:
@@ -8314,10 +8320,36 @@ def attach_count_prints(
             if junction is None:
                 continue
             for branch in junction.branches:
-                if branch.line in lines or lines & set(branch.other_lines):
-                    held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
-                    held.update(printed)
-                    branch.count_prints = [held[key] for key in sorted(held)]
+                arm_lines = {line for line in (branch.line, *branch.other_lines) if line is not None} & lines
+                if not arm_lines:
+                    continue
+                arms = [statements[line] for line in sorted(arm_lines) if line in statements]
+                held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
+                held.update(
+                    (key, one)
+                    for key, one in printed
+                    if one.line not in statements
+                    or not arms
+                    or any(not flow.ruled_out_after(arm, statements[one.line]) for arm in arms)
+                )
+                branch.count_prints = [held[key] for key in sorted(held)]
+
+
+def _own_statements(func: ast.AST) -> dict[int, ast.stmt]:
+    """The statement holding no block (:data:`_COMPOUND`) that starts each line of *func*'s own body -- not a nested
+    function's or class's --, the first on its line where a line holds two."""
+    found: dict[int, ast.stmt] = {}
+    stack: list[ast.AST] = list(getattr(func, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.stmt) and not isinstance(node, _COMPOUND):
+            held = found.get(node.lineno)
+            if held is None or node.col_offset < held.col_offset:
+                found[node.lineno] = node
+        stack.extend(ast.iter_child_nodes(node))
+    return found
 
 
 def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str]]:
