@@ -2175,6 +2175,9 @@ class Missed:
     reader_log_files: list = field(default_factory=list)
     #: where the rows of the statements selecting the value go (:mod:`value_reach`); None: not read
     reach: VR.Reach | None = None
+    #: what the amounts a statement's runs print are asked over (:meth:`Rerun._fill`): stuck's S1 window, read at one
+    #: moment; None: the part of [since, moved] judgement 3 asks first (``W.last_part``)
+    amounts: W.Asking | None = None
 
 
 @dataclass
@@ -2276,6 +2279,29 @@ def mark_columns(owner: str, lines: list[int], run: Any) -> dict[str, str]:
         for k, v in zip(r.key, vs, strict=True):
             for col in k.columns or []:
                 out.setdefault(col, v)
+    return out
+
+
+def printed_parameters(owner: str, lines: list[int]) -> set[str]:
+    """The parameters of *owner*'s function a hole of its runs' marks holds as the call hands them, by the map
+    (``RunKey.parameter``, its batch 5 M-c): ``reactivatePendingTasks_JEDI.timeLimit`` in ``limit={}``.  Empty for a
+    map that does not say (before batch 5)."""
+    return {p for r in getattr(R._prints_of(owner, lines), "runs", None) or [] for k in r.key or []
+            if (p := getattr(k, "parameter", ""))}
+
+
+def mark_parameters(owner: str, lines: list[int], run: Any) -> dict[str, str]:
+    """What *run*'s mark holds, by the parameter :func:`printed_parameters` names each hole's:
+    ``reactivatePendingTasks_JEDI < vo=atlas label=... limit=20 min timeout=48hours minPrio=None >`` holds 20 for
+    ``reactivatePendingTasks_JEDI.timeLimit``.  Empty where no mark of the function's reads in the token."""
+    out: dict[str, str] = {}
+    for r in getattr(R._prints_of(owner, lines), "runs", None) or []:
+        vs = mark_values(run.token, r.mark)
+        if vs is None or len(vs) != len(r.key or []):
+            continue
+        for k, v in zip(r.key, vs, strict=True):
+            if parameter := getattr(k, "parameter", ""):
+                out.setdefault(parameter, v)
     return out
 
 
@@ -7786,7 +7812,7 @@ class Rerun:
         q = getattr(self, "_missed_q", None)
         if q is None or q.subject != up.subject:
             return "", []
-        sts = [st for st in q.statements if st.owner.rpartition("::")[2].rpartition(".")[2] == sel.callee]
+        sts = [self._filled(st, q) for st in q.statements if st.owner.rpartition("::")[2].rpartition(".")[2] == sel.callee]
         if not sts:
             return "", []
         kept = getattr(self, "_assuming", None)
@@ -7828,7 +7854,7 @@ class Rerun:
         if len(sts) != 1:
             self.say(f"(C) part 2: {len(sts)} statement(s) of the question select through {sel.callee}: not read")
             return "", [], []
-        st = sts[0]
+        st = self._filled(sts[0], q)
         terms = key_terms(getattr(mapdump.fragment(), "key_froms", None) or [], st.owner, st.line)
         if terms.other or (terms.either and not terms.joined):
             self.say(f"(C) part 2: {sel.callee}'s terms {', '.join(terms.other or terms.either)} are not read")
@@ -8751,7 +8777,7 @@ class Rerun:
         at, words, header = self._reading_moment(q.subject, as_of)
         asked = f"{q.subject}={q.observed}"
         mq = Missed(q.subject, q.observed, "", at, at, [rs for rs in follow.reader_statements if asked in rs.selects], "", None,
-                    end=words, start=words, at_end=True)
+                    end=words, start=words, at_end=True, amounts=W.stuck(self.data.get("statuslog", {}), q.observed))
         paths = paths_of(follow, writers, q.subject, q.observed)
         self.say(header)
         out = []
@@ -9746,6 +9772,7 @@ class Rerun:
         row's values (M3(a)-cap, whose selections are the row's label's)."""
         if st.keys and not keyed:
             return []
+        st = self._filled(st, q)
         out = self._pairs_true(st.restricts, st.refuses, q)
         for reading in st.condition_trees:
             out = _intersect(out, self._true_spans(reading.tree, q))
@@ -9824,6 +9851,95 @@ class Rerun:
         stop = "; ".join(st.callers_stop) or "the map does not say it places every call"
         return "refused on a call", [*lines, f"{refusing} of {running} route(s) refuse it; {stop}"]
 
+    def _amounts_printed(self, owner: str, line: int, asking: W.Asking) -> tuple[dict[str, set[str]], list[str], bool]:
+        """What the marks of *owner*'s runs over *asking*'s window print for each parameter the map names a hole of
+        them (:func:`mark_parameters`): the values by parameter, the runs read (``log@machine``), and whether an ask of
+        its logs had no record.  Asked as S1 asks a mover's logs, over the step's own window, the logs' notes not said;
+        an ask with no record is not kept -- a run no record holds is said not read where it is used."""
+        cache: dict[tuple, tuple[dict[str, set[str]], list[str], bool]] = self.__dict__.setdefault("_amounts_cache", {})
+        window = asking.window
+        if (owner, window) not in cache:
+            values: dict[str, set[str]] = {}
+            read: list[str] = []
+            names = self.logs.names(self.files_of(owner, [], [line])) if window is not None or not self.logs.needs_window else []
+            found, missed, _holes = self._ask(self.args.key, names, asking, owners_of([owner]), quiet=True) if names else ({}, [], {})
+            func = owner.rpartition("::")[2].rpartition(".")[2]
+            for name, runs in found.items():
+                for run in runs:
+                    if not of_mover(run, func) or (window is not None and not spans(run, window)):
+                        continue
+                    if got := mark_parameters(owner, [line], run):
+                        read.append(f"{name}@{run.machine}")
+                        for parameter, value in got.items():
+                            values.setdefault(parameter, set()).add(value)
+            cache[(owner, window)] = (values, sorted(set(read)), bool(missed))
+        return cache[(owner, window)]
+
+    def _fill(self, st, q: Missed) -> tuple[Any, list[str]]:
+        """*st* with each amount that waits for a parameter of its own function filled (P29): a value the map settles
+        but for one parameter times a scale (``ConditionValue.needs``, ``scale_seconds``; its batch 4 S), where a hole
+        of the function's runs' marks holds that parameter as handed (``RunKey.parameter``, batch 5 M-c) and the runs
+        over the window (*q*'s ``amounts``, else the part of the stay judgement 3 asks first) print one value: the
+        amount is the scale times it, and a term none of whose values then waits is read as settled.  Runs printing
+        several values, or none read, leave it waiting.  With the words that say where each value came from, or why
+        it was not read.  ``reactivatePendingTasks_JEDI``'s ``modificationTime<:timeLimit``, ``limit=20``: now less
+        1200 s."""
+        waits: set[str] = set()
+        for reading in getattr(st, "condition_trees", None) or []:
+            for leaf in _tree_leaves(reading.tree):
+                for v in getattr(leaf, "values", None) or []:
+                    needs = getattr(v, "needs", None) or []
+                    if len(needs) == 1 and getattr(v, "scale_seconds", None) is not None and not getattr(v, "said", ""):
+                        waits.add(needs[0])
+        if not waits:
+            return st, []
+        # its own function's parameters, a hole of whose marks the map says holds one
+        func = st.owner.rpartition("::")[2].rpartition(".")[2]
+        waits = {n for n in waits if n.partition(".")[0] == func}
+        if not waits or not (waits := waits & printed_parameters(st.owner, [st.line])):
+            return st, []
+        since, end = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
+        asking = q.amounts or W.last_part(q.observed, since, end, "the-move-less", T.Said("the-move-at", {"move": end}))
+        key = (id(st), asking.window, since, end)
+        cache: dict[tuple, tuple[Any, list[str]]] = self.__dict__.setdefault("_fill_cache", {})
+        if key in cache:
+            return cache[key]
+        values, read, missed = self._amounts_printed(st.owner, st.line, asking)
+        window = asking.window or (since, end)
+        fill: dict[str, float] = {}
+        words = []
+        for parameter in sorted(waits):
+            name = parameter.partition(".")[2]
+            got = sorted(values.get(parameter, set()))
+            number = _number(got[0]) if len(got) == 1 else None
+            if number is not None:
+                fill[parameter] = number
+                words.append(f"{name} = {got[0]}, as the marks of {func}'s runs over {window[0]} .. {window[1]} print it "
+                             f"({', '.join(read)})")
+            elif len(got) > 1:
+                words.append(f"{name} not read: {func}'s runs over {window[0]} .. {window[1]} print {got} ({', '.join(read)})")
+            else:
+                why = "an ask of its logs has no record" if missed else "no run of it in the records holds its mark"
+                words.append(f"{name} not read: {why} over {window[0]} .. {window[1]}")
+        out = copy.deepcopy(st) if fill else st
+        for reading in out.condition_trees if fill else []:
+            for leaf in _tree_leaves(reading.tree):
+                filled = False
+                for v in getattr(leaf, "values", None) or []:
+                    needs = getattr(v, "needs", None) or []
+                    if len(needs) == 1 and needs[0] in fill and v.scale_seconds is not None and not v.said:
+                        v.offset_seconds = (v.offset_seconds or 0) + v.scale_seconds * fill[needs[0]]
+                        v.needs = []
+                        filled = True
+                if filled and not leaf.settled and leaf.node != "other" and all(_settled(v) for v in leaf.values):
+                    leaf.settled = True
+        cache[key] = (out, words)
+        return out, words
+
+    def _filled(self, st, q: Missed):
+        """*st* as :meth:`_fill` fills it, without the words."""
+        return self._fill(st, q)[0]
+
     def _passed_over(self, st, q: Missed, took: bool = False) -> tuple[str, list[str]]:
         """What the map lets one say about *st* and this row: ``refused`` -- whatever the build, the row cannot come
         back; ``refused on a call`` -- on the calls named; ``refused when`` -- on the builds the map's tests pick;
@@ -9841,6 +9957,7 @@ class Rerun:
         the statement's own fields, and only when they do not refuse the row already."""
         self.need(T.Said("the-map-s-condition-trees-and-routes"),
                   hasattr(st, "condition_trees") and hasattr(st, "call_readings"))
+        st, amounts = self._fill(st, q)
         under = _added_under(st)
         for pair in st.refuses:
             if self._row_holds(pair, q):
@@ -9890,6 +10007,7 @@ class Rerun:
                 # Q1 part 1: what the records show of it in the stay, said once
                 told.add(x)
                 said.append(T.text(_timeline_said(x, tl)))
+        said += amounts
         said += [T.text(x) for x in self._timeline_terms(st, q)]
         if kind == "refused":
             return kind, said

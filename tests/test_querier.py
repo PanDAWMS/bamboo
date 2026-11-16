@@ -15118,6 +15118,115 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
     assert got["holes"] == [True, False, True, False], got
 
 
+def test_an_amount_waiting_for_a_parameter_is_filled_from_what_the_runs_marks_print(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+
+            # the map: reactivate's mark holds its timeLimit as handed (RunKey.parameter); other's names no parameter
+            marks = {"react": [N(mark="vo={} limit={} min", key=[N(parameter="react.vo", columns=[]),
+                                                                  N(parameter="react.timeLimit", columns=[])])],
+                     "other": [N(mark="limit={}", key=[N(columns=[])])]}
+            R._prints_of = lambda owner, lines: N(runs=marks[owner.rpartition(".")[2]])
+            RR.owners_of = lambda ids: {}
+
+            def run(token, first, last, machine="m1"):
+                return N(token=token, first=first, last=last, machine=machine)
+
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.args = [], N(key="7")
+            r.logs = N(names=lambda wanted: list(wanted), needs_window=True)
+            r.files_of = lambda owner, today, lines: ["db.log"]
+            answers = {}
+            asked = []
+
+            def ask(key, names, asking, owners, quiet=False):
+                asked.append([key, names, list(asking.window), quiet])
+                return answers.get("found", {}), answers.get("missed", []), {}
+            r._ask = ask
+
+            def value(needs, scale=-60.0, said=""):
+                return N(text=":timeLimit", base="naive_utcnow", offset_seconds=None, scale_seconds=scale, needs=needs,
+                         said=said, kind="time", constant="")
+
+            def st(owner, *values):
+                leaf = N(node="compare", op="<", subject="T.modificationTime", text="modificationTime<:timeLimit",
+                         settled=False, values=list(values))
+                return N(owner=f"p/x.py::C.{owner}", line=12, condition_trees=[N(entry="e", tree=N(node="all", items=[leaf]))])
+
+            def q():
+                return RR.Missed("T.status", "pending", "", datetime.datetime(2026, 1, 1, 0, 0), datetime.datetime(2026, 1, 1, 1, 0),
+                                 [], "", None)
+
+            def leaf_of(s):
+                return s.condition_trees[0].tree.items[0]
+
+            got = {}
+            inside = run("react < vo=atlas limit=20 min >", "2026-01-01 00:10:00", "2026-01-01 00:50:00")
+            # one value over the window: filled, the copy settled, the map's statement as it was
+            answers["found"] = {"db.log": [inside, run("react < vo=atlas limit=20 min >", "2026-01-01 00:20:00", "2026-01-01 00:21:00", "m2"),
+                                           run("react < vo=atlas limit=30 min >", "2025-12-31 20:00:00", "2025-12-31 20:05:00"),
+                                           run("other < limit=99 >", "2026-01-01 00:10:00", "2026-01-01 00:20:00")]}
+            s = st("react", value(["react.timeLimit"]))
+            r1 = RR.Rerun.__new__(RR.Rerun); r1.__dict__.update(r.__dict__)
+            filled, words = r1._fill(s, q())
+            v = leaf_of(filled).values[0]
+            got["one"] = [v.offset_seconds, v.needs, leaf_of(filled).settled, leaf_of(s).values[0].needs, leaf_of(s).settled, words]
+            got["asked"] = asked[-1]
+            # the same statement again: read once
+            r1._fill(s, q())
+            got["once"] = len(asked)
+            # two values among the runs in the window: not filled, the values said
+            answers["found"] = {"db.log": [inside, run("react < vo=atlas limit=30 min >", "2026-01-01 00:30:00", "2026-01-01 00:31:00", "m2")]}
+            r2 = RR.Rerun.__new__(RR.Rerun); r2.__dict__.update(r.__dict__)
+            filled, words = r2._fill(s, q())
+            got["two"] = [filled is s, words]
+            # no run to hand; an ask with no record
+            answers["found"] = {}
+            r3 = RR.Rerun.__new__(RR.Rerun); r3.__dict__.update(r.__dict__)
+            got["none"] = r3._fill(s, q())[1]
+            answers["missed"] = [("ask", "why")]
+            r4 = RR.Rerun.__new__(RR.Rerun); r4.__dict__.update(r.__dict__)
+            got["missed"] = r4._fill(s, q())[1]
+            # nothing asked where nothing waits that a mark holds: another function's parameter, a value only said, a
+            # map that names no parameter of the mark, a value with no scale
+            n = len(asked)
+            answers.pop("missed")
+            r5 = RR.Rerun.__new__(RR.Rerun); r5.__dict__.update(r.__dict__)
+            got["left"] = [r5._fill(x, q()) == (x, []) for x in (
+                st("react", value(["caller.timeLimit"])), st("react", value(["react.timeLimit"], said="cfg@3")),
+                st("other", value(["other.timeLimit"])), st("react", value(["react.timeLimit"], scale=None)))]
+            got["left_asked"] = len(asked) - n
+            # a term with another value still waiting stays not settled, its filled value filled
+            answers["found"] = {"db.log": [inside]}
+            r6 = RR.Rerun.__new__(RR.Rerun); r6.__dict__.update(r.__dict__)
+            filled, _ = r6._fill(st("react", value(["react.timeLimit"]), value(["react.other"])), q())
+            got["partly"] = [leaf_of(filled).settled, [x.offset_seconds for x in leaf_of(filled).values]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    window = "2025-12-31 23:50:00 .. 2026-01-01 01:00:00"
+    # limit=20 a minute's -60 s: now less 1200 s; the runs read are the window's own (not the one before it, nor
+    # another method's)
+    assert got["one"] == [-1200.0, [], True, ["react.timeLimit"], False,
+                          [f"timeLimit = 20, as the marks of react's runs over {window} print it (db.log@m1, db.log@m2)"]], got
+    # the window judgement 3 asks first, the logs' notes not said
+    assert got["asked"] == ["7", ["db.log"], ["2025-12-31 23:50:00", "2026-01-01 01:00:00"], True], got
+    assert got["once"] == 1, got
+    assert got["two"] == [True, [f"timeLimit not read: react's runs over {window} print ['20', '30'] (db.log@m1, db.log@m2)"]], got
+    assert got["none"] == [f"timeLimit not read: no run of it in the records holds its mark over {window}"], got
+    assert got["missed"] == [f"timeLimit not read: an ask of its logs has no record over {window}"], got
+    assert got["left"] == [True, True, True, True] and got["left_asked"] == 0, got
+    assert got["partly"] == [False, [-1200.0, None]], got
+
+
 def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
     """R (the map's batch 2, Branch.count_prints; RR._landed): the first count print of the write's statement in the
     run after the write's print and before that print's next record says whether the write landed -- none or not one:
