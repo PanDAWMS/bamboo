@@ -209,6 +209,7 @@ def ends_after(
 def kept_from(
     exit_: ast.Return | ast.Raise | ast.Continue | ast.Break,
     statements: Sequence[ast.stmt],
+    over: Optional[ast.AST] = None,
 ) -> list[ast.stmt]:
     """Of *statements*, the ones a run leaving by *exit_* can no longer reach and could have reached had it gone on
     past it as a ``pass``, in the order given: what the exit keeps the run from.
@@ -218,18 +219,30 @@ def kept_from(
     loop around it are read as gone round once, and only statements in the loop's body or ``else`` count (a
     ``break`` keeps the run from the ``else``; a ``continue`` does not).  So ``getTasksToBeFinished_JEDI``'s
     ``continue`` at 1667 keeps a run from the turn's writes at 1673, 1676 and 1690, and its ``raise`` at 1666,
-    caught by the ``except`` around the loop that returns, from the count print at 1717 after the loop.  The flow is
-    path-insensitive: a statement only an impossible way after the exit reaches is read as reached, so an answer
-    may leave out what the exit does keep the run from, never add what it does not."""
+    caught by the ``except`` around the loop that returns, from the count print at 1717 after the loop.
+
+    *over*, a loop whose body holds *exit_*, asks the same over one turn of it, whatever the exit: that loop and
+    every loop around it gone round once, every loop inside it as often as it may, and only statements in its body
+    or ``else`` counted.  ``TaskCommandoThread.runImpl``'s ``break`` at 211, over a turn of the ``for`` at 123 around
+    its own loop, keeps a run from the arms another turn of its own loop reaches.
+
+    The flow is path-insensitive on both sides: a statement only an impossible way after the exit reaches is read as
+    reached, so an answer may leave out what the exit does keep the run from; and one only an impossible way past the
+    exit reaches is read as reachable, so an answer may hold what no run going on past it could reach."""
     _one_function(exit_, *statements)
     once: list[ast.AST] = []
     asked = list(statements)
-    if isinstance(exit_, (ast.Continue, ast.Break)):
-        loops = _loops_around(exit_)
+    loops = loops_around(exit_)
+    if over is None and isinstance(exit_, (ast.Continue, ast.Break)):
         if not loops:
             return []
-        once = list(loops)
-        asked = [statement for statement in statements if _under(statement, loops[0])]
+        over = loops[0]
+    if over is not None:
+        index = next((number for number, loop in enumerate(loops) if loop is over), None)
+        if index is None:
+            raise ValueError(f"line {getattr(over, 'lineno', '?')} is no loop whose body holds the exit")
+        once = loops[index:]
+        asked = [statement for statement in statements if _under(statement, over)]
     if not asked:
         return []
     after = reaching_each(asked, [exit_], entered=[exit_], once=once)
@@ -237,7 +250,7 @@ def kept_from(
     return [statement for statement, left, went in zip(asked, after, passing, strict=True) if went and not left]
 
 
-def _loops_around(node: ast.AST) -> list[ast.AST]:
+def loops_around(node: ast.AST) -> list[ast.AST]:
     """The loops whose body holds *node* in its function, inside out: a ``continue`` or ``break`` in a loop's
     ``else`` is the loop around it's."""
     found: list[ast.AST] = []

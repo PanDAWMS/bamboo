@@ -958,9 +958,15 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")
         # What each exit of a function holding arms or prints keeps a run from: why a pass that ran no arm ran none.
-        kept = exitkeeps.attach(fragment, self._modules)
+        kept = exitkeeps.attach(fragment, self._modules, record)
         logger.info(
-            "PandaCodeMapPlugin: %d exit(s) read, %d keep a run from an arm", len(fragment.exit_keeps), kept
+            "PandaCodeMapPlugin: %d exit(s) read, %d keep a run from an arm, %d from a call into arms, %d with a turn "
+            "of a loop around their own; %d print(s) in a loop",
+            len(fragment.exit_keeps),
+            kept,
+            sum(1 for one in fragment.exit_keeps if one.calls),
+            sum(1 for one in fragment.exit_keeps if len(one.turns) > (one.exit.startswith(("continue", "break")))),
+            len(fragment.print_loops),
         )
         lap("exits")
         if self._calls is not None:

@@ -4542,22 +4542,40 @@ class WritePrint(BaseModel):
     )
 
 
+class TurnKeeps(BaseModel):
+    """What an exit keeps a run from over one turn of a loop whose body holds it (:attr:`ExitKeeps.turns`): that loop
+    and every loop around it gone round once, every loop inside it as often as it may, and only the statements of its
+    body or ``else`` counted -- what a reader of a pass that is one turn of the loop needs.  ``TaskCommandoThread.runImpl``'s
+    ``break`` at 211 leaves the inner ``for iLoop``: over its own turn it keeps a run from no arm, over a turn of the
+    ``for`` at 123 around it from the arms another turn of the inner loop reaches (181, 197)."""
+
+    loop: int = Field(description="The line of the loop's header.")
+    arms: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.arms`, over the turn.")
+    prints: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.prints`, over the turn.")
+    calls: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.calls`, over the turn.")
+
+
 class ExitKeeps(BaseModel):
-    """What one exit of a function keeps a run from (:mod:`bamboo.codemap.panda.exitkeeps`): the junction arms and the
-    prints a run leaving there can no longer reach and could have reached had it gone on past it
-    (:func:`bamboo.codemap.panda.flow.kept_from`) -- a ``return`` or a raise over the call's pass, a ``continue`` or a
-    ``break`` over one turn of its loop.
+    """What one exit of a function keeps a run from (:mod:`bamboo.codemap.panda.exitkeeps`): the junction arms, the
+    prints and the calls into arms a run leaving there can no longer reach and could have reached had it gone on past
+    it (:func:`bamboo.codemap.panda.flow.kept_from`) -- a ``return`` or a raise over the call's pass, a ``continue`` or
+    a ``break`` over one turn of its loop; and the same over one turn of each loop holding it (*turns*).
 
     A reader of a pass that ran none of a junction's arms asks why: an exit it may have left by keeps it from them,
     or none does and a test on the way made the pass go another way.  ``setScoutJobData_JEDI``'s ``continue`` at 1185
     keeps a run from the arm at 1187 (the turn's bind of a column), and no exit keeps it from the task's status
     arms under the test at 1226; ``getTasksToBeFinished_JEDI``'s raise at 1666, caught by the ``except`` around the
-    loop that returns, keeps it from the count print at 1717.
+    loop that returns, keeps it from the count print at 1717.  A pass that is one turn of a loop -- its entry row's
+    print in the loop's body (:class:`PrintLoops`) -- reads the turn of that loop: an exit with no turn of it is not
+    in the loop's body, no way the pass can leave by (``TaskCommandoThread.runImpl``'s ``return`` at 121, before the
+    ``for`` at 123).
 
     One per ``return``, ``raise``, ``continue`` and ``break`` of the function's own body, for every function holding a
-    junction's arm or a print -- an exit keeping a run from nothing too, both lists empty: an exit not listed is one
-    not read.  The flow is path-insensitive, so a list may leave out an arm or a print the exit does keep a run from,
-    never hold one it does not.
+    junction's arm or a print -- an exit keeping a run from nothing too, every list empty: an exit not listed is one
+    not read.  The flow is path-insensitive on both sides: a list may leave out what the exit does keep a run from (a
+    way after the exit only an impossible run takes reaches it), and may hold what no run going on past the exit
+    could reach (only an impossible way does: the break at 211 over the ``for`` at 123 reaches 197 by a third turn of
+    ``for iLoop in range(2)``).  A listed line is a way the flow allows, not one the run's values allow.
     """
 
     owner: str = Field(description="``module::function``, the spelling a junction's owner and a read site's use.")
@@ -4573,6 +4591,34 @@ class ExitKeeps(BaseModel):
         default_factory=list,
         description="The lines of the function's print statements (:class:`PrintStatement`) it keeps a run from.",
     )
+    calls: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the function's calls it keeps a run from whose callee holds a junction's arm or reaches one "
+            "through the reach record: each line of a :class:`ReachCall` of the function's row whose *to* does -- "
+            "``AtlasProdTaskBrokerThread.runImpl``'s 633, ``setCloudToTasks_JEDI`` through ``JediTaskBuffer``.  "
+            "Empty where the build has no reach record."
+        ),
+    )
+    turns: list[TurnKeeps] = Field(
+        default_factory=list,
+        description=(
+            "One per loop whose body holds the exit, innermost first: what it keeps a run from over one turn of "
+            "that loop.  A ``continue``'s or ``break``'s first is its own loop's, the same as *arms*, *prints* and "
+            "*calls*; a ``return`` or raise in no loop has none."
+        ),
+    )
+
+
+class PrintLoops(BaseModel):
+    """The loops whose body holds one print statement, innermost first (:mod:`bamboo.codemap.panda.exitkeeps`): a
+    pass whose entry row is the print's line is one turn of the first, and reads each exit's turn of it
+    (:attr:`ExitKeeps.turns`).  One per print statement of a function :attr:`MapFragment.exit_keeps` reads that sits
+    in a loop's body; a print of such a function not listed sits in none."""
+
+    owner: str = Field(description="``module::function``, as :attr:`ExitKeeps.owner`.")
+    line: int = Field(description="The print statement's line (:attr:`PrintStatement.line`).")
+    loops: list[int] = Field(default_factory=list, description="The loops' header lines, innermost first.")
 
 
 class MessageEdge(BaseModel):
@@ -4729,6 +4775,13 @@ class MapFragment(BaseModel):
         description=(
             "Each write statement whose function prints its text and the bind map it runs with, and the column each "
             "bind writes (:class:`WritePrint`), in the order of the files and lines."
+        ),
+    )
+    print_loops: list[PrintLoops] = Field(
+        default_factory=list,
+        description=(
+            "The loops holding each print statement of a function :attr:`exit_keeps` reads (:class:`PrintLoops`), in "
+            "the order of the files and lines."
         ),
     )
     declaration_yields: dict[str, int] = Field(
