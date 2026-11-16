@@ -14569,6 +14569,103 @@ def test_timeline_bounds_say_where_a_time_term_surely_held(tmp_path):
     assert got["above"] == [["2026-11-15 05:47:37.091349", "2026-11-15 07:07:11.369830"]], got
 
 
+def test_a_column_tested_is_null_is_kept_as_two_states_on_a_timeline(tmp_path):
+    """Q1 batch 2 part 1: a column a selecting statement tests ``IS NULL`` holds NULL or a value, kept as a time
+    column's bounds are (NULL below, a value above).  A write that ran sets the state, one only reached widens it, an
+    open arm that writes NULL keeps it surely NULL while one that writes a value or either does not; the stay begins
+    with the states of every column arm tied to the value's arm (stay_value.before, *nulls*: getTasksToBeFinished's
+    pass ties its 3839 unlock and its 3886 lock alike).  An arm's ``None`` is NULL, a literal or a value known only at
+    run time a value -- the latter a premise, the map not saying whether it can be None --, anything else either."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            from bamboo.querier import stay_value as SV
+            from bamboo.querier import timeline as TL
+            import bamboo.querier.rerun as RR
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-14 {s}")
+
+            start, end = t("00:35:51"), t("00:47:01")
+            since = start - D.timedelta(minutes=10)
+            unlock = TL.Write(t("00:30:00"), *TL.NULL_ONLY, TL.RAN, ("prep:3839",), "prep:3856", "m")
+            margin_lock = TL.Write(t("00:35:42.7"), *TL.SET_ONLY, TL.RAN, ("read:2163",), "read:2166", "m")
+            lock = TL.Write(t("00:40:00"), *TL.SET_ONLY, TL.RAN, ("read:2163",), "read:2166", "m")
+            reached = TL.Write(t("00:43:00"), *TL.NULL_ONLY, TL.REACHED, ("unlock:2833",), "unlock:2840", "m")
+
+            def line(writes, opens=(), first=TL.EITHER):
+                return TL.Timeline(start, end, first, first, tuple(writes), tuple(opens))
+
+            got = {}
+            # the stay began as the writes read in the margin before it left it: NULL after the unlock, a value after
+            # the lock that followed it (NT-toabort's JobGenerator lock at 00:35:42.7)
+            first = TL.first_bounds(start, since, False, True, [unlock], [])
+            got["first"] = [first == TL.NULL_ONLY,
+                            TL.first_bounds(start, since, False, True, [unlock, margin_lock], []) == TL.SET_ONLY]
+            tl = line([lock], first=first)
+            got["null before lock"] = TL.surely_state_between(True, tl.pieces(), t("00:36:00"), t("00:39:00"))
+            got["value after lock"] = TL.surely_state_between(False, tl.pieces(), t("00:41:00"), t("00:46:00"))
+            got["null across lock"] = TL.surely_state_between(True, tl.pieces(), t("00:39:00"), t("00:41:00"))
+            # a reached unlock widens the state: neither sure after it
+            tl2 = line([lock, reached], first=first)
+            got["after reached"] = [TL.surely_state_between(True, tl2.pieces(), t("00:44:00"), t("00:45:00")),
+                                    TL.surely_state_between(False, tl2.pieces(), t("00:44:00"), t("00:45:00"))]
+            # open arms: one writing NULL keeps a NULL piece NULL; one writing a value, or either, does not
+            for name, states in (("open null", TL.NULL_ONLY), ("open value", TL.SET_ONLY), ("open either", TL.EITHER)):
+                o = TL.state_opening("x:1", states)
+                tl3 = line([], (o,), first=TL.NULL_ONLY)
+                got[name] = [TL.surely_state_between(True, tl3.pieces(), start, end),
+                             TL.surely_state_between(True, tl3.pieces(assume=True), start, end)]
+            got["value open value"] = TL.surely_state_between(False, line([], (TL.state_opening("x:1", TL.SET_ONLY),),
+                                                                          first=TL.SET_ONLY).pieces(), start, end)
+            got["spans"] = [[str(a), str(b)] for a, b in TL.state_spans(False, tl.pieces())]
+            # starts: the states of the arms tied to the value's arm, not the clock's time
+            got["start"] = TL.first_bounds(start, since, True, False, [], [], TL.EITHER) == TL.EITHER
+            # stay_value: every column arm tied to the value's arm is kept, whatever it writes; the value never known
+            hist = N(caller="m.py::prepare", call=3990)
+            br = lambda line, outcome, history=(): N(line=line, other_lines=[], outcome=outcome, history=list(history),
+                                                     row_precondition=[])
+            status = [N(owner="m.py::prepare", subject="T.status", branches=[br(3971, "'tobroken'", [hist])])]
+            column = [N(owner="m.py::prepare", subject="T.lockedBy",
+                        branches=[br(3839, "None", [hist]), br(3886, "runtime(pid)", [hist])]),
+                      N(owner="m.py::other", subject="T.lockedBy", branches=[br(941, "None")])]
+            b = SV.before(status, column, "T.status", "tobroken", "T.lockedBy", [], lambda k: True, lambda o, l: None,
+                          set(), lambda o, b: False, nulls=True)
+            got["before"] = [b.known, list(b.starts), list(b.left)]
+            got["no time"] = SV.before(status, column, "T.status", "tobroken", "T.lockedBy", [], lambda k: True,
+                                       lambda o, l: None, set(), lambda o, b: False) is None
+            arm = lambda outcome: N(outcome=outcome)
+            got["states"] = {o: [RR._null_states(arm(o)) == s for s in (TL.NULL_ONLY, TL.SET_ONLY, TL.EITHER)] +
+                                [RR._none_premised(arm(o))]
+                             for o in ("None", "runtime(pid)", "'aipanda'", "passthrough(lockedBy)", "")}
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["first"] == [True, True], got
+    assert got["null before lock"] is True and got["value after lock"] is True and got["null across lock"] is False, got
+    assert got["after reached"] == [False, False], got
+    # an open arm writing NULL keeps it NULL; a value or either breaks it unless the arm is named as having not
+    assert got["open null"] == [True, True] and got["open value"] == [False, True] and got["open either"] == [False, True], got
+    assert got["value open value"] is True, got
+    assert got["spans"] == [["2026-11-14 00:40:00", "2026-11-14 00:47:01"]], got
+    assert got["start"] is True, got
+    # no KeyFrom given: no arm is left out, the pass's own two among them
+    assert got["before"] == [False, ["prepare:3971 with 3839,3886"], ["prepare:3839", "prepare:3886", "other:941"]], got
+    assert got["no time"] is True, got
+    assert got["states"] == {
+        "None": [True, False, False, False],
+        "runtime(pid)": [False, True, False, True],
+        "'aipanda'": [False, True, False, False],
+        "passthrough(lockedBy)": [False, False, True, False],
+        "": [False, False, True, False],
+    }, got
+
+
 def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_path):
     """Q1 part 1 (Rerun._timeline): each arm M3(a)-1 leaves as may writing the column in the stay is read from the
     records -- its must prints whose hole the map names as the written row's key, under any mark (the lock UPDATE's
@@ -14606,7 +14703,7 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
             def rerun(hits, missed=()):
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.args, r.result = N(key="53641080"), {}
-                r._before = lambda subject, q: (before, "2026-11-13 20:29:16")
+                r._before = lambda subject, q, nulls=False: (before, "2026-11-13 20:29:16")
                 r._subject_writers = lambda subject: writers
                 r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
 
@@ -15049,6 +15146,77 @@ def test_a_selection_passed_over_is_read_on_the_statement_s_terms_then(tmp_path)
     assert got["lacking"] == ["", []], got
     said, premises = got["held"]
     assert said.endswith("(e: tabT.modificationtime<:timeLimit false until 2026-11-13 20:34:16.423630)") and premises == [], said
+
+
+def test_a_selection_passed_over_is_refused_on_a_column_tested_is_null(tmp_path):
+    """Q1 batch 2 part 1 at P5: ``lockedBy IS NULL OR lockedTime<:timeLimit`` (getTasksToBeFinished_JEDI) is surely
+    false for a selection where lockedBy's states timeline holds a value all its span and lockedTime's is not below the
+    limit -- the arm read as writing a value it knows only at run time named as a premise; an open arm writing either
+    state leaves it unread, unless the reading names it as having not written (P5 does)."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+            from bamboo.querier import timeline as TL
+
+            def t(s):
+                return D.datetime.fromisoformat(f"2026-11-14 {s}")
+
+            B, L = "JediTaskSpec.lockedBy", "JediTaskSpec.lockedTime"
+            null = N(node="null", subject=B, text="lockedBy IS NULL", settled=True, values=[])
+            limit = N(node="compare", op="<", values=[N(base="naive_utcnow", offset_seconds=-600.0)], subject=L, settled=True,
+                      text="lockedTime<:timeLimit")
+            tree = N(node="any", items=[N(node="all", items=[null]), N(node="all", items=[limit])])
+            st = N(owner="s/tcm.py::getTasksToBeFinished_JEDI", condition_trees=[N(entry="e", tree=tree)], conditions=["e"])
+            start, moved = t("00:35:51"), t("00:47:01")
+            q = N(subject="JediTaskSpec.status", statements=[st], since=start, moved=moved)
+            locked = t("00:36:12.67")
+            lt = TL.Timeline(start, moved, (locked, locked), (locked, locked), (), (), ("unlock:847",))
+            value = TL.Timeline(start, moved, TL.SET_ONLY, TL.SET_ONLY, (), (), premised=("read:2163",))
+            either = TL.Timeline(start, moved, TL.SET_ONLY, TL.SET_ONLY, (), (TL.state_opening("jg:941", TL.EITHER),))
+
+            def rerun(states):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r._missed_q = q
+                r._timeline = lambda subject, q, nulls=False: states if nulls else lt
+                r._held = lambda subject, q: (False, None)
+                r._leaf = lambda node, q: None
+                r.__dict__["_timelines"] = {(B, 0, 0, 0, 0, True): states, (L,): lt}
+                return r
+
+            def pick(after, at):
+                return N(machine="aipanda089.cern.ch", after=f"2026-11-14 {after}", at=f"2026-11-14 {at}")
+
+            sel = N(callee="getTasksToBeFinished_JEDI")
+            up = N(subject="JediTaskSpec.status")
+            early = [pick("00:40:00,100", "00:40:00,400"), pick("00:45:50,100", "00:45:50,600")]
+            got = {}
+            said, premises = RR.Rerun._passed_refused(rerun(value), sel, early, up)
+            got["value"] = [T.text(said), [T.text(p) for p in premises]]
+            said, premises = RR.Rerun._passed_refused(rerun(either), sel, early, up)
+            got["either"] = [T.text(said), [T.text(p) for p in premises]]
+            # past the limit's turn the lock term holds through lockedTime: none read
+            got["late"] = list(RR.Rerun._passed_refused(rerun(value), sel, [*early, pick("00:46:20,000", "00:46:20,500")], up))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    said, premises = got["value"]
+    assert said.endswith("(e: lockedBy IS NULL false then, on its writes the records show; lockedTime<:timeLimit false then, "
+                         "on its writes the records show)"), said
+    assert premises == ["the value read:2163 write(s) to JediTaskSpec.lockedBy, known only at run time, is not None (the map "
+                        "does not say whether it can be)"], premises
+    # P5 names the open arms as having not written the column: the one writing either state is named
+    said, premises = got["either"]
+    assert "lockedBy IS NULL false then" in said, said
+    assert premises == ["JediTaskSpec.lockedBy held the value the stay began with: none of jg:941 wrote it in the stay"], premises
+    # 00:46:20 is after lockedTime's turn (00:46:12.67): the OR holds, and no selection is read
+    assert got["late"] == ["", []], got
 
 
 def test_a_cycle_s_selection_that_named_the_row_and_ran_no_pass_on_it_is_a_take(tmp_path):

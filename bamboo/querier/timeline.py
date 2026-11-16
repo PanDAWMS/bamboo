@@ -33,6 +33,17 @@ HIGH = datetime.datetime.max
 RAN = "ran"
 REACHED = "reached"
 
+#: A column a selecting statement tests ``IS NULL`` (Q1 batch 2 part 1, out/gm/qk-design.md, tmaeno's OK 2026-11-16)
+#: holds one of two states, kept as a time column's value is, as bounds: NULL below any value, a value above it.
+#: ``(NULL, NULL)`` is surely NULL, ``(SET, SET)`` surely a value, ``(NULL, SET)`` either; a write read, an open arm and
+#: the stay's start set and widen them as they do a time's.  getTasksToBeFinished_JEDI's ``lockedBy IS NULL``.
+NULL = LOW
+SET = HIGH
+#: the states an arm's outcome writes: the literal ``None``, a value, or either
+NULL_ONLY = (NULL, NULL)
+SET_ONLY = (SET, SET)
+EITHER = (NULL, SET)
+
 
 @dataclass(frozen=True)
 class Write:
@@ -79,6 +90,9 @@ class Timeline:
     #: those of them no print names the row at the stay's start, while another's does: named, where the open arms
     #: are, as having not begun it (*first_assumed* leaves them out)
     begun_assumed: tuple[str, ...] = ()
+    #: a column tested ``IS NULL``: the arms read as writing a value they know only at run time, as one that is not
+    #: None (``runtime(pid)``), "func:line" each
+    premised: tuple[str, ...] = ()
 
     def pieces(self, assume: bool = False) -> list[tuple[datetime.datetime, datetime.datetime, datetime.datetime,
                                                           datetime.datetime, tuple[Opening, ...]]]:
@@ -106,15 +120,24 @@ def fold(writes, lo: datetime.datetime, hi: datetime.datetime) -> tuple[datetime
     return lo, hi
 
 
+def state_opening(arm: str, states: tuple[datetime.datetime, datetime.datetime]) -> Opening:
+    """An open arm of a column tested ``IS NULL`` writing *states* (``NULL_ONLY``, ``SET_ONLY``, ``EITHER``): the state
+    it writes holds whatever moment it runs, so its offsets are the farthest ones, which ``_plus`` holds at ``NULL``
+    and ``SET``."""
+    return Opening(arm, None if states[0] == NULL else datetime.timedelta.max,
+                   None if states[1] == SET else datetime.timedelta.min)
+
+
 def first_bounds(begun: datetime.datetime, since: datetime.datetime, starts: bool, lacking: bool, writes,
-                 opens) -> tuple[datetime.datetime, datetime.datetime]:
+                 opens, start: tuple[datetime.datetime, datetime.datetime] | None = None) -> tuple[datetime.datetime, datetime.datetime]:
     """The column's bounds as the stay began at *begun*: *begun* itself where an arm writing the value and the column
-    may have begun it (*starts*); where one writing the value alone may have (*lacking*), or none writing both is
-    read, what the writes read from *since* to *begun* leave, from no bound, widened by *opens* -- the last write
-    before the stay may be older than *since*, and is then not read."""
+    may have begun it (*starts*) -- *start*, where the column's arm of that pass writes another value than the clock
+    (the states of a column tested ``IS NULL``); where one writing the value alone may have (*lacking*), or none
+    writing both is read, what the writes read from *since* to *begun* leave, from no bound, widened by *opens* -- the
+    last write before the stay may be older than *since*, and is then not read."""
     ways = []
     if starts:
-        ways.append((begun, begun))
+        ways.append(start or (begun, begun))
     if lacking or not starts:
         lo, hi = fold([w for w in writes if since <= w.at <= begun], LOW, HIGH)
         for o in opens:
@@ -196,3 +219,32 @@ def surely_false_between(op: str, offset: datetime.timedelta, pieces, a: datetim
         else:
             return False
     return met
+
+
+def surely_state_between(null: bool, pieces, a: datetime.datetime, b: datetime.datetime) -> bool:
+    """Whether a column tested ``IS NULL`` surely is NULL (*null*), or surely holds a value, at every moment of
+    [*a*, *b*]: its bounds there, widened by the open arms (:func:`bounds_at`), are that state alone."""
+    met = False
+    for p in pieces:
+        lo_t, hi_t = max(p[0], a), min(p[1], b)
+        if lo_t > hi_t:
+            continue
+        met = True
+        lo, hi = bounds_at(p, hi_t)
+        if (hi != NULL) if null else (lo != SET):
+            return False
+    return met
+
+
+def state_spans(null: bool, pieces) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Where a column tested ``IS NULL`` surely is NULL (*null*), or surely holds a value: the pieces whose bounds,
+    widened by their open arms to the piece's end, are that state alone, joined where they meet."""
+    joined: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for p in pieces:
+        if not surely_state_between(null, [p], p[0], p[1]):
+            continue
+        if joined and p[0] <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], p[1]))
+        else:
+            joined.append((p[0], p[1]))
+    return joined

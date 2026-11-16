@@ -698,6 +698,7 @@ TEMPLATES: dict[str, str] = {
     "timeline-read-so-far": "the records show {n} write(s) of it in the stay ({m} more in the {slack} min before it) and {k} arm(s) not writing it",
     "false-on-the-timeline": "on its {n} write(s) read in the stay ({m} more in the {slack} min before it), {absent} arm(s) shown not to write it and the others writing at any moment: false for the row all the window",
     "none-of-wrote-it-besides": "none of {arms:join=, } wrote {column} in the stay, besides the {n} write(s) the records show",
+    "a-run-time-value-not-none": "the value {arms:join=, } write(s) to {column}, known only at run time, is not None (the map does not say whether it can be)",
     "timeline-term-held": "{term}: surely held for the row {spans}, on the writes the records show",
     "timeline-term-held-if": "{term}: surely held for the row {spans}, on the writes the records show, where {named:join= and }",
     "none-of-wrote-it": "none of {arms:join=, } wrote {column} in the stay",

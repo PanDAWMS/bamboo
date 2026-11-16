@@ -435,6 +435,38 @@ def _written_offset(b) -> datetime.timedelta | None:
     return datetime.timedelta(seconds=a.offset_seconds)
 
 
+def _null_states(b) -> tuple[datetime.datetime, datetime.datetime]:
+    """The states a write of a column tested ``IS NULL`` leaves (:data:`timeline.NULL`, Q1 batch 2 part 1): the literal
+    ``None`` NULL; another literal, or a value known at run time (``runtime(pid)``, read as one that is not None: a
+    premise, :func:`_none_premised`), a value; any other (a value handed through, none read) either."""
+    outcome = str(b.outcome or "").strip()
+    if outcome == "None":
+        return TL.NULL_ONLY
+    if outcome.startswith("runtime(") or re.fullmatch(r"'[^']*'|\"[^\"]*\"|-?\d+(\.\d+)?", outcome):
+        return TL.SET_ONLY
+    return TL.EITHER
+
+
+def _none_premised(b) -> bool:
+    """Whether :func:`_null_states` reads the arm *b*'s value, known only at run time, as one that is not None: the map
+    does not say whether it can be (getTaskWithID_JEDI's ``pid`` may be None, getTasksToBeFinished_JEDI's may not)."""
+    return str(b.outcome or "").strip().startswith("runtime(")
+
+
+def _none_premises(used: dict[str, list[str]]) -> list[T.Said]:
+    """The premise of each column tested ``IS NULL`` whose reading took an arm's value known only at run time as one
+    that is not None (:func:`_none_premised`): its arms named."""
+    return [T.Said("a-run-time-value-not-none", {"column": col, "arms": arms}) for col, arms in sorted(used.items())]
+
+
+def _write_bounds(value, at: datetime.datetime) -> tuple[datetime.datetime, datetime.datetime]:
+    """The bounds an arm's write at *at* leaves: *value* an offset from the time it ran (:func:`_written_offset`), the
+    states of a column tested ``IS NULL`` (:func:`_null_states`), or None, not read."""
+    if isinstance(value, datetime.timedelta):
+        return at + value, at + value
+    return value if value is not None else (TL.LOW, TL.HIGH)
+
+
 def _landed(fn, sn, i: int, line: int, b) -> bool | None:
     """R (the map's batch 2, ``Branch.count_prints``): what the first count print of the write's statement in the run
     after the write's print (record *i*, of the print at *line*) and before that print's next record says of the rows
@@ -3014,6 +3046,9 @@ class Rerun:
     #: the time columns a reading names the arms of as having not written them, by column, while one collects them (a
     #: turn, M3(a)-cap; Q1's assumed spans); None when none does
     _assuming: dict[str, list[str]] | None = None
+    #: the columns tested ``IS NULL`` whose reading took a value known only at run time as not None, with those arms
+    #: (``_none_premised``), while a reading collects them (P5); None when none does
+    _premised_used: dict[str, list[str]] | None = None
 
     def __init__(self, args: argparse.Namespace) -> None:
         mapdump.require("rerun")  # _investigate's walks and _writers_of ask mapdump.code_map
@@ -7626,7 +7661,8 @@ class Rerun:
         if not sts:
             return "", []
         kept = getattr(self, "_assuming", None)
-        self._assuming = {}
+        kept_used = self._premised_used
+        self._assuming, self._premised_used = {}, {}
         terms: set[str] = set()
         try:
             for p in passed:
@@ -7638,10 +7674,30 @@ class Rerun:
                     terms.add(why)
         finally:
             assumed, self._assuming = self._assuming or {}, kept
+            used, self._premised_used = self._premised_used or {}, kept_used
         said = T.Said("passed-over-refused", {
             "n": len(passed), "machines": len({p.machine for p in passed}), "start": min(p.after or p.at for p in passed)[:23],
             "end": max(p.at for p in passed)[:23], "callee": sel.callee, "terms": sorted(terms)})
-        return said, self._held_premises({k: v for k, v in assumed.items() if v}, {}, max(p.at for p in passed))
+        return said, [*self._held_premises({k: v for k, v in assumed.items() if v}, {}, max(p.at for p in passed)),
+                      *_none_premises(used)]
+
+    def _state_between(self, node, q: Missed, a: datetime.datetime, b: datetime.datetime, null: bool) -> bool:
+        """Q1 batch 2 part 1: whether the column a term ``IS NULL`` or ``IS NOT NULL`` tests surely is NULL (*null*), or
+        surely holds a value, at every moment of [*a*, *b*], on its states' timeline (:meth:`_timeline`, *nulls*).
+        Inside a reading that names the open arms (``_assuming``) they are named as having not written it; the arms
+        read as writing a value they know only at run time are kept for the premises (``_premised_used``)."""
+        tl = self._timeline(node.subject, q, nulls=True)
+        if tl is None:
+            return False
+        assuming = getattr(self, "_assuming", None)
+        if not TL.surely_state_between(null, tl.pieces(assume=assuming is not None), a, b):
+            return False
+        if assuming is not None and (tl.opens or tl.begun_assumed):
+            assuming[node.subject] = [o.arm for o in tl.opens]
+        used = self._premised_used
+        if tl.premised and used is not None:
+            used[node.subject] = list(tl.premised)
+        return True
 
     def _false_between(self, st, q: Missed, a: datetime.datetime, b: datetime.datetime) -> str:
         """A term of *st*'s every build (a ``conditions`` entry's tree) surely false for the row at every moment of
@@ -7662,6 +7718,8 @@ class Rerun:
         if node.node == "any":
             whys = [self._tree_false_between(item, q, a, b) for item in node.items]
             return "; ".join(whys) if whys and all(whys) else ""
+        if node.node in ("null", "not_null") and self._state_between(node, q, a, b, node.node == "not_null"):
+            return f"{node.text} false then, on its writes the records show"
         if node.node == "compare" and node.settled and node.values and all(
                 v.base in UTC_CLOCKS and v.offset_seconds is not None for v in node.values):
             offsets = [datetime.timedelta(seconds=v.offset_seconds) for v in node.values]
@@ -8697,20 +8755,21 @@ class Rerun:
             return True, found[1]
         return False, None
 
-    def _before(self, subject: str, q: Missed) -> tuple[SV.Before, str] | None:
+    def _before(self, subject: str, q: Missed, nulls: bool = False) -> tuple[SV.Before, str] | None:
         """M3(a)-1 (``stay_value``): what the map says of *subject*, a column of the asked row the rows file holds only
         after the move (late's ``after``), all the stay at the observed value, with the time of the statuslog row
         that began the stay -- the value it held where the map says ``known``; None where it does not apply: stuck
         (``after`` is read at the window's end), another class, a column the row holds, a history whose rows' time
         part H does not state is the write's (``History.at_write``), no such statuslog row.  Each is read once and
-        kept in the result (``held_before``)."""
+        kept in the result (``held_before``; *nulls*, a column read as a term ``IS NULL`` reads it, ``states_before``:
+        ``stay_value.before``'s *nulls*)."""
         cls, _, attr = subject.partition(".")
         if q.at_end or cls != q.subject.partition(".")[0] or attr in self._row_of(cls) or attr not in self._read()[1]:
             return None
         if not getattr(PT.history(q.subject), "at_write", False):
             return None
         cache: dict[tuple, tuple[SV.Before, str] | None] = self.__dict__.setdefault("_befores", {})
-        key = (subject, q.subject, q.observed, q.since, q.moved)
+        key = (subject, q.subject, q.observed, q.since, q.moved, nulls)
         if key in cache:
             return cache[key]
         states = [s for s in self.data.get("statuslog", {}).get("states", [])
@@ -8725,30 +8784,35 @@ class Rerun:
         found = SV.before(q.writers, asyncio.run(self._writers_of(subject)), q.subject, q.observed, subject,
                           getattr(fragment, "key_froms", None) or [], lambda kf: not never_runs(kf),
                           lambda owner, line: sites.get((owner, line)), row_tables,
-                          lambda owner, b: born(b, birth_marks(owner, subject)))
+                          lambda owner, b: born(b, birth_marks(owner, subject)), nulls=nulls)
         if found is None:
             cache[key] = None
             return None
         cache[key] = (found, start)
-        self.result.setdefault("held_before", {})[subject] = {
+        self.result.setdefault("states_before" if nulls else "held_before", {})[subject] = {
             "known": found.known, "value": start if found.known else None, "starts": list(found.starts),
             "lacking": list(found.lacking), "runtime": list(found.runtime), "left": list(found.left),
             "out": [list(x) for x in found.out]}
         return cache[key]
 
-    def _timeline(self, subject: str, q: Missed) -> TL.Timeline | None:
+    def _timeline(self, subject: str, q: Missed, nulls: bool = False) -> TL.Timeline | None:
         """Q1 part 1 (:mod:`timeline`; out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06):
         *subject*, a time column M3(a)-1 (:meth:`_before`) leaves open, read over the stay from the records.  Each arm
         M3(a)-1 leaves as may writing it in the stay (``left``): its writes where its must prints name the row's key
         (:meth:`_column_writes`), from the stay's start less ``windows.SLACK`` to the move; one with none is shown not to
         have written where judgement 3's three premises hold, and one whose premises do not hold is open, read or not.
         The bounds as the stay began: :func:`timeline.first_bounds`.  None where M3(a)-1 does not apply or settles the
-        column.  Kept in the result (``timelines``)."""
-        found = self._before(subject, q)
+        column.  Kept in the result (``timelines``).
+
+        *nulls* (Q1 batch 2 part 1, out/gm/qk-design.md, tmaeno's OK 2026-11-16): *subject* is a column a selecting
+        statement tests ``IS NULL``, its states read the same way (:data:`timeline.NULL`, :func:`_null_states`), the
+        stay begun with the states of the column's arms tied to the arm of the value that began it (``starts``' mates);
+        an arm read as writing a value it knows only at run time is named (``premised``).  Kept as ``states``."""
+        found = self._before(subject, q, nulls)
         if found is None or found[0].known:
             return None
         cache: dict[tuple, TL.Timeline | None] = self.__dict__.setdefault("_timelines", {})
-        ckey = (subject, q.subject, q.observed, q.since, q.moved)
+        ckey = (subject, q.subject, q.observed, q.since, q.moved, nulls)
         if ckey in cache:
             return cache[ckey]
         cache[ckey] = None
@@ -8758,32 +8822,53 @@ class Rerun:
         since = begun - W.SLACK
         writers = self._subject_writers(subject)
         keys = self._key_columns(q.subject, self.args.key)
-        shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, datetime.timedelta | None]]] = {}
+        arms_by_name = {SV._name(j.owner, b.line): b for j in writers for b in j.branches}
+        shown: dict[tuple[str, datetime.datetime, str, str], list[tuple[str, str, Any]]] = {}
         opens: list[TL.Opening] = []
         absent: list[str] = []
+        premised: set[str] = set()
         for j in writers:
             for b in j.branches:
                 name = SV._name(j.owner, b.line)
                 if name not in before.left:
                     continue
                 got, whole = self._column_writes(j, b, keys, (since, q.moved), writers)
-                off = _written_offset(b)
+                value: Any
+                if nulls:
+                    value = _null_states(b)
+                    opening = TL.state_opening(name, value)
+                    if _none_premised(b):
+                        premised.add(name)
+                else:
+                    value = _written_offset(b)
+                    opening = TL.Opening(name, value, value)
                 for at, machine, where, how in got:
-                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, off))
+                    shown.setdefault((j.owner, at, machine, where), []).append((name, how, value))
                 if not whole:
-                    opens.append(TL.Opening(name, off, off))
+                    opens.append(opening)
                 elif not got:
                     absent.append(name)
         writes = []
         for (_, at, machine, where), arms in sorted(shown.items(), key=lambda x: (x[0][1], x[0][3])):
-            offs = {off for _, _, off in arms}
-            known = [o for o in offs if o is not None]
-            lo, hi = (at + min(known), at + max(known)) if len(known) == len(offs) else (TL.LOW, TL.HIGH)
-            ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or (len(offs) == 1 and len(known) == 1))
+            vals = [_write_bounds(v, at) for _, _, v in arms]
+            lo, hi = min(v[0] for v in vals), max(v[1] for v in vals)
+            ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or (len(set(vals)) == 1 and vals[0] != (TL.LOW, TL.HIGH)))
             writes.append(TL.Write(at, lo, hi, TL.RAN if ran else TL.REACHED, tuple(n for n, _, _ in arms), where,
                                    machine.split(".")[0]))
+
+        def start_of(kept: list[str]) -> tuple[datetime.datetime, datetime.datetime] | None:
+            # the states the column's arms tied to the kept arms of the value write (*nulls*); None, the clock's time
+            if not nulls or not kept:
+                return None
+            mates = [f"{s.partition(' with ')[0].rpartition(':')[0]}:{line}" for s in kept
+                     for line in s.partition(" with ")[2].split(",")]
+            vals = [_null_states(arms_by_name[m]) if m in arms_by_name else TL.EITHER for m in mates]
+            premised.update(m for m in mates if m in arms_by_name and _none_premised(arms_by_name[m]))
+            return min(v[0] for v in vals), max(v[1] for v in vals)
+
         starts, lacking = bool(before.starts), bool(before.lacking)
         a_starts, a_lacking = starts, lacking
+        kept_s = a_kept_s = list(before.starts)
         begun_by: tuple[str, ...] = ()
         begun_assumed: tuple[str, ...] = ()
         # P3: which kind of arm began the stay matters only where both may have
@@ -8797,23 +8882,31 @@ class Rerun:
             if absent_b:
                 ls, ll = left(absent_b)
                 starts, lacking = bool(ls), bool(ll)
+                kept_s = a_kept_s = ls
                 begun_by = (*ls, *ll)
             if unread_b:
                 ls, ll = left(absent_b | unread_b)
                 a_starts, a_lacking = bool(ls), bool(ll)
+                a_kept_s = ls
                 begun_assumed = tuple(sorted(unread_b))
             elif absent_b:
                 a_starts, a_lacking = starts, lacking
-        tl = TL.Timeline(begun, q.moved, TL.first_bounds(begun, since, starts, lacking, writes, opens),
-                         TL.first_bounds(begun, since, a_starts, a_lacking, writes, []), tuple(writes), tuple(opens),
-                         tuple(absent), begun_by, begun_assumed)
+        tl = TL.Timeline(begun, q.moved, TL.first_bounds(begun, since, starts, lacking, writes, opens, start_of(kept_s)),
+                         TL.first_bounds(begun, since, a_starts, a_lacking, writes, [], start_of(a_kept_s)), tuple(writes),
+                         tuple(opens), tuple(absent), begun_by, begun_assumed, tuple(sorted(premised)))
         cache[ckey] = tl
-        self.result.setdefault("timelines", {})[subject] = {
+
+        def said(lo: datetime.datetime, hi: datetime.datetime) -> str | None:
+            if lo != hi:
+                return None
+            return ("NULL" if lo == TL.NULL else "a value") if nulls else _iso(str(lo))
+
+        self.result.setdefault("states" if nulls else "timelines", {})[subject] = {
             "start": _iso(str(begun)), "end": _iso(str(q.moved)),
             "writes": [{"at": _iso(str(w.at)), "how": w.how, "arms": list(w.arms), "where": w.where, "machine": w.machine,
-                        "value": _iso(str(w.lo)) if w.lo == w.hi else None} for w in writes],
+                        "value": said(w.lo, w.hi)} for w in writes],
             "absent": absent, "open": [o.arm for o in opens], "begun_by": list(begun_by),
-            "begun_assumed": list(begun_assumed)}
+            "begun_assumed": list(begun_assumed), **({"first": said(*tl.first), "premised": list(tl.premised)} if nulls else {})}
         return tl
 
     def _stay_begun_by(self, q: Missed, before: SV.Before, begun: datetime.datetime) -> tuple[set[str], set[str]]:

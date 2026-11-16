@@ -96,20 +96,24 @@ def restricted_values(statement, subject: str) -> set[str] | None:
 
 def before(status_junctions: list, column_junctions: list, subject: str, value: str, column: str, key_froms: list,
            running: Callable[[object], bool], read_at: Callable[[str, int], object | None], row_tables: set[str],
-           born: Callable[[str, object], bool]) -> Before | None:
+           born: Callable[[str, object], bool], nulls: bool = False) -> Before | None:
     """*column* (``Class.attr``) of a row while *subject* held *value*: see the module; None for a column no arm
     writes the time it runs.  *status_junctions* and *column_junctions* are the map's writers of the two; *key_froms*
     the dump's KeyFroms (each statement's row-naming terms, the subjects it writes by line, its table, its sources),
     *running* whether a placed caller may run one; *read_at* (owner, line) the map's selecting statement there;
     *row_tables* the tables (lower case) that hold rows of the column's class; *born* (owner, branch) whether the
-    branch makes the row."""
-    if not time_column(column_junctions):
+    branch makes the row.
+
+    *nulls*: the column is one a selecting statement tests ``IS NULL`` (Q1 batch 2 part 1), its states read on a
+    timeline: an arm of the value's pass may be tied with any arm of it, whatever that writes, each such arm kept
+    (``starts``: "func:line with l1,l2"), and the value is never ``known`` here."""
+    if not nulls and not time_column(column_junctions):
         return None
     attr = subject.partition(".")[2]
     now_arms: dict[str, list] = {}
     for j in column_junctions:
         for b in j.branches:
-            if b.outcome in NOW:
+            if nulls or b.outcome in NOW:
                 now_arms.setdefault(j.owner, []).append(b)
     starts, lacking, runtime = [], [], []
     for j in status_junctions:
@@ -125,7 +129,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
             pairs = _pairs(b)
             mates = sorted(c.line for c in now_arms.get(j.owner, []) if pairs & _pairs(c))
             if mates:
-                starts.append(f"{_name(j.owner, b.line)} with {mates[0]}")
+                starts.append(f"{_name(j.owner, b.line)} with {','.join(map(str, mates)) if nulls else mates[0]}")
             else:
                 lacking.append(_name(j.owner, b.line))
     left: list[str] = []
@@ -152,7 +156,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                                   f"{column.partition('.')[0]}"))
             else:
                 left.append(name)
-    known = bool(starts) and not lacking and not left
+    known = bool(starts) and not lacking and not left and not nulls
     return Before(known, tuple(starts), tuple(lacking), tuple(runtime), tuple(left), tuple(out))
 
 
