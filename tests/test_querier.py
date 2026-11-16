@@ -4852,8 +4852,7 @@ def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loo
             R.ROWS_FROM = "walk"
             fn = R.function("pandaserver/fin.py", "run", (24,))
             arm = RR.Arm(24, ["failed"], ["endTime < timeOut"])
-            got = {"free": sorted(R.free_jumps(fn.node, [24])),
-                   "names": [_names_key("7", "7"), _names_key("< PandaID=7 >", "7"), _names_key("<2026-01-01/00:00:07>", "7"),
+            got = {"names": [_names_key("7", "7"), _names_key("< PandaID=7 >", "7"), _names_key("<2026-01-01/00:00:07>", "7"),
                              _names_key("< PandaID=71 >", "7"), _names_key("7", "")]}
             for name in ("wait", "twice", "skip", "other"):
                 key = "8" if name == "other" else "7"
@@ -4873,14 +4872,12 @@ def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loo
                 except RR.Stop as e:
                     way = str(e)
                 got[name] = [sorted(once_loops_of(fn, sn, run, "outside").values()), way,
-                             [x for x in r.lines if x.startswith(("  the candidates", "  arm 24"))]]
+                             [x for x in r.lines if x.startswith(("  pass 1 ran no arm", "  arm 24"))]]
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
-    # the inner loop's continues hold no arm; the outer loop's continue (10) holds the Kill arm
-    assert got["free"] == [14, 17]
     # the run's mark is the value, whole or as a name=value field; a time token's digits are not
     assert got["names"] == [True, True, False, False, False]
     once = ("the loop at 8 went round once for the run's object: row 19 printed job.PandaID as the run's mark (the object "
@@ -4888,15 +4885,17 @@ def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loo
     killed = "  arm 24 ['failed']: needs ['endTime < timeOut']; false in the passes: ['endTime < timeOut']"
     # one call's pass on job 7: the loop over jobs went round once for it, so 10's continue is out (row 19 printed); of
     # the inner loop's continues, 17 is out (its row 16 absent) and 14 is left, which the judgement would choose by
-    # elimination -- but it keeps the pass from no arm: the pass took none, and S3 reads the Wait row's way
+    # elimination -- no way the pass went, which no row shows; the arm is excluded, so the pass ran none (S-2a), and S3
+    # reads the Wait row's way
     assert got["wait"] == [[once], None, [
-        "  the candidates pass 1 leaves, [14], are continues or breaks of loops that hold no arm (14 chosen by "
-        "elimination, which no row shows): taken, they keep a pass from none", killed]]
+        "  pass 1 ran no arm of run that moves the value: every arm excluded; it left by one of [14] (14 chosen by "
+        "elimination, which no row shows) or ran on past them", killed]]
     # the same rows twice in one run: two calls, no loop read as gone round once, 10 and 14 both left -- which way is
     # undecided, but the one arm is excluded, so the pass ran no arm and S3 reads the arm's guard
-    assert got["twice"] == [[], None, [killed]]
-    # a free jump shown taken (row 16 prints only on 17's path) stays the way the pass went
-    assert got["skip"][1] == 17 and got["skip"][2] == [killed]
+    assert got["twice"][:2] == [[], None] and got["twice"][2][1:] == [killed]
+    # a jump shown taken (row 16 prints only on 17's path) is the way the pass went, the arm excluded all the same
+    assert got["skip"][1] == 17 and got["skip"][2] == [
+        "  pass 1 ran no arm of run that moves the value: every arm excluded; it left by 17", killed]
     # another job's run: its own mark, so its loop went round once for job 8 as well
     assert got["other"][0] == [once] and got["other"][1] is None
 
@@ -9482,14 +9481,16 @@ def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_r
         r = object.__new__(rerun.Rerun)
         r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
         got = r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])]))
-        # S batch S-1: every arm excluded and no way chosen -- the exits left; an arm kept or unjudged, a way chosen: []
+        # S batch S-1 and S-2a: every arm excluded -- the exit chosen on positive evidence, else the exits left (one
+        # chosen by elimination among them); an arm kept or unjudged, or no arm: None
         v = lambda line, kind: N(line=line, kind=kind)
         ran = [rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(20, "excluded"), v(30, "kept"), v(5, "kept"),
                                                          v(40, "excluded")]), {10, 20}),
                rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(20, "kept"), v(5, "kept")]), {10, 20}),
                rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(5, "kept")]), {10, 20}),
                rerun.ran_no_arm(N(chosen=v(5, "kept"), verdicts=[v(10, "excluded"), v(5, "kept")]), {10}),
-               rerun.ran_no_arm(N(chosen=None, verdicts=[v(5, "kept")]), set())]
+               rerun.ran_no_arm(N(chosen=None, verdicts=[v(5, "kept")]), set()),
+               rerun.ran_no_arm(N(chosen=v(5, "positive"), verdicts=[v(10, "excluded"), v(5, "positive"), v(7, "kept")]), {10})]
         r2 = object.__new__(rerun.Rerun)
         r2.lines, r2.mode, r2.opened, r2.hand, r2.hand_used = [], "outside", [], {}, []
         r2.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])], (7, 9)))
@@ -9497,7 +9498,7 @@ def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_r
     """
     out = _ok(_run(tmp_path, code.replace("ARM", str(arm))))
     took, guard, line, said, ran, said2 = json.loads(out.splitlines()[-1])
-    assert ran == [[5, 30], [], [], [], []]
+    assert ran == [[None, [5, 30]], None, None, [None, [5]], None, [5, []]]
     assert said2[1] == ("run: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left by "
                         "[7, 9] (whether one keeps a run from the arms is not read)")
     # the exits said, the arm's guard read as before
@@ -15454,6 +15455,69 @@ def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
     )
     got = json.loads(out.splitlines()[-1])
     assert got == {"first": True, "second": False, "none": None, "no_counts": None}, got
+
+
+def test_s3_reads_a_tested_name_off_its_callee_s_print_or_its_one_literal(tmp_path):
+    """S-3 (the map's GuardFrom and HeldPrinted): setScoutJobData_JEDI's test at 1226 reads ``extraInfo`` and
+    ``scoutSucceeded`` back through the call at 1169 to getScoutJobData_JEDI's print at 1140 (holes 2 and 0), and
+    ``nNewJobsCutoff`` to the literal 20 at 1225; ``useExhausted``, a parameter, is not read.  The printed dict is read
+    as the map reads a bind map (its ``datetime.timedelta`` a value, not voiding the rest), its item put under the text
+    the test spells,
+    so the test is false whatever ``useExhausted`` holds.  A way changing the object in place in the function, or ways
+    through different prints, read nothing."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import evaluate as E
+
+            def P(hole, expr, at="t.py:1169"):
+                return N(at=at, statement="t.py:1140", hole=hole, expression=expr, steps=[], through=[])
+
+            def src(kind, name, line, printed=(), changes=()):
+                return N(kind=kind, name=name, line=line, printed=list(printed), changes=list(changes), steps=[])
+
+            def gf(name, *sources):
+                return N(owner="t.py::C.setScout", test_line=1226, name=name, arms=[1242], sources=list(sources))
+
+            g_extra = gf("extraInfo", src("unknown", "{}", 279, [P(2, "str(extraInfo)")]))
+            g_cut = gf("nNewJobsCutoff", src("constant", "20", 1225))
+            g_ok = gf("scoutSucceeded", src("constant", "True", 511, [P(0, "scoutSucceeded")]),
+                      src("constant", "False", 513, [P(0, "scoutSucceeded")]))
+            g_use = gf("useExhausted", src("parameter", "useExhausted", 1144))
+            g_changed = gf("m", src("constant", "1", 10, changes=[N(at="t.py:1200")]))
+            g_two = gf("k", src("unknown", "{}", 1, [P(2, "x")]), src("unknown", "{}", 2, [P(2, "x", at="t.py:1207")]))
+            readings = [RR._held_reading(g, "t.py", 1144, 1465) for g in (g_extra, g_cut, g_ok, g_use, g_changed, g_two)]
+            extra = "{'nNewJobs': 0, 'execTime': datetime.timedelta(seconds=5), 'successRate': 1.0}"
+            value = RR._hole_value(extra)
+            guard = "useExhausted and scoutSucceeded and (extraInfo['nNewJobs'] > nNewJobsCutoff)"
+            items = RR._items_spelled([guard, "'execTime' in extraInfo"], "extraInfo")
+            RR.guard_froms = lambda owner: [g_extra, g_cut, g_ok, g_use]
+            r = RR.Rerun.__new__(RR.Rerun)
+            printed = {2: extra, 0: "True"}
+            r._callee_print = lambda run, at, st, hole, expr: (RR._hole_value(printed[hole]), f"get's print at 1140, hole {expr}")
+            fn = N(owner="t.py::setScout", node=N(lineno=1144, end_lineno=1465))
+            env = E.Env()
+            said = r._held_printed(fn, N(), env, [RR.Arm(1242, ["exhausted"], [])], [guard])
+            truth = E.truth(ast.parse(guard, mode="eval").body, {}, env)
+            print(json.dumps({"readings": readings, "value": [value["nNewJobs"], repr(value["execTime"])],
+                              "unread": RR._hole_value("<obj at 0x1>") is RR.E.UNKNOWN, "items": items,
+                              "said": said, "truth": truth}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["readings"] == [["printed", "t.py:1169", "t.py:1140", 2, "str(extraInfo)"], ["constant", 20, 1225],
+                               ["printed", "t.py:1169", "t.py:1140", 0, "scoutSucceeded"], None, None, None], got
+    assert got["value"] == [0, "datetime.timedelta(seconds=5)"] and got["unread"] is True, got  # a time read as one
+    assert got["items"] == [["extraInfo['nNewJobs']", "nNewJobs"]], got
+    assert got["said"] == ["extraInfo['nNewJobs'] = 0 (get's print at 1140, hole str(extraInfo))",
+                           "nNewJobsCutoff = 20 (the constant at 1225)",
+                           "scoutSucceeded = True (get's print at 1140, hole scoutSucceeded)"], got
+    assert got["truth"] is False, got
 
 
 def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):

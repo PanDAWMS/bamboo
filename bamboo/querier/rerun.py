@@ -1885,8 +1885,9 @@ class Fork:
 @dataclass
 class Blocked:
     """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
-    candidates (:func:`took_none`), or ran none of the arms (:func:`ran_no_arm`): then *left_by* holds the exits such
-    a pass may have left by."""
+    candidates (:func:`took_none`), or ran none of the arms (:func:`ran_no_arm`) and not all by one exit shown: then
+    *left_by* holds the exits such a pass may have left by, and *took*, where any pass was shown to leave by one, each
+    pass's (None for one not shown)."""
 
     fn: R.Function
     exit_line: int | None
@@ -1894,6 +1895,7 @@ class Blocked:
     envs: list
     arms: list[Arm]
     left_by: tuple[int, ...] = ()
+    took: tuple[int | None, ...] = ()
 
 
 @dataclass
@@ -3213,29 +3215,118 @@ def took_none(j) -> bool:
     return j.chosen is None and bool(j.verdicts) and all(v.kind == "excluded" for v in j.verdicts)
 
 
-def took_none_but(j, free: set[int]) -> bool:
-    """:func:`took_none`, but with the candidates left all ``continue``s or ``break``s of loops holding no arm (*free*,
-    ``rows.free_jumps``): taken or not, they keep the pass from no arm, so it took none of the arms either (W1,
-    analyzer handover qk-design.md (M) build 1).  One the judgement chose by elimination is no way the pass went --
-    a pass may run on past every exit -- but one it chose on positive evidence stays (MT-ready-stuck's 646, row 645
-    printing only on its path)."""
-    left = [v for v in j.verdicts if v.kind != "excluded"]
-    unshown = j.chosen is None or (j.chosen.line in free and j.chosen.kind != "positive")
-    return unshown and bool(left) and all(v.line in free for v in left)
-
-
-def ran_no_arm(j, arms: set[int]) -> list[int]:
-    """S batch S-1 (qk-design.md, tmaeno "OK" 2026-11-16): where the judgement *j* excluded every one of the *arms* and
-    chose no way, the exits it left kept, sorted; [] otherwise.  An arm excluded did not run in the pass, so the pass
-    ran none of them, whichever of those exits it left by or ran on past (setScoutJobData_JEDI's six arms, their must
-    rows unprinted, and its exits 1185, 1215, 1457 and 1465).  Whether such an exit keeps a run from the arms is the
-    map's (S-2), and S3 says them."""
-    if j.chosen is not None or not arms:
-        return []
+def ran_no_arm(j, arms: set[int]) -> tuple[int | None, list[int]] | None:
+    """S batch S-1 and S-2a (qk-design.md, tmaeno "OK" 2026-11-16 13:0x and 16:1x): where the judgement *j* excluded
+    every one of the *arms*, the pass ran none of them, whichever way it went -- ``(the exit, [])`` where the judgement
+    chose one on positive evidence (MT-finishing-late's 218, its row 215 printing only on its path), else ``(None, the
+    exits it left kept, sorted)``: one it chose by elimination is no way the pass went, which no row shows -- a pass
+    may run on past every exit (setScoutJobData_JEDI's six arms, their must rows unprinted, and its exits 1185, 1215,
+    1457 and 1465).  None where an arm is kept or not examined.  Whether such an exit keeps a run from the arms is the
+    map's (``ExitKeeps``), and S3 says it."""
+    if not arms:
+        return None
     kinds = {v.line: v.kind for v in j.verdicts}
     if any(kinds.get(line) != "excluded" for line in arms):
-        return []
-    return sorted(line for line, kind in kinds.items() if line not in arms and kind != "excluded")
+        return None
+    if j.chosen is not None and j.chosen.kind == "positive":
+        return j.chosen.line, []
+    return None, sorted(line for line, kind in kinds.items() if line not in arms and kind != "excluded")
+
+
+_EK: list = [None, {}]
+
+
+def exit_keeps(owner: str) -> dict[int, set[int]] | None:
+    """The map's ``ExitKeeps`` of *owner* (``file::function``, as :func:`_bare` spells it; the map's batch 6): each
+    exit's line, and the junction arms (``Branch.line``, ``Branch.other_lines``) a run leaving there can no longer
+    reach and could have reached had it gone on -- a ``return`` or a raise over the call, a ``continue`` or a
+    ``break`` over one turn of its loop.  An exit it does not list is one not read.  None from a dump that reads none
+    (one built before the batch, as the m set's)."""
+    eks = getattr(mapdump.fragment(), "exit_keeps", None) or []
+    if not eks:
+        return None
+    if _EK[0] is not eks:
+        index: dict[str, dict[int, set[int]]] = {}
+        for ek in eks:
+            index.setdefault(_bare(ek.owner), {})[int(ek.exit.rpartition("@")[2])] = set(ek.arms)
+        _EK[:] = [eks, index]
+    held: dict[str, dict[int, set[int]]] = _EK[1]
+    return held.get(_bare(owner), {})
+
+
+_GF: list = [None, {}]
+
+
+def guard_froms(owner: str) -> list:
+    """The map's ``GuardFrom`` of *owner* (``file::function``, as :func:`_bare` spells it): what each name a test on
+    the way to its arms reads holds, way by way."""
+    gfs = getattr(mapdump.fragment(), "guard_froms", None) or []
+    if _GF[0] is not gfs:
+        index: dict[str, list] = {}
+        for g in gfs:
+            index.setdefault(_bare(g.owner), []).append(g)
+        _GF[:] = [gfs, index]
+    held: dict[str, list] = _GF[1]
+    return held.get(_bare(owner), [])
+
+
+def _held_reading(g, rel: str, lo: int, hi: int) -> tuple | None:
+    """S-3 (qk-design.md, tmaeno "OK" 2026-11-16 13:0x): what one ``GuardFrom`` says its name holds at its test, where
+    the querier reads it -- ``("constant", value, line)`` where every way ends at one literal (setScoutJobData_JEDI's
+    ``nNewJobsCutoff``, 20 at 1225); ``("printed", call, print, hole, expression)`` where every way comes back through
+    one call whose callee prints, whole, what it gives (``HeldPrinted``: getScoutJobData_JEDI's 1140 ``extra=`` for
+    ``extraInfo`` through the call at 1169, its hole 0 for ``scoutSucceeded`` whether it returned True or False).  None
+    otherwise, or where a way changes the object in place within the function (*rel*, lines *lo* .. *hi*)."""
+    sources = list(getattr(g, "sources", None) or [])
+    if not sources:
+        return None
+    for s in sources:
+        for c in getattr(s, "changes", None) or []:
+            crel, _, cline = str(c.at).rpartition(":")
+            if crel == rel and cline.isdigit() and lo <= int(cline) <= hi:
+                return None
+    if all(s.kind == "constant" for s in sources) and len({s.name for s in sources}) == 1:
+        try:
+            value = ast.literal_eval(sources[0].name)
+        except (ValueError, SyntaxError, TypeError):
+            return None
+        return ("constant", value, sources[0].line) if _hashable(value) else None
+    prints: set[tuple] = set()
+    for s in sources:
+        if getattr(s, "steps", None) or len(getattr(s, "printed", None) or []) != 1 or s.printed[0].steps:
+            return None
+        p = s.printed[0]
+        prints.add((p.at, p.statement, p.hole, p.expression))
+    return ("printed", *prints.pop()) if len(prints) == 1 else None
+
+
+def _hole_value(text: str) -> Any:
+    """The value a print's hole holds (:func:`_printed_value`); a dict it does not read, as the map reads a printed
+    bind map (``sqltext.cut``: a time read as one, a value with no literal spelling kept as its text, so one never voids
+    the rest -- getScoutJobData_JEDI's ``extra=`` holds a ``datetime.timedelta``).  ``E.UNKNOWN`` where neither reads
+    it."""
+    got = _printed_value(text)
+    if got is E.UNKNOWN and text.lstrip().startswith("{"):
+        cut = sqltext.cut(text.strip(), "", "")
+        if cut is not None:
+            return cut[1]
+    return got
+
+
+def _items_spelled(guards: list[str], name: str) -> list[tuple[str, Any]]:
+    """``(text, key)`` of each item of *name* the *guards* take by a literal key, as they spell it
+    (``extraInfo['nNewJobs']``): the evaluator looks a subscript up by its text."""
+    out = []
+    for g in guards:
+        try:
+            tree = ast.parse(E.strip_annotation(g), mode="eval")
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Subscript) and ast.unparse(node.value) == name
+                    and isinstance(node.slice, ast.Constant) and _hashable(node.slice.value)):
+                out.append((ast.unparse(node), node.slice.value))
+    return sorted(set(out), key=lambda x: x[0])
 
 
 def _number(value):
@@ -7208,12 +7299,11 @@ class Rerun:
         every pass took: S2's reading of a mover's passes, and U2's of a caller's, its calls into the mover the arms."""
         exits = sorted({n.lineno for n in R.own_nodes(fn.node) if isinstance(n, R.JUMPS)})
         lines = sorted({a.line for a in arms} | set(exits))
-        # the jumps of loops that hold no arm: left kept alone, they keep a pass from no arm (W1)
-        free = R.free_jumps(fn.node, [a.line for a in arms])
         self.say(f"candidates: arms {[a.line for a in arms]}, exits {exits}")
-        chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
+        chosen: list[Any] = []  # each pass's verdict, None where it ran none of the arms
+        took: list[int | None] = []  # the exit a pass that ran no arm was shown to leave by, None where none is shown
         envs = []
-        left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1)
+        left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1, S-2a)
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
@@ -7224,29 +7314,38 @@ class Rerun:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
                          f"{sorted(v.line for v in j.verdicts if v.kind == 'positive' and v is not arm)} are where it left after")
-            if took_none(j) or took_none_but(j, free):
-                if not took_none(j):
-                    kept = sorted(v.line for v in j.verdicts if v.kind != "excluded")
-                    by = f" ({j.chosen.line} chosen by elimination, which no row shows)" if j.chosen is not None else ""
-                    self.say(f"  the candidates pass {n} leaves, {kept}, are continues or breaks of loops that hold no arm{by}: "
-                             "taken, they keep a pass from none")
+            if took_none(j):
                 self.say(f"  pass {n} took none of the candidates: no arm of {func} that moves the value ran in it")
                 chosen.append(None)
-            elif left := ran_no_arm(j, {a.line for a in arms}):
-                self.say(f"  pass {n} ran no arm of {func} that moves the value: every arm excluded; it left by one of "
-                         f"{left} or ran on past them")
-                left_by.update(left)
+                took.append(None)
+            elif (way := ran_no_arm(j, {a.line for a in arms})) is not None:
+                # S-2a: every arm excluded, so the pass ran none, the exit it took shown or not
+                shown, left = way
+                if shown is not None:
+                    self.say(f"  pass {n} ran no arm of {func} that moves the value: every arm excluded; it left by {shown}")
+                else:
+                    by = f" ({j.chosen.line} chosen by elimination, which no row shows)" if j.chosen is not None else ""
+                    self.say(f"  pass {n} ran no arm of {func} that moves the value: every arm excluded; it left by one of "
+                             f"{left}{by} or ran on past them")
+                left_by.update(left if shown is None else [shown])
                 chosen.append(None)
+                took.append(shown)
             else:
                 chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
+                took.append(None)
             envs.append(env)
+        if all(v is None for v in chosen) and len(set(took)) == 1 and took[0] is not None:
+            # every pass ran no arm and was shown to leave by the same exit: the way they went
+            self.say(f"every pass ({len(found)}) left by {func}:{took[0]}")
+            return Blocked(fn, took[0], found, envs, arms)
         taken = {v.line if v is not None else None for v in chosen}
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
         self.say(f"every pass ({len(found)}) left by {func}:{exit_line}" if exit_line is not None
                  else f"every pass ({len(found)}) of {func} took none of its candidates" if not left_by
                  else f"every pass ({len(found)}) of {func} ran none of its arms")
-        return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)))
+        return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)),
+                       tuple(took) if exit_line is None and any(x is not None for x in took) else ())
 
     # ------------------------------------------------------------ Callers: what called the mover on the row
     def callers(self, q: Callers):
@@ -8513,24 +8612,153 @@ class Rerun:
         return {k: v.value for k, v in env.values.items()}
 
     # ------------------------------------------------------------ Blocked: what kept it from moving
+    @staticmethod
+    def _keeps_said(fn: R.Function, exits: list[int], arms: list[Arm]) -> tuple[str, bool]:
+        """S-2b (qk-design.md, tmaeno "OK" 2026-11-16 16:1x): what the map's ``ExitKeeps`` says of the exits a pass that
+        ran no arm may have left by -- one keeping a run from none of the *arms* is, by the flow, no reason it ran none
+        (a test on the way kept it off, whether it left there or ran on past), one keeping a run from some may have kept
+        it from them, one not listed is not read -- and whether every one keeps a run from none.  The lists are the
+        flow's, path-insensitive both ways: what a run's values allow is the guards' reading.  Not read where the dump
+        reads none."""
+        keeps = exit_keeps(getattr(fn, "owner", ""))
+        if keeps is None:
+            return "(whether one keeps a run from the arms is not read)", False
+        moving = {a.line for a in arms}
+        clear = [x for x in exits if x in keeps and not keeps[x] & moving]
+        early = {x: sorted(keeps[x] & moving) for x in exits if x in keeps and keeps[x] & moving}
+        unread = [x for x in exits if x not in keeps]
+        parts = ([f"{clear} keep a run from none of the arms"] if clear else []) + [
+            f"{x} keeps a run from {a}: a pass may have left by it before them" for x, a in early.items()] + (
+            [f"it lists no {unread}: not read"] if unread else [])
+        return f"(the map's ExitKeeps: {'; '.join(parts)})", bool(exits) and not early and not unread
+
+    def _held_printed(self, fn: R.Function, run, env: E.Env, arms: list[Arm], guards: list[str]) -> list[str]:
+        """S-3 (qk-design.md, tmaeno "OK" 2026-11-16 13:0x): the values of the names the arms' tests read that the
+        map's ``GuardFrom`` reads back to one literal, or to a callee's print of what its call gives -- read off the
+        callee's one print in the pass *run*, its log asked over the pass on the pass's machine -- put in *env*, and a
+        dict's items under the texts the *guards* spell them by.  A name *env* already knows (the pass's own prints),
+        one whose tests' ways disagree, one a way changes in place in the function: left.  Each one read, said."""
+        owner = getattr(fn, "owner", "")
+        moving = {a.line for a in arms}
+        found = [g for g in guard_froms(owner) if set(g.arms) & moving]
+        if not found or run is None or getattr(fn, "node", None) is None:
+            return []
+        rel = owner.partition("::")[0]
+        lo, hi = fn.node.lineno, fn.node.end_lineno or fn.node.lineno
+        readings: dict[str, set] = {}
+        for g in found:
+            readings.setdefault(g.name, set()).add(_held_reading(g, rel, lo, hi))
+        said = []
+        for name, got in sorted(readings.items()):
+            if len(got) != 1 or None in got or env.knows(name):
+                continue
+            kind, *what = next(iter(got))
+            if kind == "constant":
+                value, where = what[0], f"the constant at {what[1]}"
+            else:
+                read = self._callee_print(run, *what)
+                if read is None:
+                    continue
+                value, where = read
+            source = f"the map's GuardFrom: {where}"
+            env.put(name, value, source)
+            if isinstance(value, dict):
+                items = [(text, value[key]) for text, key in _items_spelled(guards, name) if key in value]
+                for text, item in items:
+                    env.put(text, item, source)
+                said += [f"{text} = {item!r} ({where})" for text, item in items]
+            else:
+                said.append(f"{name} = {value!r} ({where})")
+        return said
+
+    def _callee_print(self, run, at: str, statement: str, hole: int, expression: str) -> tuple[Any, str] | None:
+        """``(value, where)``: what the callee's print at *statement* holds in its hole *expression*, its one record
+        inside the pass *run* (the callee's runs of the key in its own logs, on the pass's machine, over the pass);
+        None where none or more than one is, or its log is not in the records (the ask kept)."""
+        crel, _, cline = statement.rpartition(":")
+        if not cline.isdigit():
+            return None
+        line = int(cline)
+        cdef = R.def_holding(crel, line)
+        if cdef is None:
+            return None
+        callee = f"{crel}::{cdef.name}"
+        try:
+            cfn = R.function(crel, cdef.name, within=[line])
+        except (LookupError, ValueError, SyntaxError):
+            return None
+        stmt = R.statement_at(cfn.node, line)
+        row = cfn.row_at(stmt) if stmt is not None else None
+        if row is None:
+            return None
+        # one print's records in one pass are read, asked and said once, whichever names its holes give
+        read: dict = vars(self).setdefault("_callee_hits", {})
+        once = (run.machine, run.first, run.last, statement)
+        if once not in read:
+            window = (W._down(W.when(run.first)), W._down(W.when(run.last) + datetime.timedelta(seconds=1)))
+            ask = W.Asking(window, run.machine, T.Said("for-a-callee-s-print", {
+                "callee": cdef.name, "line": line, "at": at, "first": run.first, "last": run.last}))
+            logs, unanswered = self._logs_at(self.args.key, list(dict.fromkeys(self.files_of(callee, [], [line]))), ask,
+                                             owners_of([callee]))
+            found: list = []
+            if unanswered:
+                self._keep_unanswered(unanswered)
+            for log in logs.values() if not unanswered else ():
+                if run.machine in log.without:
+                    continue
+                for r in runs_for(log, self.args.key):
+                    if not of_mover(r, callee) or r.machine != run.machine:
+                        continue
+                    for i, _, _ in R.seen(cfn, r, self.mode).hits.get(row.line, ()):
+                        if run.first <= r.records[i].stamp <= run.last:
+                            found.append(r.records[i])
+            if len(found) > 1:
+                self.say(f"  {cdef.name}'s print at {line} is in the pass {len(found)} times: which its call at {at} gave "
+                         "is not read")
+            read[once] = found if not unanswered else []
+        hits = read[once]
+        if len(hits) != 1:
+            return None
+        text = row.capture(hits[0]).get(expression)
+        value = _hole_value(text) if text is not None else E.UNKNOWN
+        if value is E.UNKNOWN:
+            return None
+        return value, f"{cdef.name}'s print at {line}, its hole {expression}, at {hits[0].span}"
+
     def blocked(self, q: Blocked):
         self.start("S3", "what kept it from moving")
         fn = q.fn
         arm = next((a for a in q.arms if a.line == q.exit_line), None)
         if arm is not None:
             return self._arm_taken(q, arm)
+        def path_of(line: int) -> list[str]:
+            # what held on the way to the exit, the early exits above it too; one read at another line is not solved here
+            return [g for g in pathcond.arm_condition(R.statement_at(fn.node, line)) if not E.read_elsewhere(g)]
+
         if q.exit_line is None:
-            # every pass took none of the arms and the exits: what settles a guard is what the passes printed on the way
-            path = []
-            self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard"
-                     if not q.left_by else
-                     f"{fn.name}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
-                     f"by {list(q.left_by)} (whether one keeps a run from the arms is not read)")
+            # every pass ran none of the arms: what settles a guard is the path of the exit a pass was shown to leave by,
+            # and what the passes printed on the way
+            left_ways = list(q.took) or [None] * len(q.passes)
+            paths = [path_of(x) if x is not None else [] for x in left_ways]
+            keeps, clear = self._keeps_said(fn, list(q.left_by), q.arms)
+            by_way = Counter(x for x in left_ways if x is not None)
+            if not q.left_by:
+                self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
+            elif not by_way:
+                self.say(f"{fn.name}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
+                         f"by {list(q.left_by)} {keeps}" + ("; so no exit kept a pass from them by the flow: a test on the way did" if clear else ""))
+            else:
+                went = "; ".join(f"{k} pass(es) left by {x}, reached when {path_of(x)}" for x, k in sorted(by_way.items()))
+                rest = len(left_ways) - sum(by_way.values())
+                self.say(f"{fn.name}: every pass ran none of its arms: {went}"
+                         + (f"; {rest} may have left by one of the others or ran on past them" if rest else "")
+                         + f"; of the exits {list(q.left_by)} {keeps}" + ("; so no exit kept a pass from them by the flow: a test on the way did" if clear else ""))
         else:
-            exit_stmt = R.statement_at(fn.node, q.exit_line)
-            # what held on the way to it, the early exits above it too; one read at another line is not solved here
-            path = [g for g in pathcond.arm_condition(exit_stmt) if not E.read_elsewhere(g)]
-            self.say(f"{fn.name}:{q.exit_line} is reached when {path}")
+            path = path_of(q.exit_line)
+            paths = [path] * len(q.passes)
+            keeps, _ = self._keeps_said(fn, [q.exit_line], q.arms)
+            self.say(f"{fn.name}:{q.exit_line} is reached when {path}"
+                     + (f" {keeps}" if keeps.startswith("(the map's") else ""))
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         # an arm in an except handler is kept off where every pass's rows show its try raised nothing: no guard to read
         printed = [self._rows_of_one_call(fn, run) for run in q.passes]
@@ -8542,8 +8770,13 @@ class Rerun:
                     quiet[a.line] = (u.line, sorted({r for r in shown if r is not None}))
                     break
         guarded = [a for a in q.arms if a.line not in quiet]
+        # S-3: the names the guards read whose values the map's GuardFrom reads back to a literal or a callee's print
+        tested = sorted({g for a in guarded for g in read[a.line][0] if not E.read_elsewhere(g)})
+        for n, (run, env) in enumerate(zip(q.passes, q.envs, strict=True), 1):
+            for line in self._held_printed(fn, run, env, guarded, tested):
+                self.say(f"  pass {n}: {line}")
         per_pass = []
-        for run, env in zip(q.passes, q.envs, strict=True):
+        for run, env, path in zip(q.passes, q.envs, paths, strict=True):
             fixed: dict[str, bool] = {}
             for g in path:
                 sol = E.solve(g, True, env)

@@ -707,6 +707,8 @@ TEMPLATES: dict[str, str] = {
     "held-before": "{subject} read as {value} all the stay:the time of the statuslog row of {observed!r}, to within the pass of {starts:join=, } that wrote both; {out} other line(s) writing it left out{premises:join=}",
     # Q1 part 1: a time column read over the stay from the records (rerun._timeline)
     "for-the-column-s-writes": "for the writes of {where} over {start} .. {end}",
+    # S-3: a tested name's value, read off its callee's print inside the pass (rerun._callee_print)
+    "for-a-callee-s-print": "for {callee}'s print at {line} of what its call at {at} gives, inside the pass {first} .. {last}",
     "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{absent}{opens}{begun:join=}",
     "timeline-begun-by": "; the stay begun by {arms:join=, } (the other arms writing the value shown not to then, judgement 3)",
     "timeline-begun-unread": "; {arms:join=, }, which may have begun the stay, print nothing naming the row as it began, while another arm that may have does",
