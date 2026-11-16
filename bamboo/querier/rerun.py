@@ -7113,26 +7113,15 @@ class Rerun:
         the passes ending in or after its second, as before."""
         states = self.data.get("statuslog", {}).get("states", [])
         observed = self.args.observed
-        at = [n for n, st in enumerate(states) if st["status"] == observed and str(st["time"])[:19] == since[:19]]
-        if not at:
+        rows = self._stay_rows(since)
+        if rows is None:
             return [p for p in found if p.last[:19] >= since], []
-        exact = [n for n in at if (states[n].get("time_extended") or "") == (getattr(self.args, "since", None) or "-")]
-        n = (exact or at)[-1]
-        row, nxt = states[n], (states[n + 1] if n + 1 < len(states) else None)
+        n, row, nxt = rows
         opens = row.get("time_extended") or str(row["time"])
-        if row.get("time_extended"):
-            before = {id(p) for p in found if W.when(p.last) < W.when(opens)}
-            if sneaked := [p for p in found if id(p) in before and p.last[:19] >= since[:19]]:
-                self.say(f"{len(sneaked)} pass(es) over before the row of {observed!r} at {opens}, in its second: not read")
-        else:
-            before = {id(p) for p in found if p.last[:19] < since[:19]}
-        kept = [p for p in found if id(p) not in before]
-        if nxt is not None and nxt.get("time_extended"):
-            after = {id(p) for p in kept if W.when(p.first) > W.when(nxt["time_extended"])}
-            if after:
-                kept = [p for p in kept if id(p) not in after]
-                self.say(f"{len(after)} pass(es) begun after the row of {nxt['status']!r} at {nxt['time_extended']}, "
-                         "the move: not read")
+        off, said = self._off_the_stay([(p.first, p.last) for p in found], since)
+        for words in said:
+            self.say(words)
+        kept = [p for i, p in enumerate(found) if i not in off]
         moved_in = n == 0 or states[n - 1]["status"] != observed
         if not moved_in:
             self.say(f"the row of {observed!r} at {opens} writes it again over the row before: no edge, the pass "
@@ -7156,6 +7145,42 @@ class Rerun:
                      f"{edge.get('time_extended') or edge['time']} ({said}): the pass the value {what}, "
                      "not one of its time")
         return kept, moving
+
+    def _stay_rows(self, since: str) -> tuple[int, dict, dict | None] | None:
+        """The stay's rows as BP' reads them (:meth:`_stay_edges`): ``(index, the statuslog row of the observed value
+        *since* names -- the one --since names, else the last of that second --, the next row, the move, or None)``;
+        None where no row of the value is at *since*'s second."""
+        states = self.data.get("statuslog", {}).get("states", [])
+        observed = self.args.observed
+        at = [n for n, st in enumerate(states) if st["status"] == observed and str(st["time"])[:19] == since[:19]]
+        if not at:
+            return None
+        exact = [n for n in at if (states[n].get("time_extended") or "") == (getattr(self.args, "since", None) or "-")]
+        n = (exact or at)[-1]
+        return n, states[n], (states[n + 1] if n + 1 < len(states) else None)
+
+    def _off_the_stay(self, spans: list[tuple[str, str]], since: str) -> tuple[set[int], list[str]]:
+        """Of *spans* (``(first, last)`` record times), the indexes BP' reads as off the stay from *since*, and what it
+        says of them -- the edges of :meth:`_stay_edges`, and of the caller's passes :meth:`_call_tied` reads by its
+        callees' runs: over before the row of the value, to the microsecond where the row has its time_extended (those in
+        its second said), else before its second; or begun after the row of the move, where that row has its
+        time_extended.  Nothing where no row of the value is at *since*'s second."""
+        rows = self._stay_rows(since)
+        if rows is None:
+            return set(), []
+        _, row, nxt = rows
+        said = []
+        if opens := row.get("time_extended"):
+            off = {i for i, (_, last) in enumerate(spans) if W.when(last) < W.when(opens)}
+            if sneaked := [i for i in off if spans[i][1][:19] >= since[:19]]:
+                said.append(f"{len(sneaked)} pass(es) over before the row of {row['status']!r} at {opens}, in its second: not read")
+        else:
+            off = {i for i, (_, last) in enumerate(spans) if last[:19] < since[:19]}
+        if nxt is not None and (closes := nxt.get("time_extended")):
+            if after := {i for i, (first, _) in enumerate(spans) if i not in off and W.when(first) > W.when(closes)}:
+                off |= after
+                said.append(f"{len(after)} pass(es) begun after the row of {nxt['status']!r} at {closes}, the move: not read")
+        return off, said
 
     def _recording_pass(self, owner: str, arms: list[int], subject: str, key: str, row: dict, found: list,
                         entered: bool = False):
@@ -7511,8 +7536,10 @@ class Rerun:
         Where the run of the mover's own (*up*'s) is one pass, and a run before it on its machine came through a call the
         caller makes before its calls into the mover, ending at most windows.SLACK before it, the mover took the row in
         the step after that one in one pass of the caller (P8): PostProcessor.start's prepareTasksToBeFinished_JEDI,
-        then its getTasksToBeFinished_JEDI.  An END and True; False where no such run is read, or where a log of them
-        is not in the records (the asks kept)."""
+        then its getTasksToBeFinished_JEDI.  Otherwise the passes on the row are said, each with its way: those the stay's
+        edges leave, read as S2 reads a mover's (:meth:`_off_the_stay`, C-2).  An END and True; False where no such run is
+        read, where none but the one that moved the row is on it, or where a log of them is not in the records (the asks
+        kept)."""
         rel, func = c.owner.split("::", 1)
         try:
             fn = R.function(rel, func, c.lines)
@@ -7581,9 +7608,13 @@ class Rerun:
             self.say(f"{func}'s callees: no pass on the row but the one that moved it")
             return False
         mine = {qual, *reached}
-        premises: list[T.Said] = [T.Said("a-callee-run-is-the-caller-s", {
-            "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine)})
-            for o in sorted({q[5] for g in grouped for q in g if q[3] != mover})]
+
+        def callee_premises(groups: list[list]) -> list[T.Said]:
+            return [T.Said("a-callee-run-is-the-caller-s", {
+                "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine)})
+                for o in sorted({q[5] for g in groups for q in g if q[3] != mover})]
+
+        premises = callee_premises(grouped)
 
         def words(g: list) -> T.Said:
             callees = list(dict.fromkeys(f"{q[3].rpartition('::')[2]} {sorted(q[4])}" for q in g))
@@ -7614,8 +7645,20 @@ class Rerun:
                     if last else T.Said("the-step-s-end-not-read", {"callee": step[3].rpartition("::")[2]}),
                     "passes": said, "premises": premises}))
                 return True
+        # C-2 (bundle C, W5; out/gm/qk-design.md, tmaeno's OK 2026-11-16 23:06): the passes said to be on the row are read
+        # at the stay's edges as S2 and U2 read a mover's or a caller's own (BP', :meth:`_off_the_stay`), to the
+        # microsecond where the rows have it.  NT-assigning-late's getTaskWithID_JEDI run on aipanda085 at 07:41:00,150 ..
+        # ,175 -- ContentsFeeder's own call, before its pass recorded 'assigning' at 07:41:00.667322 -- is no pass of
+        # TaskBroker's runImpl on the row.  P8 above reads the step the stay began in, which may end before the row
+        off, off_said = self._off_the_stay([(min(q[0] for q in g), max(q[1] for q in g)) for g in grouped], start)
+        for line in off_said:
+            self.say(f"{func}'s callees: {line}")
+        on_row = [g for i, g in enumerate(grouped) if i not in off]
+        if all(any(q[3] == mover for q in g) for g in on_row):
+            self.say(f"{func}'s callees: no pass on the row but the one that moved it")
+            return False
         self.end(T.Said("the-caller-s-passes-by-its-callees", {
-            "caller": func, "passes": said, "premises": premises,
+            "caller": func, "passes": [words(g) for g in on_row], "premises": callee_premises(on_row),
             "unknown": T.Said("why-each-pass-took-its-way", {"caller": func, "files": self.files_of(c.owner, [], c.lines)})}))
         return True
 
@@ -8001,7 +8044,11 @@ class Rerun:
                          "no label in what was searched: one may be the row's")
                 return False
             if not AG.one_process(chain, spans.get(m, {})):
-                if self._cap_take(c, sel, picks, label, moving, up):
+                # C-3 (bundle C, W3; out/gm/qk-design.md, tmaeno's OK 2026-11-16 23:06): with no label on the lines, the
+                # cap's take among more than one process's selections is not told either -- NT-registered-late's
+                # aipanda081, where TaskRefiner's 4-label process took the row with a full 999 and its 1-label one
+                # returned 1 row just before the pass
+                if label and self._cap_take(c, sel, picks, label, moving, up):
                     return True
                 self.say(f"(C) not read: {sel.agent_name}'s cycles{' for ' + label if label else ''} on {m.split('.')[0]} overlap: "
                          "more than one process selects there, and which one took the row is not told by its lines")

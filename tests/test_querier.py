@@ -16057,13 +16057,16 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
                     run("update_task_queued_activated_times < jediTaskID=53631608 >", day + "14:34:02,179"),
                     run("getTasksToBeFinished_JEDI < vo=atlas label=managed pid=p >", day + "14:35:06,139")]
 
-            def rerun(runs):
+            def rerun(runs, states=()):
                 r = RR.Rerun.__new__(RR.Rerun)
+                r.data = {"statuslog": {"states": list(states)}}
+                r.args = N(observed="scouting", since=None)
                 r.logs = N(names=lambda files: list(files))
                 r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
                 r.files_of = lambda owner, today, lines: ["panda-PostProcessor.log"]
                 r._keep_unanswered = lambda missed: None
-                r.say = lambda *a: None
+                r.said = []
+                r.say = lambda words: r.said.append(words)
                 r.ended = []
                 r.end = lambda said: r.ended.append(said)
                 r._step_end = lambda bare, files, since, until, key: day + "14:35:06,032"
@@ -16089,6 +16092,22 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
             kept = []
             r._keep_unanswered = lambda missed: kept.extend(missed)
             got["missed"] = [RR.Rerun._call_tied(r, c, up), r.ended, len(kept)]
+            # C-2: the passes said on the row are read at the stay's edges as S2 reads a mover's (BP'): one over before
+            # the row of the value in its second, or begun after the row of the move, is none of the caller's on it
+            edges = [{"status": "scouting", "time": day + "14:20:00", "time_extended": day + "14:20:00.500000"},
+                     {"status": "scouted", "time": day + "14:35:06", "time_extended": day + "14:35:06.300000"}]
+            early = run("setScoutJobData_JEDI < jediTaskID=53631608 >", day + "14:20:00,100", day + "14:20:00,200",
+                        machine="aipanda085.cern.ch")
+            late = run("setScoutJobData_JEDI < jediTaskID=53631608 >", day + "14:35:06,500", machine="aipanda087.cern.ch")
+            wide = RR.replace(up, window=(day + "14:20:00", day + "14:35:06"))
+            r = rerun([early, *runs, late], edges)
+            got["edges"] = [RR.Rerun._call_tied(r, c, wide), T.text(r.ended[0]), r.said]
+            # left with the pass that moved it alone: nothing read of the passes before it
+            r = rerun([early, runs[3]], edges)
+            got["edges-mover"] = [RR.Rerun._call_tied(r, c, wide), r.ended, r.said]
+            # with no row of the value at the window's start, nothing is cut
+            r = rerun([early, runs[3]])
+            got["edges-none"] = [RR.Rerun._call_tied(r, c, wide), T.text(r.ended[0])]
             print(json.dumps(got))
             """,
         )
@@ -16114,6 +16133,14 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
                                   "getTasksToBeFinished_JEDI [80] (it called the mover)"), said
     assert said.endswith("not known: why each pass took its way, which start's own log (panda-PostProcessor.log) would say"), said
     assert got["none"] == [False, []], got
+    ok, said, says = got["edges"]
+    assert ok and said == got["p22"][1], said
+    assert "start's callees: 1 pass(es) over before the row of 'scouting' at 2026-11-13 14:20:00.500000, in its second: not read" in says, says
+    assert "start's callees: 1 pass(es) begun after the row of 'scouted' at 2026-11-13 14:35:06.300000, the move: not read" in says, says
+    ok, ended, says = got["edges-mover"]
+    assert not ok and ended == [] and "start's callees: no pass on the row but the one that moved it" in says, got
+    ok, said = got["edges-none"]
+    assert ok and said.startswith("start's passes on the row, read by its callees' runs: aipanda085 2026-11-13 14:20:00,100 "), said
 
 
 def test_a_cycle_s_label_is_taken_from_a_row_every_pass_prints(tmp_path):
