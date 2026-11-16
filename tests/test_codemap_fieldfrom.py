@@ -417,6 +417,23 @@ def _parameter(
     return found
 
 
+def test_a_parameter_from_says_what_its_own_signature_says_of_none(built: MapFragment) -> None:
+    """``Status.__init__``'s ``job_status: str`` excludes ``None``; ``job`` and ``note`` say nothing
+    (:attr:`ParameterFrom.declared`): a reader following a way through a parameter reads it there.  What admits
+    ``None`` is :func:`values.declared`'s reading, as ``Branch.handed``'s."""
+    declared = {
+        one.parameter: (one.declared.name, one.declared.annotation, one.declared.none) if one.declared else None
+        for one in built.parameter_froms
+        if one.owner == f"{STATUS}::__init__"
+    }
+
+    assert declared == {
+        "job": ("__init__.job", "", "unannotated"),
+        "job_status": ("__init__.job_status", "str", "excludes"),
+        "note": ("__init__.note", "", "unannotated"),
+    }
+
+
 def test_case_a_reads_the_field_on_through_the_class_to_the_call_that_changes_it(
     built: MapFragment,
 ) -> None:

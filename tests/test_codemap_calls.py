@@ -3920,3 +3920,39 @@ def test_none_is_left_out_of_a_containers_union_for_its_element(tmp_path):
     calls = _calls(_tree(tmp_path, m=_OPTIONAL_CONTAINERS))
     for text in ("spec.check", "other.check", "others[0].check", "by_name['x'].check"):
         assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text
+
+
+def test_an_arm_the_constants_of_a_route_rule_out_names_the_route(tmp_path):
+    """``getTaskWithID_JEDI``'s shape: ``lockedBy`` is written under ``if lock:``, so a route handing ``lock`` the
+    default ``False`` -- the facade's own default, or a literal -- never runs that arm, and says so
+    (:func:`sqlwrite.routes_ruling_out`, read into ``Branch.not_run_on``); one handing a caller's parameter may run it.
+    The arm outside the test runs on every route."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get_task(task, task_id, lock=False, pid=None):\n"
+            "    if lock:\n"
+            "        task.lockedBy = pid\n"
+            "    task.status = 'x'\n"
+        ),
+        tb=("from pkg.db import get_task\n\ndef forward(task, task_id, lock=False, pid=None):\n"
+            "    return get_task(task, task_id, lock, pid)\n"),
+        main=(
+            "from pkg.db import get_task\n"
+            "from pkg.tb import forward\n"
+            "\n"
+            "def feed(task, real_run, pid):\n    forward(task, 1, real_run, pid)\n"
+            "\n"
+            "def peek(task):\n    forward(task, 1)\n"
+            "\n"
+            "def direct(task):\n    get_task(task, 2, False, None)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "get_task")
+    locked, status = sqlwrite.routes_ruling_out(calls, "pkg/db.py", func, [(3,), (4,)])
+
+    assert sorted(locked) == [["pkg/main.py:11"], ["pkg/tb.py:4", "pkg/main.py:8"]]
+    assert status == []

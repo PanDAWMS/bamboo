@@ -744,6 +744,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
             fragment.calls_considered, fragment.call_stops, fragment.open_calls = _call_stops(self._calls, self._modules)
+            # And which of those routes never run an arm, by the constants they hand: a read site's not_run, of a
+            # junction's branches.
+            _attach_not_run_on(fragment.junctions, self._calls)
         lap("callers")
         # Where a row a statement keeps is carried on to: after the reach
         # record, whose holes and database calls it reads, over every junction
@@ -1610,6 +1613,40 @@ def _attach_called_from(junctions, calls) -> None:
                 break
             by_owner[junction.owner] = found
         junction.called_from = by_owner[junction.owner]
+
+
+def _attach_not_run_on(junctions, calls) -> None:
+    """Fill ``Branch.not_run_on`` for every junction's branches (:func:`sqlwrite.routes_ruling_out`), each function's
+    routes read once for all its junctions -- the function holding the junction's anchor, of the owner's name."""
+    named: dict[tuple[str, str], list] = {}
+    held_by: dict[int, tuple[str, ast.AST, list]] = {}
+    for junction in junctions:
+        file, _, name = junction.owner.partition("::")
+        if (file, name) not in named:
+            tree = calls.types.tree(file)
+            named[(file, name)] = [
+                one
+                for one in (walk(tree) if tree is not None else ())
+                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and one.name == name
+            ]
+        candidates = named[(file, name)]
+        anchor = junction.anchor
+        func = next(
+            (
+                one
+                for one in candidates
+                if anchor is None or one.lineno <= anchor.line_start <= (one.end_lineno or one.lineno)
+            ),
+            None,
+        )
+        if func is None or (anchor is None and len(candidates) > 1):
+            continue
+        held_by.setdefault(id(func), (file, func, []))[2].append(junction)
+    for file, func, held in held_by.values():
+        branches = [branch for junction in held for branch in junction.branches if branch.line is not None]
+        arms = [tuple(sorted({branch.line, *branch.other_lines})) for branch in branches]
+        for branch, routes in zip(branches, sqlwrite.routes_ruling_out(calls, file, func, arms), strict=True):
+            branch.not_run_on = sorted(routes)
 
 
 def _stops_read_again(modules, roots, stops) -> list[str]:

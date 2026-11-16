@@ -3467,6 +3467,36 @@ def _flag_parameters(func: ast.AST) -> set[str]:
     return tested - rebound
 
 
+def routes_ruling_out(
+    calls: Calls, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, arms: list[tuple[int, ...]]
+) -> list[list[list[str]]]:
+    """For each arm of *func*, given as the lines it writes on, the routes into *func* whose constants rule out every
+    one of those lines (:func:`pathcond.ruled_out_by`), each spelled as :attr:`CallReading.chain` spells a route --
+    read as a read site's routes are (:attr:`CallReading.not_run`).  ``getTaskWithID_JEDI``'s ``lockedBy=:newLockedBy``
+    under ``if lockTask:`` runs on no route handing ``lockTask`` the default ``False``.  A route not listed may run
+    the arm: one whose constants decide nothing, and one the routes do not reach (:meth:`Calls.routes`' stops)."""
+    found: list[list[list[str]]] = [[] for _ in arms]
+    tested = _flag_parameters(func)
+    if not tested or not arms:
+        return found
+    statements: dict[int, list[ast.stmt]] = {}
+    for node in walk(func):
+        if isinstance(node, ast.stmt) and enclosing_function(node) is func:
+            statements.setdefault(node.lineno, []).append(node)
+    owned = calls.types.method_class(file, func)
+    target = Target(file, func, owned[1] if owned else None)
+    routes, _stops = calls.routes(target)
+    for route in routes:
+        constants = _route_constants(calls, target, route.sites, tested)
+        if not constants:
+            continue
+        for at, lines in enumerate(arms):
+            written = [statement for line in lines for statement in statements.get(line, ())]
+            if written and all(pathcond.ruled_out_by(statement, func, constants) for statement in written):
+                found[at].append(list(route.chain))
+    return found
+
+
 def _module_of(node: ast.AST) -> Optional[ast.Module]:
     while getattr(node, "parent", None) is not None:
         node = node.parent  # type: ignore[attr-defined]

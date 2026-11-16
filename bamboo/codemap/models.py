@@ -1115,6 +1115,17 @@ class Branch(BaseModel):
             "value, a local rebound before the write among them."
         ),
     )
+    not_run_on: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "The routes of calls into the owner whose constants rule out every line this arm writes on, each as "
+            ":attr:`CallReading.chain` spells one (the call into the owner first): the arm never runs on them "
+            "(:func:`bamboo.codemap.panda.recognizers.sqlwrite.routes_ruling_out`, as :attr:`CallReading.not_run` "
+            "says it of a read site).  ``getTaskWithID_JEDI``'s ``lockedBy`` arm under ``if lockTask:`` is not run "
+            "on the routes handing ``lockTask`` the default ``False``.  A route not listed may run it: one whose "
+            "constants decide nothing, one the routes do not reach.  Sorted."
+        ),
+    )
     count_prints: list[CountPrint] = Field(
         default_factory=list,
         description=(
@@ -6464,6 +6475,16 @@ class ParameterFrom(BaseModel):
     parameter: str
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
+    declared: Optional[HandedParameter] = Field(
+        default=None,
+        description=(
+            "What the function's own signature says of the parameter -- the annotation as written, and whether it "
+            "admits ``None`` -- read as :attr:`Branch.handed` reads a written parameter's "
+            "(:func:`bamboo.codemap.values.declared`): ``ContentsFeederThread.__init__``'s ``pid: str`` excludes it, "
+            "so a way through it holds no ``None`` as far as the annotation goes.  ``None`` for a ``*`` or ``**`` "
+            "parameter."
+        ),
+    )
 
 
 #: What a :class:`WriteFrom` reads of its arm: the object the arm writes a field of, or the value a passthrough arm

@@ -50,7 +50,7 @@ import ast
 import re
 from typing import Any, Iterable, NamedTuple, Optional
 
-from bamboo.codemap import callfacts, evaluate, pathcond
+from bamboo.codemap import callfacts, evaluate, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     Calls,
@@ -2835,7 +2835,12 @@ class _Reader:
             ways.append(_stop("missed", owner, what=why, at=f"{owner}:{line}"))
         sources, stops = _said(ways)
         return ParameterFrom(
-            owner=owner, line=line, parameter=name, sources=sources, stops=stops
+            owner=owner,
+            line=line,
+            parameter=name,
+            sources=sources,
+            stops=stops,
+            declared=values.declared(func, name),
         )
 
     def _sent(self, file: str, func: ast.AST, name: str) -> list[_Way]:
