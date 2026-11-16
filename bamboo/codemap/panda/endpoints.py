@@ -547,11 +547,9 @@ class _Code:
             found = self._changes[owner] = []
             file, func = self.funcs.get(owner, ("", None))
             for node in C.own_nodes(func) if func is not None else []:
-                got = (
-                    callfacts.change(self.types, file, func, node)
-                    if isinstance(node, ast.Call)
-                    else None
-                )
+                if not isinstance(node, ast.Call):
+                    continue
+                got = callfacts.change(self.types, file, func, node)
                 if got is not None:
                     kind, system, callee = got
                     found.append(
