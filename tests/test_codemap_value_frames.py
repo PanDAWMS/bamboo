@@ -209,6 +209,7 @@ def test_a_length_limit_counts_where_the_spec_cuts_by_it():
 
 
 def test_the_attribute_slice_records_the_frames_of_a_run_time_write():
+    """The write is the one binding of ``msg`` reaching it, spelled whole, and its frames are that text's."""
     specs = "class JediTaskSpec(object):\n    _attributes = ('jediTaskID', 'status')\n"
     writer = (
         "class W:\n"
@@ -224,5 +225,52 @@ def test_the_attribute_slice_records_the_frames_of_a_run_time_write():
     (junction,) = [j for j in junctions if j.owner.startswith("pandajedi/jediorder/W.py")]
 
     assert [(b.outcome, b.value_frames) for b in junction.branches] == [
-        ("runtime(msg)", ["merge_{}"])
+        ("runtime(f'merge_{s}')", ["merge_{}"])
     ]
+
+
+def test_the_attribute_slice_records_a_time_written_as_a_clock_plus_an_offset():
+    """``updateTask_JEDI``'s ``taskSpec.modificationTime = timeNow - datetime.timedelta(hours=1)`` after ``timeNow =
+    naive_utcnow()``: one write of ``timeNow`` reaches it, so the value is the clock less 3600 seconds
+    (:attr:`Branch.amount`), and ``= timeNow`` is the clock itself.  Where two writes of the name reach the write --
+    the clock on one way, the clock less a day on the other -- it is no one amount, and a parameter as it stands is
+    what the outcome already says: neither has one."""
+    specs = (
+        "class JediTaskSpec(object):\n"
+        "    _attributes = ('jediTaskID', 'modificationTime', 'frozenTime', 'startTime')\n"
+    )
+    writer = (
+        "class W:\n"
+        "    def f(self, taskSpec, setOld, s, modTime):\n"
+        "        timeNow = naive_utcnow()\n"
+        "        if setOld:\n"
+        "            taskSpec.modificationTime = timeNow - datetime.timedelta(hours=1)\n"
+        "        else:\n"
+        "            taskSpec.modificationTime = timeNow\n"
+        "        if s:\n"
+        "            t = naive_utcnow()\n"
+        "        else:\n"
+        "            t = naive_utcnow() - datetime.timedelta(days=1)\n"
+        "        taskSpec.frozenTime = t\n"
+        "        taskSpec.startTime = modTime\n"
+    )
+    modules = [
+        _module(specs, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(writer, "pandajedi/jediorder/W.py"),
+    ]
+    _subjects, junctions, _coverage, _diag, _enum = progress.extract(modules, "panda", "v")
+    amounts = {
+        j.subject: [
+            (b.line, None if b.amount is None else (b.amount.kind, b.amount.base, b.amount.offset_seconds))
+            for b in j.branches
+        ]
+        for j in junctions
+        if j.owner.startswith("pandajedi/jediorder/W.py")
+    }
+
+    assert amounts["JediTaskSpec.modificationTime"] == [
+        (5, ("bind", "naive_utcnow", -3600.0)),
+        (7, ("bind", "naive_utcnow", 0.0)),
+    ]
+    assert amounts["JediTaskSpec.frozenTime"] == [(12, None)]
+    assert amounts["JediTaskSpec.startTime"] == [(13, None)]

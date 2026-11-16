@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.models import ConditionValue
 from bamboo.codemap.pathcond import single_definition
 from bamboo.codemap.reaching import reaching
 
@@ -1532,3 +1533,25 @@ def stated(
     if isinstance(expression, ast.Name):
         return _named(expression, func, at, depth, handed)
     return _said(expression)
+
+
+def written_amount(node: ast.expr, func) -> Optional[ConditionValue]:
+    """*node*, a value a write puts into a column, as an amount (:attr:`Branch.amount`), read as a condition's value is
+    (:func:`stated`, where the write evaluates it): ``timeNow - datetime.timedelta(hours=1)`` after ``timeNow =
+    naive_utcnow()`` is the base ``naive_utcnow`` and -3600 seconds.  ``None`` where that says nothing the outcome
+    does not: no base (a constant, a number, a value said) or a parameter as it stands."""
+    try:
+        amount = stated(node, func, pathcond.site_of(node))
+    except RecursionError:
+        return None
+    if amount.said or not amount.base:
+        return None
+    if not is_clock(amount.base) and amount.offset == 0 and not amount.needs:
+        return None
+    return ConditionValue(
+        kind="bind",
+        text=ast.unparse(node),
+        base=amount.base,
+        offset_seconds=amount.offset,
+        needs=list(amount.needs),
+    )

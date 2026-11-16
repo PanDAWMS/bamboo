@@ -1021,10 +1021,19 @@ def may_change(
 
 def _key_values(write: DbWrite, key_column: str) -> list[tuple[str, str]]:
     """``(path, spelled)`` of each value *write* names its row by on *key_column* -- an ``INSERT``'s column, an
-    ``UPDATE``'s key: the path holding it (:func:`key_path`) and how an answer spells it."""
+    ``UPDATE``'s key: the path holding it (:func:`key_path`) and how an answer spells it.  A key read for one key of a
+    mapping (:attr:`WrittenValue.keyed`) is spelled as the mapping's key, ``criteria[]``: a caller's mapping need not
+    hold that key."""
     named_by = write.columns if write.kind == "insert" else write.keys
     return [
-        (held, v.path if v.column == MAP_KEY else held or v.value or v.why)
+        (
+            held,
+            v.path
+            if v.column == MAP_KEY
+            else f"{v.path[: v.path.rfind('[')]}[]"
+            if v.keyed
+            else held or v.value or v.why,
+        )
         for v in named_by
         if (held := key_path(v, key_column)) or v.column.lower() == key_column.lower()
     ]

@@ -55,7 +55,14 @@ from bamboo.codemap.models import (
     required_values,
     writes_its_value,
 )
-from bamboo.codemap.panda import attribution, promotion, sql, sqltext
+from bamboo.codemap.panda import (
+    attribution,
+    heldfrom,
+    messages,
+    promotion,
+    sql,
+    sqltext,
+)
 from bamboo.codemap.panda.recognizers import (
     alias,
     boundary,
@@ -1371,7 +1378,8 @@ def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
     there.  A local is a step in a computation, not a place a value lives, so a
     passthrough onto one is an edge whose far end cannot exist -- and the
     reference gate would not catch it, because it excuses a passthrough landing
-    off the promoted set as a provenance terminal.
+    off the promoted set as a provenance terminal.  The one binding reaching
+    the write says what the local holds: the call, decided when it runs.
     """
     source = (
         "def refine(self, taskSpec, incoming):\n"
@@ -1380,7 +1388,41 @@ def test_an_unresolvable_local_is_a_run_time_outcome_not_a_passthrough():
     )
     _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
 
+    assert _outcomes(junctions) == [("runtime(compute(incoming))", 2)]
+
+
+def test_a_local_two_unsettled_bindings_reach_stays_the_name():
+    """Which of the two the write takes is the run's: the name is the value, as it was."""
+    source = (
+        "def refine(self, taskSpec, incoming):\n"
+        "    if incoming:\n"
+        "        newStatus = compute(incoming)\n"
+        "    else:\n"
+        "        newStatus = fallback(taskSpec)\n"
+        "    taskSpec.status = newStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+
     assert _outcomes(junctions) == [("runtime(newStatus)", 2)]
+
+
+def test_a_local_bound_once_under_a_test_is_its_call_at_each_write_below():
+    """``killJob``'s ``currentTime = naive_utcnow()`` and, under the same test, ``job.endTime = currentTime`` and
+    ``job.modificationTime = currentTime``: each write is the call the one binding made, not a name a reader cannot
+    place (``pathcond.reaching_values``)."""
+    source = (
+        "def kill(self, taskSpec):\n"
+        "    if taskSpec.jediTaskID:\n"
+        "        currentStatus = pick_status(taskSpec)\n"
+        "        if taskSpec.oldStatus in [None, 'NULL']:\n"
+        "            taskSpec.oldStatus = currentStatus\n"
+        "        taskSpec.status = currentStatus\n"
+    )
+    _subjects, junctions, _cov = _progress(source, "pandajedi/jedirefine/TaskRefiner.py")
+    outcomes = {j.subject: [(b.outcome, b.tier) for b in j.branches] for j in junctions}
+
+    assert outcomes["JediTaskSpec.oldStatus"] == [("runtime(pick_status(taskSpec))", 2)]
+    assert outcomes["JediTaskSpec.status"] == [("runtime(pick_status(taskSpec))", 2)]
 
 
 def test_a_parameter_reaching_the_write_is_an_outcome_beside_the_literal():
@@ -3883,6 +3925,178 @@ class Knight:
     ]
 
 
+def test_a_line_naming_the_local_a_tier_two_outcome_is_spelled_through_is_named_for():
+    """The branch is ``runtime(pick_status(incoming))``, the one binding reaching the write, and the line logs the
+    local: still one fact, joined through the binding rather than by the name."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming):
+        newTaskStatus = pick_status(incoming)
+        taskSpec.status = newTaskStatus
+        tmpLog.info(f"set task_status={newTaskStatus} sourceLabel={self.label}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == [
+        "set task_status={} sourceLabel={}"
+    ]
+
+
+def test_a_line_logging_a_local_bound_two_ways_is_not_tied_by_one_of_their_spellings():
+    """``getOutputFiles_JEDI``'s ``fileDatasetID`` is bound four ways, one of them ``int(val)``: a line logging it
+    holds none of them by name, and a branch spelled ``runtime(int(val))`` from another local is not its value."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming, other):
+        newTaskStatus = pick_status(incoming)
+        taskSpec.status = newTaskStatus
+        if other:
+            shown = pick_status(incoming)
+        else:
+            shown = other
+        tmpLog.info(f"picked {shown} for the task")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_a_local_bound_once_to_the_text_another_write_writes_is_not_tied_by_the_text():
+    """``getOutputFiles_JEDI`` logs ``fileDatasetID = int(val)`` and writes a file ID from another ``int(val)``: the
+    same text, another value.  A line is tied by a binding it shares with the write, never by the spelling."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, incoming):
+        shown = pick_status(incoming)
+        tmpLog.info(f"picked {shown} for the task")
+        taskSpec.status = pick_status(incoming)
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(incoming))"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_past_the_merge_with_the_parameter_logs_the_binding_the_write_reads_and_one_above_it_does_not():
+    """``upsert_workflow_entities`` writes the ``workflow_id`` it bound from the insert: its last line, past the merge
+    with the parameter, can log that binding; a line above the insert logs only the parameter."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, newStatus, fresh):
+        tmpLog.info(f"asked for {newStatus}")
+        if fresh:
+            newStatus = pick_status(fresh)
+            taskSpec.status = newStatus
+        tmpLog.info(f"done with {newStatus}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status(fresh))"]
+    assert [e.template for e in status[0].branches[0].emits] == ["done with {}"]
+
+
+def test_a_line_logging_a_name_another_loop_binds_again_is_not_tied_to_the_write_of_the_name():
+    """``updateWorkers`` writes the ``panda_id`` of the IDs it was handed and logs the ``panda_id`` of the rows it
+    reads back in a later loop: one name, two bindings, and the line shares none with the write."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, wanted, rows):
+        for status in wanted:
+            taskSpec.status = status
+        for (status,) in rows:
+            tmpLog.info(f"row has {status}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(status)"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_an_expression_of_a_local_another_loop_binds_is_not_tied_by_the_text():
+    """``insertFilesForDataset_JEDI`` logs ``fileVal['lfn']`` of a file it skips and writes ``fileVal["lfn"]`` of the
+    files it keeps, each from its own loop: the same text, read through two bindings."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, files, produced):
+        for item in files:
+            if item["name"] not in produced:
+                tmpLog.info(f"{item['name']} skipped")
+        for item in files:
+            taskSpec.status = item["name"]
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(item['name'])"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_another_slot_of_the_unpacking_that_binds_the_written_local_is_not_tied():
+    """``insertFilesForDataset_JEDI`` unpacks ``..., dsStateInDB, nFilesToUseDS, ... = resDs``, writes the
+    ``nFilesToUseDS`` it bound there and logs ``ds.state={dsStateInDB}``: one statement binds both, and only the
+    written slot holds the value the branch decided at that statement.  The SQL slice places such a branch at the
+    unpacking, beside a binding that chooses a value, so the rule is asked here of a branch on that line."""
+    source = '''
+def f(res, fresh, varMap):
+    if fresh:
+        status = "ready"
+    else:
+        shown, status = res
+        tmpLog.info(f"state={shown} in DB")
+        tmpLog.info(f"status={status} in DB")
+    varMap[":status"] = status
+'''
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    func = tree.body[0]
+    (unpacking,) = [n for n in ast.walk(func) if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Tuple)]
+    other, own = [n for n in ast.walk(func) if isinstance(n, ast.FormattedValue)]
+    held = emit._Held(func, values.resolver(None))
+    spelled = {"status": [unpacking.lineno]}
+
+    def line_of(node):
+        return next(one for one in pathcond.ancestors(node) if isinstance(one, ast.stmt))
+
+    assert not emit._holds_the_read_value(other.value, line_of(other), spelled, held)
+    assert emit._holds_the_read_value(own.value, line_of(own), spelled, held)
+
+
+def test_a_line_logging_a_call_the_write_also_makes_is_not_tied():
+    """Two calls of one function are two evaluations: a line interpolating ``pick_status()`` does not show what the
+    write's own call returned, however alike the two are spelled."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec):
+        taskSpec.status = pick_status()
+        tmpLog.info(f"now {pick_status()}")
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(pick_status())"]
+    assert [e.template for e in status[0].branches[0].emits] == []
+
+
+def test_a_line_logging_the_name_a_written_local_was_bound_from_is_tied_where_it_shares_a_binding():
+    """``increaseRamLimitJobJEDI_xtimes`` binds ``nextLimit = minimumRam`` and writes the column from it: a line
+    logging ``minimumRam`` past its last binding shows the value written, through the one binding the branch was
+    spelled from."""
+    source = '''
+class Knight:
+    def runImpl(self, taskSpec: JediTaskSpec, base, cap):
+        limit = base * 2
+        if cap:
+            limit = min(limit, cap)
+        tmpLog.info(f"new limit {limit}")
+        nextLimit = limit
+        taskSpec.status = nextLimit
+'''
+    status = [j for j in _emits(source) if j.subject == "JediTaskSpec.status"]
+
+    assert [b.outcome for b in status[0].branches] == ["runtime(limit)"]
+    assert [e.template for e in status[0].branches[0].emits] == ["new limit {}"]
+
+
 def test_the_line_reporting_how_many_rows_changed_is_kept_apart():
     """The only trace a compare-and-set leaves when it loses.
 
@@ -4503,6 +4717,26 @@ def test_a_value_decided_at_run_time_is_recorded_not_dropped():
     assert branch.outcome == "runtime(newStatus)"
 
 
+def test_a_bind_filled_from_a_local_bound_once_to_a_call_is_that_call():
+    """``varMap[":modificationTime"] = timeNow`` after ``timeNow = naive_utcnow()``: the bind is the clock.  The one
+    binding chose no value, so the value is decided where the bind is put, as before: its lines and tests are the
+    put's, and what the code writes between the two is about the write (``throttleTasks_JEDI``'s reason)."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID):\n"
+        "        timeNow = naive_utcnow()\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET modificationTime=:modificationTime WHERE jediTaskID=:jediTaskID'\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        varMap[':modificationTime'] = timeNow\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    (branch,) = [b for j in junctions if j.subject.endswith(".modificationTime") for b in j.branches]
+
+    assert (branch.outcome, branch.tier, branch.line) == ("runtime(naive_utcnow())", 2, 7)
+
+
 def test_clearing_a_column_is_spelled_the_way_the_attribute_slice_spells_it():
     """``SET oldStatus=NULL`` and ``taskSpec.oldStatus = None`` are one fact.
 
@@ -4568,6 +4802,40 @@ def test_what_the_database_itself_decides_is_a_branch_not_a_dropped_write():
     # the statement cannot say which spec owns the row and the table does.
     assert outcomes["JEDI_Datasets.nFiles"] == [("runtime(nFiles+:iFiles)", 2)]
     assert outcomes["JEDI_Datasets.modificationTime"] == [("runtime(CURRENT_DATE)", 2)]
+
+
+def test_a_time_a_statement_writes_is_a_clock_plus_an_offset():
+    """``SET modificationTime=CURRENT_DATE-1/24`` writes the database's clock less an hour, and a bind filled with
+    ``timeNow - datetime.timedelta(hours=6)`` after ``timeNow = naive_utcnow()`` Python's clock less six: each
+    branch says so as an amount (:attr:`Branch.amount`), as a read site's condition value does, so a reader that
+    knows when the value was made knows the value.  A parameter as it stands and the row's own count plus a bind
+    are no amount the outcome does not already say."""
+    source = (
+        "class M:\n"
+        "    def f(self, startTime):\n"
+        "        timeNow = naive_utcnow()\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET modificationTime=CURRENT_DATE-1/24,lockedTime=CURRENT_DATE,'\n"
+        "        sqlU += 'frozenTime=:frozenTime,startTime=:startTime,nFiles=nFiles+:iFiles WHERE jediTaskID=:jediTaskID '\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = 1\n"
+        "        varMap[':frozenTime'] = timeNow - datetime.timedelta(hours=6)\n"
+        "        varMap[':startTime'] = startTime\n"
+        "        varMap[':iFiles'] = 1\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    amounts = {
+        j.subject.split(".")[-1]: [
+            None if b.amount is None else (b.amount.kind, b.amount.base, b.amount.offset_seconds) for b in j.branches
+        ]
+        for j in junctions
+    }
+
+    assert amounts["modificationTime"] == [("clock", "CURRENT_DATE", -3600.0)]
+    assert amounts["lockedTime"] == [("clock", "CURRENT_DATE", 0.0)]
+    assert amounts["frozenTime"] == [("bind", "naive_utcnow", -21600.0)]
+    assert amounts["startTime"] == [None]
+    assert amounts["nFiles"] == [None]
 
 
 def test_a_bind_filled_with_a_non_string_constant_is_settled():
@@ -5465,6 +5733,25 @@ def test_the_key_half_of_the_loop_is_not_a_value():
     )
 
     assert bound == []
+
+
+def test_a_module_constant_read_by_its_full_dotted_path_is_its_value():
+    """``adder_gen`` imports ``pandaserver.dataservice.ErrorCode`` whole and writes ``ddmErrorCode =
+    pandaserver.dataservice.ErrorCode.EC_Adder``: the constant ``ErrorCode.EC_Adder`` is under ``from
+    pandaserver.dataservice import ErrorCode``, 200 either way.  A path the file imports no module by is not read."""
+    dotted, imported, not_imported = _settled(
+        "import pandaserver.dataservice.ErrorCode\n"
+        "from pandaserver.dataservice import ErrorCode\n"
+        "def f(self):\n"
+        "    a = pandaserver.dataservice.ErrorCode.EC_Adder\n"
+        "    b = ErrorCode.EC_Adder\n"
+        "    c = pandaserver.dataservice.Other.EC_Adder\n",
+        ("EC_Adder = 200\n", "pandaserver/dataservice/ErrorCode.py"),
+        ("EC_Adder = 7\n", "pandaserver/dataservice/Other.py"),
+    )
+
+    assert dotted == imported == ["200"]
+    assert not_imported == []
 
 
 def _settled_by_name(caller: str) -> dict[str, list[str]]:
@@ -20210,6 +20497,349 @@ def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_
     ]
 
 
+#: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,
+#: from a map whose callers hand one key or the other; and one over a map no caller is read for.
+_KEYED_WHERE = '''
+class TaskModule:
+    def updateTask_JEDI(self, taskSpec: JediTaskSpec, criteria):
+        if criteria == {}:
+            return False
+        taskSpec.status = "running"  # SET
+        sqlU = f"UPDATE ATLAS_PANDA.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in criteria.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        for tmpKey, tmpVal in taskSpec.valuesMap(useSeq=False, onlyChanged=True).items():
+            varMap[tmpKey] = tmpVal
+        self.cur.execute(sqlU + sql, varMap)  # RUN T
+        return True
+
+    def queryDatasetWithMap(self, map):
+        sql = "SELECT name FROM ATLAS_PANDA.Datasets"
+        varMap = {}
+        for key in map:
+            sql += f" WHERE {key}=:{key}"
+            varMap[f":{key}"] = map[key]
+        self.cur.execute(sql, varMap)  # RUN D
+        return self.cur.fetchall()
+
+    def unread(self, task, handed):
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in handed.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        varMap[":status"] = "done"
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status " + sql, varMap)  # RUN U
+
+    def caller(self, taskSpec: JediTaskSpec, name, vuid):
+        self.updateTask_JEDI(taskSpec, {"jediTaskID": taskSpec.jediTaskID})
+        self.queryDatasetWithMap({"name": name})
+        self.queryDatasetWithMap({"vuid": vuid})
+'''
+
+
+def test_a_where_term_built_from_a_maps_keys_is_a_term_for_each_key_its_callers_hand(tmp_path):
+    """``updateTask_JEDI``'s ``{tmpKey}=:cr_{tmpKey}`` over its criteria is read for each key the criteria hold through
+    the corpus's calls, as a ``SET`` item ``{}=:{}`` is (:func:`sql.keyed_items`): the write keyed by ``jediTaskID``,
+    marked as there only when the caller's map holds the key.  A map read for no key keeps the term unread."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/Specs.py": _MAPPED_SPECS, rel: _KEYED_WHERE}
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions + arms,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            modules=modules,
+            attributor=attributor,
+        )
+    lines = _KEYED_WHERE.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    found = sorted(
+        (one.owner.rpartition("::")[2], one.statement, one.table, one.term, one.keyed)
+        for one in froms
+        if one.term and one.table
+    )
+    assert found == [
+        ("queryDatasetWithMap", at("# RUN D"), "Datasets", "name=:name", "map"),
+        ("queryDatasetWithMap", at("# RUN D"), "Datasets", "vuid=:vuid", "map"),
+        ("updateTask_JEDI", at("# RUN T"), "JEDI_Tasks", "jediTaskID=:cr_jediTaskID", "criteria"),
+    ]
+    (keyed,) = [one for one in froms if one.term == "jediTaskID=:cr_jediTaskID"]
+    # A value of the map's items reads as the map itself (KeySource.paths): the caller's criteria, key and all.
+    assert [(s.kind, s.name, s.paths) for s in keyed.sources] == [("parameter", "criteria", ["()"])]
+    # The map is filled from the spec's valuesMap() entry by entry: the statement persists the spec, so its write is
+    # on the row the term names, and no record is left for an object no write persists.
+    assert keyed.writes == {"JediTaskSpec.status": [at("# SET")]}
+    assert not [one for one in froms if one.owner.endswith("::updateTask_JEDI") and not one.table]
+    read = {s.owner.rpartition("::")[2]: s for s in sites}
+    assert read["queryDatasetWithMap"].keys == ["Datasets.name", "Datasets.vuid"]
+    assert read["queryDatasetWithMap"].keyed == ["Datasets.name", "Datasets.vuid"]
+    assert not [one for one in froms if one.owner.endswith("::unread") and one.term]
+
+
+#: A term whose binds a parameter fills (``status IN (:old___in)`` from *oldStatus*), and a caller handing it a list
+#: of literals a spec's method returns, and one more.
+_PARAMETER_TERM = '''
+class TaskModule:
+    def updateTaskOld_JEDI(self, taskSpec: JediTaskSpec, jediTaskID, oldStatus=None):
+        varMap = taskSpec.valuesMap(useSeq=False, onlyChanged=True)
+        varMap[":jediTaskID"] = jediTaskID
+        sql = f"UPDATE ATLAS_PANDA.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} WHERE jediTaskID=:jediTaskID "
+        if oldStatus is not None:
+            names, old_map = get_sql_IN_bind_variables(oldStatus, prefix=":old_", value_as_suffix=True)
+            sql += f"AND status IN ({names}) "
+            varMap.update(old_map)
+        self.cur.execute(sql + comment, varMap)  # RUN
+'''
+
+_PARAMETER_CALLER = '''
+from pandaserver.taskbuffer.Specs import JediTaskSpec
+from pandaserver.taskbuffer.db_proxy_mods.task_module import TaskModule
+
+
+class Generator:
+    def __init__(self, proxy: TaskModule):
+        self.proxy = proxy
+
+    def run(self, taskSpec: JediTaskSpec):
+        self.proxy.updateTaskOld_JEDI(taskSpec, taskSpec.jediTaskID, oldStatus=JediTaskSpec.statusToUpdateContents() + ["pending"])
+'''
+
+
+def test_a_term_a_parameter_fills_points_at_what_each_call_hands_the_parameter(tmp_path):
+    """``updateTask_JEDI``'s ``status IN (:old___in)`` is filled from its *oldStatus*: the KeyFrom's source ends at the
+    parameter, and points at its ParameterFrom (:func:`sqlwrite.parameter_ends`), read with the guards' -- what
+    ``JobGenerator`` hands it, a spec method's list of literals and one more, element by element."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    caller = "pandajedi/jediorder/Generator.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path,
+        {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _PARAMETER_TERM, caller: _PARAMETER_CALLER},
+    )
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    trees = {module.rel_path: module.tree for module in modules}
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources([], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules)
+        ends = sqlwrite.parameter_ends(froms)
+        _guards, parameters, *_rest = heldfrom.guard_froms(
+            junctions, sites, trees, calls, record, parameters=ends
+        )
+    def_line = next(n for n, line in enumerate(_PARAMETER_TERM.split("\n"), 1) if "def updateTaskOld_JEDI" in line)
+    owner = f"{rel}::updateTaskOld_JEDI"
+    (term,) = [one for one in froms if one.owner == owner and one.term.startswith("status IN")]
+    assert [(s.kind, s.name, s.site_owner, s.site_line) for s in term.sources] == [
+        ("parameter", "oldStatus", owner, def_line)
+    ]
+    (old,) = [one for one in parameters if one.owner == owner and one.parameter == "oldStatus"]
+    assert old.line == def_line
+    assert sorted(s.name for s in old.sources if s.kind == "constant") == ["'defined'", "'pending'", "'ready'"]
+
+
+#: insertNewJob's INSERT of a job handed in, keyed by its PandaID; archiveJob's move; and an INSERT keyed by a field the
+#: function itself assigns on the object it was handed, ppEventServiceJob's jobParamsTable row.
+_HANDED_PROXY = '''
+class JobModule:
+    def insertNewJob(self, job: JobSpec):
+        sql1 = f"INSERT INTO ATLAS_PANDA.jobsDefined4 ({JobSpec.columnNames()}) "
+        sql1 += JobSpec.bindValuesExpression()
+        self.cur.execute(sql1 + comment, job.valuesMap())  # NEW JOB
+
+    def archiveJob(self, job: JobSpec):
+        sql1 = f"INSERT INTO ATLAS_PANDA.jobsArchived4 ({JobSpec.columnNames()}) "
+        sql1 += JobSpec.bindValuesExpression()
+        self.cur.execute(sql1 + comment, job.valuesMap())  # ARCHIVE
+
+    def cloneJob(self, jobSpec: JobSpec, val):
+        jobSpec.PandaID = int(val)  # STORE IN
+        varMap = {":PandaID": jobSpec.PandaID, ":jobStatus": "activated"}
+        self.cur.execute("INSERT INTO ATLAS_PANDA.jobsActive4 (PandaID,jobStatus) VALUES (:PandaID,:jobStatus) ", varMap)  # CLONE
+
+    def fetch_ids(self, n):
+        self.cur.execute("SELECT ATLAS_PANDA.JOBSDEFINED4_PANDAID_SEQ.nextval FROM dual", {})
+        return [one for (one,) in self.cur.fetchall()]
+'''
+
+_HANDED_CALLER = '''
+from pandaserver.taskbuffer.Specs import JobSpec
+from pandaserver.taskbuffer.db_proxy_mods.job_module import JobModule
+
+
+class Buffer:
+    def __init__(self, proxy: JobModule):
+        self.proxy = proxy
+
+    def storeJobs(self, jobs: list[JobSpec]):
+        new_ids = self.proxy.fetch_ids(len(jobs))
+        for idx, job in enumerate(jobs):
+            job.PandaID = new_ids[idx]  # SET ID
+            self.proxy.insertNewJob(job)
+
+    def archiveJobs(self, jobs: list[JobSpec]):
+        for job in jobs:
+            self.proxy.archiveJob(job)
+'''
+
+
+def _handed_built(tmp_path, specs: str = _MAPPED_SPECS):
+    """The build's steps an INSERT's mark is read in, over :data:`_HANDED_PROXY` and :data:`_HANDED_CALLER`: the key
+    records and their sources, the guards' records with the ParameterFroms the sources end at, then the births
+    (:func:`sqlwrite.handed_births`).  ``(KeyFroms, junctions, modules, marks before the births)``."""
+    proxy = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    caller = "pandaserver/taskbuffer/Buffer.py"
+    modules, calls, record = _keyed_corpus(
+        tmp_path, {"pandaserver/taskbuffer/Specs.py": specs, proxy: _HANDED_PROXY, caller: _HANDED_CALLER}
+    )
+    _s, arms, *_rest = progress.extract(modules, MAP_ID, VERSION)
+    attributor = attribution.SpecAttributor(
+        progress.spec_attributes(modules), attribution.class_bases(modules)
+    )
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_table_classes(modules)
+    keys = {
+        "jobsdefined4": frozenset({"pandaid"}),
+        "jobsarchived4": frozenset({"pandaid"}),
+        "jobsactive4": frozenset({"pandaid"}),
+    }
+    froms: list[KeyFrom] = []
+    trees = {module.rel_path: module.tree for module in modules}
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, keys, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [],
+            junctions + arms,
+            calls,
+            record,
+            key_froms=froms,
+            read_sites=sites,
+            table_class=attributor.class_for_table,
+            modules=modules,
+            attributor=attributor,
+        )
+        ends = sqlwrite.parameter_ends(froms)
+        _guards, parameters, _sets, writes, _fields = heldfrom.guard_froms(
+            junctions + arms, sites, trees, calls, record, parameters=ends
+        )
+    before = {
+        (one.owner.rpartition("::")[2], one.table): (one.new_row, one.new_row_by) for one in froms if one.new_row_by
+    }
+    every = junctions + arms
+    sqlwrite.handed_births(froms, every, writes, parameters)
+    return froms, every, modules, before
+
+
+def _at(text: str, where: str) -> int:
+    return next(n for n, line in enumerate(where.split("\n"), 1) if text in line)
+
+
+def test_an_insert_of_an_object_handed_in_is_new_where_its_key_was_given_a_value_before_it(tmp_path):
+    """An INSERT keyed by a field of an object of its class handed in is not said by the function alone: who made the
+    key is the caller's.  Where the field was given a value on that object before the statement on every way -- in a
+    caller before its call (storeJobs' ``job.PandaID = new_ids[idx]`` for insertNewJob), or in the function itself
+    (cloneJob, as ppEventServiceJob keys its jobParamsTable row by the PandaID its job's RETURNING gave) -- the row is
+    new, not of its class, and *new_row_at* says where (:func:`sqlwrite.handed_births`).  archiveJob's callers give
+    the field no value: still not said."""
+    proxy = "pandaserver/taskbuffer/db_proxy_mods/job_module.py"
+    caller = "pandaserver/taskbuffer/Buffer.py"
+    froms, _junctions, _modules, before = _handed_built(tmp_path)
+    marks = {
+        (one.owner.rpartition("::")[2], one.table): (one.new_row, one.new_row_by, one.new_row_at)
+        for one in froms
+        if one.new_row_by
+    }
+    assert before[("insertNewJob", "jobsDefined4")] == (None, "handed in as its class")
+    assert before[("cloneJob", "jobsActive4")] == (None, "handed in as its class")
+    assert marks[("insertNewJob", "jobsDefined4")] == (
+        True,
+        "not of its class",
+        f"{caller}:{_at('# SET ID', _HANDED_CALLER)}",
+    )
+    assert marks[("cloneJob", "jobsActive4")] == (True, "not of its class", f"{proxy}:{_at('# STORE IN', _HANDED_PROXY)}")
+    assert marks[("archiveJob", "jobsArchived4")] == (None, "handed in as its class", "")
+
+
+#: JobSpec's map as PanDA's: an unset field reads back ``"NULL"``, written ``0`` where the field is one of _zeroAttrs.
+_ZERO_SPECS = """
+class JobSpec(object):
+    _attributes = ("PandaID", "jobStatus", "taskBufferErrorCode", "jobName")
+    _zeroAttrs = ("taskBufferErrorCode",)
+
+    def valuesMap(self, useSeq=False, onlyChanged=False):
+        ret = {}
+        for attr in self._attributes:
+            val = getattr(self, attr)
+            if val == "NULL":
+                if attr in self._zeroAttrs:
+                    val = 0
+                else:
+                    val = None
+            ret[f":{attr}"] = val
+        return ret
+"""
+
+
+def test_an_insert_making_a_row_of_an_object_written_whole_writes_its_classs_value_of_an_unset_field(tmp_path):
+    """ZDF: JobSpec's valuesMap writes ``0`` for a field of ``_zeroAttrs`` no code set (``progress.spec_unset_values``),
+    so insertNewJob's INSERT -- a row made, of the job written whole -- is an arm writing ``0`` to
+    ``taskBufferErrorCode`` where the job does not hold one: a tier-1 arm at the INSERT, marked as the unset field's
+    value (:attr:`Branch.unset_default`), and a write of the field at that line on the INSERT's records, so a reader
+    asking whether a write makes its row reads it as a birth.  archiveJob's INSERT moves a row (not said here):
+    none.  cloneJob's INSERT writes no object whole: none."""
+    froms, junctions, modules, _before = _handed_built(tmp_path, _ZERO_SPECS)
+    assert progress.spec_unset_values(modules) == {("JobSpec", "taskBufferErrorCode"): "0"}
+    sqlwrite.unset_births(junctions, froms, progress.spec_unset_values(modules), modules, MAP_ID, VERSION)
+    line = _at("# NEW JOB", _HANDED_PROXY)
+    arms = [
+        (j.owner.rpartition("::")[2], b.line, b.outcome, b.tier, b.unset_default)
+        for j in junctions
+        if j.subject == "JobSpec.taskBufferErrorCode"
+        for b in j.branches
+    ]
+    assert arms == [("insertNewJob", line, "0", 1, "JobSpec.taskBufferErrorCode")]
+    (born,) = [one for one in froms if one.owner.endswith("::insertNewJob") and one.table == "jobsDefined4"]
+    assert born.writes["JobSpec.taskBufferErrorCode"] == [line]
+
+
 _READ_TWICE = '''
 class TaskModule:
     def countTasks(self, vo):
@@ -21600,3 +22230,145 @@ def test_an_object_write_holds_a_field_however_it_is_assigned(tmp_path):
         "JediFileSpec.proc_status": [bumped],
         "JediFileSpec.status": [fetched],
     }
+
+
+#: ``_read_task_with_unprocessed_inputs``'s lock: the ``UPDATE`` changes the row only where nobody holds it, and the
+#: function says so under a test of the row count; then a second statement, with its own count test.
+_COUNTED = '''
+class TaskModule:
+    def lock(self, jediTaskID, pid, timeLimit):
+        sqlL = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=:newLockedBy,modificationTime=CURRENT_DATE "
+        sqlL += "WHERE jediTaskID=:jediTaskID AND lockedBy IS NULL AND modificationTime<:timeLimit "
+        sqlC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET errorDialog=:err WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":newLockedBy"] = pid
+        varMap[":timeLimit"] = timeLimit
+        tmpLog.debug(sqlL + str(varMap))
+        self.cur.execute(sqlL, varMap)
+        nRow = self.cur.rowcount
+        if nRow != 1:
+            tmpLog.debug(f"failed to lock jediTaskID={jediTaskID}")
+            return False
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":err"] = "locked"
+        self.cur.execute(sqlC, varMap)
+        if self.cur.rowcount == 0:
+            tmpLog.debug(f"no task to mark jediTaskID={jediTaskID}")
+        return True
+'''
+
+
+def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_landed(tmp_path):
+    """``failed to lock jediTaskID=...`` runs only where the lock ``UPDATE`` changed not exactly one row: it says the
+    lock's writes did not land, not which value the block chose.  So it is no frame of the lock's arms
+    (:attr:`Branch.messages`) but a count print of each (:attr:`Branch.count_prints`, ``not_one``); the second
+    statement's ``no task to mark`` under ``if self.cur.rowcount == 0:`` is its arm's (``none``), the count being
+    that run's, not the lock's."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _COUNTED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    failed, unmarked = _at("failed to lock", _COUNTED), _at("no task to mark", _COUNTED)
+    arms = {
+        j.subject.split(".")[-1]: [([(p.line, p.frame, p.rows) for p in b.count_prints], b.messages) for b in j.branches]
+        for j in junctions
+    }
+
+    lock = [(failed, "failed to lock jediTaskID={}", "not_one")]
+    assert arms["lockedBy"] == [(lock, [])]
+    assert arms["modificationTime"] == [(lock, [])]
+    assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
+
+
+#: The proxy puts the type and the task into a message; the buffer hands its own on to it; the feeder sends.
+_MESSAGE_BUFFER = '''
+import json
+
+
+class Proxy:
+    def push(self, msg_type, task_id, data=None):
+        msg_dict = {}
+        msg_dict.update({"msg_type": msg_type, "taskid": task_id})
+        self.mq.send(json.dumps(msg_dict))
+
+
+class Buffer:
+    def __init__(self):
+        self.proxy = Proxy()
+
+    def push(self, msg_type, task_id):
+        return self.proxy.push(msg_type, task_id)
+'''
+
+_MESSAGE_FEEDER = '''
+from pkg.buffer import Buffer
+
+
+class Feeder:
+    def __init__(self, tb: Buffer):
+        self.tb = tb
+
+    def run(self, jediTaskID):
+        self.tb.push("job_generator", jediTaskID)
+        self.tb.push("contents_feeder", jediTaskID)
+'''
+
+_MESSAGE_PROCS = '''
+import json
+
+
+class GeneratorProc:
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        msg_type = msg_dict["msg_type"]
+        if msg_type != "job_generator":
+            raise RuntimeError(f"got unknown msg_type {msg_type}")
+        task_id = int(msg_dict["taskid"])
+        return task_id
+
+
+class AnyProc:
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        task_id = msg_dict["taskid"]
+        return task_id
+'''
+
+
+def test_a_message_sent_with_a_literal_type_is_joined_to_the_function_taking_only_that_type(tmp_path):
+    """``ContentsFeeder`` sends ``jedi_job_generator`` through the task buffer, which hands its type on to the proxy
+    that puts it into the message; ``JediJobGeneratorMsgProcPlugin.process`` takes only that type and binds
+    ``task_id`` from ``taskid``.  The send and the receiver are joined as a :class:`MessageEdge`, beside reach: the
+    receiver runs in another process.  A type no receiver takes only, and a receiver taking any type, join
+    nothing; the buffer's own call hands a name, not a type, and is no send."""
+    files = {
+        "pkg/buffer.py": _MESSAGE_BUFFER,
+        "pkg/feeder.py": _MESSAGE_FEEDER,
+        "pkg/procs.py": _MESSAGE_PROCS,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    edges = messages.edges(modules, calls)
+
+    assert [
+        (edge.sender, edge.line, edge.msg_type, edge.sent, edge.receiver, [(r.key, r.line, r.name) for r in edge.reads])
+        for edge in edges
+    ] == [
+        (
+            "pkg/feeder.py::run",
+            _at('"job_generator"', _MESSAGE_FEEDER),
+            "job_generator",
+            {"taskid": "jediTaskID"},
+            "pkg/procs.py::process",
+            [("taskid", _at('int(msg_dict["taskid"])', _MESSAGE_PROCS), "task_id")],
+        )
+    ]

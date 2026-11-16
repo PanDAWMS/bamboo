@@ -671,6 +671,30 @@ def _row_filled(calls: Any, rel: str, func: ast.AST, read: ast.expr, bound: tupl
     return held is not None and not held.others and _from_the_row(held, column, keys)
 
 
+def printed_row_column(fn: R.Function, line: int, attr: str, keys: set[str]) -> bool:
+    """M3(a)-2 step 1: whether every read of ``.attr`` the statement at *line* of *fn* makes -- a print's hole -- is
+    filled from one row of a statement testing a key column (*keys*, lower case) equal to a bind, as the column
+    *attr* (:func:`_row_filled`, K71's reading): Watcher.run's ``job.modificationTime`` at 78, *job* filled by
+    peekJob from the row of ``PandaID=:PandaID``.  False where it makes no such read or the map's types cannot be
+    asked."""
+    try:
+        types = asked._types()
+        tree = types.tree(fn.rel)
+        if tree is None:
+            return False
+        func = next(f for f, _ in pathcond.functions_with_owner(tree) if f.lineno == fn.node.lineno and f.name == fn.name)
+        calls = PR._calls_index(types)
+        owned = types.method_class(fn.rel, func)
+    except (StopIteration, LookupError, ValueError):
+        return False
+    stmt = R.statement_at(func, line)
+    if stmt is None:
+        return False
+    bound = tuple(calls.objects_of(owned)) if owned else ()
+    reads = [n for n in ast.walk(stmt) if isinstance(n, ast.Attribute) and n.attr == attr and isinstance(n.ctx, ast.Load)]
+    return bool(reads) and all(_row_filled(calls, fn.rel, func, n, bound, attr.lower(), keys) for n in reads)
+
+
 #: what a conversion's tests and value may call: builtins with no effect, and the builtin types a test names
 _PURE_BUILTINS: dict[str, Callable[..., Any]] = {f.__name__: f for f in (isinstance, str, int, float, bool, len, repr, abs, type)}
 _BUILTIN_TYPES = {t.__name__: t for t in (int, str, float, bool, bytes, list, dict, tuple, set, frozenset)}

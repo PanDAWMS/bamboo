@@ -86,6 +86,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "restricts",
         "consults",
         "keys",
+        "keyed",
         "order_by",
         "limits",
         # What each route of calls reads, and whether the routes are all of them.
@@ -301,6 +302,9 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "same_pass",
     "rewrites",
     "rewrites_open",
+    "unset_default",
+    "amount",
+    "count_prints",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",
@@ -384,6 +388,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "handlers": (
         "records beside the nodes, not nodes: the endpoints' records of the async requests' handlers -- see "
         "MapFragment.handlers; a dump's section compare reads them"
+    ),
+    "message_edges": (
+        "records beside the nodes, not nodes: a message one run sends and the function another run takes it with -- "
+        "see MessageEdge; a dump's section compare reads them"
     ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,

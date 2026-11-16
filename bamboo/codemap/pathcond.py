@@ -2088,7 +2088,12 @@ def reaching_values(
 
     Nothing where no binding that reaches *at* settles or is told.  The name
     is then a run-time value as a whole, which a reader reads as one, and
-    that is what it read before any binding was asked.
+    that is what it read before any binding was asked -- unless one binding
+    alone reaches *at*, and it binds the name whole to an expression: then
+    that expression is what the name holds there, a run-time value still,
+    spelled by what makes it.  ``killJob``'s ``currentTime = naive_utcnow()``
+    is what ``job.endTime = currentTime`` writes, the clock and not a name.
+    Where several reach, each is left to the name as before.
     """
     settle = resolve or _literal_only
     whole = {id(assignment): (assignment, written) for assignment, written in _whole_assignments(func, name)}
@@ -2097,7 +2102,7 @@ def reaching_values(
         for key, (assignment, written) in whole.items()
     }
     told = tested_values(ast.Name(id=name, ctx=ast.Load()), at, func)
-    if not any(settled.values()) and not told:
+    if not any(settled.values()) and not told and not whole:
         return []
     own = [binding for binding in bindings(func, name) if not binding.nested]
     sites = _unique([binding.site for binding in own])
@@ -2146,7 +2151,10 @@ def reaching_values(
                 site,
             )
         )
-    return found if any(one.values for one in found) else []
+    if any(one.values for one in found):
+        return found
+    # Nothing that reaches settles: the one whole binding alone, or the name.
+    return found if len(found) == 1 and found[0].expression is not None else []
 
 
 def _literal_only(expression: ast.expr, _func: ast.AST) -> list[str]:

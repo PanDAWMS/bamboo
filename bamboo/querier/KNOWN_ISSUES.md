@@ -221,10 +221,16 @@ its 51 not-settled judgements lacking rows (JediDatasetSpec 50, FileSpec 1) all 
 (`out/nrow/nr0-summary.txt`); JediFileSpec and T_TASK appear there only in refused ones; the FileSpec one's rows
 are in its file's `linked` (the harness's reading of f99a537's ask, 10-29).  The fetch that answers
 them is the harness's (stage 2); until it reads them the file keeps its sections as now.  A stop no other rule
-names, with rows asked, has the code `rows` -- not `asks`, which the harness records the logs for.  An iterable the
-walk does not read as a row's attribute asks nothing.
+names, with rows asked at one of the first three places, has the code `rows` -- not `asks`, which the harness records
+the logs for (`Rerun.rows_code`).  Each ask carries its place (`place`: `loop`, `call`, `answers`, `linked`).  The 4th
+place's asks alone do not code a stop: its statement stays not settled whatever the rows, so a stop beside them is not
+one for them (NT-pending-late, r4x38, was coded `rows` though its stop is two U2 branches, K55 and a log ask; tmaeno's
+OK 2026-11-15 18:34).  The first place need not stop either: a loop over a collection the file lacks leaves what it
+binds unknown (`Walk.elements` gives None) and the walk goes on, so a stop after it for another reason is coded `rows`
+all the same; none on v88's r5 (its only rows asks are the 4th place's, 2 questions).  An iterable the walk does not
+read as a row's attribute asks nothing.
 
-*Shows:* `rows_asks` in result.json (`path`, `count`); a stop coded `rows`.
+*Shows:* `rows_asks` in result.json (`path`, `count`); each ask's `place` in the rows-asks file; a stop coded `rows`.
 *Revisit:* when the harness's fetch answers them (stage 2); when the rows file's old sections go (stage 3).  The 4th
 place's answer is many rows of a class (a task's datasets), and S1 compares one row of each class: reading it needs
 a comparison that takes the row where some joined row holds the terms, which is not built.
@@ -665,6 +671,22 @@ key alone ('pandaid asc', MJ-activated-late) left no column and stopped.  Now (t
   job/get_status_history takes keys, not a value and a site.  So the answers are a hand's SQL, or a fetch by the
   parts, until PanDA answers the structure.
 
+The questions are asked under the order the call that took the row sorted by, not the statement's other order (the
+analyzer handover's out/gm/qk-design.md, the section on L3's fix, step 1, tmaeno's OK 2026-11-15 17:27).  L3 counted under the
+other: rows ahead under an order no call is shown to have used do not say why the row waited.  NJ-activated-late
+(v88) was taken by a call sorting by getCriteriaForGlobalShares (gshare's rank, currentpriority desc, pandaid asc;
+the call's 33 `:leave` binds) and counted under getCriteriaByAge's 'pandaid asc': 0 ahead at the move.  The live
+MJ-activated-late counted 1866 ahead under 'pandaid asc', and a call sorting by the other took it.  Now:
+- each question's name holds the order (`... at the move, under 'O', by ...`); the old names, without it, are read as
+  the other order's;
+- the other order is counted beside, where the rows file answers its questions, and never asked; an answer that does
+  not hold (the row not once in its own group, a column missing) is said, not stopped on;
+- no END: the run stops on the answers under the order that took the row, and with them on the count under it, which
+  is not built (step 2: its run-time ranking -- getJobs' CASE by gshare -- is in the taking call's binds, and the END
+  must show rows ahead at the move that had left, or the call's njobs).  The rows file's row holds neither gshare nor
+  currentpriority on both L3 cases (the sort line prints "-> ?"), so step 2 reads the row's own group as the answer's
+  group with n_self 1.
+
 What stays:
 - the order's columns are read as they are now (currentpriority, gshare); a term read as now that changed since
   the move (a time column) counts other rows than the call did;
@@ -672,18 +694,68 @@ What stays:
   there all differ from the row it left (its site changed at the move) is not counted;
 - the lookback: 8 days before the move (`L3_LOOKBACK`: copyArchive.py:509-512 kills an activated job created more than
   7 days before; D's group waited up to 169.1 h).  A row that entered the value earlier is not counted;
-- only the call that took the row is read: its WHERE and binds, and the other order counted.  The calls that passed
-  it over -- each picks its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by
-  gshare) and its binds from the pilot's request -- are not read;
+- only the call that took the row is read: its WHERE, binds and order.  The calls that passed it over -- each picks
+  its order by a draw (entity_module getSortingCriteria: by age about one in nine, else by gshare) and its binds
+  from the pilot's request -- are not read;
 - stuck does not reach L3: no call of a stuck row's statement is read (S1 asks the logs for the key, which a call that
   passed the row over does not print), and M2's "takes it" reads no first-rows statement in the five sets.  Its way
   in, and its count now from the row tables, are a design of their own (part B).
 
-*Shows:* L3's two questions under their names "... held V at the move, by the order's items before the key" and
-"... left V in the window, by the value it went to and the key"; "at the move (T): N row(s) ahead of it (G in groups
-ahead, K of its own group's M with a key ahead)"; the END's "read as now: ..." and "-- at least: ...".
-*Revisit:* when a stuck case's first-rows statement is read (part B); when the calls that passed the row over are
-read; when PanDA answers a history held at a moment.
+*Shows:* L3's two questions under their names "... held V at the move, under 'O', by the order's items before the
+key" and "... left V in the window, under 'O', by the value it went to and the key"; "under 'O' (the call that took it
+sorted by it)" and "(no call is shown to have sorted by it)"; beside, "at the move (T): N row(s) ahead of it (G in
+groups ahead, K of its own group's M with a key ahead)", "read as now: ...", "-- at least: ...", or "not counted:
+..."; the stop "a count of the rows ahead of it under 'O', the order the call that took it sorted by (KNOWN_ISSUES.md
+K48: not built)".
+*Revisit:* step 2, once the answers under the order that took the row are in a rows file; when a stuck case's
+first-rows statement is read (part B); when the calls that passed the row over are read; when PanDA answers a history
+held at a moment.
+
+### K77. A selection waiting on other rows is read at their last move, by function, from the rows the file links
+
+A mover's statement that selects the value can hold a term on other rows: prepareTasksToBeFinished_JEDI takes a task
+only where `NOT EXISTS` a dataset of it with files left (3694 on pin d, 3696 on v88).  The map held such a term as
+`other`, its text only, so the turn read nowhere: L2's judgement 1 said "held for the row at times not known" and sent
+the mover to its callers, who print no key (U2, K55).  MT-running-late stopped there although its one job finished 19.7
+s before the move.
+
+Now (design H, the analyzer handover's out/gm/qk-design.md "H", tmaeno's OK 2026-11-15 13:27:03; `hop.py`,
+`Rerun._hop_turn`, step O1 `Rerun.other_rows`): where the map structures the term (a condition node's `rows`: op,
+`correlated` pairs, inner tree), its tested columns' writers (junctions) are followed up the reach graph to the nearest
+functions that record the history of a class the rows file links to the row by a correlated column -- the carriers,
+each with the values it records (archiveJob: cancelled, closed, failed, finished, merging; propagateResultToJEDI, which
+writes the files' counts, is one call below).  The linked rows (`linked`) and their histories (`statuslogs`) say when
+the last of them entered a carrier value; late, inside the stay and every linked row in one by the move: an END naming
+that row, how long the mover took after it, and the next question -- the row's longest stay up to then, and its making
+where it came after the stay began.  Stuck: rows not in a carrier value at the window's end stop the branch (K77),
+named.  O1 is read before U1 where the mover's statement holds such a term; passes() reads it where no pass took the
+row.  It assumes:
+
+- *A carrier's values are its function's, not its arms'.*  archiveJob records merging too, and which of its arms
+  write which counts (propagateResultToJEDI treats a merging job's files apart) is not read; a row entering merging
+  can read as having moved on.  A row's entry into the value it holds at the end is read, not an earlier carrier value
+  (a scout job merging, then finished by its merge job's end, entered finished).
+- *The linked rows stand for the term's rows.*  The term counts a dataset's files; the rows file links the task's jobs.
+  Which job held which file is not read, and a job holding none (a build job, a merge job) is counted with the rest.
+- *A write of the term's columns comes with its carrier's transition.*  propagateResultToJEDI's update can be queued
+  (`insert_to_query_pool`, async) and run later; the END names how long after the last transition the move came.
+- *The term's other conditions are not read*: masterID, type and status of the inner rows hold as the selection needs.
+- *Only `NOT EXISTS` is read*; `EXISTS` and `IN (SELECT ...)` are left as before.
+
+*Shows:* "== O1 what other rows its selection waited on"; "H: ..." lines saying why it does not read (no carrier, no
+linked rows or history, a linked row not moved on at the move -- MT-scouting-late's 5 running jobs: it moved by the
+early count of finished scouts, another statement --, the term holding from the stay's start); the END "... moved it on
+N s after ...'s NOT EXISTS term on ... began to hold at T: the last of the row's N C row(s) by ... -- next: ...";
+stuck, the stop "... did not hold up to ..., the window's end: ... it waits on them".
+*Why not further now:* the map holds no term's structure yet (its H-a, x13_cx/subq/design.md, awaiting tmaeno's OK),
+nor the counts' writer in propagateResultToJEDI (a SET built from a dict's keys, same design); until both land H reads
+nothing (the 4 live cases L2's judgement 1 sends to their callers print the same on dump x13a3Bd).  On a probe dump
+that injects both: of the 8 live cases reaching 3694, MT-running-late STOP -> END, MT-scouting-late read and refused,
+6 the same (their movers' passes are found, so S2 reads them first; a stuck case's term is not read there).  The
+next question is named, not run; the rows a job's task and a task's parent need come by rows asks once the harness
+reads their histories (its stage 1).
+*Revisit:* when the map's H-a lands (the shape read here is its proposal); when EXISTS or IN terms are met; when a
+next question is to be run in the same process.
 
 ## Row values at a step's time (`held.py`)
 
@@ -801,7 +873,14 @@ the value then held need not be.  An arm whose function marks its runs by the ob
 creation to when the value was read, on every machine (F3, `windows.lifetime`), for its mark as its rows' prefix
 prints it with the key (`key_marks`: "changeTaskSplitRulePanda < jediTaskID=53351604 >", "; jediTaskID=53351078;
 siteID="), not the key alone -- a task's ID is on every line of the calls listing it (getTasksToBeProcessed_JEDI), and
-the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Each run found there whose mark holds
+the door would then ask each such mark whole (K13; the harness, 10-31 14:00).  Since 2026-11-15 (tmaeno's OK,
+14:44:05), such an arm whose write is the time it runs (`attr_time.NOW`) is asked around the value alone, from the value
+less SLACK to the value plus SLACK, for its own marks (`windows.near_value`).  If it wrote the value, it ran then, on
+its own clock, which its log's times use too.  The window does not hold the write (`holds_write`): another arm may
+have written the value.  The premise is that the run's records span the write's time within SLACK.  killJob writes a
+job's endTime this way (pin s 1021, 1024), but the map gives the value as `runtime(currentTime)`: it does not resolve
+the local to `naive_utcnow()` (below).  So NR-J-7422160126-endTime is still asked over its 47 h life; the
+resolution is asked of the map (11-15).  Each run found there whose mark holds
 the key is read as a row is, by its first record's time among the rows (`_runs_as_rows`), asked for the same marks; a
 run naming the key in its lines alone is another call's.  A life with no run, its logs shown to
 name the key and searched whole, is no pass of those writers, and one not searched whole leaves them open, newer than
@@ -1388,6 +1467,40 @@ is not read: MT-toabort-late), where one machine's cycles overlap (TaskRefiner's
 lines carry no mark (ContentsFeeder's, K70), or where the list is not made of a local.  One process per machine and
 label is a premise its lines cannot show (two whose short cycles take turns overlap nowhere), and a message
 processor's way in is named, not read.
+
+*Changed (A2, 2026-11-15, out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* where no pass of a late mover took
+the row before the one that moved it on, and the key each write of its arms takes the row by comes only from rows of
+selections on another table the map's `wakers` write -- getTasksToExecCommand_JEDI's 4483 by 4339's
+`prodsys_comm.comm_task`, a command row sendCommandTaskPanda inserts at 4038 -- the mover runs on the row when a waker
+wrote a row for its key (`Rerun._waker_turn`), before U1.  The wakers' runs of the key are asked over the stay on every
+machine; a run wrote where a row of it prints only on a path through the waker's line (`implying_rows`, H2's test); the
+last such write before the move ends the branch, with the value a row printed where it is one of the wakers' values,
+and the API entry the map's waker routes name where they name one.  None in the stay stops it (K55), naming the system
+an inbound boundary says writes the table too (DEFT's PRODSYS_COMM: no log here).  Premises named: that system wrote
+none in the stay; the mover's first pass after the write took it (its passes print no key).  Another source of the
+key, or a waker's log not searched whole, leaves it to U1 as before.  MT-exhausted-late: a retry command registered at
+11:14:16 on aipanda097, the move 7 s later.  The external actor is the chain's end, as a pilot's API call is; what A2
+reads is the table between the act and the mover (tmaeno, 2026-11-15).  A stuck value's stay is read alike up to the
+window's end, the statuslog's as_of: none in it stops the branch the same way (MT-exhausted-stuck: no command row for
+the task from 08:31:31 to 13:58:02); a write in it with the value not moved on is not read here (U1 as before).
+
+*Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
+question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
+leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row
+that printed the column at the stay's start says none wrote it before the print (`Rerun._printed_held`): the print is
+a hole of the map's prints reading `.attr` of an object every write of which fills it from the row by its key
+(`which_ran.printed_row_column`, K71's reading; Watcher.run's `lastmod:` at 78), its runs asked by the key over the
+stay.  The turn's premises say the column held so up to the selection that took the row only where the print is at or
+after it; else the arms are named as before, the print said too.  (2) A caller asked by the key alone rules nothing
+out, except where the late question's statement it selects with has no cap and its loop over the rows prints a hole
+the map says holds the row's key, a statement of the loop's own body before any of the statement's exits
+(`Rerun._row_key_print`): from the statement's turn, every pass reaching it prints the key, so with no line holding it
+before the move, the moving pass was the first to reach it after the turn (END), and stuck, none to the window's end
+stops it (`Rerun._keyed_turn`).  A pass that stopped before the statement (an error before it) is not told from one
+that did not run, and is named.  Effect: none on the live 144 yet -- (2) needs the map to name copyArchive main's 354
+`Sent Watcher {id}` hole as JobSpec.PandaID (the map's RHC); simulated with that hole named, MJ-sent-late goes to END
+by (2) alone, its time column's arms named (on the old version (1) does not hold on peekJob's fill).  For the current
+version's cases (v88's NJ-sent), measured after their records round.
 
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
@@ -2619,9 +2732,16 @@ Premises not read:
   the millisecond on the same host; elsewhere it is measured to the second only (recorded.py, JEDI_CLOCKS).
 - *The recorder's runs are in the records.*  Its methods' logs are asked on the row's host near the row, whole, as
   K67 asks them; where they are not answered the asks are kept and the pass is read as before.
-- *The row's recorder is called after one of the mover's own arms.*  The history pairs are read after the mover's arms
-  only: TaskCommando's pass that wrote 'exhausted' through retryTask_JEDI (MT-exhausted-late, 09:33:01.716) has none
-  after its arms 181 and 197 (those name updateTask_JEDI at 201), so it is read as one of the value's time.
+- *The row's recorder is called after one of the mover's own arms.*  *Changed (A1, 2026-11-15, the analyzer
+  handover's out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* at the row that began the value's time, where
+  none of the mover's arms' pairs places it, the pairs of another writer's arm that may write the value (the value, or
+  one known only at run time) are read too, where the map's reach goes from the mover's function into that arm's by
+  calls alone (`Rerun._entering_recorders`, `Rerun._reached`): TaskCommando's pass that wrote 'exhausted' through
+  retryTask_JEDI (MT-exhausted-late, 09:33:01.716; its arms 181 and 197 name updateTask_JEDI at 201) is that row's
+  pass, the recorder's run placed inside it by time, its call not named.  At the move the mover's own arms alone are
+  read, as before.  A recorder that prints nothing leaves no run to place: MJ-starting-late's update_job pass at
+  08:28:00, inside which updateJobStatus's recordStatusChange (silent) most likely recorded 'starting', stays one of
+  the value's time, and a line says so.
 - *A pass is one execution.*  A run with no entry row is not cut (JobGenerator's `<jediTaskID=... datasetID=...>` on
   aipanda081, 51 records in 9 bursts over two days, MT-throttled-stuck), and is read whole as before: not decided here.
 - *Between the first row of the value and a row writing it again, nothing is read.*  The window opens at the second

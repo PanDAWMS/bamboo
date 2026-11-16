@@ -864,6 +864,37 @@ class RewriteOpen(BaseModel):
     why: str = Field(description="One of the ``REWRITE_*`` reasons above :class:`SamePassWrite`.")
 
 
+#: :attr:`CountPrint.rows`: the statement changed no row.
+ROWS_NONE = "none"
+#: One row or more.
+ROWS_SOME = "some"
+#: Exactly one row.
+ROWS_ONE = "one"
+#: Not exactly one: none, or more than one.
+ROWS_NOT_ONE = "not_one"
+
+
+class CountPrint(BaseModel):
+    """A line the function prints in an arm of an ``if`` testing the row count of the run of the statement a branch's
+    write lands at (:attr:`Branch.count_prints`, :mod:`bamboo.codemap.panda.rowcounts`).
+
+    ``_read_task_with_unprocessed_inputs`` runs ``UPDATE ... SET lockedBy=:newLockedBy ... WHERE ... lockedBy IS
+    NULL``, reads ``n_row = self.cur.rowcount`` and prints ``failed to lock jediTaskID={}`` under ``if n_row != 1:``.
+    That line says the statement changed no row (or more than one), so the write did not land: it is the run's
+    outcome, not a frame of the decision, and it is not among :attr:`Branch.messages`.
+    """
+
+    line: int = Field(description="The print's line in the owner.")
+    frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
+    rows: str = Field(
+        description=(
+            f"What its printing says of the rows the run changed: {ROWS_NONE!r}, {ROWS_SOME!r}, {ROWS_ONE!r} or "
+            f"{ROWS_NOT_ONE!r}.  The body of an ``and`` holds its count comparison's reading; an ``else`` holds the "
+            "opposite only where the test is the comparison alone."
+        )
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -950,7 +981,9 @@ class Branch(BaseModel):
             "retry refusals and the goal check, which write prose.  Weaker "
             "evidence than a tag, since wording drifts between releases and "
             "two arms can share a frame, so a match names an arm only where it "
-            "is the only one."
+            "is the only one.  A frame printed under a test of a statement's "
+            "row count is not one: it says how the statement's run ended "
+            "(``count_prints``)."
         ),
     )
     line: Optional[int] = Field(
@@ -1027,6 +1060,27 @@ class Branch(BaseModel):
             "makes (``SubjectNode.truncated_to``): a value of one of them may "
             "be the head of a frame, not all of it.  Read with "
             "``value_frames``; ``[]`` where nothing cuts it."
+        ),
+    )
+    amount: Optional[ConditionValue] = Field(
+        default=None,
+        description=(
+            "A run-time value as an amount, the way a read site's condition value is one: a base -- a clock, or "
+            "``<function>.<parameter>`` -- plus an offset.  ``updateTask_JEDI``'s ``taskSpec.modificationTime = "
+            "timeNow - datetime.timedelta(hours=1)`` after ``timeNow = naive_utcnow()`` is kind ``bind``, base "
+            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written_amount`); a statement's own "
+            "``modificationTime=CURRENT_DATE-1`` is kind ``clock``, base ``CURRENT_DATE``, offset -86400.  So a "
+            "reader holding the time the value was made reads the value.  ``None`` where the value reads as no "
+            "base and offset (a constant the outcome states, a value only said), or as a parameter as it stands."
+        ),
+    )
+    count_prints: list[CountPrint] = Field(
+        default_factory=list,
+        description=(
+            "The lines the owner prints under a test of the row count of a run of the statement this branch's write "
+            "lands at (:attr:`KeyFrom.writes`), each with what it says of the rows changed: a run's ``failed to lock "
+            "jediTaskID=...`` after the lock ``UPDATE`` says the write did not land.  Its absence says the row "
+            "changed only where the line's level is in the log and the run is read past it.  Sorted by line."
         ),
     )
     must_prints: Optional[list[int]] = Field(
@@ -1139,6 +1193,17 @@ class Branch(BaseModel):
             "Whether the arm can leave a value other than the row's on a row made before it: "
             ":mod:`bamboo.codemap.panda.aftermade`, which says what that rests on.  ``None`` where not read: an arm "
             "``off_row`` holds, or of a class whose assignments the reach record does not keep."
+        ),
+    )
+    unset_default: str = Field(
+        default="",
+        description=(
+            "Where the arm is the value an ``INSERT`` making a row gives a field the object it writes whole does not "
+            "hold -- no code set it, and the spec's map writes the value its class declares for an unset field "
+            "(``JobSpec.valuesMap`` writes ``0`` for each of ``_zeroAttrs``, :func:`progress.spec_unset_values`) --: "
+            "the field, ``JobSpec.taskBufferErrorCode``.  The arm is at the ``INSERT``, written only where the field "
+            "is not set on the object there, which no print shows: a reader names that as a premise.  Empty for any "
+            "other arm."
         ),
     )
 
@@ -1982,6 +2047,18 @@ class ConditionValue(BaseModel):
             "nothing in the map fills."
         ),
     )
+    rows: Optional[RowsTerm] = Field(
+        default=None,
+        description="An ``other`` value one subquery gives: ``(SELECT MAX(fileID) FROM ...)``, its ``op`` ``value``.",
+    )
+    columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "An ``other`` value made only of the row's columns, numbers and "
+            "``+ - * /``: each column's subject, spelled as ``subject`` is -- "
+            "``nFilesFinished+nFilesFailed``.  The expression is not evaluated."
+        ),
+    )
 
 
 class ConditionNode(BaseModel):
@@ -2028,6 +2105,52 @@ class ConditionNode(BaseModel):
     settled: bool = Field(
         default=False,
         description="Every bind of the term is filled with a value the map settles, and nothing in it is ``other``.",
+    )
+    rows: Optional[RowsTerm] = Field(
+        default=None,
+        description=(
+            "An ``other`` term that asks about rows other than the statement's "
+            "own -- ``EXISTS``, ``NOT EXISTS``, ``IN (SELECT ...)``, ``NOT IN "
+            "(SELECT ...)`` -- as its subquery says it.  The term stays "
+            "``other``: this says what it asks, not whether it holds."
+        ),
+    )
+
+
+class RowsTerm(BaseModel):
+    """What a term asks of rows other than the statement's own, as its subquery says it: :attr:`ConditionNode.rows`.
+
+    ``NOT EXISTS (SELECT 1 FROM JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID AND masterID IS NULL AND
+    ...)`` is the datasets of the row's task (``correlated``) and what one of them must meet to stop the row
+    (``tree``).
+    """
+
+    op: str = Field(
+        ...,
+        description="``EXISTS``, ``NOT EXISTS``, ``IN``, ``NOT IN``, or ``value`` for the one value a comparison reads.",
+    )
+    tables: list[str] = Field(default_factory=list, description="The subquery's own tables, as ``ReadSiteNode.tables`` spells them.")
+    correlated: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<inner subject>=<outer subject>`` for each column of the subquery "
+            "its ``WHERE`` equates with one of a statement outside it: "
+            "``JediDatasetSpec.jediTaskID=JediTaskSpec.jediTaskID``."
+        ),
+    )
+    subject: str = Field(default="", description="``IN``/``NOT IN``: the subject of the column outside that is looked for.")
+    selected: str = Field(
+        default="",
+        description="The subject of the column the subquery selects, or that its selected aggregate is of.",
+    )
+    tree: Optional[ConditionNode] = Field(
+        default=None,
+        description=(
+            "The subquery's ``WHERE`` without the correlation, read as a "
+            "statement's own clause is, its binds settled by the same run: "
+            "what a row of ``tables`` must meet to count.  ``None`` where the "
+            "clause does not read; an ``all`` of nothing where it asks nothing more."
+        ),
     )
 
 
@@ -2367,6 +2490,14 @@ class ReadSiteNode(BaseNode):
             "time, sorted: ``JobSpec.jediTaskID`` for ``WHERE "
             "jediTaskID=:jediTaskID``, or a bind nothing in the map settles.  "
             "A statement asking by these alone is still a reader of the rows."
+        ),
+    )
+    keyed: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Those of *keys* a term built in a loop over a mapping's keys asks by (``WHERE {key}=:{key}`` over "
+            "``queryDatasetWithMap``'s *map*, :attr:`KeyFrom.keyed`), sorted: a run asks by one only where its "
+            "caller's mapping holds that key, so two of them need not be asked together."
         ),
     )
     order_by: list[str] = Field(
@@ -3285,13 +3416,19 @@ class KeySource(BaseModel):
     site_owner: str = Field(
         default="",
         description=(
-            "``rows`` / ``sequence``: the statement's owner.  On a :class:`HeldSource`, ``self_field``: the class whose "
-            "method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
+            "``rows`` / ``sequence``: the statement's owner.  ``parameter``: the function handed it, as "
+            ":class:`ParameterFrom` names it (``file::name``) -- where what each call hands it is found, on a "
+            ":class:`KeyFrom`'s source as on a :class:`HeldSource`.  On a :class:`HeldSource`, ``self_field``: the "
+            "class whose method the ``self`` is of, ``object``: the class built, as ``file::Class`` -- where the "
             ":class:`FieldFrom` of a field of it is found; empty where the ``self`` is no method's."
         ),
     )
     site_line: Optional[int] = Field(
-        default=None, description="``rows`` / ``sequence``: the line the statement runs on."
+        default=None,
+        description=(
+            "``rows`` / ``sequence``: the line the statement runs on.  ``parameter``: the line of the function's "
+            "``def``, its :attr:`ParameterFrom.line`."
+        ),
     )
     paths: list[str] = Field(
         default_factory=list,
@@ -3430,6 +3567,33 @@ class HeldThrough(BaseModel):
     )
 
 
+class HeldKeyed(BaseModel):
+    """One selection by a key computed at run time a :class:`HeldSource`'s way went through, where the map knows the
+    key the source sat under: ``JediTaskSpec.commandStatusMap()[commandStr]["doing"]`` at
+    ``task_complex_module.py:4446`` holds ``'dummy'`` under ``'resume'``, ``'avalanche'`` and ``'release'`` -- three
+    sources, each with its key -- and ``'aborting'`` under ``'kill'``.  The selection is a test in all but name: the
+    way is taken where *by* equals *key*.  Where *by* reads names of the function, a :class:`GuardFrom` at the
+    selection's line reads each (``test`` the selection as written), so a reader decides it with the names' values as
+    it decides a test."""
+
+    at: str = Field(description="``file:line`` of the selection.")
+    by: str = Field(
+        description=(
+            "What selects, as written: the key of ``d[k]``, ``d.get(k)``, ``d.pop(k)`` (``commandStr``); for a pair "
+            "of ``d.items()`` a loop takes, the name the loop binds the pair's key to (``for k, v in d.items()``: "
+            "``k``), empty where it binds none."
+        )
+    )
+    key: str = Field(
+        description=(
+            "The key the source sat under, as the reader placed it or a put stored it: a constant's repr "
+            "(``'resume'``, ``0``).  A sequence's position counts from its start: a *by* that is negative at run "
+            "time counts from its end, which the reader reads with the sequence's length.  A key that is a "
+            "constant's expression (``x[-1]``) is no selection by a value and keys nothing."
+        )
+    )
+
+
 class HeldSource(KeySource):
     """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
     of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
@@ -3521,6 +3685,17 @@ class HeldSource(KeySource):
             "taskParamMap:``, where the bindings under its ``elif`` and ``else`` reach the loop too.  Which of them a "
             "run made is the tests on the way to each, which have GuardFroms (:attr:`GuardFrom.calls`).  Not the "
             "function's entry, which no statement is; empty where each read on the way had one binding reaching it."
+        ),
+    )
+    keyed: list[HeldKeyed] = Field(
+        default_factory=list,
+        description=(
+            "Each selection by a key computed at run time the way went through where the map knows the key the "
+            "source sat under, in the order run (:class:`HeldKeyed`): sources that are one but for the key they sat "
+            "under are as many sources.  The selections' lines have GuardFroms of the tests on the way to them "
+            "(:attr:`GuardFrom.calls`).  Empty where the key is not known: the value was put under a computed key, or "
+            "the path carry says where it sits (``loose``), or the container is read on past the way's end (a "
+            "parameter's, a field's: the ``[*]`` among *steps*)."
         ),
     )
     sent: bool = Field(
@@ -3648,6 +3823,15 @@ class KeyFrom(BaseModel):
             "write persists, and for an ``INSERT`` into a table with no key."
         )
     )
+    keyed: str = Field(
+        default="",
+        description=(
+            "Where the term is one the statement builds in a loop over a mapping's keys, ``{tmpKey}=:cr_{tmpKey}`` "
+            "over ``updateTask_JEDI``'s *criteria*, the mapping as the function spells it: the term is one of the "
+            "keys the mapping holds through the corpus's calls (:func:`bamboo.codemap.panda.sql.keyed_items`), and "
+            "a run has it only where its caller's mapping holds that key.  Empty for a term the text spells."
+        ),
+    )
     writes: dict[str, list[int]] = Field(
         default_factory=dict,
         description=(
@@ -3722,6 +3906,16 @@ class KeyFrom(BaseModel):
         description=(
             "Where *new_row_by* is read: the statement selecting the sequence, the one returning the key, the value "
             "computed or carried, the delete -- or the ``INSERT`` itself."
+        ),
+    )
+    new_row_at: str = Field(
+        default="",
+        description=(
+            "Where the key of an object of the table's class handed in or held was given its value, as "
+            "``file:line``, read by :func:`bamboo.codemap.panda.recognizers.sqlwrite.handed_births`: an assignment of "
+            "the key's field on that object before the statement -- in the function, else in each caller before its "
+            "call (``storeJobs``' ``job.PandaID = new_panda_ids[idxJob]`` at ``TaskBuffer.py:358`` for "
+            "``insertNewJob``'s ``INSERT``).  Empty where the mark is read in the function itself (*new_row_line*)."
         ),
     )
     routes: int = Field(
@@ -4104,6 +4298,42 @@ class CoverageStat(BaseModel):
         return self.explained / self.candidates if self.candidates else 1.0
 
 
+class MessageRead(BaseModel):
+    """Where a message's receiver binds a key of it: ``task_id = int(msg_dict["taskid"])`` at 109."""
+
+    key: str = Field(description="The message's key: ``taskid``.")
+    line: int = Field(description="The binding's line in the receiver.")
+    name: str = Field(description="The name it binds: ``task_id``.")
+
+
+class MessageEdge(BaseModel):
+    """A message one run sends and the function another run processes it with (:mod:`bamboo.codemap.panda.messages`).
+
+    ``ContentsFeeder`` 785 sends ``jedi_job_generator`` for ``jediTaskID``, and
+    ``JediJobGeneratorMsgProcPlugin.process`` takes only that type, binding ``task_id`` from ``taskid``.  Not an edge
+    of reach: the receiver runs in another process, on its own run's input (``cross_run_not_reach``); a reader goes
+    from the send to the receiver's run as from a row's writer to its read site.  Which receiver listens to which
+    queue is the deployment's: the edge says the receiver takes no other type.
+    """
+
+    sender: str = Field(description="The sending function, ``file::name``.")
+    line: int = Field(description="The send's line in it.")
+    msg_type: str = Field(description="The type it sends, as the call's literal: ``jedi_job_generator``.")
+    sent: dict[str, str] = Field(
+        default_factory=dict,
+        description="Each payload key, the expression the send hands it: ``{\"taskid\": \"jediTaskID\"}``.",
+    )
+    columns: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Each payload key whose value's ways end at a statement's rows, the columns there as the tables' classes "
+            "declare them: ``{\"taskid\": [\"JediTaskSpec.jediTaskID\"]}``; a key left out where no way does."
+        ),
+    )
+    receiver: str = Field(description="The function processing only this type, ``file::name``.")
+    reads: list[MessageRead] = Field(default_factory=list, description="Where the receiver binds each key it reads.")
+
+
 class MapFragment(BaseModel):
     """What one recognizer contributes to a build.
 
@@ -4198,6 +4428,13 @@ class MapFragment(BaseModel):
             "(:func:`bamboo.codemap.panda.endpoints.handlers`): one per request type its table names "
             "(``processor.HANDLERS``), *route* ``async/<type>``, *version* ``async``.  A request is a row an "
             "endpoint inserts; which endpoint inserts which type is not read here."
+        ),
+    )
+    message_edges: list[MessageEdge] = Field(
+        default_factory=list,
+        description=(
+            "Each send of a message of a literal type and the function taking only that type "
+            "(:func:`bamboo.codemap.panda.messages.edges`): a run's hand-on to another run, beside reach."
         ),
     )
     declaration_yields: dict[str, int] = Field(
@@ -5719,6 +5956,23 @@ class SkeletonHole(BaseModel):
             "column of a class holding rows or not."
         ),
     )
+    listed: bool = Field(
+        default=False,
+        description=(
+            "Whether the hole prints several values of *columns* at once: a list the function makes and only appends "
+            "to, or a slice of it (:func:`bamboo.codemap.panda.keycolumns.listed`) -- copyArchive's ``killJobs for "
+            "Pending ({str(jobs[iJob:iJob + nJob])})``, a hundred PandaIDs of the rows its SELECT returned.  A reader "
+            "finds a row's value inside the printed list."
+        ),
+    )
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            "Where the hole prints a select item that is a column's ``MAX`` or ``MIN`` over a ``GROUP BY`` (the one "
+            "aggregate its stops carry, :attr:`KeyStop.aggregate`): copyArchive's ``maxModTime={maxModificationTime}``, "
+            "``MAX(JobSpec.creationTime)`` by ``JobSpec.jobDefinitionID``, ...  Not among *columns*: no row holds it."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):
@@ -5983,6 +6237,7 @@ KEY_STOPS: dict[str, str] = {
     "outside": "{name} is bound outside {at}",
     "bound": "{name} is {what} at {at}",
     "element": "{name} is an element of {what} at {at}",
+    "row_item": "it is a part of {name}'s rows that is no one select item whole ({what}), at {at}",
     "value": "it is {what} at {at}",
     "undeclared": "the class of {name} is not declared at {at}",
     "several": "{name} is declared as several classes at {at}: {what}",
@@ -6015,6 +6270,22 @@ KEY_STOPS: dict[str, str] = {
 }
 
 
+class RowAggregate(BaseModel):
+    """A select item that is one column's ``MAX`` or ``MIN`` over the rows a ``GROUP BY`` makes one: no row's value of
+    the column, but the greatest or least of the group's.  copyArchive's ``MAX(creationTime)`` of ``jobsDefined4``
+    grouped by ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}``."""
+
+    fn: str = Field(description="``MAX`` or ``MIN``.")
+    column: str = Field(description="The column it is of, as the table's class declares it: ``JobSpec.creationTime``.")
+    group_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``GROUP BY`` columns, as the table's class declares each, else ``table.column`` as written; empty "
+            "where the statement groups nothing (one value over every row it selects)."
+        ),
+    )
+
+
 class KeyStop(BaseModel):
     """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
 
@@ -6043,7 +6314,19 @@ class KeyStop(BaseModel):
     )
     at: list[str] = Field(
         default_factory=list,
-        description="``owner:line`` of each site, or the function, in the order met.",
+        description=(
+            "``owner:line`` of each site, or the function, in the order met.  On a held way "
+            "(:class:`HeldSource`) that came back through calls of the corpus, those calls first, as the way's "
+            "*route* lists them, then the stop's own site; an ``uncarried`` stop has no site of its own, so its *at* "
+            "is the route alone (``TaskBuffer.py:1025``, then ``adder_gen.py:111``)."
+        ),
+    )
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            "On a ``row_item`` stop whose item is a column's ``MAX`` or ``MIN``: that column and the grouping.  The "
+            "value is no row's, so no column is said; a reader comparing it with rows' values reads it here."
+        ),
     )
 
     def said(self) -> str:
@@ -6072,6 +6355,10 @@ class GuardFrom(BaseModel):
     So ``taskParamMap`` reaches three ways through ``runImpl`` 211: ``JEDI_TaskParams.taskParams`` read at
     ``getTaskParamsWithID_JEDI`` 1407, ``''`` where no row came, ``None`` where it raised, each through
     ``json.loads``.  Which way a run took, and whether the decoder kept the value, are the reader's.
+
+    A selection by a key computed at run time a way goes through (:class:`HeldKeyed`) is a test of its key: each name
+    the key reads has a GuardFrom at the selection, *test* the selection as written
+    (``JediTaskSpec.commandStatusMap()[commandStr]``), *test_line* its line, which is among its *calls*.
     """
 
     owner: str = Field(description="The function's owner, as the junction's (``file::name``).")
@@ -6096,7 +6383,9 @@ class GuardFrom(BaseModel):
             "the corpus or operator (:attr:`HeldThrough.at`), each binding that was one of several reaching its read "
             "(:attr:`HeldSource.chosen`) -- ``if 'log' not in taskParamMap:`` guards ``itemList = "
             "taskParamMap['jobParameters']`` and the ``+`` under its ``else`` --, and each call of the corpus "
-            "(:attr:`HeldSource.route`).  Not lines of calls only, then: the lines of the places it guards."
+            "(:attr:`HeldSource.route`), and each selection by a computed key (:attr:`HeldSource.keyed`); a "
+            "selection's own GuardFrom has the selection's line.  Not lines of calls only, then: the lines of the "
+            "places it guards."
         ),
     )
     sources: list[HeldSource] = Field(default_factory=list, description="Each way's end (:attr:`KeySource.kind`).")
@@ -6837,6 +7126,16 @@ class WrittenValue(BaseModel):
         description="Otherwise the value as the code or the statement spells it: ``literal:'failed'``, ``expression:CURRENT_DATE``.",
     )
     why: str = Field(default="", description="Why neither is read; empty where one is.")
+    keyed: str = Field(
+        default="",
+        description=(
+            "For a key a term built in a loop over a mapping's keys names the row by, read for one key the mapping "
+            "holds through the corpus's calls (:attr:`KeyFrom.keyed`): the mapping as the function spells it -- "
+            "*column* ``jediTaskID`` at *path* ``criteria['jediTaskID']`` of ``updateTask_JEDI``'s *criteria*.  A run "
+            "has the key only where its caller's mapping holds it.  Empty otherwise; a mapping whose keys are not "
+            "read keeps :data:`MAP_KEY`."
+        ),
+    )
 
 
 class DbWrite(BaseModel):

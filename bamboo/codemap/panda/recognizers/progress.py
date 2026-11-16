@@ -39,11 +39,13 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts, values
+from bamboo.codemap import callfacts, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
+    ConditionValue,
+    CountPrint,
     CoverageStat,
     DiagnosticTemplate,
     EnumerationWrite,
@@ -51,7 +53,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import rowcounts, sql
 from bamboo.codemap.panda.attribution import (
     NOT_A_SPEC,
     UNRESOLVED_CLASS,
@@ -292,7 +294,10 @@ def _recorded_argument(call: ast.Call, setters: dict[str, _Setter]) -> Optional[
 
 
 def _recorded_in(
-    statement: ast.stmt, setters: dict[str, _Setter], settling: Optional[str]
+    statement: ast.stmt,
+    setters: dict[str, _Setter],
+    settling: Optional[str],
+    func: Optional[ast.AST] = None,
 ) -> Iterator[Optional[ast.expr]]:
     """Every message *statement* records, by any of the three spellings.
 
@@ -305,8 +310,20 @@ def _recorded_in(
     "exhausted"`` is a string assigned to a declared field like any other, and
     reading it as this branch's message would make the value its own
     description -- a frame that matches any message with the word in it.
+
+    So is what an ``if`` testing a statement's row count records (*func*
+    given): ``failed to lock jediTaskID=...`` under ``if n_row != 1:`` says how
+    the lock ``UPDATE`` ran, not what the block decided
+    (:func:`count_prints`).
     """
+    counted: set[int] = set()
+    if func is not None:
+        for node in walk(statement):
+            if isinstance(node, ast.If) and id(node) not in counted and rowcounts.is_count_test(node, func):
+                counted.update(id(one) for one in walk(node))
     for node in walk(statement):
+        if id(node) in counted:
+            continue
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
@@ -443,7 +460,7 @@ def recorded_signature(
     tags: set[str] = set()
     messages: list[str] = []
     for statement in block:
-        for argument in _recorded_in(statement, setters, attribute):
+        for argument in _recorded_in(statement, setters, attribute, func):
             if argument is None:
                 continue
             held = (
@@ -459,6 +476,36 @@ def recorded_signature(
                 if values.has_literal_text(text) and text not in messages:
                     messages.append(text)
     return sorted(tags), messages
+
+
+def count_prints(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.AST,
+    setters: dict[str, _Setter],
+) -> list[CountPrint]:
+    """What *func* records under each ``if`` testing the row count of the run *call* makes
+    (:func:`rowcounts.tests_of`), with what each says of the rows changed -- frames read as
+    :func:`recorded_signature` reads a block's, each at the line recording it."""
+    found: dict[tuple[int, str, str], CountPrint] = {}
+    for node, body, other in rowcounts.tests_of(func, call):
+        for rows, block in ((body, node.body), (other, node.orelse)):
+            if rows is None:
+                continue
+            for statement in block:
+                for argument in _recorded_in(statement, setters, None, func):
+                    if argument is None:
+                        continue
+                    at = pathcond.site_of(argument)
+                    if not isinstance(at, ast.stmt):
+                        continue
+                    held = _reaching(argument.id, at, func) if isinstance(argument, ast.Name) else [argument]
+                    for expression in held:
+                        text = values.rendered_text(expression)
+                        if text and values.has_literal_text(text):
+                            found.setdefault(
+                                (at.lineno, text, rows), CountPrint(line=at.lineno, frame=text, rows=rows)
+                            )
+    return [found[key] for key in sorted(found)]
 
 
 def _persisted_templates(
@@ -586,6 +633,8 @@ class Resolved(NamedTuple):
     frames: tuple[str, ...] = ()
     #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
     cuts: tuple[int, ...] = ()
+    #: A run-time value as a base plus an offset -- see ``Branch.amount``.
+    amount: Optional[ConditionValue] = None
 
 
 def _runtime(value: ast.expr) -> str:
@@ -731,7 +780,13 @@ def _unsettled(
     # be is kept beside it, read back through the locals that build it: that
     # is a bound on the text, not a claim about what kind of text it is.
     reading = values.value_reading(value, func)
-    return Resolved(_runtime(value), 2, frames=tuple(reading.frames), cuts=tuple(reading.cuts))
+    return Resolved(
+        _runtime(value),
+        2,
+        frames=tuple(reading.frames),
+        cuts=tuple(reading.cuts),
+        amount=values.written_amount(value, func),
+    )
 
 
 def _declared_names(value: ast.expr) -> set[str]:
@@ -830,6 +885,78 @@ def spec_attributes(modules: list[SourceModule]) -> dict[str, set[str]]:
 
 #: The class attribute PanDA's specs name their length limits in.
 LENGTH_LIMITS = "_limitLength"
+
+
+def spec_unset_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]:
+    """``{(spec_class, attribute): value}`` a spec's map writes for a field no code set.
+
+    ``JobSpec()`` starts every field ``None``, read back as ``"NULL"``, and its
+    ``valuesMap`` writes ``0`` for one of ``_zeroAttrs`` that is still so --
+    ``if val == "NULL": if attr in self._zeroAttrs: val = 0`` -- so a row
+    made of a job no one gave a ``taskBufferErrorCode`` holds ``0``.
+    ``JediFileSpec`` tests ``val is None`` the same way.
+
+    **The test, not the name.**  As :func:`spec_length_limits` reads a cut:
+    a tuple of names in the class counts only where its own body replaces an
+    unset value by a literal under a test of the attribute's membership in it,
+    the value tested unset (``== "NULL"`` or ``is None``) around it.  The
+    ``else`` writing ``None`` is no value: a field unset is ``NULL``, which is
+    what a row not given it holds anyway.
+    """
+    found: dict[tuple[str, str], str] = {}
+    for module in modules:
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
+            declared: dict[str, list[str]] = {}
+            for stmt in cls.body:
+                value = getattr(stmt, "value", None)
+                if not isinstance(value, (ast.Tuple, ast.List)):
+                    continue
+                names = [one.value for one in value.elts if isinstance(one, ast.Constant) and isinstance(one.value, str)]
+                if len(names) != len(value.elts):
+                    continue
+                for target in targets_of(stmt):
+                    if isinstance(target, ast.Name):
+                        declared[target.id] = names
+            unset_tests = [n for n in walk(cls) if isinstance(n, ast.If) and _tests_unset(n.test)]
+            inner = [n for outer in unset_tests for stmt in outer.body for n in walk(stmt) if isinstance(n, ast.If)]
+            for test in inner:
+                held = _unset_membership(test.test)
+                if held is None or held not in declared:
+                    continue
+                literal = next(
+                    (
+                        repr(stmt.value.value)
+                        for stmt in test.body
+                        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant)
+                        and stmt.value.value is not None
+                    ),
+                    None,
+                )
+                if literal is not None:
+                    found.update(((cls.name, attribute), literal) for attribute in declared[held])
+    return found
+
+
+def _unset_membership(test: ast.expr) -> Optional[str]:
+    """``_zeroAttrs`` of ``attr in self._zeroAttrs``; ``None`` for any other test."""
+    if (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.In)
+        and isinstance(test.comparators[0], ast.Attribute)
+        and isinstance(test.comparators[0].value, ast.Name)
+        and test.comparators[0].value.id == "self"
+    ):
+        return test.comparators[0].attr
+    return None
+
+
+def _tests_unset(test: ast.expr) -> bool:
+    """Whether *test* asks a value unset: ``== "NULL"`` or ``is None``."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.comparators[0], ast.Constant)):
+        return False
+    right = test.comparators[0].value
+    return (isinstance(test.ops[0], ast.Eq) and right == "NULL") or (isinstance(test.ops[0], ast.Is) and right is None)
 
 
 def spec_length_limits(modules: list[SourceModule]) -> dict[tuple[str, str], int]:
@@ -1116,6 +1243,7 @@ def extract(
                             line=node.lineno,
                             value_frames=list(resolved.frames),
                             value_cuts=list(resolved.cuts),
+                            amount=resolved.amount,
                         )
                     )
         if candidates:

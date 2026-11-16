@@ -32,6 +32,16 @@ an attribute of a name declared as one class gives that attribute
 (``tmp_id = job.PandaID``); a name bound to a name is read again, as it
 runs (:func:`pathcond.surviving_writes`).
 
+**A statement's rows.**  A binding read no further -- a loop's target, a
+call's value, an item or a position of one -- is read again as the reader
+of the guards' ways reads it (:meth:`heldfrom._Reader.binding_rows`): a
+value that is a select item of a statement's rows is that item's column.
+``copyArchive``'s ``for (id,) in res`` over ``SELECT PandaID FROM
+jobsActive4`` prints ``id``, which is ``JobSpec.PandaID``, as the guard
+``int(id) in xmlIDs`` beside it reads it.  A part of the rows that is no one
+item -- a row whole, a part of an item -- says so (``row_item``); a binding
+some of whose ways are not rows keeps its stop as well.
+
 **Backward, up the callers.**  A parameter is what each call placed at the
 function hands it (:meth:`Calls.callers`, :meth:`Calls.handed`), read
 backward there in the same way, up to :data:`CALLERS_UP` calls; the columns
@@ -63,18 +73,34 @@ it where nothing else is named.
 from __future__ import annotations
 
 import ast
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from bamboo.codemap import callfacts, objects, pathcond, reach
 from bamboo.codemap import calls as C
-from bamboo.codemap.models import MAP_KEY, KeyStop, MapFragment, SourceModule
+from bamboo.codemap.models import (
+    MAP_KEY,
+    KeyStop,
+    MapFragment,
+    RowAggregate,
+    SourceModule,
+)
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
 from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.reaching import reaching
+
+if TYPE_CHECKING:
+    from bamboo.codemap.panda import heldfrom
 
 #: How many calls up a parameter is read at its callers.
 CALLERS_UP = 6
+
+#: ``(name, binding, file, function) -> (the ways ending at a statement's rows, whether every way does)``:
+#: :meth:`heldfrom._Reader.binding_rows`.
+RowItems = Callable[
+    [ast.Name, ast.AST, str, ast.AST], tuple[list["heldfrom.RowItem"], bool]
+]
 
 
 class Reader:
@@ -88,8 +114,11 @@ class Reader:
         names: reach._Names,
         funcs: dict[str, tuple[str, ast.AST]],
         follow: Callable[[str, str, int], objects.ObjectReach],
+        row_items: Optional[RowItems] = None,
     ):
         self.calls = calls
+        #: :meth:`heldfrom._Reader.binding_rows`, where the build reads the guards' ways.
+        self.row_items = row_items
         self.types = calls.types
         self.trees = {module.rel_path: module.tree for module in modules}
         self.names = names
@@ -310,6 +339,14 @@ class Reader:
                     if not self.holds_rows(column):
                         self._field(where, cls, node.attr, found, stops, seen)
             return
+        # An item or a slice of a list the function makes and only appends to holds what it appended:
+        # copyArchive's ``str(jobs[iJob:iJob + nJob])``, ``jobs.append(id)`` for each row's PandaID.
+        listed = node.value if isinstance(node, ast.Subscript) else node
+        items = appended(func, listed) if isinstance(listed, ast.Name) else None
+        if items is not None:
+            for item in items:
+                self._backward(file, func, owner, item, found, stops, seen, up)
+            return
         if not isinstance(node, ast.Name):
             stops.append(_stop("value", what=_kind(node), at=at))
             return
@@ -331,24 +368,25 @@ class Reader:
                     if iterable is not None
                     else "a loop"
                 )
-                stops.append(_stop("element", name=node.id, what=what, at=where))
+                stop = _stop("element", name=node.id, what=what, at=where)
+                self._at_binding(file, func, node, binding.site, stop, found, stops)
             elif value is None:
-                stops.append(
-                    _stop(
-                        "bound", name=node.id, what=f"a {binding.kind} target", at=where
-                    )
+                stop = _stop(
+                    "bound", name=node.id, what=f"a {binding.kind} target", at=where
                 )
+                self._at_binding(file, func, node, binding.site, stop, found, stops)
             elif binding.unpacked:
                 if (
                     binding.slot is not None
                     and isinstance(value, (ast.Tuple, ast.List))
                     and len(value.elts) > binding.slot
                 ):
-                    self._bound(
+                    self._given(
                         file,
                         func,
                         owner,
-                        node.id,
+                        node,
+                        binding.site,
                         value.elts[binding.slot],
                         found,
                         stops,
@@ -356,16 +394,104 @@ class Reader:
                         up,
                     )
                 else:
-                    stops.append(
-                        _stop(
-                            "bound",
-                            name=node.id,
-                            what=f"a position of {_kind(callfacts.unconverted(self.types, file, func, value))}",
-                            at=where,
-                        )
+                    stop = _stop(
+                        "bound",
+                        name=node.id,
+                        what=f"a position of {_kind(callfacts.unconverted(self.types, file, func, value))}",
+                        at=where,
                     )
+                    self._at_binding(file, func, node, binding.site, stop, found, stops)
             else:
-                self._bound(file, func, owner, node.id, value, found, stops, seen, up)
+                self._given(
+                    file, func, owner, node, binding.site, value, found, stops, seen, up
+                )
+
+    def _given(
+        self,
+        file: str,
+        func: ast.AST,
+        owner: str,
+        node: ast.Name,
+        site: ast.AST,
+        value: ast.expr,
+        found: set[str],
+        stops: list[KeyStop],
+        seen: set[tuple[str, str]],
+        up: int,
+    ) -> None:
+        """What *value*, bound to *node*'s name at *site* of *func*, gives it: a name or an attribute read back
+        (:meth:`_backward`), else the binding read as a statement's rows (:meth:`_at_binding`)."""
+        value = callfacts.unconverted(self.types, file, func, value)
+        if isinstance(value, (ast.Name, ast.Attribute)):
+            self._backward(file, func, owner, value, found, stops, seen, up)
+            return
+        at = f"{_short(owner)}:{getattr(value, 'lineno', '?')}"
+        stop = _stop("bound", name=node.id, what=_kind(value), at=at)
+        self._at_binding(file, func, node, site, stop, found, stops)
+
+    def _at_binding(
+        self,
+        file: str,
+        func: ast.AST,
+        node: ast.Name,
+        site: ast.AST,
+        stop: KeyStop,
+        found: set[str],
+        stops: list[KeyStop],
+    ) -> None:
+        """The reading of *node* stopped at its binding *site* (*stop*): the binding read again as a statement's rows
+        (:attr:`row_items`).  A way that is a select item whole is its column, spelled as the table's class declares
+        it (:meth:`_column`); one that is the rows but no one item whole says so (``row_item``); *stop* stands unless
+        every way is the rows."""
+        items: list = []
+        every = False
+        if self.row_items is not None:
+            try:
+                items, every = self.row_items(node, site, file, func)
+            except Exception:  # noqa: BLE001 -- the binding unread as rows: its stop stands
+                items, every = [], False
+        if not every:
+            stops.append(stop)
+        where = stop.at[0] if stop.at else ""
+        for item in items:
+            if item.whole and item.column:
+                table, _dot, column = item.column.rpartition(".")
+                self._column(table, column, where, found, stops)
+            elif item.whole and item.attr and self.holds_rows(item.attr):
+                found.add(item.attr)
+            else:
+                what = item.why or (
+                    f"a value made from {item.column} ({item.made})"
+                    if item.made and item.column
+                    else f"a part of {item.column}"
+                    if item.column
+                    else ""
+                )
+                stop = _stop("row_item", name=item.site, what=what, at=where)
+                if item.whole and item.aggregate is not None:
+                    stop.aggregate = self._aggregate(item.aggregate)
+                stops.append(stop)
+
+    def _aggregate(self, aggregate) -> Optional[RowAggregate]:
+        """*aggregate* (:class:`sqltext.Aggregate`) with its columns as their tables' classes declare them; ``None``
+        where its own column's is not."""
+        column = self._declared(aggregate.table, aggregate.column)
+        if column is None:
+            return None
+        return RowAggregate(
+            fn=aggregate.fn,
+            column=column,
+            group_by=[
+                self._declared(table, name) or (f"{table}.{name}" if table else name)
+                for table, name in aggregate.group_by
+            ],
+        )
+
+    def _declared(self, table: str, column: str) -> Optional[str]:
+        """``Class.attribute`` of *table*'s *column*, as :meth:`_column` spells it, or ``None``."""
+        cls = self.tables.get(table.rpartition(".")[2].lower())
+        attribute = self.declared.get(cls, {}).get(column.lower()) if cls is not None else None
+        return f"{cls}.{attribute}" if attribute is not None else None
 
     def _handed(
         self,
@@ -508,17 +634,110 @@ class Reader:
 _CAPPED = objects.PARTS_SPENT.format(path="")
 
 
+#: The calls a list is read by and not changed: its length, a printed or sorted copy of it.
+_READS_A_LIST = frozenset({"len", "str", "repr", "sorted", "list", "tuple", "set"})
+
+
+def appended(func: ast.AST, read: ast.Name) -> Optional[list[ast.expr]]:
+    """What the local list *read* reads in *func* holds, where every binding of the name reaching *read* binds it to
+    an empty list and the uses of the name those bindings reach only append to it: each value appended --
+    copyArchive's ``jobs = []`` at 875 and ``jobs.append(id)`` at 878, read at 885.  The name's other bindings are
+    other lists and are not asked: the same ``jobs`` made again for other queries at 754, 857 and 924, handed whole to
+    ``Client.kill_jobs`` at 760, or bound to ``jobsMap[site]`` at 907.  Read where it is sliced, indexed, iterated,
+    tested, measured or copied; ``None`` where anything else is done with it -- handed to a call, extended, put
+    into, returned, bound to another name -- or nothing is appended."""
+    own = [one for one in pathcond.bindings(func, read.id) if not one.nested]
+    sites = [one.site for one in own]
+    made = (
+        {id(site) for site in reaching(pathcond.site_of(read), sites)}
+        if sites
+        else set()
+    )
+    if not made or not all(_empty_list(one) for one in own if id(one.site) in made):
+        return None
+    values: list[ast.expr] = []
+    for node in C.own_nodes(func):
+        if not (
+            isinstance(node, ast.Name)
+            and node.id == read.id
+            and isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        if not any(
+            id(site) in made for site in reaching(pathcond.site_of(node), sites)
+        ):
+            continue
+        parent = getattr(node, "parent", None)
+        if isinstance(parent, ast.Attribute):
+            call = getattr(parent, "parent", None)
+            if not (
+                parent.attr == "append"
+                and isinstance(call, ast.Call)
+                and call.func is parent
+                and len(call.args) == 1
+            ):
+                return None
+            values.append(call.args[0])
+        elif (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(parent.ctx, ast.Load)
+        ):
+            continue
+        elif isinstance(parent, ast.Call) and node in parent.args:
+            if not (
+                isinstance(parent.func, ast.Name) and parent.func.id in _READS_A_LIST
+            ):
+                return None
+        elif not isinstance(
+            parent,
+            (
+                ast.If,
+                ast.While,
+                ast.IfExp,
+                ast.UnaryOp,
+                ast.BoolOp,
+                ast.Compare,
+                ast.For,
+            ),
+        ):
+            return None
+        elif isinstance(parent, ast.For) and parent.iter is not node:
+            return None
+    return values or None
+
+
+def _empty_list(binding: pathcond.Binding) -> bool:
+    """Whether *binding* binds its name, whole, to ``[]``."""
+    return (
+        binding.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED)
+        and not binding.unpacked
+        and isinstance(binding.value, ast.List)
+        and not binding.value.elts
+    )
+
+
+def listed(types, file: str, func: ast.AST, node: ast.expr) -> bool:
+    """Whether *node* prints several values of a list :func:`appended` reads -- the list, or a slice of it."""
+    node = callfacts.unconverted(types, file, func, node)
+    if isinstance(node, ast.Subscript):
+        if not isinstance(node.slice, ast.Slice):
+            return False
+        node = node.value
+    return isinstance(node, ast.Name) and appended(func, node) is not None
+
+
 def _stop(kind: str, name: str = "", what: str = "", at: str = "") -> KeyStop:
     return KeyStop(kind=kind, name=name, what=what, at=[at] if at else [])
 
 
 def _merged(stops: list[KeyStop]) -> list[KeyStop]:
     """*stops* once each, those saying one thing at several sites as one, with each site."""
-    kept: dict[tuple[str, str, str], KeyStop] = {}
+    kept: dict[tuple[str, str, str, str], KeyStop] = {}
     for stop in stops:
         held = kept.setdefault(
-            (stop.kind, stop.name, stop.what),
-            KeyStop(kind=stop.kind, name=stop.name, what=stop.what),
+            (stop.kind, stop.name, stop.what, stop.aggregate.model_dump_json() if stop.aggregate else ""),
+            KeyStop(kind=stop.kind, name=stop.name, what=stop.what, aggregate=stop.aggregate),
         )
         held.at.extend(site for site in stop.at if site not in held.at)
     return list(kept.values())

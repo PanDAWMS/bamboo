@@ -2619,3 +2619,175 @@ def test_a_column_a_row_read_fills_holds_its_value_nothing_changes_in_place(
     assert [one.how for one in loose.bindings] == ["setattr", "row", "setattr"]
     leak = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'LEAK_LOOSE', FIELDS)}"
     assert [(one.at, one.kind) for one in loose.changes] == [(leak, "unread")]
+
+
+def test_a_selection_by_a_computed_key_keeps_the_key_each_part_the_reader_placed_sat_under() -> (
+    None
+):
+    """``d[k]`` with ``k`` computed: a source the reader placed under a key is taken with that key kept, a way per
+    key (one source under two keys is two ways); a part under no key is cut as ``[*]`` cuts it, keyed with nothing;
+    a part the path carry placed (``loose``) is not known to sit under the key, and is read as before."""
+    select = ("p/m.py:7", "command")
+    dummy = heldfrom._Way(
+        "constant", "'dummy'", 3, paths=("['resume']['doing']", "['release']['doing']")
+    )
+    aborting = heldfrom._Way("constant", "'aborting'", 2, paths=("['kill']['doing']",))
+    anywhere = heldfrom._Way("parameter", "extra", paths=("[*]",))
+    assert heldfrom._taken([dummy, aborting, anywhere], "[*]", select=select) == [
+        dummy._replace(
+            paths=("['doing']",), keyed=(("p/m.py:7", "command", "'resume'"),)
+        ),
+        dummy._replace(
+            paths=("['doing']",), keyed=(("p/m.py:7", "command", "'release'"),)
+        ),
+        aborting._replace(
+            paths=("['doing']",), keyed=(("p/m.py:7", "command", "'kill'"),)
+        ),
+        anywhere._replace(paths=()),
+    ]
+    # Without the selection -- a loop's element, a key not computed -- nothing is keyed, as before.
+    assert heldfrom._taken([dummy], "[*]") == [dummy._replace(paths=("['doing']",))]
+    loose = dummy._replace(loose=True)
+    assert heldfrom._taken([loose], "[*]", select=select) == heldfrom._taken(
+        [loose], "[*]"
+    )
+    # A whole value -- a parameter's, a field's -- takes the step, read on past the end with no key known.
+    whole = heldfrom._Way("parameter", "status_map")
+    assert heldfrom._taken([whole], "[*]", select=select) == [
+        whole._replace(steps=("[*]",))
+    ]
+
+
+KEYED = {
+    BASE: """\
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def statusMap(self):
+                return {
+                    "kill": {"doing": "aborting"},
+                    "resume": {"doing": "dummy"},
+                    "release": {"doing": "dummy"},
+                }
+
+            def extractCommon(self, command, index, first, second, flag):
+                status_map = self.statusMap()
+                new = status_map[command]["doing"]  # S1
+                if new == "dummy":  # T1
+                    self.a = 1  # R1
+                local_map = {"kill": "aborting", "pause": "paused"}
+                got = local_map.get(command)  # S2
+                if got:  # T2
+                    self.a = 2  # R2
+                for name, value in local_map.items():  # S3
+                    if value == "paused":  # T3
+                        self.a = name  # R3
+                picked = [first, second][index]  # S4
+                if picked:  # T4
+                    self.a = 4  # R4
+                data = {"job_ids": first}
+                if flag:
+                    data["code"] = second
+                sent = data[command]  # S5
+                if sent:  # T5
+                    self.a = 5  # R5
+                last = [first, second][-1]  # S6
+                if last:  # T6
+                    self.a = 6  # R6
+        """,
+}
+
+
+def test_a_value_chosen_by_a_computed_key_keeps_the_key_it_sat_under_and_the_key_s_names_have_guards(
+    tmp_path: Path,
+) -> None:
+    """getTasksToExecCommand_JEDI's ``commandStatusMap()[commandStr]["doing"]``: ``'dummy'`` under ``'resume'`` and
+    ``'release'`` is two sources, each keyed with the selection and its key, and ``'aborting'`` one under ``'kill'``;
+    so is a local dict's ``.get(k)`` (its ``None`` keyed with nothing), a pair of ``.items()`` with the name the loop
+    binds the key to, a list literal by an index, and a value a put stored under a constant key.  The names a
+    selection's key reads have a GuardFrom at the selection's line, the line among its *calls*; a pair's key, the
+    pair's own, has none.  A constant's expression as the key (``[-1]``, which counts from the end) selects by no
+    value: nothing is keyed and no GuardFrom is made."""
+    fragment = _build(
+        tmp_path, KEYED, tuple(("extractCommon", f"R{n}") for n in range(1, 7))
+    )
+
+    def at(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, KEYED)}"
+
+    def keyed(marker: str, name: str) -> set[tuple]:
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, KEYED) and one.name == name
+        ]
+        return {
+            (one.name, tuple((k.at, k.by, k.key) for k in one.keyed))
+            for one in guard.sources
+        }
+
+    assert keyed("T1", "new") == {
+        ("'aborting'", ((at("S1"), "command", "'kill'"),)),
+        ("'dummy'", ((at("S1"), "command", "'resume'"),)),
+        ("'dummy'", ((at("S1"), "command", "'release'"),)),
+    }
+    assert keyed("T2", "got") == {
+        ("'aborting'", ((at("S2"), "command", "'kill'"),)),
+        ("'paused'", ((at("S2"), "command", "'pause'"),)),
+        ("None", ()),
+    }
+    assert keyed("T3", "value") == {
+        ("'aborting'", ((at("S3"), "name", "'kill'"),)),
+        ("'paused'", ((at("S3"), "name", "'pause'"),)),
+    }
+    assert keyed("T4", "picked") == {
+        ("first", ((at("S4"), "index", "0"),)),
+        ("second", ((at("S4"), "index", "1"),)),
+    }
+    assert keyed("T5", "sent") == {
+        ("first", ((at("S5"), "command", "'job_ids'"),)),
+        ("second", ((at("S5"), "command", "'code'"),)),
+    }
+    assert keyed("T6", "last") == {("first", ()), ("second", ())}
+    selections = {
+        (
+            one.test_line,
+            one.test,
+            one.name,
+            tuple(one.calls),
+            tuple(source.name for source in one.sources),
+        )
+        for one in fragment.guard_froms
+        if one.test_line in {_line(BASE, f"S{n}", KEYED) for n in range(1, 7)}
+    }
+    assert selections == {
+        (
+            _line(BASE, "S1", KEYED),
+            "status_map[command]",
+            "command",
+            (_line(BASE, "S1", KEYED),),
+            ("command",),
+        ),
+        (
+            _line(BASE, "S2", KEYED),
+            "local_map.get(command)",
+            "command",
+            (_line(BASE, "S2", KEYED),),
+            ("command",),
+        ),
+        (
+            _line(BASE, "S4", KEYED),
+            "[first, second][index]",
+            "index",
+            (_line(BASE, "S4", KEYED),),
+            ("index",),
+        ),
+        (
+            _line(BASE, "S5", KEYED),
+            "data[command]",
+            "command",
+            (_line(BASE, "S5", KEYED),),
+            ("command",),
+        ),
+    }

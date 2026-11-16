@@ -39,10 +39,18 @@ from bamboo.codemap.models import (
     SkeletonHole,
     SourceModule,
 )
-from bamboo.codemap.panda import keycolumns, rewrites, runs, sql
+from bamboo.codemap.panda import (
+    attribution,
+    heldfrom,
+    keycolumns,
+    rewrites,
+    runs,
+    sql,
+    sqltext,
+)
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.plugin import _DatabaseLeaves
-from bamboo.codemap.panda.recognizers import sqlwrite
+from bamboo.codemap.panda.recognizers import progress, sqlwrite
 
 PACKAGE = "pkg"
 
@@ -298,10 +306,12 @@ def _build(
     tmp_path: Path,
     arms: list[tuple[str, str, str, str]],
     entities: list[EntityNode] | None = None,
+    read_rows: bool = False,
     **files: str,
 ) -> MapFragment:
     """Read *files* as the build does, with one junction per (file, owner, marker, subject) of *arms*, and the
-    tables *entities* (:data:`ENTITIES` where none) hold."""
+    tables *entities* (:data:`ENTITIES` where none) hold; with *read_rows*, the keys read a binding as a statement's
+    rows as the build does (the read sites, the guards' value reader)."""
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
@@ -370,7 +380,25 @@ def _build(
             reach_graph=reach.graph(calls, "m", "v", _DatabaseLeaves()),
         )
         panda_objects.attach(fragment, modules, calls)
-        runs.attach(fragment, modules, calls)
+        row_items = None
+        if read_rows:
+            attributor = attribution.SpecAttributor(
+                progress.spec_attributes(modules), attribution.class_bases(modules)
+            )
+            attributor.learn_table_classes(modules)
+            fragment.read_sites = sqlwrite.read_site_nodes(
+                sqlwrite.read_side(modules, attributor, calls).statements, "m", "v"
+            )
+            values = heldfrom.value_reader(
+                junctions,
+                fragment.read_sites,
+                {module.rel_path: module.tree for module in modules},
+                calls,
+                reach.ReachGraph(fragment.reach_graph),
+            )
+            assert values is not None
+            row_items = values.binding_rows
+        runs.attach(fragment, modules, calls, row_items)
     return fragment
 
 
@@ -488,6 +516,137 @@ def test_a_column_named_by_a_mapping_s_key_is_on_the_row_its_statement_keys(
     (pair,) = branch.history
     assert (pair.call, pair.order) == (_line(KEYED, "K2"), HISTORY_AFTER)
     assert (pair.row, pair.row_why, pair.object) == (HISTORY_ROW_CAN, "", "panda_id")
+
+
+def test_a_fragment_the_build_read_through_the_callers_keys_is_named_in_the_census(tmp_path: Path) -> None:
+    """``update_status``' ``,{key}=:{key}`` over a parameter: once the build has read the ``SET`` items for the keys
+    ``update_job`` states (``sql.with_keyed_columns``), the census -- the build report's ``sql-key-built`` -- counts
+    the fragment as named.  Before, it counted every such fragment unresolved, the ones the map read included, and a
+    key the walk lost moved nothing."""
+    spec = SPEC.replace('("PandaID", "jobStatus")', '("PandaID", "jobStatus", "transExitCode")')
+    before, after, columns = _keyed_columns(tmp_path, {"spec": spec, "keyed": KEYED}, "update_status")
+
+    assert "transExitCode" in columns
+    assert (before.loops, before.resolved, after.resolved) == (1, 0, 1)
+
+
+def _keyed_columns(
+    tmp_path: Path, sources: dict[str, str], owner: str
+) -> tuple[sql.KeyColumnCensus, sql.KeyColumnCensus, dict[str, sqltext.ColumnValue]]:
+    """*owner*'s key census before and after its statements are read with :func:`sql.with_keyed_columns`, and the
+    columns they write so."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    modules = []
+    for name, text in sources.items():
+        (root / f"{name}.py").write_text(text)
+        _source, tree = calls_mod.parsed(root / f"{name}.py")
+        modules.append(
+            SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}.py", tree=tree, source=text, blob_sha=blob_sha(text))
+        )
+    calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
+    func = next(
+        node
+        for module in modules
+        for node in ast.walk(module.tree)
+        if isinstance(node, ast.FunctionDef) and node.name == owner
+    )
+    columns: dict[str, sqltext.ColumnValue] = {}
+    with sql.across_calls(calls):
+        before = sql.key_column_census(func)
+        for run in sql.executions(func):
+            for statement in sqltext.writes(run.reading):
+                columns.update(sql.with_keyed_columns(func, run, statement).columns)
+        after = sql.key_column_census(func)
+    return before, after, columns
+
+
+COUNTED = """\
+class DBProxy:
+    def propagate(self, task_id, files):
+        stats = {}
+        for dataset_id, status in files:
+            if dataset_id not in stats:
+                stats[dataset_id] = {"nFilesFinished": 0, "nFilesFailed": 0}
+            if status == "finished":
+                stats[dataset_id]["nFilesFinished"] += 1
+            else:
+                stats[dataset_id]["nFilesFailed"] += 1
+        for dataset_id in sorted(stats):
+            counts = stats[dataset_id]
+            sql = "UPDATE ATLAS_PANDA.JEDI_Datasets SET "
+            for key in counts:
+                value = counts[key]
+                if value == 0:
+                    continue
+                if value > 0:
+                    sql += f"{key}={key}+{value},"  # C1
+                else:
+                    sql += f"{key}={key}-{abs(value)},"  # C2
+            sql = sql[:-1]
+            sql += " WHERE jediTaskID=:jediTaskID AND datasetID=:datasetID"
+            self.cur.execute(sql, {":jediTaskID": task_id, ":datasetID": dataset_id})
+"""
+
+
+def test_a_column_named_by_a_key_and_changed_by_an_amount_is_written_whichever_amount_a_pass_skips(
+    tmp_path: Path,
+) -> None:
+    """``propagateResultToJEDI``'s ``{k}={k}+{v},`` / ``{k}={k}-{abs(v)},`` over a dataset's file counts, the counts a
+    dict literal put under each dataset ID, a count of 0 skipped.  Each key's column is written, changed by an amount
+    the map does not read: the skip reads the key only as the count at it, so it says which passes write the column,
+    not which columns are written (``sql._kept_keys``).  Before, the skip it could not decide declined the loop, and
+    the statement wrote no column the map could name."""
+    before, after, columns = _keyed_columns(tmp_path, {"counted": COUNTED}, "propagate")
+
+    assert {column: (value.kind, value.text) for column, value in columns.items()} == {
+        "nFilesFinished": ("expression", "nFilesFinished + {} or nFilesFinished - {}"),
+        "nFilesFailed": ("expression", "nFilesFailed + {} or nFilesFailed - {}"),
+    }
+    assert (before.loops, before.resolved, after.resolved) == (2, 0, 2)
+
+
+def test_a_column_named_by_a_key_and_changed_by_an_amount_is_a_branch_at_each_fragment_putting_it(
+    tmp_path: Path,
+) -> None:
+    """The text spells no column, so no reading of it finds where a value was put, and the statement wrote no column
+    the junctions named.  Each fragment putting an item in is where its value is decided, under its own tests: the
+    ``+`` at C1, the ``-`` at C2."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "counted.py").write_text(COUNTED)
+    _source, tree = calls_mod.parsed(root / "counted.py")
+    modules = [
+        SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/counted.py", tree=tree, source=COUNTED, blob_sha=blob_sha(COUNTED))
+    ]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    with sql.across_calls(sqlwrite.corpus_calls(modules, {PACKAGE: root})):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, "panda", "test", attributor)
+    branches = {
+        junction.subject: sorted((branch.outcome, branch.line) for branch in junction.branches)
+        for junction in junctions
+        if junction.subject.startswith("JEDI_Datasets.nFiles")
+    }
+
+    assert branches == {
+        f"JEDI_Datasets.{column}": [
+            (f"runtime({column} + {{}})", _line(COUNTED, "C1")),
+            (f"runtime({column} - {{}})", _line(COUNTED, "C2")),
+        ]
+        for column in ("nFilesFinished", "nFilesFailed")
+    }
+
+
+def test_a_skip_on_anything_but_the_value_at_the_key_still_declines_the_loop(tmp_path: Path) -> None:
+    """A ``continue`` on what the map cannot decide for a key, other than the value at it, may drop a key on every
+    pass: the loop stays unread, its columns unnamed."""
+    skipped = COUNTED.replace("if value == 0:", "if value == 0 or task_id in self.frozen:")
+    _before, _after, columns = _keyed_columns(tmp_path, {"counted": skipped}, "propagate")
+
+    assert columns == {}
 
 
 def test_the_next_turn_of_a_loop_is_another_pass(tmp_path: Path) -> None:
@@ -2312,6 +2471,166 @@ def test_a_message_hole_says_the_column_its_value_is_where_the_message_is_writte
     counted = holes[("len(status)", _line(HOLES, "M3"))]
     assert counted.columns == []
     assert [stop.kind for stop in counted.stops] == ["value", "no_use"]
+
+
+ROWS = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+
+_logger = None
+
+
+class Rows(DBProxy):
+    def sent(self):
+        tmp_log = LogWrapper(_logger, "<sent>")
+        self.cur.execute("SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s", {":s": "sent"})
+        res = self.cur.fetchall()
+        for (panda_id, status) in res:
+            tmp_log.debug(f"sent {panda_id} in {status}")  # W1
+        for row in res:
+            tmp_log.debug(f"row {row}")  # W2
+        for other in self.others():
+            tmp_log.debug(f"other {other}")  # W3
+        ids = ""
+        for (panda_id, status) in res:
+            ids += f"{panda_id},"
+        ids = ids[:-1]
+        tmp_log.debug(f"ids {ids}")  # W4
+        jobs = []
+        for (panda_id, status) in res:
+            jobs.append(status)
+        self.others(jobs)
+        jobs = []
+        for (panda_id, status) in res:
+            jobs.append(panda_id)
+        if len(jobs):
+            tmp_log.debug(f"kill ({str(jobs[0:100])})")  # W5
+            tmp_log.debug(f"first {jobs[0]}")  # W6
+        jobs = self.others()
+        tmp_log.debug(f"again ({str(jobs[0:100])})")  # W8
+        more = []
+        for (panda_id, status) in res:
+            more.append(panda_id)
+        more.extend(self.others())
+        tmp_log.debug(f"more ({str(more[0:100])})")  # W7
+        self.cur.execute(
+            "SELECT jobStatus,MAX(PandaID),COUNT(*) FROM ATLAS_PANDA.jobsActive4 "
+            "WHERE jobStatus IN (:s1,:s2) GROUP BY jobStatus",
+            {":s1": "sent", ":s2": "running"},
+        )
+        grouped = self.cur.fetchall()
+        for (status, newest, n) in grouped:
+            tmp_log.debug(f"newest {newest} of {n} in {status}")  # W9
+
+    def others(self):
+        return [1, 2]
+"""
+
+
+def _row_holes(tmp_path: Path, read_rows: bool) -> dict[tuple[str, int], SkeletonHole]:
+    fragment = _build(
+        tmp_path, [], read_rows=read_rows, spec=SPEC, proxy=PROXY, rows=ROWS
+    )
+    (node,) = [
+        one for one in fragment.function_prints if one.owner.endswith("Rows.sent")
+    ]
+    return {
+        (hole.expression, hole.line): hole
+        for st in node.statements
+        for row in st.rows
+        for hole in row.holes
+    }
+
+
+def test_a_message_hole_that_is_a_select_item_of_a_statement_s_rows_is_that_item_s_column(
+    tmp_path: Path,
+) -> None:
+    """``copyArchive``'s ``for (id,) in res`` over ``SELECT PandaID FROM jobsActive4`` prints ``id``: the loop's
+    target is read no further than an element of ``res``, though the guards' ways read the same value as the select
+    item.  Read so, each target unpacked from a row is its item's column, and the element stop goes; a row whole is
+    the rows but no one item, and says so; a loop over what is no statement's rows keeps its element stop."""
+    before = _row_holes(tmp_path / "before", read_rows=False)
+    sent = before[("panda_id", _line(ROWS, "W1"))]
+    assert sent.columns == []
+    assert [stop.kind for stop in sent.stops] == ["element", "no_use"]
+
+    holes = _row_holes(tmp_path / "after", read_rows=True)
+    sent = holes[("panda_id", _line(ROWS, "W1"))]
+    assert (sent.columns, [stop.kind for stop in sent.stops]) == (
+        ["JobSpec.PandaID"],
+        ["no_use"],
+    )
+    assert holes[("status", _line(ROWS, "W1"))].columns == ["JobSpec.jobStatus"]
+    row = holes[("row", _line(ROWS, "W2"))]
+    assert row.columns == []
+    assert "element" not in [stop.kind for stop in row.stops]
+    (item,) = [stop for stop in row.stops if stop.kind == "row_item"]
+    # The statement on the line of its execute, three above W1; a row of two items holds neither whole.
+    assert (item.name.rpartition("@")[2], item.what) == (
+        str(_line(ROWS, "W1") - 3),
+        "no item",
+    )
+    other = holes[("other", _line(ROWS, "W3"))]
+    assert (other.columns, [stop.kind for stop in other.stops][:1]) == ([], ["element"])
+
+
+def test_a_message_hole_printing_a_list_of_a_select_item_s_values_is_that_item_s_column_listed(
+    tmp_path: Path,
+) -> None:
+    """copyArchive's ``killJobs for Pending ({str(jobs[iJob:iJob + nJob])})``: the ``jobs`` the print reads is made
+    empty and only appended to, each ``id`` of the rows of ``SELECT PandaID``, so a slice of it prints that column's
+    values, several at once (:attr:`SkeletonHole.listed`); an item of it, one.  The name's other bindings are other
+    lists -- copyArchive makes ``jobs`` again for each query, hands one whole to ``Client.kill_jobs`` and binds it to
+    ``jobsMap[site]`` -- and say nothing of this one: the statuses appended to the first ``jobs`` here, which is
+    handed to a call, are not in it, and the ``jobs`` bound to a call's value after it is not a list read here.  A
+    list that is also extended holds what else it was given too: not read."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    kill = holes[("str(jobs[0:100])", _line(ROWS, "W5"))]
+    assert (kill.columns, kill.listed) == (["JobSpec.PandaID"], True)
+    first = holes[("jobs[0]", _line(ROWS, "W6"))]
+    assert (first.columns, first.listed) == (["JobSpec.PandaID"], False)
+    again = holes[("str(jobs[0:100])", _line(ROWS, "W8"))]
+    assert again.listed is False
+    more = holes[("str(more[0:100])", _line(ROWS, "W7"))]
+    assert (more.columns, more.listed) == ([], False)
+
+
+def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_not_the_column(
+    tmp_path: Path,
+) -> None:
+    """copyArchive's ``maxModTime={maxModificationTime}``: the item is ``MAX(creationTime)`` of ``jobsDefined4``
+    grouped by ``jobDefinitionID, ...`` -- the greatest of a group's values, no row's.  So the hole names no column,
+    and says the aggregate (:attr:`SkeletonHole.aggregate`): the function, the column and the grouping, as the
+    classes declare them.  A ``COUNT`` is no column's value at all and says nothing; the grouping column itself is
+    that column."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    line = _line(ROWS, "W9")
+    newest = holes[("newest", line)]
+    assert newest.columns == []
+    assert newest.aggregate is not None
+    assert (newest.aggregate.fn, newest.aggregate.column, newest.aggregate.group_by) == (
+        "MAX",
+        "JobSpec.PandaID",
+        ["JobSpec.jobStatus"],
+    )
+    assert holes[("n", line)].aggregate is None
+    assert (holes[("status", line)].columns, holes[("status", line)].aggregate) == (["JobSpec.jobStatus"], None)
+
+
+def test_a_message_hole_holding_a_text_made_from_a_select_item_is_not_that_item_s_column(
+    tmp_path: Path,
+) -> None:
+    """``registerTaskInOneShot_JEDI``'s ``tmpErrStr += f"{tmpJediTaskID},"`` over ``SELECT jediTaskID`` rows, then
+    ``tmpErrStr = tmpErrStr[:-1]``, prints a text made from the item, not the item: it says so (``row_item``) and
+    names no column."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    ids = holes[("ids", _line(ROWS, "W4"))]
+    assert ids.columns == []
+    made = [stop.what for stop in ids.stops if stop.kind == "row_item"]
+    assert made and all(
+        what.startswith("a value made from jobsactive4.pandaid (") for what in made
+    ), made
 
 
 def _handed(tmp_path: Path) -> tuple[list[str], SkeletonHole]:

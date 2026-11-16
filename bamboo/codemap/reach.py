@@ -144,6 +144,8 @@ _BUILTIN_ANNOTATIONS = {
     "str", "int", "float", "bool", "bytes", "bytearray", "complex", "range", "None", "NoneType",
 } | callfacts.containers(callfacts.MAPPING, callfacts.COLLECTION, callfacts.RECORD)  # fmt: skip
 _SCALARS = callfacts.SCALARS
+#: The builtin mappings by the names :meth:`_Receivers.of` gives them: going through one gives its keys.
+_MAPPINGS = frozenset(one.builtin for one in callfacts.CONTAINERS.values() if one.holds == callfacts.MAPPING and one.builtin)
 #: The dunders each operator calls (:data:`callfacts.OPERATOR_DUNDERS`).
 _OPERATORS = callfacts.OPERATOR_DUNDERS
 
@@ -1322,6 +1324,8 @@ class _Holders:
             and not isinstance(value.args[0], ast.Starred)
             and (function := callfacts.builtin_function(self.calls.types, file, func, value)) is not None
         ):
+            if self._keys_only(file, func, value.args[0]):
+                return []  # sorted(d), list(d): a mapping's keys, as d.keys() is
             if function.gives == callfacts.COPY:
                 return [(value.args[0], (None,), (None,))]
             if function.gives == callfacts.NUMBERED:
@@ -1566,11 +1570,20 @@ class _Holders:
             isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension))
             and parent.target is here
         ):
-            self._place(file, func, parent.iter, (None, *path, *at), of)
+            if not self._keys_only(file, func, parent.iter):
+                self._place(file, func, parent.iter, (None, *path, *at), of)
         elif isinstance(parent, ast.NamedExpr) and parent.target is here:
             self._place(file, func, parent.value, at, of)
         else:
             self._unread(at, of)
+
+    def _keys_only(self, file: str, func: ast.AST, value: ast.AST) -> bool:
+        """Whether going through *value* -- a loop over it, a builtin's copy of it -- gives its keys and none of its
+        values: a mapping, as ``d.keys()`` does (``for k in d``, ``sorted(d)``).  By what the map says *value* is."""
+        if not isinstance(value, ast.expr):
+            return False
+        kind = self.receivers.of(file, func, value)
+        return kind[0] == _BUILTIN and kind[1] in _MAPPINGS
 
     # -- where a holder's value goes ------------------------------------------------
 
@@ -1654,7 +1667,7 @@ class _Holders:
                     return
                 step = ((None,), ())
             elif isinstance(parent, (ast.comprehension, ast.For, ast.AsyncFor)):
-                if parent.iter is here:
+                if parent.iter is here and not self._keys_only(file, func, here):
                     self._assigned(file, func, parent.target, (), (None,), at, of)
                 return
             elif (
@@ -1824,7 +1837,9 @@ class _Holders:
                 if any(argument is one for one in whole):
                     return (), ()  # max(a, b), next(it, default): one of them
                 if any(argument is one for one in elements):
-                    return (), (None,)
+                    return None if self._keys_only(file, func, argument) else ((), (None,))
+            if len(call.args) == 1 and gives in (callfacts.COPY, callfacts.NUMBERED) and self._keys_only(file, func, argument):
+                return None  # sorted(d), list(d), enumerate(d): a mapping's keys, as d.keys() is
             if len(call.args) == 1 and gives == callfacts.COPY:
                 return (None,), (None,)
             if len(call.args) == 1 and gives == callfacts.NUMBERED:
@@ -2105,6 +2120,21 @@ def _iterated_texts(
             taken = over.args[0].id  # for k in list(d)
     if taken and taken in holders:
         return set()  # the mapping's own keys
+    if slot is None and isinstance(over, ast.Dict):
+        return _dict_keys([over])  # for k in {...}
+    if (
+        isinstance(over, ast.Call)
+        and isinstance(over.func, ast.Attribute)
+        and isinstance(over.func.value, ast.Dict)
+        and not over.args
+        and not over.keywords
+        and over.func.attr == ("keys" if slot is None else "items" if slot == 0 else None)
+    ):
+        return _dict_keys([over.func.value])  # for k in {...}.keys(), for k, v in {...}.items()
+    if taken:
+        dicts = _local_dicts(func, taken)
+        if dicts is not None:
+            return _dict_keys(dicts)  # for k, v in d.items(), d a local bound only to dict literals
     sequences: list[ast.expr]
     if isinstance(over, (ast.List, ast.Tuple, ast.Set)):
         sequences = [over]
@@ -2153,6 +2183,70 @@ def _iterated_texts(
             ):
                 return None
             texts.add(element.value)
+    return texts
+
+
+#: What a read of a mapping bound to dict literals may be and leave its keys the literals' -- ``d.items()``,
+#: ``d.get(k)``: no method that changes it.
+_DICT_READS = frozenset({"keys", "items", "values", "get"})
+
+
+def _local_dicts(func: ast.AST, name: str) -> Optional[list[ast.Dict]]:
+    """The dict literals the local *name* of *func* is bound to, where it is bound only to them and only read --
+    iterated, looked up, tested with ``in``, read by :data:`_DICT_READS` or ``list()`` / ``sorted()`` and the like;
+    ``None`` where it is a parameter, bound otherwise, or used in any other way (changed, handed to a call)."""
+    if name in _parameters(func):
+        return None
+    dicts: list[ast.Dict] = []
+    for node in walk(func):
+        if not isinstance(node, ast.Name) or node.id != name:
+            continue
+        parent = getattr(node, "parent", None)
+        if isinstance(node.ctx, ast.Store):
+            if not (
+                isinstance(parent, (ast.Assign, ast.AnnAssign))
+                and isinstance(parent.value, ast.Dict)
+                and (parent.targets if isinstance(parent, ast.Assign) else [parent.target]) == [node]
+            ):
+                return None
+            dicts.append(parent.value)
+        elif isinstance(node.ctx, ast.Load):
+            if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)) and parent.iter is node:
+                continue
+            if isinstance(parent, ast.Subscript) and parent.value is node and isinstance(parent.ctx, ast.Load):
+                continue
+            if isinstance(parent, ast.Compare) and node in parent.comparators and all(
+                isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops
+            ):
+                continue
+            if (
+                isinstance(parent, ast.Attribute)
+                and parent.attr in _DICT_READS
+                and isinstance(getattr(parent, "parent", None), ast.Call)
+                and parent.parent.func is parent  # type: ignore[attr-defined]
+            ):
+                continue
+            if (
+                isinstance(parent, ast.Call)
+                and isinstance(parent.func, ast.Name)
+                and parent.func.id in ("list", "tuple", "sorted", "set", "len")
+                and parent.args == [node]
+            ):
+                continue
+            return None
+        else:
+            return None
+    return dicts or None
+
+
+def _dict_keys(dicts: list[ast.Dict]) -> Optional[set[str]]:
+    """The keys of *dicts*, each a text; ``None`` where one is not (a ``**`` spread, a computed key)."""
+    texts: set[str] = set()
+    for one in dicts:
+        for key in one.keys:
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                return None
+            texts.add(key.value)
     return texts
 
 

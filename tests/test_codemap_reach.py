@@ -1825,6 +1825,111 @@ def test_the_keys_a_mapping_may_hold_are_read_from_every_put_into_every_name_hol
         assert keys(owner) is None, owner
 
 
+def test_a_key_put_by_a_loop_over_a_dict_literal_is_one_of_its_keys(tmp_path):
+    """``pilot_api.update_job`` clamps the memory metrics by ``for key, digits in memory_metric_digits.items(): ...
+    param[key] = ...``, over a local bound only to a dict literal: its keys are texts as a list literal's are.  One store
+    of ``key`` not read so left every key of ``param`` unread, and ``updateJobStatus`` wrote none of the pilot's
+    columns.  A dict that is changed, handed on, or spread with ``**`` is not read."""
+    mod = (
+        "def update(job_id, param):\n"
+        "    for key in list(param):\n"
+        "        param[key] = str(param[key])\n\n"
+        "def items(job_id, rss):\n"
+        "    param = {}\n"
+        "    param['transExitCode'] = 0\n"
+        "    digits = {'maxRSS': 10, 'maxVMEM': 15}\n"
+        "    for key, width in digits.items():\n"
+        "        if key in param and param[key] > 10**width - 1:\n"
+        "            param[key] = 10**width - 1\n"
+        "    update(job_id, param)\n\n"
+        "def plain():\n"
+        "    param = {}\n"
+        "    widths = {'avgRSS': 10}\n"
+        "    for key in widths:\n"
+        "        param[key] = widths[key]\n"
+        "    for key in {'avgPSS': 1}.keys():\n"
+        "        param[key] = 1\n\n"
+        "def changed():\n"
+        "    param = {}\n"
+        "    widths = {'avgRSS': 10}\n"
+        "    widths['other'] = 1\n"
+        "    for key in widths:\n"
+        "        param[key] = 1\n\n"
+        "def handed(more):\n"
+        "    param = {}\n"
+        "    widths = {'avgRSS': 10}\n"
+        "    more.fill(widths)\n"
+        "    for key in widths:\n"
+        "        param[key] = 1\n\n"
+        "def spread(more):\n"
+        "    param = {}\n"
+        "    for key in {'avgRSS': 10, **more}:\n"
+        "        param[key] = 1\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    tree = calls.types.tree("pkg/mod.py")
+
+    def keys(owner: str):
+        func = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == owner
+        )
+        return receivers.keys("pkg/mod.py", func, "param")
+
+    assert keys("update") == {"transExitCode", "maxRSS", "maxVMEM"}
+    assert keys("plain") == {"avgRSS", "avgPSS"}
+    for owner in ("changed", "handed", "spread"):
+        assert keys(owner) is None, owner
+
+
+def test_going_through_a_mapping_gives_its_keys_and_none_of_its_values(tmp_path):
+    """``propagateResultToJEDI`` counts files per dataset in ``datasetContentsStat``, a dict of dict literals, walks
+    ``sorted(datasetContentsStat)`` and hands each dataset ID to a statement's map.  A loop over a mapping, or a
+    builtin's copy of it, gives its keys, as ``d.keys()`` does: an ID handed on takes no count with it, and the keys
+    of one dataset's counts are read.  A list's elements are its values: one handed to a call not followed leaves
+    them unread."""
+    mod = (
+        "def propagate(self, files):\n"
+        "    stats = {}\n"
+        "    for f in files:\n"
+        "        if f.datasetID not in stats:\n"
+        "            stats[f.datasetID] = {'nFilesUsed': 0, 'nFilesFinished': 0}\n"
+        "        stats[f.datasetID]['nFilesFinished'] += 1\n"
+        "    for one in sorted(stats):\n"
+        "        self.cur.execute('SELECT 1', {':datasetID': one})\n"
+        "    for one, n in enumerate(stats):\n"
+        "        counts = stats[one]\n"
+        "        self.cur.execute('SELECT 1', {':id': one, ':n': n, ':first': max(stats)})\n"
+        "        for key in counts:\n"
+        "            self.cur.execute(f'UPDATE t SET {key}={key}+1', {})\n\n"
+        "def listed(self, files):\n"
+        "    rows = []\n"
+        "    for f in files:\n"
+        "        rows.append({'nFilesUsed': 0})\n"
+        "    for row in rows:\n"
+        "        self.cur.execute('SELECT 1', {':row': row})\n"
+        "    for counts in rows:\n"
+        "        for key in counts:\n"
+        "            self.cur.execute(f'UPDATE t SET {key}={key}+1', {})\n"
+    )
+    calls = calls_mod.Calls(calls_mod.Types(_tree(tmp_path, mod=mod), {}))
+    receivers = reach._Receivers(calls, None)
+    tree = calls.types.tree("pkg/mod.py")
+
+    def keys(owner: str):
+        func = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == owner
+        )
+        return receivers.keys("pkg/mod.py", func, "counts")
+
+    assert keys("propagate") == {"nFilesUsed", "nFilesFinished"}
+    assert keys("listed") is None
+
+
 def test_a_value_declared_a_collection_is_a_builtin_as_a_sequence_is(tmp_path):
     """``Collection[str]`` from ``collections.abc`` names a builtin container, as ``Sequence[str]`` does, not a class
     outside the corpus; ``DefaultDict`` and ``FrozenSet`` are a ``defaultdict`` and a ``frozenset``

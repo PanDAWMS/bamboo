@@ -34,6 +34,7 @@ from bamboo.codemap.models import (
     Anchor,
     AnnotationAudit,
     CallStop,
+    CoverageStat,
     FunctionPrintsNode,
     JunctionNode,
     MapFragment,
@@ -52,6 +53,7 @@ from bamboo.codemap.panda import (
     flow,
     handlermarks,
     heldfrom,
+    messages,
     mustprints,
     objects,
     offrow,
@@ -202,6 +204,9 @@ def _unique_subjects(subjects: list[SubjectNode]) -> list[SubjectNode]:
 #: read by them (:data:`bamboo.codemap.callfacts.READ_OUTSIDE`).  Its logger, broker and configuration modules stay
 #: outside.
 PACKAGES = ("pandaserver", "pandajedi", "pandacommon")
+#: The coverage slice of the statement fragments a loop over a mapping's keys writes (:func:`sql.key_column_census`):
+#: candidates are the fragments, explained the ones the map named a column or term by.
+KEY_BUILT_SLICE_NAME = "sql-key-built"
 
 # Test code is not the system's behaviour: :func:`calls.is_test_module`, the
 # one rule the build and the call index share.
@@ -673,20 +678,25 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # A column name the code builds from a mapping key.  Where the keys
         # cannot be read the statement names no column, which in the map looks
         # exactly like a statement that writes none -- so the count is carried
-        # to the build report rather than left as that silence.
-        self.key_columns = sql.KeyColumnCensus(
-            *(
-                sum(part)
-                for part in zip(
-                    *(
-                        sql.key_column_census(func)
-                        for module in self._modules
-                        for func, _owner in functions_with_owner(module.tree)
-                    ),
-                    strict=True,
+        # to the build report, file by file in the coverage matrix, rather than
+        # left as that silence: a key the walk loses shows as one fewer named.
+        census: dict[str, sql.KeyColumnCensus] = {}
+        for module in self._modules:
+            counts = [sql.key_column_census(func) for func, _owner in functions_with_owner(module.tree)]
+            total = sql.KeyColumnCensus(*(sum(part) for part in zip(*counts, strict=True))) if counts else None
+            if total is not None and total.loops:
+                census[module.rel_path] = total
+                fragment.coverage.append(
+                    CoverageStat(
+                        slice_name=KEY_BUILT_SLICE_NAME,
+                        file=module.rel_path,
+                        candidates=total.loops,
+                        explained=total.resolved,
+                    )
                 )
-            )
-        )
+        self.key_columns = sql.KeyColumnCensus(
+            *(sum(part) for part in zip(*census.values(), strict=True))
+        ) if census else sql.KeyColumnCensus(0, 0, 0)
 
         # After promotion, which marks the subjects and drops none: the reach
         # figure is over every junction the slices produced.
@@ -779,6 +789,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         # The routes of calls on which each write never runs, its records all made (the objects' last).
         sqlwrite.attach_routes(fragment.key_froms, self._calls)
+        # The parameters the key records' sources end at, each pointed at its ParameterFrom: read with the guards'.
+        key_parameters = sqlwrite.parameter_ends(fragment.key_froms)
         lap("key sources")
         # Where each function holding an arm is entered from, the tests each way in sits under, and why those may not
         # be every way: a reader rules an arm out by them, reading their names with the GuardFroms below.
@@ -797,6 +809,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # And what the object each arm writes, and the value each passthrough arm hands on, hold: a reader binds a
         # guard's name to the arm's row where the two ways end alike.  And what each field of self a definition the
         # conditions call reads holds: a reader runs it on the object (``self.add_result.is_succeeded()``).
+        # The reader of those ways is kept: the runs' keys read a binding they read no further as it does.
+        values = heldfrom.value_reader(
+            fragment.junctions,
+            fragment.read_sites,
+            {module.rel_path: module.tree for module in self._modules},
+            self._calls,
+            record,
+        )
         (
             fragment.guard_froms,
             fragment.parameter_froms,
@@ -810,7 +830,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._calls,
             record,
             writes,
+            reader=values,
             entered=fragment.entered_froms,
+            parameters=key_parameters,
             fields=runnable.condition_fields(
                 fragment.junctions,
                 {module.rel_path: module.tree for module in self._modules},
@@ -820,6 +842,32 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             ),
         )
         lap("guard sources")
+        # An INSERT keyed by a field of an object of its class handed in is new where the field was given a value
+        # before it on every way -- in the function, or in the callers the parameter's ways reach.
+        sqlwrite.handed_births(
+            fragment.key_froms, fragment.junctions, fragment.write_froms, fragment.parameter_froms
+        )
+        # And at each INSERT making a row of an object written whole, the value its class's map gives a field no code
+        # set: an arm a reader asking who wrote that value finds.
+        sqlwrite.unset_births(
+            fragment.junctions,
+            fragment.key_froms,
+            progress.spec_unset_values(self._modules),
+            self._modules,
+            fragment.map_id,
+            fragment.derived_from,
+        )
+        # What the function prints under a test of the row count of a run each write lands at: whether it landed.
+        sqlwrite.attach_count_prints(
+            fragment.key_froms,
+            fragment.junctions,
+            progress.spec_setters(
+                self._modules,
+                {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
+            ),
+        )
+        # Each message a run sends and the function another run takes it with: beside reach, not in it.
+        fragment.message_edges = messages.edges(self._modules, self._calls, values)
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(
@@ -903,7 +951,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             # can record, and the calls that write a history row in the same pass
             # as an arm: what gives a value the map sees set a time, and the log
             # lines of the run it was set in.
-            started, recorded, paired, columned, rewritten = runs.attach(fragment, self._modules, self._calls)
+            started, recorded, paired, columned, rewritten = runs.attach(
+                fragment,
+                self._modules,
+                self._calls,
+                values.binding_rows if values is not None else None,
+            )
             logger.info(
                 "PandaCodeMapPlugin: %d function(s) start a run, %d history call(s), %d branch(es) with a history pair, "
                 "%d message hole(s) naming a column, %d branch(es) with a later write",

@@ -917,6 +917,46 @@ def test_object_getattribute_on_the_class_is_read_as_getattr_where_object_is_the
         assert callfacts.builtin_function_at(call) == function
 
 
+
+_SLOTS = """\
+def slots(job, entries, keys, cls):
+    object.__getattribute__(job, "PandaID")
+    object.__new__(cls)
+    dict.fromkeys(keys)
+    dict.get(entries, "a")
+    dict.__setitem__(entries, "a", job)
+    list.append(keys, job)
+
+
+def shadowed(job, dict):
+    dict.__setitem__(job, "a", 1)
+"""
+
+
+def test_a_builtin_class_s_method_read_off_the_class_is_its_slot_which_python_says_takes_the_object_or_not(tmp_path):
+    """A method read off a builtin class runs the builtin's own (:func:`callfacts.builtin_slot`): a method or a slot
+    of the type takes the object it runs on first and may change it, but where it reads (``object.__getattribute__``,
+    ``dict.get``); a class's or a static method (``object.__new__``, ``dict.fromkeys``) takes none.  With ``dict`` a
+    parameter it is no slot."""
+    types = calls_mod.Types(_tree(tmp_path, mod=_SLOTS), {})
+    file = f"{PACKAGE}/mod.py"
+    functions = {node.name: node for node in ast.walk(types.tree(file)) if isinstance(node, ast.FunctionDef)}
+    found = {
+        ast.unparse(call.func): callfacts.builtin_slot(types, file, functions["slots"], call)
+        for call in ast.walk(functions["slots"])
+        if isinstance(call, ast.Call)
+    }
+    assert {name: (slot.instance, slot.changes) for name, slot in found.items() if slot is not None} == {
+        "object.__getattribute__": (True, False),
+        "object.__new__": (False, False),
+        "dict.fromkeys": (False, False),
+        "dict.get": (True, False),
+        "dict.__setitem__": (True, True),
+        "list.append": (True, True),
+    }
+    (call,) = [node for node in ast.walk(functions["shadowed"]) if isinstance(node, ast.Call)]
+    assert callfacts.builtin_slot(types, file, functions["shadowed"], call) is None
+
 def _named(text: str, me: str | None = None) -> tuple | None:
     written = callfacts.named_write(ast.parse(text, mode="eval").body, me)
     if written is None:

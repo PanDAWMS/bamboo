@@ -26,7 +26,7 @@ import functools
 import itertools
 import re
 from pathlib import Path
-from typing import Iterator, NamedTuple, Optional
+from typing import Any, Iterator, NamedTuple, Optional
 
 import sqlglot
 from pydantic import BaseModel, Field
@@ -199,9 +199,10 @@ class SqlWrite(BaseModel):
         default_factory=list,
         description=(
             "The ``SET`` items ``{}=:{}`` -- a column that is a hole, given a bind whose name holds one -- as "
-            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  Not in "
-            "*columns*, and each still a :data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's "
-            "to read."
+            "*key_holes* spells a term: ``updateJobStatus``' ``,{key}=:{key}`` for each key of ``param``.  So is "
+            "``{}={}+{}``, a column that is a hole changed by an amount, with the value as the statement spells it "
+            "and not a bind: ``propagateResultToJEDI``'s file counts.  Not in *columns*, and each still a "
+            ":data:`SET_COLUMN_IS_A_HOLE`: which columns the holes are is the run's to read."
         ),
     )
 
@@ -872,8 +873,9 @@ def _update_pairs(
 
     An item it cannot pair goes into *passed*, where given, as ``(the item as
     the statement spells it, why)`` -- see :func:`unread_columns`; one whose
-    column is a hole and whose bind holds one goes into *holes* as well, where
-    given (:attr:`SqlWrite.column_holes`).
+    column is a hole and whose bind holds one, or whose value is a hole changed
+    by an amount, goes into *holes* as well, where given
+    (:attr:`SqlWrite.column_holes`).
     """
     update = _at_depth(tokens, 0, {_T.UPDATE})
     assign = _at_depth(tokens, update + 1, {_T.SET}) if update is not None else None
@@ -902,7 +904,7 @@ def _update_pairs(
                 passed.append(
                     ("SET " + _spelled(sql, tokens, lo, hi, written=True), SET_COLUMN_IS_A_HOLE if equals is not None else SET_ITEM_NOT_READ)
                 )
-            if holes is not None and equals is not None and (held := _key_hole(item)) is not None:
+            if holes is not None and equals is not None and (held := _key_hole(item) or _counted_hole(item)) is not None:
                 holes.append(held)
             continue
         found.append((name, tokens[hi - 1].end + 1, _supplied(item.expression, _spelled(sql, tokens, equals + 1, hi, written=True), False)))
@@ -1094,6 +1096,21 @@ def where_terms(sql: str) -> Optional[dict[str, tuple[str, list[tuple[int, int]]
     return {column: (term, spans.get(column, [])) for column, term in preconditions.items()}
 
 
+def read_key_holes(sql: str) -> list[tuple[int, str, tuple[int, ...]]]:
+    """The terms ``{}=:{}`` of the ``WHERE`` of the ``SELECT`` in *sql* -- a column that is a hole, equated to a bind
+    whose name holds one -- spelt as :attr:`SqlWrite.key_holes` spells an ``UPDATE``'s: ``queryDatasetWithMap``'s
+    ``WHERE {key}=:{key}`` over its *map*.  Only the conjuncts every row meets, of the statement's own clause."""
+    tree = parsed(sql).tree
+    while isinstance(tree, exp.Subquery):
+        tree = tree.this
+    if not isinstance(tree, exp.Select):
+        return []
+    where = tree.args.get("where")
+    if where is None:
+        return []
+    return [held for term in _conjuncts(where.this) if (held := _key_hole(term)) is not None]
+
+
 def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
     """``(column hole, bind, bind holes)`` of a term ``{}=:cr_{}`` (:attr:`SqlWrite.key_holes`); ``None`` for any other."""
     if not (isinstance(term, exp.EQ) and _is_hole(term.this) and isinstance(term.expression, exp.Placeholder)):
@@ -1103,6 +1120,26 @@ def _key_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]
     if column is None or not numbers:
         return None
     return int(column.group(1)), ":" + _NAMED_HOLE.sub("{}", term.expression.name), numbers
+
+
+def _counted_hole(term: exp.Expression) -> Optional[tuple[int, str, tuple[int, ...]]]:
+    """``(column hole, value, value holes)`` of a ``SET`` item ``{}={}+{}`` or ``{}={}-{}`` (:attr:`SqlWrite.column_holes`):
+    a column that is a hole, changed by an amount -- ``propagateResultToJEDI``'s ``f"{tmpStatKey}={tmpStatKey}+{tmpStatVal},"``.
+    The value as the statement spells it, its holes ``{}``; it starts with a hole, and whether that hole is the
+    column's key is the run's to read (``sql.keyed_items``).  ``None`` for any other."""
+    if not (isinstance(term, exp.EQ) and _is_hole(term.this)):
+        return None
+    first = term.expression
+    while isinstance(first, (exp.Add, exp.Sub)):
+        first = first.this
+    if first is term.expression or not _is_hole(first):
+        return None
+    column = _HOLE_NUMBER.fullmatch(term.this.name)
+    spelled = term.expression.sql()
+    numbers = tuple(int(number) for number in _HOLE_NUMBER.findall(spelled))
+    if column is None or not numbers:
+        return None
+    return int(column.group(1)), _NAMED_HOLE.sub("{}", spelled), numbers
 
 
 #: Why a column a statement writes is not in what :func:`writes` returns.  Each
@@ -2118,6 +2155,19 @@ def term_spans(sql: str) -> tuple[tuple[int, int], ...]:
 ITEM_COLUMN, ITEM_STAR, ITEM_HOLE, ITEM_EXPRESSION, ITEM_AFTER_HOLE = "column", "star", "hole", "expression", "after hole"
 
 
+class Aggregate(NamedTuple):
+    """An :data:`ITEM_EXPRESSION` that is one column's ``MAX`` or ``MIN``: ``MAX(creationTime)`` of ``jobsDefined4``
+    under ``GROUP BY jobDefinitionID, prodUserName, ...`` (:class:`~bamboo.codemap.models.RowAggregate`)."""
+
+    #: ``MAX`` or ``MIN``.
+    fn: str
+    #: The column's table, as :attr:`SelectItem.table`, and the column, lowered.
+    table: str
+    column: str
+    #: The ``GROUP BY`` columns, ``(table, column)`` lowered, the table ``""`` where none is read.
+    group_by: tuple[tuple[str, str], ...] = ()
+
+
 class SelectItem(NamedTuple):
     """One item of a statement's select list, at its position in each row the statement returns."""
 
@@ -2126,6 +2176,8 @@ class SelectItem(NamedTuple):
     table: str = ""
     #: Its column, lowered; ``""`` but for :data:`ITEM_COLUMN`.
     column: str = ""
+    #: An expression that is one column's ``MAX`` or ``MIN``: that.
+    aggregate: Optional[Aggregate] = None
 
 
 @functools.lru_cache(maxsize=None)
@@ -2173,8 +2225,29 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
             else:
                 items.append(SelectItem(ITEM_EXPRESSION))
         else:
-            items.append(SelectItem(ITEM_EXPRESSION))
+            items.append(SelectItem(ITEM_EXPRESSION, aggregate=_aggregate(column, select, scope, root)))
     return tuple(items)
+
+
+def _aggregate(node: object, select: exp.Select, scope, root) -> Optional[Aggregate]:
+    """*node*, a select item, as one column's ``MAX`` or ``MIN`` with *select*'s grouping, where it is one."""
+    if not isinstance(node, (exp.Max, exp.Min)) or not isinstance(node.this, exp.Column) or scope is None:
+        return None
+    if node.expressions or _NAMED_HOLE.search(node.this.name):
+        return None
+
+    def placed(column: exp.Column) -> tuple[str, str]:
+        owned, why = _owner(column, scope, root)
+        return (owned[0].lower() if owned and not why else "", column.name.lower())
+
+    table, column = placed(node.this)
+    if not table:
+        return None
+    group = select.args.get("group")
+    grouped = tuple(
+        placed(one) for one in (group.expressions if isinstance(group, exp.Group) else ()) if isinstance(one, exp.Column)
+    )
+    return Aggregate("MAX" if isinstance(node, exp.Max) else "MIN", table, column, grouped)
 
 
 def is_hole(name: str) -> bool:
@@ -2506,6 +2579,37 @@ class Side(NamedTuple):
     #: Seconds per unit of a bind amount added to the clock:
     #: ``CURRENT_DATE-:days`` is ``-86400`` times the bind's value.
     scale_seconds: Optional[float] = None
+    #: An ``other`` side that is one value a subquery gives: ``(SELECT MAX(fileID) FROM ...)``.
+    rows: Optional[Rows] = None
+    #: An ``other`` side made only of the row's columns, numbers and ``+ - * /``, each column as :attr:`table` and
+    #: :attr:`column` are: ``nFilesFinished+nFilesFailed``.  The expression is not evaluated.
+    columns: tuple[tuple[str, str], ...] = ()
+
+
+class Rows(NamedTuple):
+    """What a term asks of rows other than its own, as a subquery says it.
+
+    ``NOT EXISTS (SELECT 1 FROM JEDI_Datasets tabD WHERE tabD.jediTaskID=tabT.jediTaskID AND ...)`` is the
+    datasets of the task the statement's row is, and the clause they must all fail; ``PandaID NOT IN (SELECT PandaID
+    FROM ...)`` the rows whose column the row's must not be; ``MAX_PRIORITY=(SELECT MAX(...) FROM ...)`` the rows
+    one value is read off.  The term stays ``other``: nothing here says whether it holds.
+    """
+
+    #: ``EXISTS``, ``NOT EXISTS``, ``IN``, ``NOT IN``, or ``value`` for the one value a comparison reads.
+    op: str
+    #: The subquery's own tables, spelled as :attr:`Term.table`.
+    tables: tuple[str, ...] = ()
+    #: Each column of the subquery its ``WHERE`` equates with a column of a statement outside it, as ``((table,
+    #: column), (outer table, column))``: ``tabD.jediTaskID=tabT.jediTaskID``.
+    correlated: tuple[tuple[tuple[str, str], tuple[str, str]], ...] = ()
+    #: ``IN`` and ``NOT IN``: the column outside that is looked for, as ``(table, column)``.
+    column: tuple[str, str] = ("", "")
+    #: The column the subquery selects, or the one its selected aggregate is of: ``MAX(fileID)`` is ``fileID``.
+    selected: tuple[str, str] = ("", "")
+    #: The subquery's ``WHERE`` without the correlation, read as a statement's own clause is: what a row of
+    #: :attr:`tables` must meet to count.  ``None`` where the clause does not read; an ``all`` of nothing where it
+    #: asks nothing more.
+    tree: Optional[Twin] = None
 
 
 class Test(NamedTuple):
@@ -2524,6 +2628,8 @@ class Test(NamedTuple):
     op: str = ""
     #: The other side: one for a comparison, each listed value for ``IN``.
     sides: tuple[Side, ...] = ()
+    #: An ``other`` term that asks about other rows: ``EXISTS``, ``IN (SELECT ...)`` and their negations.
+    rows: Optional[Rows] = None
 
 
 class Twin(NamedTuple):
@@ -2698,16 +2804,16 @@ def _own(node: exp.Expression, select: Optional[exp.Expression]) -> list[exp.Col
 
 def _term_kind(term: exp.Expression, scope, root) -> str:
     """:data:`_KEEP`, :data:`_HELD` or :data:`_DROP`, read off the tree."""
-    node, negations = term, 0
+    node = term
     while isinstance(node, (exp.Not, exp.Paren)):
-        negations += isinstance(node, exp.Not)
         node = node.this
     if isinstance(node, exp.Exists) or (isinstance(node, exp.In) and node.args.get("query") is not None):
-        # ``EXISTS (...)`` looks rows up and is ``consults``; ``NOT EXISTS``
-        # turns the subquery's terms round, and only the term as a whole says
-        # what it asks.  So does the subquery an ``UPDATE`` picks its own
-        # rows by, which no other field holds.
-        return _KEEP if negations % 2 or _picks_own_rows(node) else _DROP
+        # A term about other rows, ``EXISTS`` as much as ``NOT EXISTS``: a
+        # row the statement passed over may have failed it alone, and the
+        # entry it is dropped from would read as met without it.  Only the
+        # term as a whole says what it asks (:class:`Rows`); ``consults``
+        # still holds the values an ``EXISTS`` looks rows up by.
+        return _KEEP
     select = None if isinstance(scope, _Root) else scope.expression
     own = _own(node, select)
     if not own:
@@ -2954,6 +3060,17 @@ def _clock_side(node: exp.Expression, text: str) -> Optional[Side]:
     return Side("clock", text, clock=name, offset_seconds=sign * days * 86400.0)
 
 
+def clock_of(text: str) -> Optional[Side]:
+    """*text*, a value a statement writes as it spells it -- ``CURRENT_DATE``, ``CURRENT_DATE-1``,
+    ``CURRENT_DATE-1/24``, ``SYSDATE-:days`` -- as the database's clock plus an amount, read as a term's side is
+    (:func:`_clock_side`); ``None`` where it is no such amount."""
+    try:
+        tree = sqlglot.parse_one(text, read="oracle")
+    except SqlglotError:
+        return None
+    return _clock_side(tree, text) if isinstance(tree, exp.Expression) else None
+
+
 def _side(node: exp.Expression, scope, root, sql: str) -> Side:
     """What *node*, the side a term compares its column with, is."""
     read = parsed(sql)
@@ -2976,7 +3093,10 @@ def _side(node: exp.Expression, scope, root, sql: str) -> Side:
     clock = _clock_side(node, text)
     if clock is not None:
         return clock
-    return Side("other", text, binds=tuple(f":{one.name}" for one in node.find_all(exp.Placeholder)))
+    binds = tuple(f":{one.name}" for one in node.find_all(exp.Placeholder))
+    if isinstance(node, exp.Subquery):
+        return Side("other", text, binds=binds, rows=_rows("value", node, scope, root, sql))
+    return Side("other", text, binds=binds, columns=_arithmetic(node, scope, root))
 
 
 def _column_owner(column: exp.Expression, scope, root) -> Optional[str]:
@@ -2989,6 +3109,110 @@ def _column_owner(column: exp.Expression, scope, root) -> Optional[str]:
     return owners[0] if owners and not why else None
 
 
+def _owned(node: Optional[exp.Expression], scope, root) -> tuple[str, str]:
+    """A plain column as ``(table, column)``, or ``("", "")``."""
+    owner = _column_owner(node, scope, root) if node is not None else None
+    return (owner, node.name) if owner is not None and node is not None else ("", "")
+
+
+def _arithmetic(node: exp.Expression, scope, root) -> tuple[tuple[str, str], ...]:
+    """The columns *node* is made of where it is only the row's columns, numbers and ``+ - * /``; ``()`` for
+    anything else: ``nFilesFinished+nFilesFailed``."""
+    found: list[tuple[str, str]] = []
+    stack = [node]
+    while stack:
+        one = stack.pop()
+        if isinstance(one, exp.Paren):
+            stack.append(one.this)
+        elif isinstance(one, (exp.Add, exp.Sub, exp.Mul, exp.Div)):
+            stack.extend((one.expression, one.this))
+        elif isinstance(one, exp.Literal) and not one.is_string:
+            continue
+        else:
+            column = _owned(one, scope, root)
+            if not column[0]:
+                return ()
+            if column not in found:
+                found.append(column)
+    return tuple(found)
+
+
+@functools.lru_cache(maxsize=None)
+def _scoped(sql: str) -> tuple[dict[int, Any], Optional[_Root], list[_Token]]:
+    """*sql*'s scopes by the expression each is of, its ``UPDATE``/``DELETE`` root, and its tokens.
+
+    One set for a statement and every subquery in it, so a subquery's column is owned through the same chain of
+    scopes the statement's own clause is read in.
+    """
+    read = parsed(sql)
+    if read.tree is None:
+        return {}, None, []
+    scopes, root = _scopes(read.tree)
+    return {id(scope.expression): scope for scope, _verb, _kind in scopes}, root, _tokens(read.text)
+
+
+def _rows(op: str, query: exp.Expression, scope, root, sql: str, column: tuple[str, str] = ("", "")) -> Rows:
+    """The subquery *query* of a term *op* asks by, as :class:`Rows`; only *op* where it is not one ``SELECT``.
+
+    The correlation is each term of its ``WHERE``'s outermost ``AND`` equating a column of its own with one a
+    qualifier from outside names: ``tabD.jediTaskID=tabT.jediTaskID``.  Its tree is the rest of the clause, a term
+    against a column outside kept as it compares (``tabD.creationTime>tabT.creationTime``): it is part of what a row
+    must meet to count.
+    """
+    while isinstance(query, (exp.Subquery, exp.Paren)):
+        query = query.this
+    if not isinstance(query, exp.Select):
+        return Rows(op, column=column)
+    scope_of, _root, tokens = _scoped(sql)
+    inner = scope_of.get(id(query))
+    if inner is None:
+        return Rows(op, column=column)
+    tables = tuple(sorted({_table_name(one) for one in inner.sources.values() if isinstance(one, exp.Table)}))
+    own = {key.lower() for key in inner.sources}
+
+    def outside(node: exp.Expression) -> bool:
+        return isinstance(node, exp.Column) and bool(node.table) and node.table.lower() not in own
+
+    correlated: list[tuple[tuple[str, str], tuple[str, str]]] = []
+    through: set[int] = set()
+    where = query.args.get("where")
+    for term in _conjuncts(where.this) if where is not None else ():
+        if not isinstance(term, exp.EQ) or outside(term.this) == outside(term.expression):
+            continue
+        mine, theirs = (term.expression, term.this) if outside(term.this) else (term.this, term.expression)
+        pair = (_owned(mine, inner, root), _owned(theirs, inner, root))
+        if pair[0][0] and pair[1][0]:
+            correlated.append(pair)
+            through.add(id(term))
+    projections = query.selects
+    picked = list(projections[0].find_all(exp.Column)) if len(projections) == 1 else []
+    selected = _owned(picked[0], inner, root) if len(picked) == 1 else ("", "")
+    tree: Optional[Twin] = Twin("all")
+    if where is not None:
+        clause = _where_tree(where, inner, root, parsed(sql), sql, tokens)
+        if clause is None:
+            tree = None
+        else:
+            kept = _prune(_correlation_off(clause, through, outside), False, True)
+            tree = _as_twin(kept, inner, root, sql) if kept is not None else Twin("all")
+    return Rows(op, tables, tuple(correlated), column, selected, tree)
+
+
+def _correlation_off(node, through: set[int], outside):
+    """A subquery's clause tree with its correlation terms dropped, and a term against a column outside kept."""
+    if node[0] != "term":
+        kind, body = node
+        return (kind, [_correlation_off(child, through, outside) for child in body])
+    _term, text, kind, held, span = node
+    if held is None:
+        return node
+    if id(held) in through:
+        return ("term", text, _DROP, held, span)
+    if kind == _DROP and any(outside(one) for one in held.find_all(exp.Column)):
+        return ("term", text, _KEEP, held, span)
+    return node
+
+
 def _test(node: Optional[exp.Expression], text: str, scope, root, sql: str) -> Twin:
     """The term *node* of a clause as a :class:`Test`, or the ``all`` of a ``BETWEEN``'s two."""
     other = Twin("test", test=Test("other", text))
@@ -2998,6 +3222,12 @@ def _test(node: Optional[exp.Expression], text: str, scope, root, sql: str) -> T
     while isinstance(node, (exp.Not, exp.Paren)):
         negated ^= isinstance(node, exp.Not)
         node = node.this
+    if isinstance(node, exp.Exists):
+        return Twin("test", test=Test("other", text, rows=_rows("NOT EXISTS" if negated else "EXISTS", node.this, scope, root, sql)))
+    if isinstance(node, exp.In) and node.args.get("query") is not None:
+        op = "NOT IN" if negated else "IN"
+        rows = _rows(op, node.args["query"], scope, root, sql, _owned(node.this, scope, root))
+        return Twin("test", test=Test("other", text, rows=rows))
     if isinstance(node, exp.Is) and isinstance(node.expression, exp.Null):
         owner = _column_owner(node.this, scope, root)
         if owner is None:
@@ -3234,9 +3464,7 @@ def _readings(sql: str, held: bool) -> tuple[_Read, ...]:
     read = parsed(sql)
     if read.tree is None:
         return ()
-    tokens = _tokens(read.text)
-    scopes, root = _scopes(read.tree)
-    scope_of = {id(scope.expression): scope for scope, _verb, _kind in scopes}
+    scope_of, root, tokens = _scoped(sql)
     ctes: dict[str, exp.Expression] = {}
     entered: set[int] = set()
 

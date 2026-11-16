@@ -18,6 +18,11 @@ KNOWN_ISSUES.md K55), what decides is which cycle's selection took the row, and 
   M's last selection before T of the row's label, where those selections come one after another (one process).
 - C4 :func:`lock_of`: why the other machines' selections did not take the row once one had: the selecting function's
   lock term (``lockedTime<:timeLimit``) and the time its limit is set back by.
+- M3(a)-cap :func:`cap_take` (tmaeno's OK 2026-11-15 01:16:35, its build 01:46:09): where the selecting statement
+  returns at most a cap of rows (the map's ``limits``, ``rownum<1000``), a selection that returned fewer took every row
+  selectable then; from the time the statement began to return the row (the turn) the first such selection is the
+  one that took it, and those before it returned the cap (others first) or none (a selection beside them took the same
+  rows).
 """
 
 from __future__ import annotations
@@ -213,7 +218,9 @@ def selection_of(owner: str, line: int) -> tuple[Selection | None, str]:
 @dataclass(frozen=True)
 class CycleRows:
     """C2: the agent's rows in the innermost loop around the selecting call: *before* it (in order) and *after* it;
-    *label*, the hole a row before it prints the loop's element by (``prod_source_label``), or ""."""
+    *label*, the hole a row before it prints the loop's element by (``prod_source_label``), or "" -- a row every pass
+    to the call prints (:func:`_straight`), not one a branch or a handler prints on the way that skips the call
+    (TaskCommando's "failed to get lock" line; P7, out/gm/qk-design.md, tmaeno's OK 2026-11-15 23:06)."""
 
     before: tuple[R.Row, ...]
     after: tuple[R.Row, ...]
@@ -236,8 +243,23 @@ def cycle_rows(sel: Selection) -> CycleRows | None:
     before = tuple(r for r in rows if r.line < sel.call)
     after = tuple(r for r in rows if r.line > sel.call)
     targets = {n.id for n in ast.walk(loop.target) if isinstance(n, ast.Name)} if isinstance(loop, (ast.For, ast.AsyncFor)) else set()
-    label = next((t for r in before for t in targets if t in _holes(r)), "")
+    label = next((t for r in before if _straight(r.stmt, loop) for t in targets if t in _holes(r)), "")
     return CycleRows(before, after, label)
+
+
+def _straight(stmt: ast.AST, loop: ast.For | ast.AsyncFor | ast.While) -> bool:
+    """Whether *loop*'s body reaches *stmt* straight: through the bodies of ``with`` and ``try`` only, not an ``if``'s
+    branch, a handler, an ``else`` or a nested loop -- so every pass of the body that reaches a later statement of it
+    printed *stmt* first."""
+    child = stmt
+    for parent in pathcond.ancestors(stmt):
+        if parent is loop:
+            return any(c is child for c in loop.body)
+        if isinstance(parent, (ast.With, ast.AsyncWith, ast.Try)) and any(c is child for c in parent.body):
+            child = parent
+            continue
+        return False
+    return False
 
 
 def _holes(row: R.Row) -> set[str]:
@@ -402,6 +424,116 @@ def _timedelta_back(value: Any) -> datetime.timedelta | None:
         return datetime.timedelta(**kw)
     except TypeError:
         return None
+
+
+def waker_readers(key_froms: list, read_sites: list, row_tables: set[str], owner: str, subject: str,
+                   lines: set[int], rows_kind: str = "rows") -> tuple[list[tuple[Any, str]], list] | None:
+    """A2: the selections whose rows alone give *owner*'s writes of *subject* at *lines* the key they take the row by,
+    each with the column the key is read off (``(read site, column)``), and the inserts the map's ``wakers`` of them
+    name -- getTasksToExecCommand_JEDI's 4483 by 4339's ``prodsys_comm.comm_task``, sendCommandTaskPanda's 4038.  None
+    where a write takes its key from anything else, a selection reads a table holding rows of the subject's class
+    (*row_tables*, lower case), or no waker inserts.  *owner* and the KeyFroms' owners compare as ``file::function``."""
+
+    def bare(o: str) -> str:
+        rel, _, qual = o.partition("::")
+        return f"{rel}::{qual.rpartition('.')[2]}"
+
+    sites = {(r.owner, r.anchor.line_start): r for r in read_sites}
+    readers: list[tuple[Any, str]] = []
+    for kf in key_froms:
+        if bare(kf.owner) != bare(owner) or not set(kf.writes.get(subject, [])) & lines:
+            continue
+        for s in kf.sources:
+            site = sites.get((s.site_owner, s.site_line)) if s.kind == rows_kind else None
+            if site is None:
+                return None
+            readers.append((site, s.column))
+    if not readers or any({t.lower() for t in r.tables} & row_tables for r, _ in readers):
+        return None
+    wakers = [w for r, _ in readers for w in getattr(r, "wakers", None) or [] if w.kind == "insert"]
+    return (readers, wakers) if wakers else None
+
+
+def cap_rows(limits: list[str]) -> int | None:
+    """The most rows a statement returns by the map's ``limits`` (``< 1000``: 999, ``<= 50``: 50), the least where it
+    has several; None where none is a number (``< nTasks``)."""
+    caps = []
+    for limit in limits or []:
+        m = re.fullmatch(r"\s*(<=?)\s*(\d+)\s*", limit)
+        if m:
+            caps.append(int(m.group(2)) - (m.group(1) == "<"))
+    return min(caps) if caps else None
+
+
+@dataclass(frozen=True)
+class CapTake:
+    """M3(a)-cap: the selection *take* that took the row, the first after the turn to return fewer rows than *cap*, and
+    those of the row's label from the turn to it: *full* returned the cap, *empty* none.  Where the lines name no label,
+    the row's is the *place*-th (from 0) of each cycle's *width* selections -- the only place *take*'s cycle returned
+    rows at -- and *others* are the selections of cycles of another width in that time (another process's, another
+    label's); *place* is -1 where the lines name the label."""
+
+    take: Pick
+    cap: int
+    full: tuple[Pick, ...]
+    empty: tuple[Pick, ...]
+    place: int = -1
+    width: int = 0
+    others: tuple[Pick, ...] = ()
+
+
+def _count(p: Pick) -> int | None:
+    return int(p.count) if p.count.isdigit() else None
+
+
+def cap_take(picks: dict[str, list[Pick]], machine: str, first: str, turn: datetime.datetime, cap: int,
+             label: str) -> tuple[CapTake | None, str]:
+    """M3(a)-cap: which selection took the row the pass on *machine* beginning at *first* moved on, where the selecting
+    statement returns at most *cap* rows and began to return the row at *turn*: the machine's last selection of the
+    row's label before *first* that returned some rows, fewer than *cap*; every one of the label's from *turn* to it, on
+    any machine, returned *cap* rows or none.  With *label* the selections are the label's; without, the row's place in
+    a cycle is the one place the take's cycle returned rows at.  ``(CapTake, "")``, or None with why not."""
+    cycles: dict[tuple[str, str], list[Pick]] = {}
+    for qs in picks.values():
+        for q in qs:
+            cycles.setdefault((q.machine, q.mark), []).append(q)
+    for qs in cycles.values():
+        qs.sort(key=lambda q: q.at)
+
+    def began(q: Pick) -> datetime.datetime:
+        return when(q.after or q.at)
+
+    hi = when(first)
+    took = [q for q in picks.get(machine, []) if (not label or q.label == label) and began(q) >= turn
+            and when(q.at) <= hi and (_count(q) or 0) > 0]
+    if not took:
+        return None, f"no selection on {machine.split('.')[0]} from {turn:%H:%M:%S} to {first[11:19]} returned rows"
+    take = took[-1]
+    n = _count(take)
+    if n is None or n >= cap:
+        return None, (f"the last selection on {machine.split('.')[0]} before the pass returned {take.count} row(s), "
+                      f"not fewer than {cap}")
+    place, width = -1, 0
+    others: tuple[Pick, ...] = ()
+    if label:
+        mine = [q for qs in picks.values() for q in qs if q.label == label]
+    else:
+        cycle = cycles[(take.machine, take.mark)]
+        rows_at = [i for i, q in enumerate(cycle) if (_count(q) or 0) > 0]
+        if len(rows_at) != 1:
+            return None, f"the take's cycle {take.mark} returned rows at {len(rows_at)} of its {len(cycle)} selections"
+        place, width = rows_at[0], len(cycle)
+        mine = [qs[place] for qs in cycles.values() if len(qs) == width]
+        others = tuple(q for qs in cycles.values() if len(qs) != width for q in qs
+                       if began(q) >= turn and when(q.at) < began(take))
+    before = sorted((q for q in mine if began(q) >= turn and when(q.at) < began(take)), key=lambda q: q.at)
+    odd = [q for q in before if _count(q) not in (0, cap)]
+    if odd:
+        q = odd[0]
+        return None, (f"{q.machine.split('.')[0]}'s selection at {q.at[11:23]} returned {q.count} row(s), fewer than "
+                      f"{cap}, and did not take it")
+    return CapTake(take, cap, tuple(q for q in before if _count(q) == cap), tuple(q for q in before if _count(q) == 0),
+                   place, width, others), ""
 
 
 def _defs_named(name: str) -> list[str]:

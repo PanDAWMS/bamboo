@@ -358,10 +358,15 @@ class _Reached(NamedTuple):
 
 
 def attach(
-    fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
+    fragment: MapFragment,
+    modules: list[SourceModule],
+    calls: C.Calls,
+    row_items: Optional[keycolumns.RowItems] = None,
 ) -> tuple[int, int, int, int, int]:
     """Read the runs, the history calls, the pairs, the columns of the messages' holes and the arms' later writes
-    (:mod:`bamboo.codemap.panda.rewrites`, on the same walk up) into *fragment*'s nodes and branches.
+    (:mod:`bamboo.codemap.panda.rewrites`, on the same walk up) into *fragment*'s nodes and branches.  *row_items*:
+    how the guards' ways read a binding as a statement's rows, for the keys' columns
+    (:attr:`keycolumns.Reader.row_items`).
 
     Returns how many functions have a run, how many history calls there are,
     how many branches have a pair, how many holes name a column, and how many
@@ -369,7 +374,7 @@ def attach(
     """
     from bamboo.codemap.panda import rewrites
 
-    reader = _Reader(fragment, modules, calls)
+    reader = _Reader(fragment, modules, calls, row_items)
     return (
         reader.attach_runs(),
         reader.attach_history_calls(),
@@ -398,7 +403,11 @@ def _method_name(owner: str) -> str:
 
 class _Reader:
     def __init__(
-        self, fragment: MapFragment, modules: list[SourceModule], calls: C.Calls
+        self,
+        fragment: MapFragment,
+        modules: list[SourceModule],
+        calls: C.Calls,
+        row_items: Optional[keycolumns.RowItems] = None,
     ):
         self.fragment = fragment
         self.calls = calls
@@ -413,7 +422,7 @@ class _Reader:
         self.writers = history_writers(self.names.functions)
         self._follows: dict[tuple[str, str, int], objects.ObjectReach] = {}
         self.keys = keycolumns.Reader(
-            fragment, modules, calls, self.names, self.funcs, self._follow
+            fragment, modules, calls, self.names, self.funcs, self._follow, row_items
         )
         self._built: dict[int, list[_Bound]] = {}
         self._objects: dict[int, tuple[list[RunStart], str]] = {}
@@ -645,8 +654,40 @@ class _Reader:
                             read[at] = self._hole_key(node.owner, file, func, *at)
                         hole.columns = list(read[at].columns)
                         hole.stops = list(read[at].stops)
+                        hole.listed = bool(hole.columns) and self._hole_listed(
+                            file, func, *at
+                        )
+                        aggregates = {
+                            stop.aggregate.model_dump_json(): stop.aggregate
+                            for stop in hole.stops
+                            if stop.aggregate is not None
+                        }
+                        hole.aggregate = (
+                            next(iter(aggregates.values()))
+                            if len(aggregates) == 1
+                            else None
+                        )
                         named += any(self.keys.holds_rows(one) for one in hole.columns)
         return named
+
+    def _hole_listed(
+        self, file: str, func: ast.AST, line: int, expression: str
+    ) -> bool:
+        """Whether the expression spelled *expression* in a statement of *func* starting at *line* prints a list's
+        values (:func:`keycolumns.listed`)."""
+        for site in walk(func):
+            if isinstance(site, ast.stmt) and site.lineno == line:
+                found = next(
+                    (
+                        one
+                        for one in walk(site)
+                        if isinstance(one, ast.expr) and ast.unparse(one) == expression
+                    ),
+                    None,
+                )
+                if found is not None:
+                    return keycolumns.listed(self.keys.types, file, func, found)
+        return False
 
     def _hole_key(
         self, owner: str, file: str, func: ast.AST, line: int, expression: str

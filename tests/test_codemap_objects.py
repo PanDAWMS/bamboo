@@ -10,7 +10,6 @@ from bamboo.codemap.gates import object_records_resolve
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     BIND_FILL,
-    MAP_KEY,
     CallBinding,
     EntityNode,
     MapFragment,
@@ -1955,8 +1954,10 @@ def test_a_row_named_by_the_keys_of_a_mapping_is_named_where_the_caller_says_the
     tmp_path,
 ):
     """updateBy names its row by each key of criteria, ``{key}=:cr_{key}`` with criteria's value at it, and writes the
-    changed attributes it copies from spec.valuesMap(onlyChanged=True) entry by entry.  The write's key is the
-    mapping's key (MAP_KEY), its value criteria[]; its row is the whole of spec's.  finish hands job as spec, and the
+    changed attributes it copies from spec.valuesMap(onlyChanged=True) entry by entry.  The write's keys are the keys
+    its callers' criteria hold, PandaID and jobStatus, each at its key of criteria and marked as read so (keyed: a
+    call has one only where its criteria hold it), and an answer spells them criteria[]; its row is the whole of
+    spec's.  finish hands job as spec, and the
     write takes it.  mark hands another object with {"PandaID": job.PandaID}: the asked key is followed to
     criteria['PandaID'], so the write is on job's row -- and the object written there, handed with no key of that
     row, is not followed to where it was read (open, as for any write).  hold hands another object with
@@ -1964,7 +1965,10 @@ def test_a_row_named_by_the_keys_of_a_mapping_is_named_where_the_caller_says_the
     fragment = _build(tmp_path, entities=JOB_TABLES, spec=CHANGES_SPEC, mapped=MAPPED)
     rows = {row.owner: row for row in fragment.reach_graph}
     (write,) = rows["pkg/mapped.py::DBProxy.updateBy"].writes
-    assert [(key.column, key.path) for key in write.keys] == [(MAP_KEY, "criteria[]")]
+    assert [(key.column, key.path, key.keyed) for key in write.keys] == [
+        ("PandaID", "criteria['PandaID']", "criteria"),
+        ("jobStatus", "criteria['jobStatus']", "criteria"),
+    ]
     assert (write.whole, write.changed) == ("spec", True)
     finish = objects.may_change(
         rows, "pkg/mapped.py::Runner.finish", "job", "jobStatus", keys=("job.PandaID",)
