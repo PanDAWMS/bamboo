@@ -433,6 +433,9 @@ class Log:
     #: ``(machine, mark) -> method`` for the marks asked for the method's own rows and every line at WARNING and above
     #: (``recorded._read``): a row of another function below WARNING is not searched in a run of one
     narrowed: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: ``(machine, mark) -> heads`` of a narrowed mark's method asked with the key after them (``recorded._keyed_heads``):
+    #: a row starting with one holds in a run of the mark only the key's lines
+    keyed: dict[tuple[str, str], frozenset[str]] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     #: the machines a recorded listing says hold no file of the log (``no such log``): none of its runs is there (empty
     #: in a file handed in)
@@ -581,14 +584,19 @@ class Run:
     def has_level(self, level: str) -> bool:
         return any(r.level == level for r in self.records)
 
-    def holds(self, func: str | None, level: str) -> bool:
+    def holds(self, func: str | None, level: str, row=None) -> bool:
         """Whether the run's records hold every line *func* prints through its mark at *level*: not where the door
         asked the mark for another method's rows (``Log.narrowed``) and the level is below WARNING; *func* None for a
-        reader that does not say whose row it reads."""
+        reader that does not say whose row it reads.  Nor for a *row* starting with a head the door asked with the key
+        after it (``Log.keyed``): its lines for other rows were not asked."""
+        heads = self.log.keyed.get((self.machine, self.token))
+        if heads and row is not None and any(shape and shape[0][0] == "lit" and shape[0][1].startswith(tuple(heads))
+                                             for shape in getattr(row, "shapes", None) or []):
+            return False
         method = self.log.narrowed.get((self.machine, self.token))
         return method is None or (func is not None and func == method) or LEVEL_RANK.get(level, 0) >= LEVEL_RANK["WARNING"]
 
-    def would_print(self, level: str, func: str | None = None) -> bool:
+    def would_print(self, level: str, func: str | None = None, row=None) -> bool:
         """Whether a row at *level* missing from this run says it was not printed (rule 8).
 
         A logger passes every level at or above its threshold, so a run that
@@ -624,7 +632,7 @@ class Run:
             return False
         if (self.machine, self.token) in self.log.partial:
             return False
-        if not self.holds(func, level):
+        if not self.holds(func, level, row):
             return False
         if self.log.whole is not None and not self.log.whole(self.machine, self.token, self.first, self.last):
             return False

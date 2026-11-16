@@ -1446,6 +1446,71 @@ def test_the_record_door_asks_an_s1_method_mark_for_its_own_rows_and_a_run_of_it
     assert "asked for" not in described
 
 
+def test_a_head_whose_next_hole_the_map_names_and_the_key_fills_is_asked_with_the_key(tmp_path):
+    out = _ok(
+        _run(
+            tmp_path,
+            textwrap.dedent(_RECORDED)
+            + textwrap.dedent("""
+            from types import SimpleNamespace as NS
+            from bamboo.querier import rows as R
+
+            K, W, TOK = "52410322", ("2026-09-28 08:21:12", "2026-09-28 08:41:13"), "getX < vo=atlas pid=1 >"
+            hit = {**line("08:31:12", f"skipping jediTaskID={K} 3/9", TOK), "offset": 20}
+            # the run's lines: its own rows, one of the skipping head for another task (the 8,400 of NT-ready-stuck)
+            whole = [{**line("08:31:10", "start label=managed", TOK), "offset": 10}, hit,
+                     {**line("08:31:12", "skipping jediTaskID=7 4/9", TOK), "offset": 25},
+                     {**line("08:31:16", "returning 1 tasks", TOK), "offset": 50}]
+            Path("k.jsonl").write_text(json.dumps(record(Ask("panda-x.log", (K,), W), {M1: answered({**TODAY, "records": [hit]})})) + "\\n")
+            Path("t.jsonl").write_text(json.dumps(record(Ask("panda-x.log", (TOK,), W, M1), {M1: answered({**TODAY, "records": whole})})) + "\\n")
+            ident = frozenset({"JediTaskSpec.jediTaskID"})
+            # 'skipping ' is followed by the key's column and the key's own line has the key there; 'returning ' is
+            # followed by a column the key's lines never fill there; 'start label=' by no column the map names
+            heads = (R._head("returning ", frozenset({"X.n"})), R._head("skipping jediTaskID=", ident), R._head("start label=", frozenset()))
+            got = {}
+            try:
+                RecordedLogs(["k.jsonl"]).log("panda-x.log", K, W, owners={"getX": heads})
+            except Unrecorded as e:
+                got["asked"] = [list(a.canonical()["strings"]) for a, _ in e.asks]
+            log = RecordedLogs(["k.jsonl", "t.jsonl"]).log("panda-x.log", K, W, owners={"getX": heads})
+            run, = runs_for(log, K)
+            skip = NS(shapes=[[("lit", "skipping jediTaskID="), ("hole", "jediTaskID")]])
+            done = NS(shapes=[[("lit", "returning "), ("hole", "n"), ("lit", " tasks")]])
+            got["run"] = [[r.message for r in run.records], run.would_print("DEBUG", "getX", skip), run.would_print("DEBUG", "getX", done),
+                          run.would_print("DEBUG", "getX"), log.notes]
+            # the head's columns: the hole right after it, in every map row holding a hole of that expression
+            hole = lambda e, *c: NS(expression=e, columns=list(c))
+            row = NS(map_rows=[NS(holes=[hole("jediTaskID", "JediTaskSpec.jediTaskID", "X.y")]), NS(holes=[hole("jediTaskID", "JediTaskSpec.jediTaskID")])])
+            got["columns"] = [sorted(R._next_hole_columns(row, s)) for s in (
+                [("lit", "skipping jediTaskID="), ("hole", "jediTaskID")], [("lit", "a\\nb="), ("hole", "jediTaskID")],
+                [("lit", "done")], [("lit", "x="), ("hole", "other")])]
+            # mark_heads: a head two rows start with keeps the columns both name there
+            rows = [NS(level="DEBUG", shapes=[[("lit", "skipping jediTaskID="), ("hole", "jediTaskID")]], map_rows=row.map_rows),
+                    NS(level="DEBUG", shapes=[[("lit", "skipping jediTaskID="), ("hole", "jediTaskID")], [("lit", "start")]],
+                       map_rows=[NS(holes=[hole("jediTaskID")])])]
+            R.functions, R.function = (lambda rel, name: [0]), (lambda rel, name: NS(rows=rows))
+            got["heads"] = [[h, sorted(h.columns)] for h in R.mark_heads("pandaserver/a.py", "getX")]
+            print(json.dumps(got))
+            """),
+        )
+    )
+    got = json.loads(out)
+    # the skipping head with the key after it; the others as before
+    assert sorted(got["asked"][0]) == sorted([
+        "getX < vo=atlas pid=1 > skipping jediTaskID=52410322", "getX < vo=atlas pid=1 > returning ",
+        "getX < vo=atlas pid=1 > start label=",
+        "WARNING  getX < vo=atlas pid=1 >", "ERROR    getX < vo=atlas pid=1 >", "CRITICAL getX < vo=atlas pid=1 >"]) and len(got["asked"]) == 1
+    messages, would_skip, would_done, would_any, notes = got["run"]
+    # answered from the mark's record by the lines holding the strings: the other task's skipping line is not one
+    assert messages == ["start label=managed", "skipping jediTaskID=52410322 3/9", "returning 1 tasks"]
+    # a row starting with the keyed head missing from the run says nothing (its other rows' lines were not asked); the
+    # method's other rows, and a reader not saying which row, as before
+    assert (would_skip, would_done, would_any) == (False, True, True)
+    assert "1 mark(s) asked for the key's own lines alone of a head whose next hole holds it: ['skipping jediTaskID=']" in notes
+    assert got["columns"] == [["JediTaskSpec.jediTaskID"], [], [], []]
+    assert got["heads"] == [["skipping jediTaskID=", []], ["start", []]]
+
+
 _HEADS = """
 def h(self, tmp_log, x):
     tmp_log.debug("start")

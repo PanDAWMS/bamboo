@@ -1094,21 +1094,49 @@ def function(rel: str, name: str, arms: Iterable[int] = (), within: Iterable[int
     return _function(rel, name, tuple(sorted(set(arms))), tuple(sorted(set(within))) if picks else ())
 
 
-def mark_heads(rel: str, name: str) -> tuple[str, ...]:
+class Head(str):
+    """A head of a method's own rows (:func:`mark_heads`), with the columns the map names the hole right after it by
+    (``SkeletonHole.columns``): empty where a row starting with it goes on with text, or the map names that hole by no
+    column in some row."""
+
+    columns: frozenset[str] = frozenset()
+
+
+def _head(text: str, columns: frozenset[str]) -> Head:
+    head = Head(text)
+    head.columns = columns
+    return head
+
+
+def _next_hole_columns(row: Row, shape: list[Part]) -> frozenset[str]:
+    """The columns the map names *shape*'s hole right after its head by: a shape that is a head and then a hole, the
+    columns every map row of the statement gives a hole of that expression (none where no map row has one)."""
+    if len(shape) < 2 or shape[1][0] != "hole" or "\n" in shape[0][1]:
+        return frozenset()
+    named = [frozenset(h.columns or []) for m in row.map_rows for h in getattr(m, "holes", None) or []
+             if h.expression == shape[1][1]]
+    return frozenset.intersection(*named) if named else frozenset()
+
+
+def mark_heads(rel: str, name: str) -> tuple[Head, ...]:
     """The fixed text each of *name*'s own rows below WARNING starts with, up to its first line's end: the door asks
     the method's mark for these rows (``recorded._narrowed``).  Empty where one may start otherwise -- a shape whose
     first part is a hole (an f-string's leading expression, a message handed in), a row with no shape -- or where
-    *rel* defines *name* more than once: the mark is asked whole."""
+    *rel* defines *name* more than once: the mark is asked whole.  Each with the columns the map names the hole right
+    after it by in every row starting with it (:class:`Head`): the door asks such a head with the key after it where the
+    key's own records show the key there (``recorded._keyed_heads``)."""
     if len(functions(rel, name)) != 1:
         return ()
-    heads = set()
+    heads: dict[str, frozenset[str]] = {}
     for row in function(rel, name).rows:
         if LEVEL_RANK[row.level] >= LEVEL_RANK["WARNING"]:
             continue
         if not row.shapes or any(not shape or shape[0][0] != "lit" for shape in row.shapes):
             return ()
-        heads |= {shape[0][1].split("\n", 1)[0] for shape in row.shapes}
-    return tuple(sorted(heads))
+        for shape in row.shapes:
+            text, columns = shape[0][1].split("\n", 1)[0], _next_hole_columns(row, shape)
+            heads[text] = heads[text] & columns if text in heads else columns
+    return tuple(_head(text, heads[text]) for text in sorted(heads))
 
 
 # ---------------------------------------------------------------- whether the map's pattern can be trusted to be absent
@@ -1176,7 +1204,7 @@ class Seen:
     def would_show(self, row: Row) -> bool:
         """Whether the run would show *row* had it printed: rule 4's test of a row missing from a run
         (:func:`absence_trusted`, ``Run.would_print``).  A print it would not show may have printed unseen."""
-        return absence_trusted(row, self.run.log, self.mode)[0] and self.run.would_print(row.level, row.func)
+        return absence_trusted(row, self.run.log, self.mode)[0] and self.run.would_print(row.level, row.func, row)
 
     def proven(self, row: Row) -> bool:
         """Whether a record of the run is this row's, read by no other row of the function (a text two rows print

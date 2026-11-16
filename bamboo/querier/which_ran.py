@@ -81,7 +81,7 @@ def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
     def absent(stmt: ast.stmt) -> bool:
         row = fn.row_at(stmt)
         return (row is not None and not sn.present(row) and R.absence_trusted(row, run.log, mode)[0]
-                and run.would_print(row.level, row.func))
+                and run.would_print(row.level, row.func, row))
     if not sn.single_call():
         return {}
     return R.once_loops(fn.node, absent) | keyed_loops(fn, sn, run)
@@ -1716,7 +1716,7 @@ def judge(
                     continue
                 if sn.present(row):
                     elsewhere = other_elements(fn, stmt, row, sn, env) or for_others.get(row.line, "")
-                    if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func):
+                    if elsewhere and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func, row):
                         absent.append(row.line)
                         per_element.append(elsewhere)
                         continue
@@ -1728,7 +1728,7 @@ def judge(
                             for expr, val in row.capture(run.records[i]).items():
                                 if re.fullmatch(rf"[\w.]+\.{re.escape(subject)}", expr) and val.strip() != observed:
                                     wrong_value.append(f"{row.line} shows {expr}={val.strip()}")
-                elif (trust := R.absence_trusted(row, run.log, mode))[0] and run.would_print(row.level, row.func):
+                elif (trust := R.absence_trusted(row, run.log, mode))[0] and run.would_print(row.level, row.func, row):
                     absent.append(row.line)
                 else:
                     neutral.append(row.line)
