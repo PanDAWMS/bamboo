@@ -3236,22 +3236,45 @@ def ran_no_arm(j, arms: set[int]) -> tuple[int | None, list[int]] | None:
 _EK: list = [None, {}]
 
 
-def exit_keeps(owner: str) -> dict[int, set[int]] | None:
-    """The map's ``ExitKeeps`` of *owner* (``file::function``, as :func:`_bare` spells it; the map's batch 6): each
-    exit's line, and the junction arms (``Branch.line``, ``Branch.other_lines``) a run leaving there can no longer
-    reach and could have reached had it gone on -- a ``return`` or a raise over the call, a ``continue`` or a
-    ``break`` over one turn of its loop.  An exit it does not list is one not read.  None from a dump that reads none
-    (one built before the batch, as the m set's)."""
+def exit_keeps(owner: str) -> dict[int, Any] | None:
+    """The map's ``ExitKeeps`` of *owner* (``file::function``, as :func:`_bare` spells it; the map's batch 6), by each
+    exit's line: the junction arms (``Branch.line``, ``Branch.other_lines``) and the calls into arms (``calls``, the
+    map's M-h) a run leaving there can no longer reach and could have reached had it gone on -- a ``return`` or a
+    raise over the call, a ``continue`` or a ``break`` over one turn of its loop -- and the same over one turn of each
+    loop holding it (``turns``, innermost first, the map's M-g).  An exit it does not list is one not read.  None from
+    a dump that reads none (one built before the batch)."""
     eks = getattr(mapdump.fragment(), "exit_keeps", None) or []
     if not eks:
         return None
     if _EK[0] is not eks:
-        index: dict[str, dict[int, set[int]]] = {}
+        index: dict[str, dict[int, Any]] = {}
         for ek in eks:
-            index.setdefault(_bare(ek.owner), {})[int(ek.exit.rpartition("@")[2])] = set(ek.arms)
+            index.setdefault(_bare(ek.owner), {})[int(ek.exit.rpartition("@")[2])] = ek
         _EK[:] = [eks, index]
-    held: dict[str, dict[int, set[int]]] = _EK[1]
+    held: dict[str, dict[int, Any]] = _EK[1]
     return held.get(_bare(owner), {})
+
+
+_PL: list = [None, {}]
+
+
+def print_loops(owner: str, line: int) -> list[int] | None:
+    """The loops whose body holds *owner*'s print statement at *line*, innermost first (the map's ``PrintLoops``): a
+    pass whose entry row is that print is one turn of the first.  ``[]`` for a print of a function the map read in no
+    loop; None from a dump that reads none."""
+    pls = getattr(mapdump.fragment(), "print_loops", None)
+    if pls is None or not getattr(mapdump.fragment(), "exit_keeps", None):
+        return None
+    if _PL[0] is not pls:
+        _PL[:] = [pls, {(_bare(p.owner), p.line): list(p.loops) for p in pls}]
+    held: dict[tuple[str, int], list[int]] = _PL[1]
+    return held.get((_bare(owner), line), [])
+
+
+def _kept_lines(keeps) -> set[int]:
+    """What an ``ExitKeeps`` or a ``TurnKeeps`` keeps a run from that an arm of a junction may be: its arms and its
+    calls into arms (the map's M-h: an arm that is a call, AtlasProdTaskBroker's 633)."""
+    return set(keeps.arms) | set(getattr(keeps, "calls", None) or [])
 
 
 _GF: list = [None, {}]
@@ -8635,24 +8658,64 @@ class Rerun:
 
     # ------------------------------------------------------------ Blocked: what kept it from moving
     @staticmethod
-    def _keeps_said(fn: R.Function, exits: list[int], arms: list[Arm]) -> tuple[str, bool]:
+    def _keeps_said(fn: R.Function, exits: list[int], arms: list[Arm]) -> tuple[str, str]:
         """S-2b (qk-design.md, tmaeno "OK" 2026-11-16 16:1x): what the map's ``ExitKeeps`` says of the exits a pass that
         ran no arm may have left by -- one keeping a run from none of the *arms* is, by the flow, no reason it ran none
         (a test on the way kept it off, whether it left there or ran on past), one keeping a run from some may have kept
-        it from them, one not listed is not read -- and whether every one keeps a run from none.  The lists are the
-        flow's, path-insensitive both ways: what a run's values allow is the guards' reading.  Not read where the dump
-        reads none."""
-        keeps = exit_keeps(getattr(fn, "owner", ""))
+        it from them, one not listed is not read -- and, where every one keeps a run from none, the clause saying so
+        (empty otherwise).  A pass that is one turn of a loop reads each exit over that turn, one not in the loop off
+        its way; a whole call's return or raise in loops, over the turn it left by, the rest said as past it.  The
+        lists are the flow's, path-insensitive both ways: what a run's values allow is the guards' reading.  Not read
+        where the dump reads none."""
+        owner = getattr(fn, "owner", "")
+        keeps = exit_keeps(owner)
         if keeps is None:
-            return "(whether one keeps a run from the arms is not read)", False
+            return "(whether one keeps a run from the arms is not read)", ""
         moving = {a.line for a in arms}
-        clear = [x for x in exits if x in keeps and not keeps[x] & moving]
-        early = {x: sorted(keeps[x] & moving) for x in exits if x in keeps and keeps[x] & moving}
-        unread = [x for x in exits if x not in keeps]
+        # M-g (the map's TurnKeeps and PrintLoops; tmaeno "OK" 2026-11-16 16:1x and 17:2x): a pass cut at an entry row
+        # in a loop is one turn of it (R-g1); a pass that is the whole call and leaves by a return or a raise in loops
+        # is read over the turn it left by, the rest said as past that turn: a later turn, or what follows the outermost
+        # loop, reached past the turn whether or not another runs (the map, 2026-11-16 17:3x) (R-g2)
+        entry = R.entry_row(fn) if getattr(fn, "rows", None) and getattr(fn, "node", None) is not None else None
+        loops = print_loops(owner, entry.line) if entry is not None else None
+        turn_of = loops[0] if loops else None
+        clear, off, unread = [], [], []
+        early: dict[int, list[int]] = {}
+        later: dict[int, tuple[list[int], int]] = {}
+        for x in exits:
+            ek = keeps.get(x)
+            if ek is None:
+                unread.append(x)
+                continue
+            turns = {t.loop: t for t in getattr(ek, "turns", None) or []}
+            if turn_of is not None:
+                if turn_of not in turns:
+                    off.append(x)
+                    continue
+                kept = _kept_lines(turns[turn_of]) & moving
+            elif ek.exit.partition("@")[0] in ("return", "raise") and turns:
+                outer = ek.turns[-1]
+                kept = _kept_lines(outer) & moving
+                if after := (_kept_lines(ek) & moving) - kept:
+                    later[x] = (sorted(after), outer.loop)
+            else:
+                kept = _kept_lines(ek) & moving
+            if kept:
+                early[x] = sorted(kept)
+            elif x not in later:
+                clear.append(x)
         parts = ([f"{clear} keep a run from none of the arms"] if clear else []) + [
-            f"{x} keeps a run from {a}: a pass may have left by it before them" for x, a in early.items()] + (
+            f"{x} keeps a run from {a}: a pass may have left by it before them" for x, a in early.items()] + [
+            f"{x} keeps a run from {a} only past the turn it left by -- a later turn of the loop at {loop}, or what "
+            "follows it: in that turn, from none (whether the pass would have run on past it is not read)"
+            for x, (a, loop) in later.items()] + (
+            [f"{off} are not in the loop at {turn_of} a pass is one turn of: no way it left by"] if off else []) + (
             [f"it lists no {unread}: not read"] if unread else [])
-        return f"(the map's ExitKeeps: {'; '.join(parts)})", bool(exits) and not early and not unread
+        conclusion = ""
+        if exits and not early and not unread:
+            conclusion = ("; so no exit kept a pass from them by the flow" + (" in the turn it left by" if later else "")
+                          + ": a test on the way did")
+        return f"(the map's ExitKeeps: {'; '.join(parts)})", conclusion
 
     def _held_printed(self, fn: R.Function, run, env: E.Env, arms: list[Arm], guards: list[str]) -> list[str]:
         """S-3 (qk-design.md, tmaeno "OK" 2026-11-16 13:0x): the values of the names the arms' tests read that the
@@ -8762,19 +8825,19 @@ class Rerun:
             # and what the passes printed on the way
             left_ways = list(q.took) or [None] * len(q.passes)
             paths = [path_of(x) if x is not None else [] for x in left_ways]
-            keeps, clear = self._keeps_said(fn, list(q.left_by), q.arms)
+            keeps, so = self._keeps_said(fn, list(q.left_by), q.arms)
             by_way = Counter(x for x in left_ways if x is not None)
             if not q.left_by:
                 self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
             elif not by_way:
                 self.say(f"{fn.name}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
-                         f"by {list(q.left_by)} {keeps}" + ("; so no exit kept a pass from them by the flow: a test on the way did" if clear else ""))
+                         f"by {list(q.left_by)} {keeps}{so}")
             else:
                 went = "; ".join(f"{k} pass(es) left by {x}, reached when {path_of(x)}" for x, k in sorted(by_way.items()))
                 rest = len(left_ways) - sum(by_way.values())
                 self.say(f"{fn.name}: every pass ran none of its arms: {went}"
                          + (f"; {rest} may have left by one of the others or ran on past them" if rest else "")
-                         + f"; of the exits {list(q.left_by)} {keeps}" + ("; so no exit kept a pass from them by the flow: a test on the way did" if clear else ""))
+                         + f"; of the exits {list(q.left_by)} {keeps}{so}")
         else:
             path = path_of(q.exit_line)
             paths = [path] * len(q.passes)

@@ -15576,6 +15576,61 @@ def test_s4_says_the_part_the_values_read_make_a_guard_false_by_and_ends(tmp_pat
 GUARD_1226 = "useExhausted and scoutSucceeded and (extraInfo['nNewJobs'] > nNewJobsCutoff)"
 
 
+def test_an_exit_s_keeps_are_read_over_the_turn_a_pass_is_or_left_by_and_its_calls_into_arms(tmp_path):
+    """M-g and M-h (the map's TurnKeeps, PrintLoops and ExitKeeps.calls): TaskCommando's pass is one turn of the ``for``
+    at 123, its entry row's loop, so the return at 121 before it is off its way and the break at 211 keeps it, over
+    that turn, from the arms 181 and 197 another turn of the inner loop reaches (R-g1).  activateJob's pass is the
+    call: its return at 151 in the retry loop at 31 keeps a run from 72 only past the turn it left by -- in that turn,
+    from none -- and its continue at 158 is read over its own turn as before (R-g2).  An arm that is a call, 633,
+    is kept off by an exit whose calls hold it (R-h).  A dump with no turns or loops reads as before."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            def T(loop, arms=(), calls=()):
+                return N(loop=loop, arms=list(arms), prints=[], calls=list(calls))
+
+            def X(owner, exit, arms=(), calls=(), turns=()):
+                return N(owner=owner, exit=exit, arms=list(arms), prints=[], calls=list(calls), turns=list(turns))
+
+            tc, aj, br = "t.py::runImpl", "a.py::activateJob", "b.py::runImpl"
+            eks = [X(tc, "return@121", [155, 181, 197]), X(tc, "break@211", [], turns=[T(129), T(123, [181, 197])]),
+                   X(aj, "return@151", [72], turns=[T(31)]), X(aj, "continue@158", [], turns=[T(31)]),
+                   X(br, "return@265", [], [633]), X(br, "return@543", [], [])]
+            loops = [N(owner=tc, line=125, loops=[123]), N(owner=aj, line=40, loops=[31])]
+            arms = lambda *lines: [RR.Arm(n, ["x"], []) for n in lines]
+            fn = lambda owner: N(owner=owner, rows=[1], node=N(lineno=1))
+            got = {}
+            for name, frag, entry in (("new", N(exit_keeps=eks, print_loops=loops), {tc: 125, aj: 27, br: 200}),
+                                      ("old", N(exit_keeps=[X(o, e, a) for o, e, a in ((aj, "return@151", [72]), (aj, "continue@158", []))]), {})):
+                RR.mapdump.fragment = lambda frag=frag: frag
+                RR._EK[:], RR._PL[:] = [None, {}], [None, {}]
+                RR.R.entry_row = lambda f, entry=entry: N(line=entry[f.owner]) if f.owner in entry else None
+                got[name] = [RR.Rerun._keeps_said(fn(tc), [121, 211], arms(181, 197)),
+                             RR.Rerun._keeps_said(fn(aj), [151, 158], arms(72)),
+                             RR.Rerun._keeps_said(fn(br), [265, 543], arms(633))]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    tc, aj, br = got["new"]
+    assert tc == ["(the map's ExitKeeps: 211 keeps a run from [181, 197]: a pass may have left by it before them; "
+                  "[121] are not in the loop at 123 a pass is one turn of: no way it left by)", ""], tc
+    assert aj == ["(the map's ExitKeeps: [158] keep a run from none of the arms; 151 keeps a run from [72] only past "
+                  "the turn it left by -- a later turn of the loop at 31, or what follows it: in that turn, from none "
+                  "(whether the pass would have run on past it is not read))",
+                  "; so no exit kept a pass from them by the flow in the turn it left by: a test on the way did"], aj
+    assert br == ["(the map's ExitKeeps: [543] keep a run from none of the arms; 265 keeps a run from [633]: a pass "
+                  "may have left by it before them)", ""], br
+    assert got["old"][1] == ["(the map's ExitKeeps: [158] keep a run from none of the arms; 151 keeps a run from "
+                             "[72]: a pass may have left by it before them)", ""], got["old"]
+
+
 def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
     """The bind-print part (the map's WritePrint; RR._printed_write): updateTask_JEDI prints its UPDATE's text and the
     map of the task's changed fields at 1483 before it runs them, so the call's record of 1483 after the write's must
