@@ -3685,6 +3685,50 @@ class HeldThrough(BaseModel):
     )
 
 
+class HeldPrinted(BaseModel):
+    """A print of a function a :class:`HeldSource`'s way comes back from through a call of the corpus (one of
+    *route*), whose hole holds the value the call gives: what a reader of the run's records reads that value off.
+
+    The function's ``return`` gives the value as a name, and the print is on every way from the function's entry to
+    the ``return`` -- passed once it has printed --, with no binding of the name and no change in place of what it
+    holds between the two (:func:`bamboo.codemap.panda.changes.object_changes`).  ``getScoutJobData_JEDI`` prints
+    ``succeeded={scoutSucceeded} ... extra={str(extraInfo)}`` at 1140 and returns ``scoutSucceeded, returnMap,
+    extraInfo`` at 1141: the ways of ``setScoutJobData_JEDI``'s ``scoutSucceeded`` and ``extraInfo`` through the call
+    at 1169 have the holes 0 and 2.  A print on one side of an ``if`` only, after the ``return`` or in a loop, is not
+    one; nor is a hole of a message the print does not spell as an f-string of its own.
+    """
+
+    at: str = Field(description="``file:line`` of the call, as *route* spells it.")
+    statement: str = Field(description="``file:line`` of the print statement (:attr:`PrintStatement.line`).")
+    hole: int = Field(
+        description=(
+            "Which hole of the print's message holds it, counted from 0 as each row of the statement lists its "
+            "holes (:attr:`PrintRow.holes`).  A row a binding wrote may spell the hole otherwise -- ``True`` for "
+            "``scoutSucceeded``, the hole's line the binding's -- in the same place."
+        )
+    )
+    expression: str = Field(description="The hole's expression as the print's source spells it: ``str(extraInfo)``.")
+    steps: list[str] = Field(
+        default_factory=list,
+        description="The part of the call's value the hole holds, each step as applied (:attr:`HeldSource.steps`); "
+        "empty for the whole.",
+    )
+    through: list[HeldThrough] = Field(
+        default_factory=list,
+        description=(
+            "Each call outside the corpus the hole hands that part to, in the order run, as *through* says one: "
+            "``str`` for ``str(extraInfo)``, ``len`` (computed) for ``len(retPandaIDs)``."
+        ),
+    )
+    after_steps: int = Field(
+        default=0,
+        description=(
+            "How many of the way's *steps* are taken before the call's value, as :attr:`HeldThrough.after_steps` "
+            "counts: the steps after them are the caller's, from the call's value to the value read."
+        ),
+    )
+
+
 class HeldKeyed(BaseModel):
     """One selection by a key computed at run time a :class:`HeldSource`'s way went through, where the map knows the
     key the source sat under: ``JediTaskSpec.commandStatusMap()[commandStr]["doing"]`` at
@@ -3824,6 +3868,13 @@ class HeldSource(KeySource):
             "parameter's default where the request may lack the key -- and the send, the client's call, is the last "
             "of *route*.  ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, "
             "and ``None``: both sent.  False on a way a call of the corpus hands in."
+        ),
+    )
+    printed: list[HeldPrinted] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way through a call of the corpus's return: each print of the callee "
+            "holding the value the call gives (:class:`HeldPrinted`), in the order the value went, as *route*."
         ),
     )
 

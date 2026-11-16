@@ -1874,6 +1874,52 @@ def _held_ways(fragment: MapFragment):
             yield from each(f"{field.owner}.{field.field} {change.at}", change.value)
 
 
+def printed_holes_are_rows(fragment: MapFragment) -> GateResult:
+    """(i) Every print a way through a call's return names (:class:`HeldPrinted`) is a print statement of the map
+    whose every row has the hole, spelt as the print's source spells it where no binding wrote it, its call is on the
+    way's route, and the steps before the call's value are the way's: the reader reads the value off the row its run
+    printed, at that hole."""
+    statements = {
+        f"{node.owner.partition('::')[0]}:{statement.line}": statement
+        for node in fragment.function_prints
+        for statement in node.statements
+    }
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        for printed in source.printed:
+            checked += 1
+            problem = _printed_problem(printed, source, statements)
+            if problem:
+                failures.append(f"{where} {printed.statement} hole {printed.hole}: {problem}")
+    return GateResult(
+        gate="printed-holes-are-rows",
+        passed=not failures,
+        checked=checked,
+        unit="prints of a call's value",
+        question="does a way name a print of a call's value whose rows do not hold that hole?",
+        finding="a way's print of a call's value is not where the map's rows put it",
+        failures=failures,
+    )
+
+
+def _printed_problem(printed, source, statements) -> str:
+    if printed.at not in source.route:
+        return f"its call {printed.at} is not on the route"
+    if printed.after_steps > len(source.steps):
+        return f"{printed.after_steps} steps before the call, of {len(source.steps)}"
+    statement = statements.get(printed.statement)
+    if statement is None:
+        return "no print statement of the map"
+    line = int(printed.statement.rpartition(":")[2])
+    for row in statement.rows:
+        if len(row.holes) <= printed.hole:
+            return f"a row has {len(row.holes)} hole(s): {row.text[:80]}"
+        hole = row.holes[printed.hole]
+        if hole.line == line and hole.expression != printed.expression:
+            return f"a row spells the hole {hole.expression}"
+    return ""
+
+
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
     """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a statement's rows names a read
     site of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
@@ -3003,6 +3049,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(guard_rows_are_read_sites(fragment))
         results.append(guard_parameters_are_read(fragment))
         results.append(guard_fields_are_read(fragment))
+        if fragment.function_prints:
+            results.append(printed_holes_are_rows(fragment))
     if fragment.runnables:
         results.append(runnable_fields_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))

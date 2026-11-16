@@ -11,13 +11,18 @@ from pathlib import Path
 import pytest
 
 from bamboo.codemap import calls as calls_mod
-from bamboo.codemap import reach
-from bamboo.codemap.gates import guard_parameters_are_read, guard_rows_are_read_sites
+from bamboo.codemap import reach, trace
+from bamboo.codemap.gates import (
+    guard_parameters_are_read,
+    guard_rows_are_read_sites,
+    printed_holes_are_rows,
+)
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     Anchor,
     Branch,
     FieldFrom,
+    FunctionPrintsNode,
     GuardFrom,
     HeldSource,
     JunctionNode,
@@ -1656,6 +1661,171 @@ def test_a_returned_tuple_holding_a_row_s_value_holds_its_other_elements_too(
         ("constant", "None"),
     }
     assert "rows" in {kind for kind, _name, _at in ways("T2")}
+
+
+PRINTED = {
+    BASE: """\
+        from pandaserver.taskbuffer.db_proxy_mods.job_module import JobModule
+
+
+        class TaskRefinerBase:
+            def __init__(self):
+                self.a = None
+
+            def extractCommon(self, jediTaskID, flag):
+                scoutSucceeded, extraInfo = JobModule().getScoutJobData_JEDI(jediTaskID)  # C1
+                if scoutSucceeded and extraInfo["nNewJobs"] > 2:  # T1
+                    self.a = 1  # R1
+                ids = JobModule().getIDs(jediTaskID, flag)  # C2
+                if ids == []:  # T2
+                    self.a = 2  # R2
+                value = JobModule().getFlag(flag)  # C3
+                if value:  # T3
+                    self.a = 3  # R3
+                info = JobModule().getInfo()  # C4
+                part = info["a"]
+                if part:  # T4
+                    self.a = 4  # R4
+        """,
+    MERGE: """\
+        import logging
+
+        _logger = logging.getLogger("x")
+
+
+        class JobModule:
+            def getScoutJobData_JEDI(self, jediTaskID):
+                extraInfo = {}  # V0
+                scoutSucceeded = True  # V1
+                if not jediTaskID:
+                    scoutSucceeded = False  # V2
+                extraInfo["nNewJobs"] = 3
+                _logger.debug(f"succeeded={scoutSucceeded} extra={str(extraInfo)} n={len(extraInfo)}")  # P1
+                return scoutSucceeded, extraInfo
+
+            def getIDs(self, jediTaskID, flag):
+                ids = []  # V3
+                if flag:
+                    _logger.debug(f"one side {len(ids)}")  # P2
+                    return ids
+                _logger.debug(f"got {len(ids)} ids")  # P3
+                ids.append(jediTaskID)
+                return ids
+
+            def getFlag(self, flag):
+                value = None  # V4
+                if flag:
+                    _logger.debug(f"flag {value}")  # P4
+                return value
+
+            def getInfo(self):
+                info = {"a": 1}  # V5
+                _logger.debug(f"info={info}")  # P5
+                return info
+        """,
+}
+
+
+def test_a_way_through_a_call_s_return_names_the_callee_s_prints_holding_the_value_it_gives(
+    tmp_path: Path,
+) -> None:
+    """``setScoutJobData_JEDI`` reads ``scoutSucceeded`` and ``extraInfo`` from ``getScoutJobData_JEDI``, which
+    prints both just before returning them: each way through the call names the print's holes holding its value,
+    ``str`` and ``len`` of it too, as the reader reads them off the run's record.  A print on one side of an ``if``
+    only, or one after which the value is changed in place before the ``return``, holds no value it gives; nor is a
+    print of a container the way's end sits in (``{"a": 1}``), whose part the caller takes: the way's steps say
+    nothing of that part."""
+    fragment = _build(
+        tmp_path,
+        PRINTED,
+        (("extractCommon", "R1"), ("extractCommon", "R2"), ("extractCommon", "R3"), ("extractCommon", "R4")),
+    )
+
+    def printed(marker: str, name: str) -> list[tuple]:
+        """Each way of the guard's *name*: its end, the kinds of its changes, and its prints, sorted."""
+        (guard,) = [
+            one
+            for one in fragment.guard_froms
+            if one.test_line == _line(BASE, marker, PRINTED) and one.name == name
+        ]
+        return sorted(
+            (
+                one.name,
+                tuple(one.at),
+                tuple(change.kind for change in one.changes),
+                tuple(
+                    (
+                        held.at,
+                        held.statement,
+                        held.hole,
+                        held.expression,
+                        tuple(held.steps),
+                        tuple((call.call, call.gives) for call in held.through),
+                        held.after_steps,
+                    )
+                    for held in one.printed
+                ),
+            )
+            for one in guard.sources
+        )
+
+    def at(rel: str, marker: str) -> str:
+        return f"{rel}:{_line(rel, marker, PRINTED)}"
+
+    call, statement = at(BASE, "C1"), at(MERGE, "P1")
+    assert printed("T1", "scoutSucceeded") == [
+        ("False", (at(MERGE, "V2"),), (), ((call, statement, 0, "scoutSucceeded", (), (), 0),)),
+        ("True", (at(MERGE, "V1"),), (), ((call, statement, 0, "scoutSucceeded", (), (), 0),)),
+    ]
+    assert printed("T1", "extraInfo") == [
+        (
+            "{}",
+            (at(MERGE, "V0"),),
+            ("store",),
+            (
+                (call, statement, 1, "str(extraInfo)", (), (("str", "converted"),), 0),
+                (call, statement, 2, "len(extraInfo)", (), (("len", "computed"),), 0),
+            ),
+        ),
+    ]
+    # Two ways from the one binding: through the return under ``if flag:``, after its print, and through the last
+    # return, past the ``append`` that follows the print before it.
+    assert printed("T2", "ids") == [
+        ("[]", (at(MERGE, "V3"),), (), ((at(BASE, "C2"), at(MERGE, "P2"), 0, "len(ids)", (), (("len", "computed"),), 0),)),
+        ("[]", (at(MERGE, "V3"),), ("method",), ()),
+    ]
+    assert printed("T3", "value") == [("None", (at(MERGE, "V4"),), (), ())]
+    assert [held for *_way, held in printed("T4", "part")] == [()]
+
+
+def test_a_print_of_a_call_s_value_is_a_hole_every_row_of_the_print_has(tmp_path: Path) -> None:
+    """``printed-holes-are-rows``: the holes the ways name are where the map's rows of the print put them -- a row a
+    binding wrote spells ``scoutSucceeded`` as ``True`` there --, and a hole no row has fails."""
+    fragment = _build(tmp_path, PRINTED, (("extractCommon", "R1"), ("extractCommon", "R2")))
+    fragment.function_prints = [
+        FunctionPrintsNode(
+            name=f"m:{found.owner}",
+            map_id="m",
+            derived_from="v",
+            owner=found.owner,
+            cls=found.cls,
+            function=found.func.name,
+            count=len(found.statements),
+            statements=found.statements,
+        )
+        for found in trace.function_prints({"pandaserver": tmp_path / "pandaserver"}, [MERGE])
+    ]
+    passed = printed_holes_are_rows(fragment)
+    assert passed.passed, passed.failures
+    # ``scoutSucceeded``'s two ways, one hole each; ``extraInfo``'s ``str`` and ``len``; ``ids``' ``len``.
+    assert passed.checked == 5
+    (source,) = [
+        one for guard in fragment.guard_froms if guard.name == "extraInfo" for one in guard.sources
+    ]
+    source.printed[0].hole = 5
+    failed = printed_holes_are_rows(fragment)
+    assert not failed.passed
+    assert "hole 5: a row has 3 hole(s)" in failed.failures[0]
 
 
 UNBOUND = {
