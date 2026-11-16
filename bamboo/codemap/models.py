@@ -1029,6 +1029,18 @@ class Branch(BaseModel):
             "``value_frames``; ``[]`` where nothing cuts it."
         ),
     )
+    amount: Optional[ConditionValue] = Field(
+        default=None,
+        description=(
+            "A run-time value as an amount, the way a read site's condition value is one: a base -- a clock, or "
+            "``<function>.<parameter>`` -- plus an offset.  ``updateTask_JEDI``'s ``taskSpec.modificationTime = "
+            "timeNow - datetime.timedelta(hours=1)`` after ``timeNow = naive_utcnow()`` is kind ``bind``, base "
+            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written_amount`); a statement's own "
+            "``modificationTime=CURRENT_DATE-1`` is kind ``clock``, base ``CURRENT_DATE``, offset -86400.  So a "
+            "reader holding the time the value was made reads the value.  ``None`` where the value reads as no "
+            "base and offset (a constant the outcome states, a value only said), or as a parameter as it stands."
+        ),
+    )
     must_prints: Optional[list[int]] = Field(
         default=None,
         description=(

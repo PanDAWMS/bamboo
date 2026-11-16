@@ -1644,6 +1644,8 @@ class _Outcome(NamedTuple):
     frames: tuple[str, ...] = ()
     #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
     cuts: tuple[int, ...] = ()
+    #: A run-time value as a base plus an offset -- see ``Branch.amount``.
+    amount: Optional[ConditionValue] = None
 
 
 def _outcomes(
@@ -1746,6 +1748,7 @@ def _outcomes(
                                     chosen,
                                     tuple(reading.frames),
                                     tuple(reading.cuts),
+                                    values.written_amount(held, func),
                                 )
                             )
                     continue
@@ -1762,6 +1765,7 @@ def _outcomes(
                     site,
                     tuple(reading.frames),
                     tuple(reading.cuts),
+                    values.written_amount(value, func),
                 )
             )
         if not found:
@@ -1807,7 +1811,7 @@ def _outcomes(
         # literal writes against all of them, so a column the source only ever
         # increments looked, from its one ``= 0``, like a field with a closed
         # vocabulary of one.
-        return [_Outcome(f"runtime({supplied.text})", 2, node, [], node)]
+        return [_Outcome(f"runtime({supplied.text})", 2, node, [], node, amount=_written_clock(supplied.text))]
 
     # A copied column.  The source is named as a subject rather than as a bare
     # column so the edge joins: ``passthrough(JediTaskSpec.oldStatus)`` points
@@ -1818,6 +1822,25 @@ def _outcomes(
     )
     outcome = f"passthrough({SubjectNode.make_name(source, attribute)})"
     return [_Outcome(outcome, 2, node, [], node)]
+
+
+def _written_clock(text: str) -> Optional[ConditionValue]:
+    """A statement's own value of a column -- ``modificationTime=CURRENT_DATE-1`` -- as the database's clock plus an
+    amount (:attr:`Branch.amount`, kind ``clock``); a bind amount, ``SYSDATE-:days``, is said, its value being the
+    run's.  ``None`` where the value is no clock."""
+    side = sqltext.clock_of(text)
+    if side is None:
+        return None
+    held = ConditionValue(
+        kind="clock",
+        text=text,
+        base=side.clock,
+        offset_seconds=side.offset_seconds,
+        scale_seconds=side.scale_seconds,
+    )
+    if side.binds:
+        return held.model_copy(update={"said": f"{side.binds[0]} is filled where the statement runs"})
+    return held
 
 
 def _statement_at(
@@ -1916,7 +1939,7 @@ def _record(
         )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
-    for outcome, tier, node, extra, decided_at, frames, cuts in outcomes:
+    for outcome, tier, node, extra, decided_at, frames, cuts, amount in outcomes:
         tests = path_condition(node)
         # The early exits above the write, as arm_condition adds them, less what the value's own tests say.
         condition = tests + [one for one in exits_above(node) if one not in tests and one not in extra] + extra
@@ -1934,6 +1957,9 @@ def _record(
         if held is not None:
             held.value_frames = pooled_frames(held.value_frames, list(frames))
             held.value_cuts = pooled_cuts(held.value_cuts, list(cuts))
+            if held.amount != amount:
+                # Two writes of one text that read as different amounts -- or one as none -- are one amount to neither.
+                held.amount = None
             held.row_precondition = [term for term in held.row_precondition if term in guards]
             if decided_at.lineno != held.line and decided_at.lineno not in held.other_lines:
                 held.other_lines = sorted([*held.other_lines, decided_at.lineno])
@@ -1957,6 +1983,7 @@ def _record(
             line=decided_at.lineno,
             value_frames=list(frames),
             value_cuts=list(cuts),
+            amount=amount,
         )
         known[(outcome, tuple(condition))] = branch
         junction.branches.append(branch)

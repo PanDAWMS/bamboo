@@ -4797,6 +4797,40 @@ def test_what_the_database_itself_decides_is_a_branch_not_a_dropped_write():
     assert outcomes["JEDI_Datasets.modificationTime"] == [("runtime(CURRENT_DATE)", 2)]
 
 
+def test_a_time_a_statement_writes_is_a_clock_plus_an_offset():
+    """``SET modificationTime=CURRENT_DATE-1/24`` writes the database's clock less an hour, and a bind filled with
+    ``timeNow - datetime.timedelta(hours=6)`` after ``timeNow = naive_utcnow()`` Python's clock less six: each
+    branch says so as an amount (:attr:`Branch.amount`), as a read site's condition value does, so a reader that
+    knows when the value was made knows the value.  A parameter as it stands and the row's own count plus a bind
+    are no amount the outcome does not already say."""
+    source = (
+        "class M:\n"
+        "    def f(self, startTime):\n"
+        "        timeNow = naive_utcnow()\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET modificationTime=CURRENT_DATE-1/24,lockedTime=CURRENT_DATE,'\n"
+        "        sqlU += 'frozenTime=:frozenTime,startTime=:startTime,nFiles=nFiles+:iFiles WHERE jediTaskID=:jediTaskID '\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = 1\n"
+        "        varMap[':frozenTime'] = timeNow - datetime.timedelta(hours=6)\n"
+        "        varMap[':startTime'] = startTime\n"
+        "        varMap[':iFiles'] = 1\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    amounts = {
+        j.subject.split(".")[-1]: [
+            None if b.amount is None else (b.amount.kind, b.amount.base, b.amount.offset_seconds) for b in j.branches
+        ]
+        for j in junctions
+    }
+
+    assert amounts["modificationTime"] == [("clock", "CURRENT_DATE", -3600.0)]
+    assert amounts["lockedTime"] == [("clock", "CURRENT_DATE", 0.0)]
+    assert amounts["frozenTime"] == [("bind", "naive_utcnow", -21600.0)]
+    assert amounts["startTime"] == [None]
+    assert amounts["nFiles"] == [None]
+
+
 def test_a_bind_filled_with_a_non_string_constant_is_settled():
     """``varMap[':frozenTime'] = None`` is decided, and ``runtime(None)`` --
     which is what the slice used to record -- says it is not."""

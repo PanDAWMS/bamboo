@@ -44,6 +44,7 @@ from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
+    ConditionValue,
     CoverageStat,
     DiagnosticTemplate,
     EnumerationWrite,
@@ -586,6 +587,8 @@ class Resolved(NamedTuple):
     frames: tuple[str, ...] = ()
     #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
     cuts: tuple[int, ...] = ()
+    #: A run-time value as a base plus an offset -- see ``Branch.amount``.
+    amount: Optional[ConditionValue] = None
 
 
 def _runtime(value: ast.expr) -> str:
@@ -731,7 +734,13 @@ def _unsettled(
     # be is kept beside it, read back through the locals that build it: that
     # is a bound on the text, not a claim about what kind of text it is.
     reading = values.value_reading(value, func)
-    return Resolved(_runtime(value), 2, frames=tuple(reading.frames), cuts=tuple(reading.cuts))
+    return Resolved(
+        _runtime(value),
+        2,
+        frames=tuple(reading.frames),
+        cuts=tuple(reading.cuts),
+        amount=values.written_amount(value, func),
+    )
 
 
 def _declared_names(value: ast.expr) -> set[str]:
@@ -1188,6 +1197,7 @@ def extract(
                             line=node.lineno,
                             value_frames=list(resolved.frames),
                             value_cuts=list(resolved.cuts),
+                            amount=resolved.amount,
                         )
                     )
         if candidates:

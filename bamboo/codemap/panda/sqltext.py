@@ -3024,6 +3024,17 @@ def _clock_side(node: exp.Expression, text: str) -> Optional[Side]:
     return Side("clock", text, clock=name, offset_seconds=sign * days * 86400.0)
 
 
+def clock_of(text: str) -> Optional[Side]:
+    """*text*, a value a statement writes as it spells it -- ``CURRENT_DATE``, ``CURRENT_DATE-1``,
+    ``CURRENT_DATE-1/24``, ``SYSDATE-:days`` -- as the database's clock plus an amount, read as a term's side is
+    (:func:`_clock_side`); ``None`` where it is no such amount."""
+    try:
+        tree = sqlglot.parse_one(text, read="oracle")
+    except SqlglotError:
+        return None
+    return _clock_side(tree, text) if isinstance(tree, exp.Expression) else None
+
+
 def _side(node: exp.Expression, scope, root, sql: str) -> Side:
     """What *node*, the side a term compares its column with, is."""
     read = parsed(sql)
