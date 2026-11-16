@@ -20531,6 +20531,68 @@ def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_
     ]
 
 
+#: ``getTasksToBeFinished_JEDI``'s pick: a term against another table's column, ``OR``-ed with an ``IN`` list only
+#: some runs append, beside terms every row meets.
+_PICKED = '''
+class TaskModule:
+    def getTasksToBeFinished_JEDI(self, vo, target_tasks=None):
+        varMap = {}
+        varMap[":status1"] = "prepared"
+        sqlRT = "SELECT tabT.jediTaskID,tabT.status "
+        sqlRT += "FROM ATLAS_PANDA.JEDI_Tasks tabT,ATLAS_PANDA.JEDI_AUX_Status_MinTaskID tabA "
+        sqlRT += "WHERE tabT.status=tabA.status "
+        or_taskids_sql = ""
+        if target_tasks:
+            or_taskids_sql = "OR tabT.jediTaskID IN (:jediTaskID1) "
+            varMap[":jediTaskID1"] = target_tasks
+        sqlRT += f"AND (tabT.jediTaskID>=tabA.min_jediTaskID {or_taskids_sql}) "
+        sqlRT += "AND tabT.status IN (:status1) AND tabT.vo=:vo "
+        varMap[":vo"] = vo
+        self.cur.execute(sqlRT + comment, varMap)
+'''
+
+
+def test_a_read_term_a_row_need_not_meet_or_against_another_table_says_so(tmp_path):
+    """The pick's ``tabT.jediTaskID IN (...)`` is a way of an ``OR``: a record whose rows need not meet it
+    (:attr:`KeyFrom.some_rows`), its bind read as any other.  ``tabT.jediTaskID>=tabA.min_jediTaskID`` is compared
+    with another table's column, which no bind brings: a record from each side, the other column its source
+    (:data:`KEY_JOINED`).  ``tabT.status=tabA.status`` is a join and gets none; ``vo=:vo`` every row meets."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _PICKED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    found = sorted(
+        (one.table, one.term, one.some_rows, sorted((s.kind, s.name) for s in one.sources))
+        for one in froms
+        if one.reads
+    )
+
+    assert found == [
+        (
+            "JEDI_AUX_Status_MinTaskID",
+            "min_jediTaskID<=JEDI_Tasks.jediTaskID",
+            True,
+            [("joined", "JEDI_Tasks.jediTaskID")],
+        ),
+        ("JEDI_Tasks", "jediTaskID=:jediTaskID1", True, [("parameter", "target_tasks")]),
+        (
+            "JEDI_Tasks",
+            "jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID",
+            True,
+            [("joined", "JEDI_AUX_Status_MinTaskID.min_jediTaskID")],
+        ),
+        ("JEDI_Tasks", "status=:status1", False, [("constant", "'prepared'")]),
+        ("JEDI_Tasks", "vo=:vo", False, [("parameter", "vo")]),
+    ]
+
+
 #: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,
 #: from a map whose callers hand one key or the other; and one over a map no caller is read for.
 _KEYED_WHERE = '''

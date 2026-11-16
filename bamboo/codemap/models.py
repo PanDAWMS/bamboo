@@ -3360,7 +3360,20 @@ KEY_SELF_FIELD = "self_field"
 KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
-KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+#: And a read term's other side where it is a column of another table of the statement, compared by an order or
+#: ``<>`` (``tabT.jediTaskID>=tabA.min_jediTaskID``): *name* ``<table>.<column>``, a value no bind brings and no print
+#: of the statement's binds shows.
+KEY_JOINED = "joined"
+KEY_KINDS = (
+    KEY_ROWS,
+    KEY_SEQUENCE,
+    KEY_PARAMETER,
+    KEY_SELF_FIELD,
+    KEY_CONSTANT,
+    KEY_ATTRIBUTE,
+    KEY_UNKNOWN,
+    KEY_JOINED,
+)
 #: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
 #: a call builds of a corpus class (``JobSpec()``) or a handler catches (``except FileRegistrationError as e``), a
 #: module's name, a call neither placed nor gone through, a fetch whose rows no statement of the function reads.
@@ -3919,6 +3932,14 @@ class KeyFrom(BaseModel):
         description=(
             "A term of a statement that reads rows (its read site's run): *writes* empty, no *object* nor *new_row*; "
             "*routes* as a write's.  Its sources say which rows the statement is asked for by."
+        ),
+    )
+    some_rows: bool = Field(
+        default=False,
+        description=(
+            "A read term (*reads*) a row the statement returns need not meet: one way of an ``OR`` -- "
+            "``getTasksToBeFinished_JEDI``'s ``tabT.jediTaskID>=tabA.min_jediTaskID OR tabT.jediTaskID IN (...)`` "
+            "-- under a ``NOT``, or one only some runs append.  False where every row it returns meets the term."
         ),
     )
     attr: str = Field(

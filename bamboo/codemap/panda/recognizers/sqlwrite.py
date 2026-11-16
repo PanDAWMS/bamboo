@@ -90,6 +90,7 @@ from bamboo.codemap.models import (
     KEY_COLUMN_UNREAD,
     KEY_CONSTANT,
     KEY_HANDED,
+    KEY_JOINED,
     KEY_KEPT,
     KEY_NO_BIND,
     KEY_NO_MAP,
@@ -7282,9 +7283,9 @@ def _selected_value(selected: str) -> object:
 
 
 def _term_column(term: str) -> str:
-    """The column a KeyFrom's *term* compares: ``jediTaskID`` of ``jediTaskID=:jediTaskID`` or of
-    ``jediTaskID IN (:a, :b)``."""
-    return term.split(" IN ", 1)[0].split("=", 1)[0].strip()
+    """The column a KeyFrom's *term* compares: ``jediTaskID`` of ``jediTaskID=:jediTaskID``, of ``jediTaskID IN (:a,
+    :b)`` or of ``jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID``."""
+    return re.split(r" IN |[<>!=]", term, maxsplit=1)[0].strip()
 
 
 def _site_function(
@@ -7326,9 +7327,14 @@ def _read_keyed(
 
 def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) -> list[KeyFrom]:
     """A KeyFrom (:attr:`KeyFrom.reads`) for each row-naming term of each read site's run: a term on the statement's
-    own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding, every row meeting it -- as
-    :func:`_key_froms` makes a write's, its binds read the same way.  Its statement is the read site's line, its binds
-    those reaching that call (:func:`_read_runs`); an ``IN`` list of several binds is one term.
+    own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding -- as :func:`_key_froms` makes a
+    write's, its binds read the same way.  Its statement is the read site's line, its binds those reaching that call
+    (:func:`_read_runs`); an ``IN`` list of several binds is one term.  A term a returned row need not meet -- a way
+    of an ``OR`` -- says so (:attr:`KeyFrom.some_rows`).
+
+    And one for each term comparing a column with another table's (:func:`sqltext.joined_terms`), from each side, its
+    source that column (:data:`KEY_JOINED`): ``getTasksToBeFinished_JEDI``'s ``tabT.jediTaskID>=
+    tabA.min_jediTaskID``, which no bind brings nor a print of the binds shows.
     """
     found: dict[tuple[str, int, str, str], KeyFrom] = {}
     for site in sorted(sites, key=lambda one: (one.owner, one.anchor.line_start)):
@@ -7339,8 +7345,24 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
         for run in _read_runs(func):
             if run.call.lineno != line:
                 continue
+            for joined in sqltext.joined_terms(run.reading):
+                other = f"{joined.other_table}.{joined.other_column}"
+                spelled = f"{joined.column}{joined.op}{other}"
+                record = found.get((site.owner, line, joined.table, spelled))
+                if record is None:
+                    record = found[(site.owner, line, joined.table, spelled)] = KeyFrom(
+                        owner=site.owner,
+                        file=file,
+                        statement=line,
+                        table=joined.table,
+                        term=spelled,
+                        reads=True,
+                        sources=[KeySource(kind=KEY_JOINED, line=line, name=other)],
+                    )
+                record.some_rows = record.some_rows or not joined.every_row
+                _ran_by(record, func, run)
             for term in sqltext.terms(run.reading).terms:
-                if term.verb != "read" or term.scope != sqltext.ROW or term.excluding or not term.decided:
+                if term.verb != "read" or term.scope != sqltext.ROW or term.excluding:
                     continue
                 # A bind spelt with a hole is no term here: sqltext.terms reads none.
                 binds = list(term.binds)
@@ -7362,6 +7384,8 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                         reads=True,
                     )
                     record._binds = (func, file, [])
+                # A way of an OR, or a term only some runs append, in any of the texts the statement runs with.
+                record.some_rows = record.some_rows or not term.decided
                 _ran_by(record, func, run)
                 bound = [
                     filled
