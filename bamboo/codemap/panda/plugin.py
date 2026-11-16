@@ -50,6 +50,7 @@ from bamboo.codemap.panda import (
     aftermade,
     endpoints,
     entered,
+    exitkeeps,
     flow,
     handlermarks,
     heldfrom,
@@ -952,6 +953,12 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")
+        # What each exit of a function holding arms or prints keeps a run from: why a pass that ran no arm ran none.
+        kept = exitkeeps.attach(fragment, self._modules)
+        logger.info(
+            "PandaCodeMapPlugin: %d exit(s) read, %d keep a run from an arm", len(fragment.exit_keeps), kept
+        )
+        lap("exits")
         if self._calls is not None:
             # Where each function's runs start, what each call of a history writer
             # can record, and the calls that write a history row in the same pass

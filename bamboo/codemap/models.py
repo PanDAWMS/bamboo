@@ -4432,6 +4432,39 @@ class MessageRead(BaseModel):
     name: str = Field(description="The name it binds: ``task_id``.")
 
 
+class ExitKeeps(BaseModel):
+    """What one exit of a function keeps a run from (:mod:`bamboo.codemap.panda.exitkeeps`): the junction arms and the
+    prints a run leaving there can no longer reach and could have reached had it gone on past it
+    (:func:`bamboo.codemap.panda.flow.kept_from`) -- a ``return`` or a raise over the call's pass, a ``continue`` or a
+    ``break`` over one turn of its loop.
+
+    A reader of a pass that ran none of a junction's arms asks why: an exit it may have left by keeps it from them,
+    or none does and a test on the way made the pass go another way.  ``setScoutJobData_JEDI``'s ``continue`` at 1185
+    keeps a run from the arm at 1187 (the turn's bind of a column), and no exit keeps it from the task's status
+    arms under the test at 1226; ``getTasksToBeFinished_JEDI``'s raise at 1666, caught by the ``except`` around the
+    loop that returns, keeps it from the count print at 1717.
+
+    One per ``return``, ``raise``, ``continue`` and ``break`` of the function's own body, for every function holding a
+    junction's arm or a print -- an exit keeping a run from nothing too, both lists empty: an exit not listed is one
+    not read.  The flow is path-insensitive, so a list may leave out an arm or a print the exit does keep a run from,
+    never hold one it does not.
+    """
+
+    owner: str = Field(description="``module::function``, the spelling a junction's owner and a read site's use.")
+    exit: str = Field(
+        description="``kind@line``, as :attr:`ReadSiteNode.exits` spells an exit: ``continue@1185``, ``raise@1666``."
+    )
+    arms: list[int] = Field(
+        default_factory=list,
+        description="The lines of the junction branches (:attr:`Branch.line`, :attr:`Branch.other_lines`) it keeps a "
+        "run from.",
+    )
+    prints: list[int] = Field(
+        default_factory=list,
+        description="The lines of the function's print statements (:class:`PrintStatement`) it keeps a run from.",
+    )
+
+
 class MessageEdge(BaseModel):
     """A message one run sends and the function another run processes it with (:mod:`bamboo.codemap.panda.messages`).
 
@@ -4572,6 +4605,13 @@ class MapFragment(BaseModel):
         description=(
             "Each send of a message of a literal type and the function taking only that type "
             "(:func:`bamboo.codemap.panda.messages.edges`): a run's hand-on to another run, beside reach."
+        ),
+    )
+    exit_keeps: list[ExitKeeps] = Field(
+        default_factory=list,
+        description=(
+            "What each exit of a function holding arms or prints keeps a run from (:class:`ExitKeeps`), in the order "
+            "of the files and lines."
         ),
     )
     declaration_yields: dict[str, int] = Field(
