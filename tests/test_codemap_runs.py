@@ -2112,6 +2112,44 @@ def test_a_key_no_declaration_names_is_the_column_its_function_uses_it_as(
         assert (key.columns, key.stops) == (["JobSpec.PandaID"], said), marker
 
 
+REBOUND = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+
+_logger = None
+
+
+class Keys(DBProxy):
+    def rebound(self, pid):
+        pid = pid.strip()
+        tmp_log = LogWrapper(_logger, f"<pid={pid}>")  # R1
+        tmp_log.debug("rebound")
+
+    def later(self, pid, limit: int):
+        tmp_log = LogWrapper(_logger, f"<pid={pid} limit={limit}>")  # R2
+        limit = naive_utcnow() - datetime.timedelta(minutes=limit)
+        tmp_log.debug("later")
+"""
+
+
+def test_a_hole_of_a_mark_holding_a_parameter_as_handed_names_it(tmp_path: Path) -> None:
+    """``limit={timeLimit}`` in ``reactivatePendingTasks_JEDI``'s mark prints the minutes its statement's amount waits
+    for, so the hole names the parameter as the amount's needs spell it (:attr:`RunKey.parameter`).  A parameter
+    bound again before the mark, an attribute of one, a local holding another value: none.  One bound again after
+    the mark is still the call's value where the mark prints it."""
+    keys = _keys(tmp_path)
+    parameters = {marker: keys[_line(KEYS, marker)].parameter for marker in ("K1", "K23", "K12", "K13", "K8")}
+
+    assert parameters == {"K1": "kill.panda_id", "K23": "defaulted.pid", "K12": "", "K13": "", "K8": ""}
+
+    fragment = _build(tmp_path / "rebound", [], spec=SPEC, proxy=PROXY, keys=REBOUND)
+    runs = {run.line: [key.parameter for key in run.key] for node in fragment.function_prints for run in node.runs}
+
+    assert runs[_line(REBOUND, "R1")] == [""]
+    assert runs[_line(REBOUND, "R2")] == ["later.pid", "later.limit"]
+
+
 def test_a_key_is_the_column_it_is_used_as_wherever_it_is_followed(
     tmp_path: Path,
 ) -> None:

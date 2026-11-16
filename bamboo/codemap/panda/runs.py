@@ -613,8 +613,9 @@ class _Reader:
             return RunStart(**common, mark="", key=key)
         pieces = _pieces(expression, func)  # type: ignore[arg-type]
         mark = "".join(piece if isinstance(piece, str) else "{}" for piece in pieces)
+        # And which of the holes hold a parameter as handed: what a reader fills an amount's needs with from the mark.
         key = [
-            self._key(piece, file, func)
+            self._key(piece, file, func).model_copy(update={"parameter": values.parameter_as_handed(piece, func)})
             for piece in pieces
             if not isinstance(piece, str)
         ]

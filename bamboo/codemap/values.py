@@ -1593,7 +1593,7 @@ def written(node: ast.expr, func) -> Written:
         return Written()
     if value.said or not value.base:
         return Written()
-    if not is_clock(value.base) and value.offset == 0 and not value.needs:
+    if _as_handed(value):
         return Written(handed=_handed(value.base, func))
     return Written(
         amount=ConditionValue(
@@ -1607,14 +1607,40 @@ def written(node: ast.expr, func) -> Written:
     )
 
 
+def parameter_as_handed(node: ast.expr, func) -> str:
+    """``<function>.<parameter>`` where *node*, read where it is evaluated (:func:`stated`), is *func*'s parameter as
+    the call hands it -- bound again on no way to *node* -- and ``""`` for any other value (:attr:`RunKey.parameter`).
+    ``reactivatePendingTasks_JEDI``'s mark ``limit={timeLimit}`` is ``reactivatePendingTasks_JEDI.timeLimit``, the
+    spelling the amount its statement compares with waits for (:attr:`ConditionValue.needs`)."""
+    try:
+        value = stated(node, func, pathcond.site_of(node))
+    except RecursionError:
+        return ""
+    return value.base if _as_handed(value) else ""
+
+
+def _as_handed(value: Stated) -> bool:
+    """Whether *value* is a parameter as the call hands it: its base, nothing added and nothing waited for."""
+    return not value.said and bool(value.base) and not is_clock(value.base) and value.offset == 0 and not value.needs
+
+
 def _handed(base: str, func) -> Optional[HandedParameter]:
     """The parameter *base* names in *func*'s signature -- ``<function>.<parameter>``, as :func:`_named` spells it --
     and what the signature says of ``None``."""
-    arguments = getattr(func, "args", None)
     name = getattr(func, "name", "")
-    if arguments is None or not base.startswith(name + "."):
+    if not base.startswith(name + "."):
         return None
-    parameter = base[len(name) + 1 :]
+    return declared(func, base[len(name) + 1 :])
+
+
+def declared(func, parameter: str) -> Optional[HandedParameter]:
+    """What *func*'s signature says of its *parameter*, named ``<function>.<parameter>``: the annotation as written,
+    and whether it admits ``None`` (:class:`HandedParameter`).  ``None`` where *func* has no such named parameter (a
+    ``*`` or ``**`` one among them: what it holds is a tuple or a dict)."""
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return None
+    base = f"{getattr(func, 'name', '')}.{parameter}"
     positional = [*arguments.posonlyargs, *arguments.args]
     defaulted = positional[len(positional) - len(arguments.defaults) :]
     defaults = {one.arg: default for one, default in zip(defaulted, arguments.defaults, strict=True)}

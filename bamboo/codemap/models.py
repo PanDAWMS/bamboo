@@ -6829,6 +6829,16 @@ class RunKey(BaseModel):
     """
 
     expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
+    parameter: str = Field(
+        default="",
+        description=(
+            "``<function>.<parameter>`` where the hole is the function's parameter as the call hands it, bound again "
+            "on no way to the mark (:func:`bamboo.codemap.values.parameter_as_handed`): "
+            "``reactivatePendingTasks_JEDI``'s ``limit={timeLimit}`` is ``reactivatePendingTasks_JEDI.timeLimit``, "
+            "as :attr:`ConditionValue.needs` and :attr:`HandedParameter.name` spell it, so a value a run's mark "
+            "prints fills what an amount waits for.  Empty for any other value."
+        ),
+    )
     columns: list[str] = Field(
         default_factory=list,
         description=(
