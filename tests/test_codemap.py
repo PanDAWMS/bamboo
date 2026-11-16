@@ -10702,6 +10702,35 @@ def test_the_branch_where_the_rows_did_come_back_is_not_a_no_rows_exit():
     assert node.exits == []
 
 
+def test_a_test_of_what_a_row_loop_puts_aside_is_not_a_no_rows_exit():
+    """``if taskID in checked: continue`` asks whether this row was seen before, not whether rows came.
+
+    ``checkAllEventsDone`` and five other statements put each row's ID into a set as they go, to skip repeats.  The
+    set holds rows, and a loop over it would be over them; a test of it inside the loop filling it is about this row.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        resT = self.cur.fetchall()\n"
+        "        checked = set()\n"
+        "        for (taskID,) in resT:\n"
+        "            if taskID in checked:\n"
+        "                continue\n"
+        "            checked.add(taskID)\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == ["continue@12"]
+    assert node.rows_handled == [10, 14]
+
+
 def test_the_rows_are_followed_to_the_fetch_that_binds_them():
     """``execute`` binds nothing at the call -- 195 of 264 arrive at a fetch.
 

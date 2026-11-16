@@ -3402,13 +3402,17 @@ def _assigned_names(node: ast.AST) -> set[str]:
 def _row_loops(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
 ) -> tuple[list[ast.For | ast.AsyncFor | ast.While], set[str]]:
-    """The loops over the rows of the statement run at *line*, whose stretch ends at *last*, and the names holding them.
+    """The loops over the rows of the statement run at *line*, whose stretch ends at *last*, and the names they land in.
 
-    The names are where the rows land (:func:`_rows_written`), and a list a loop over them puts a row into -- the
-    loop's target, or a tuple of its names (:func:`_copies`): ``getTasksToBeFinished_JEDI`` copies its rows into
-    ``taskStatList`` in ``for ... in resList``, commits, and works them through in ``for ... in taskStatList``,
-    which is where a row is passed over.  A loop over the cursor is over the rows itself; its target is a row, and
-    a loop over that is one nested in it.
+    A loop is over the rows when its header reads a name they land in (:func:`_rows_written`), or a list a loop over
+    them puts a row into -- the loop's target, or a tuple of its names (:func:`_copies`): ``getTasksToBeFinished_JEDI``
+    copies its rows into ``taskStatList`` in ``for ... in resList``, commits, and works them through in
+    ``for ... in taskStatList``, which is where a row is passed over.  A loop over the cursor is over the rows itself;
+    its target is a row, and a loop over that is one nested in it.
+
+    The names are only where the rows land, not the copies: a test of a copy inside the loop filling it asks whether
+    this row was seen, not whether rows came (``checkAllEventsDone``'s ``if pandaID in checkedPandaIDs: continue``),
+    so it is not a ``no-rows`` exit (:func:`place_exits`).
 
     The loop must **open** inside the stretch; only its end is followed.  Searching the function for every loop
     over the same names gives 174 exits over 71 statements against 90 over 45, because ``res`` is reused:
@@ -3433,8 +3437,7 @@ def _row_loops(
     loops = over(names)
     copies = {name for loop in loops for name in _copies(loop)} - names
     if copies:
-        names |= copies
-        loops = over(names)
+        loops = over(names | copies)
     return loops, names
 
 
