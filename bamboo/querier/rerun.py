@@ -1803,13 +1803,15 @@ class Fork:
 @dataclass
 class Blocked:
     """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
-    candidates (:func:`took_none`)."""
+    candidates (:func:`took_none`), or ran none of the arms (:func:`ran_no_arm`): then *left_by* holds the exits such
+    a pass may have left by."""
 
     fn: R.Function
     exit_line: int | None
     passes: list
     envs: list
     arms: list[Arm]
+    left_by: tuple[int, ...] = ()
 
 
 @dataclass
@@ -3087,6 +3089,20 @@ def took_none_but(j, free: set[int]) -> bool:
     left = [v for v in j.verdicts if v.kind != "excluded"]
     unshown = j.chosen is None or (j.chosen.line in free and j.chosen.kind != "positive")
     return unshown and bool(left) and all(v.line in free for v in left)
+
+
+def ran_no_arm(j, arms: set[int]) -> list[int]:
+    """S batch S-1 (qk-design.md, tmaeno "OK" 2026-11-16): where the judgement *j* excluded every one of the *arms* and
+    chose no way, the exits it left kept, sorted; [] otherwise.  An arm excluded did not run in the pass, so the pass
+    ran none of them, whichever of those exits it left by or ran on past (setScoutJobData_JEDI's six arms, their must
+    rows unprinted, and its exits 1185, 1215, 1457 and 1465).  Whether such an exit keeps a run from the arms is the
+    map's (S-2), and S3 says them."""
+    if j.chosen is not None or not arms:
+        return []
+    kinds = {v.line: v.kind for v in j.verdicts}
+    if any(kinds.get(line) != "excluded" for line in arms):
+        return []
+    return sorted(line for line, kind in kinds.items() if line not in arms and kind != "excluded")
 
 
 def _number(value):
@@ -7064,6 +7080,7 @@ class Rerun:
         self.say(f"candidates: arms {[a.line for a in arms]}, exits {exits}")
         chosen: list[Any] = []  # each pass's verdict, None where it took none of the candidates
         envs = []
+        left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1)
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
@@ -7082,6 +7099,11 @@ class Rerun:
                              "taken, they keep a pass from none")
                 self.say(f"  pass {n} took none of the candidates: no arm of {func} that moves the value ran in it")
                 chosen.append(None)
+            elif left := ran_no_arm(j, {a.line for a in arms}):
+                self.say(f"  pass {n} ran no arm of {func} that moves the value: every arm excluded; it left by one of "
+                         f"{left} or ran on past them")
+                left_by.update(left)
+                chosen.append(None)
             else:
                 chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
             envs.append(env)
@@ -7089,8 +7111,9 @@ class Rerun:
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
         self.say(f"every pass ({len(found)}) left by {func}:{exit_line}" if exit_line is not None
-                 else f"every pass ({len(found)}) of {func} took none of its candidates")
-        return Blocked(fn, exit_line, found, envs, arms)
+                 else f"every pass ({len(found)}) of {func} took none of its candidates" if not left_by
+                 else f"every pass ({len(found)}) of {func} ran none of its arms")
+        return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)))
 
     # ------------------------------------------------------------ Callers: what called the mover on the row
     def callers(self, q: Callers):
@@ -8291,7 +8314,10 @@ class Rerun:
         if q.exit_line is None:
             # every pass took none of the arms and the exits: what settles a guard is what the passes printed on the way
             path = []
-            self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
+            self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard"
+                     if not q.left_by else
+                     f"{fn.name}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
+                     f"by {list(q.left_by)} (whether one keeps a run from the arms is not read)")
         else:
             exit_stmt = R.statement_at(fn.node, q.exit_line)
             # what held on the way to it, the early exits above it too; one read at another line is not solved here

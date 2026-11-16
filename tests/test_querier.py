@@ -4892,8 +4892,9 @@ def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loo
     assert got["wait"] == [[once], None, [
         "  the candidates pass 1 leaves, [14], are continues or breaks of loops that hold no arm (14 chosen by "
         "elimination, which no row shows): taken, they keep a pass from none", killed]]
-    # the same rows twice in one run: two calls, no loop read as gone round once, 10 and 14 both left -- undecided
-    assert got["twice"] == [[], "S2: which way pass 1 went", []]
+    # the same rows twice in one run: two calls, no loop read as gone round once, 10 and 14 both left -- which way is
+    # undecided, but the one arm is excluded, so the pass ran no arm and S3 reads the arm's guard
+    assert got["twice"] == [[], None, [killed]]
     # a free jump shown taken (row 16 prints only on 17's path) stays the way the pass went
     assert got["skip"][1] == 17 and got["skip"][2] == [killed]
     # another job's run: its own mark, so its loop went round once for job 8 as well
@@ -9479,10 +9480,26 @@ def test_a_pass_that_took_none_of_the_candidates_did_not_move_the_value_and_s3_r
         r = object.__new__(rerun.Rerun)
         r.lines, r.mode, r.opened, r.hand, r.hand_used = [], "outside", [], {}, []
         got = r.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])]))
-        print(json.dumps([took, got.guard, got.line, [x for x in r.lines if x]]))
+        # S batch S-1: every arm excluded and no way chosen -- the exits left; an arm kept or unjudged, a way chosen: []
+        v = lambda line, kind: N(line=line, kind=kind)
+        ran = [rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(20, "excluded"), v(30, "kept"), v(5, "kept"),
+                                                         v(40, "excluded")]), {10, 20}),
+               rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(20, "kept"), v(5, "kept")]), {10, 20}),
+               rerun.ran_no_arm(N(chosen=None, verdicts=[v(10, "excluded"), v(5, "kept")]), {10, 20}),
+               rerun.ran_no_arm(N(chosen=v(5, "kept"), verdicts=[v(10, "excluded"), v(5, "kept")]), {10}),
+               rerun.ran_no_arm(N(chosen=None, verdicts=[v(5, "kept")]), set())]
+        r2 = object.__new__(rerun.Rerun)
+        r2.lines, r2.mode, r2.opened, r2.hand, r2.hand_used = [], "outside", [], {}, []
+        r2.blocked(rerun.Blocked(fn, None, [run], [env], [rerun.Arm(ARM, ["failed"], ["job.flag"])], (7, 9)))
+        print(json.dumps([took, got.guard, got.line, [x for x in r.lines if x], ran, [x for x in r2.lines if x]]))
     """
     out = _ok(_run(tmp_path, code.replace("ARM", str(arm))))
-    took, guard, line, said = json.loads(out.splitlines()[-1])
+    took, guard, line, said, ran, said2 = json.loads(out.splitlines()[-1])
+    assert ran == [[5, 30], [], [], [], []]
+    assert said2[1] == ("run: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left by "
+                        "[7, 9] (whether one keeps a run from the arms is not read)")
+    # the exits said, the arm's guard read as before
+    assert said2[-1] == said[-1]
     # every candidate excluded: none taken; one kept or not examined may have been taken
     assert took == [True, False, False, False]
     # no exit's path: the guard of the arm is read false in what the pass printed, and S3 goes on to where it is tested
