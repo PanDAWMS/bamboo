@@ -2437,6 +2437,36 @@ class Waker(BaseModel):
     )
 
 
+#: :attr:`RowFall.kept`: the way of the ``if`` the hand-on is in.
+FALL_BODY = "body"
+FALL_ELSE = "orelse"
+
+
+class RowFall(BaseModel):
+    """An ``if`` of a statement's row loop on the way to a hand-on -- the row, or a row a later statement of the
+    function names by it (:attr:`KeySource.name` of a ``rows`` source), put into what the function returns -- whose
+    other way puts nothing there: a row taking it ends its turn without being handed on (:attr:`ReadSiteNode.falls`).
+
+    ``getTasksToBeFinished_JEDI`` puts ``taskSpec``, packed from the rows of the statement at 1699 its loop names by
+    the row of 1644, into ``retTasks`` at 1704 and returns ``retTasks``.  ``if nRows == 1:`` at 1695 has no
+    ``else``: a task the lock statement changed no row of goes on to the next row, printing nothing.
+    """
+
+    line: int = Field(description="The ``if``'s line: the exit's ``fall@<line>``.")
+    kept: str = Field(description=f"{FALL_BODY!r} or {FALL_ELSE!r}: the way the hand-on is in.")
+    lines: list[int] = Field(
+        default_factory=list,
+        description="``[first, last]`` of the other way; empty where there is none (no ``else``): nothing runs.",
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<subject>@<line>`` for each junction branch of the owner written on the other way, sorted: the "
+            "scouted task's ``JediTaskSpec.status@1673``.  What the row's turn did instead of handing it on."
+        ),
+    )
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -2813,7 +2843,26 @@ class ReadSiteNode(BaseNode):
             "nothing at all. Empty is an answer -- most statements have no "
             "exit of their own -- so there is no coverage gate on this field, "
             "only the invariant that every line named falls inside ``region`` "
-            "or ``rows_handled``."
+            "or ``rows_handled``.\n\n"
+            "The rows are also in a list a loop over them copies each into, "
+            "and a loop over that list is a row loop too "
+            "(``getTasksToBeFinished_JEDI``'s ``taskStatList``).  And "
+            "``\"fall@<line>\"`` is an ``if`` of a row loop on the way to where "
+            "the row, or a row named by it, is put into what the function "
+            "returns, whose other way puts nothing: the row's turn ends "
+            "without it being handed on -- see ``falls``."
+        ),
+    )
+    falls: list[RowFall] = Field(
+        default_factory=list,
+        description=(
+            "Each ``fall@`` exit read whole: the ``if``, which of its ways "
+            "the hand-on is in, the lines of the other way and the arms "
+            "written there.  ``getTasksToBeFinished_JEDI@1644`` hands a task "
+            "on at ``retTasks.append(taskSpec)`` (1704), past ``if taskStatus "
+            "== \"scouted\"`` (its body sets the task running), ``if nRows "
+            "== 1`` and ``if resTS is not None`` (no ``else``: silent).  "
+            "Sorted by line."
         ),
     )
     rows_handled: list[int] = Field(
@@ -7709,8 +7758,17 @@ class StatementExit(BaseModel):
     been asking the map about.
     """
 
-    kind: str = Field(description="``continue`` | ``break`` | ``return`` | ``raise`` | ``except``")
+    kind: str = Field(
+        description=(
+            "``continue`` | ``break`` | ``return`` | ``raise`` | ``except`` | ``fall`` -- the last an ``if`` whose "
+            "other way does not hand the row on (:class:`RowFall`); its *line* is the ``if``'s."
+        )
+    )
     line: int = Field(default=0, description="Where the exit is taken.")
+    writes: list[str] = Field(
+        default_factory=list,
+        description="A ``fall``'s :attr:`RowFall.writes`: the arms written on the way that does not hand the row on.",
+    )
     no_rows: bool = Field(
         default=False,
         description=(
@@ -8004,6 +8062,10 @@ class StatementReading(BaseModel):
             "what the code says on the way out.  Empty for most statements, "
             "which is an answer."
         ),
+    )
+    falls: list[RowFall] = Field(
+        default_factory=list,
+        description=":attr:`ReadSiteNode.falls`: the ``fall`` exits read whole, which the walk reads the blocks of.",
     )
     crosses_to: list[str] = Field(
         default_factory=list,

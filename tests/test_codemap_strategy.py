@@ -3650,6 +3650,17 @@ def test_the_two_kinds_of_exit_are_read_back_apart():
     assert (empty_handed.kind, empty_handed.line, empty_handed.no_rows) == ("return", 263, True)
 
 
+def test_a_fall_is_read_back_with_the_arms_its_other_way_writes():
+    """``fall@1669``: the scouted task is set running on the way that does not hand it on (:class:`RowFall`)."""
+    from bamboo.codemap.models import RowFall
+
+    fall = RowFall(line=1669, kept="orelse", lines=[1670, 1685], writes=["JediTaskSpec.status@1673"])
+    read = strategy_mod._statement_exit("fall@1669", {1669: fall})
+
+    assert (read.kind, read.line, read.no_rows, read.writes) == ("fall", 1669, False, ["JediTaskSpec.status@1673"])
+    assert strategy_mod._statement_exit("continue@390", {1669: fall}).writes == []
+
+
 def test_an_exits_walk_stops_where_the_rows_stop_being_worked_through():
     """The region runs on into the *next* query's setup, and the walk followed it.
 

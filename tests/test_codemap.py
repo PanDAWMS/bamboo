@@ -20593,6 +20593,90 @@ def test_a_read_term_a_row_need_not_meet_or_against_another_table_says_so(tmp_pa
     ]
 
 
+#: ``getTasksToBeFinished_JEDI``'s shape: the rows copied into a list, committed, and worked through in a loop over
+#: the copy, which hands a task on only past three tests.
+_HANDED_ON = '''
+class TaskModule:
+    def getTasksToBeFinished_JEDI(self, vo, pid):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRT = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=:lockedBy WHERE jediTaskID=:jediTaskID "
+        sqlTS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+        sqlSC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlRT + comment, varMap)  # PICK
+        resList = self.cur.fetchall()
+        retTasks = []
+        taskStatList = []
+        for jediTaskID, taskStatus in resList:  # COPY
+            taskStatList.append((jediTaskID, taskStatus))
+        for jediTaskID, taskStatus in taskStatList:
+            if taskStatus == "skip":
+                continue  # SKIP
+            if taskStatus == "scouted":  # SCOUTED
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "running"  # RUNNING
+                self.cur.execute(sqlSC + comment, varMap)
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":lockedBy"] = pid
+                self.cur.execute(sqlLK + comment, varMap)
+                nRows = self.cur.rowcount
+                if nRows == 1:  # LOCKED
+                    varMap = {}
+                    varMap[":jediTaskID"] = jediTaskID
+                    self.cur.execute(sqlTS + comment, varMap)
+                    resTS = self.cur.fetchone()
+                    if resTS is not None:  # FOUND
+                        taskSpec = JediTaskSpec()
+                        taskSpec.pack(resTS)
+                        retTasks.append(taskSpec)  # HAND
+        return retTasks  # END
+'''
+
+
+def test_a_row_worked_through_in_a_copy_and_not_handed_on_past_a_test_exits_there(tmp_path):
+    """The rows are copied into ``taskStatList`` and worked through in the loop over it: its ``continue`` is an exit,
+    and the loop is where they are handled.  A task is handed on where ``retTasks``, which the function returns, is
+    given ``taskSpec``, packed from the rows of the statement the row names; each test on the way whose other way
+    hands nothing on is a fall (:attr:`ReadSiteNode.falls`): the scouted task is set running instead, a lock that
+    changed no row and a task no longer there go on in silence."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_ON})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _HANDED_ON.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (picked,) = [site for site in sites if site.anchor.line_start == at("# PICK")]
+    assert picked.rows_handled == [at("# COPY"), at("# HAND")]
+    assert picked.exits == sorted(
+        [f"continue@{at('# SKIP')}", f"fall@{at('# SCOUTED')}", f"fall@{at('# LOCKED')}", f"fall@{at('# FOUND')}"]
+    )
+    assert [(one.line, one.kept, one.lines, one.writes) for one in picked.falls] == [
+        # ``status`` is the column of more than one spec here: the subject is spelled by its table.
+        (
+            at("# SCOUTED"),
+            "orelse",
+            [at("# SCOUTED") + 1, at("# RUNNING") + 1],
+            [f"JEDI_Tasks.status@{at('# RUNNING')}"],
+        ),
+        (at("# LOCKED"), "body", [], []),
+        (at("# FOUND"), "body", [], []),
+    ]
+
+
 #: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,
 #: from a map whose callers hand one key or the other; and one over a map no caller is read for.
 _KEYED_WHERE = '''

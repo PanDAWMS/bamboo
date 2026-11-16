@@ -113,6 +113,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "region",
         "rows_handled",
         "exits",
+        "falls",
         "crosses_to",
         "crosses_open",
         "crossing_selects",

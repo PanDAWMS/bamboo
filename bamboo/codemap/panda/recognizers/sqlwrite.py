@@ -79,6 +79,8 @@ from bamboo.codemap.calls import (
 )
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
+    FALL_BODY,
+    FALL_ELSE,
     KEY_ATTRIBUTE,
     KEY_BOUND,
     KEY_COLUMN_EXPRESSION,
@@ -144,6 +146,7 @@ from bamboo.codemap.models import (
     ReachNode,
     ReadingStop,
     ReadSiteNode,
+    RowFall,
     RowKeySource,
     RowsTerm,
     SetFrom,
@@ -3396,6 +3399,69 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return {name for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)}
 
 
+def _row_loops(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
+) -> tuple[list[ast.For | ast.AsyncFor | ast.While], set[str]]:
+    """The loops over the rows of the statement run at *line*, whose stretch ends at *last*, and the names holding them.
+
+    The names are where the rows land (:func:`_rows_written`), and a list a loop over them puts a row into -- the
+    loop's target, or a tuple of its names (:func:`_copies`): ``getTasksToBeFinished_JEDI`` copies its rows into
+    ``taskStatList`` in ``for ... in resList``, commits, and works them through in ``for ... in taskStatList``,
+    which is where a row is passed over.  A loop over the cursor is over the rows itself; its target is a row, and
+    a loop over that is one nested in it.
+
+    The loop must **open** inside the stretch; only its end is followed.  Searching the function for every loop
+    over the same names gives 174 exits over 71 statements against 90 over 45, because ``res`` is reused:
+    ``copyArchive::main``'s first query picks up the ``continue`` that belongs to its query on line 381, and one
+    handler on line 1364 lands on 19 statements.  The stretch is what makes ``res`` mean *this* ``res``, and
+    keeping the opening inside it keeps that.
+    """
+    seeds = _rows_written(func, line, last)
+    names = {name for node in seeds for name in _assigned_names(node)}
+    cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
+
+    def over(held: set[str]) -> list[ast.For | ast.AsyncFor | ast.While]:
+        found: list[ast.For | ast.AsyncFor | ast.While] = []
+        for node in walk(func):
+            if not isinstance(node, _LOOPS) or not line < node.lineno <= last:
+                continue
+            header = node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
+            if {one.id for one in walk(header) if isinstance(one, ast.Name)} & held or id(node) in cursor_loops:
+                found.append(node)
+        return found
+
+    loops = over(names)
+    copies = {name for loop in loops for name in _copies(loop)} - names
+    if copies:
+        names |= copies
+        loops = over(names)
+    return loops, names
+
+
+def _copies(loop: ast.AST) -> set[str]:
+    """The lists *loop* puts its row into: ``L.append(row)`` or ``L.add((a, b))`` whose value names nothing but the
+    loop's target -- a row copied, whole or by its parts."""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return set()
+    target = {one.id for one in walk(loop.target) if isinstance(one, ast.Name)}
+    found: set[str] = set()
+    for node in walk(loop):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("append", "add")
+            and isinstance(node.func.value, ast.Name)
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            continue
+        named = {one.id for one in walk(node.args[0]) if isinstance(one, ast.Name)}
+        held = [one for one in walk(node.args[0]) if not isinstance(one, (ast.Name, ast.Tuple, ast.expr_context))]
+        if named and named <= target and not held:
+            found.add(node.func.value.id)
+    return found
+
+
 def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
 ) -> list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor]:
@@ -4472,34 +4538,10 @@ def read_side(
             if own != owner or kept.region is None:
                 continue
             _first, last = kept.region
-            seeds = _rows_written(func, line, last)
-            names = {name for node in seeds for name in _assigned_names(node)}
-            # A loop over the cursor is over the rows itself; its target is a
-            # row, and a loop over that is one nested in it.
-            cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
             enclosing = _enclosing_loops(func)
-            spans: list[tuple[int, int]] = []
-            over_rows: set[int] = set()
-            for node in walk(func):
-                if not isinstance(node, _LOOPS):
-                    continue
-                # The loop must **open** inside the region; only its end is
-                # followed.  Searching the function for every loop over the
-                # same names gives 174 exits over 71 statements against 90
-                # over 45, because ``res`` is reused: ``copyArchive::main``'s
-                # first query picks up the ``continue`` that belongs to its
-                # query on line 381, and one handler on line 1364 lands on 19
-                # statements.  The region is what makes ``res`` mean *this*
-                # ``res``, and keeping the opening inside it keeps that.
-                if not line < node.lineno <= last:
-                    continue
-                header = (
-                    node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
-                )
-                over = {n.id for n in walk(header) if isinstance(n, ast.Name)}
-                if over & names or id(node) in cursor_loops:
-                    spans.append((node.lineno, node.end_lineno or node.lineno))
-                    over_rows.add(id(node))
+            loops, names = _row_loops(func, line, last)
+            spans = [(node.lineno, node.end_lineno or node.lineno) for node in loops]
+            over_rows = {id(node) for node in loops}
             # Where the rows are worked through.  Kept as a field of its own
             # because it is not ``region``: a loop opened inside the region
             # runs to its own end, and for 64 of the corpus's 151 looping
@@ -7119,6 +7161,37 @@ class _Filled:
             self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds) if seeds else None
         return self._carries[key]
 
+    def holds_rows(self, value: ast.AST, at: ast.AST, names: set[str]) -> bool:
+        """Whether *value*, where *at* runs, holds the rows of one of the read sites *names*, whole or a part -- as
+        :meth:`sources` reads a ``rows`` source -- or is an object such a row is read into: ``taskSpec`` after
+        ``taskSpec.pack(resTS)`` (:data:`callfacts.ROW_READ`), between each binding of the name reaching *at* and
+        *at*, holds every column of ``resTS``."""
+        if self._held_rows(value, at, names):
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        bound = [site_of(one).lineno for one in reaching_definitions(self.func, value.id, at)]
+        line = getattr(at, "lineno", 0)
+        return bool(bound) and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in callfacts.ROW_READ
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == value.id
+            and len(node.args) == 1
+            and max(bound) < node.lineno <= line
+            and self._held_rows(node.args[0], site_of(node), names)
+            for node in own_nodes(self.func)
+        )
+
+    def _held_rows(self, value: ast.AST, at: ast.AST, names: set[str]) -> bool:
+        for site in self.sites:
+            if site.name in names:
+                carry = self._rows(site)
+                if carry is not None and carry.held(value, at):
+                    return True
+        return False
+
     def sources(self, value: ast.AST, at: ast.AST) -> list[KeySource]:
         """Where *value*, filled at *at*, came from: each statement's rows, sequence's next values, parameter and
         field of ``self`` that reaches it, else what it is -- a literal, an attribute of something else, or a value
@@ -7429,6 +7502,126 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
     return list(found.values())
 
 
+#: The methods of a builtin container that put a value into it, and the argument the value is.
+_PUTS_VALUE = {"append": 0, "add": 0, "appendleft": 0, "extend": 0, "insert": 1}
+
+
+def _attach_falls(
+    sites: dict[str, ReadSiteNode],
+    froms: list[KeyFrom],
+    junctions: list[JunctionNode],
+    trees: dict[str, ast.AST],
+    of: Callable[[ast.FunctionDef | ast.AsyncFunctionDef, str], "_Filled"],
+) -> None:
+    """Add to each read site the ``if`` s of its row loops a row falls through without being handed on
+    (:attr:`ReadSiteNode.falls`, ``fall@<line>`` among its ``exits``).
+
+    A hand-on is a put, in a row loop (:func:`_row_loops`), into a name the function returns, of a value holding the
+    rows of the statement or of a later statement of the function its rows name (a read KeyFrom with a ``rows``
+    source of it) -- ``retTasks.append(taskSpec)``, ``taskSpec`` packed from the rows of the statement 1644's row
+    names at 1699.  Each ``if`` between the loop and a hand-on whose other way holds none is one: the row's turn
+    ends there without it.  A function that returns no name its loop puts into has none.
+    """
+    by_line = {(site.owner, site.anchor.line_start): site.name for site in sites.values() if site.anchor is not None}
+    named_by: dict[str, set[str]] = {}
+    for key_from in froms:
+        reader_name = by_line.get((key_from.owner, key_from.statement)) if key_from.reads else None
+        if reader_name is None:
+            continue
+        for source in key_from.sources:
+            if source.kind == KEY_ROWS and source.site_owner == key_from.owner and source.name in sites:
+                named_by.setdefault(source.name, set()).add(reader_name)
+    written: dict[str, list[tuple[str, int]]] = {}
+    for junction in junctions:
+        for branch in junction.branches:
+            for line in (branch.line, *branch.other_lines):
+                if line is not None:
+                    written.setdefault(junction.owner, []).append((junction.subject, line))
+    for site in sites.values():
+        if not site.region or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        if func is None:
+            continue
+        loops, _names = _row_loops(func, site.anchor.line_start, site.region[1])
+        returned = _returned_names(func) if loops else set()
+        if not returned:
+            continue
+        rows = {site.name} | named_by.get(site.name, set())
+        reader = of(func, site.anchor.file)
+        falls: dict[int, RowFall] = {}
+        for loop in loops:
+            handing = [
+                statement
+                for statement, value in _puts_into(loop, returned)
+                if reader.holds_rows(value, statement, rows)
+            ]
+            held = {id(statement) for statement in handing}
+            for statement in handing:
+                node: ast.AST = statement
+                while node is not loop and isinstance(getattr(node, "parent", None), ast.AST):
+                    parent = node.parent  # type: ignore[attr-defined]
+                    if isinstance(parent, ast.If) and parent.lineno not in falls:
+                        kept = FALL_BODY if node in parent.body else FALL_ELSE
+                        other = parent.orelse if kept == FALL_BODY else parent.body
+                        if not any(id(one) in held for way in other for one in walk(way)):
+                            first = other[0].lineno if other else 0
+                            last = max((one.end_lineno or one.lineno for one in other), default=0)
+                            falls[parent.lineno] = RowFall(
+                                line=parent.lineno,
+                                kept=kept,
+                                lines=[first, last] if other else [],
+                                writes=sorted(
+                                    {
+                                        f"{subject}@{line}"
+                                        for subject, line in written.get(site.owner, ())
+                                        if other and first <= line <= last
+                                    }
+                                ),
+                            )
+                    node = parent
+        if falls:
+            site.falls = [falls[line] for line in sorted(falls)]
+            site.exits = sorted(set(site.exits) | {f"fall@{line}" for line in falls})
+
+
+def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The names *func*'s own ``return`` s hand back, alone or in a tuple."""
+    found: set[str] = set()
+    for node in walk(func):
+        if not isinstance(node, ast.Return) or enclosing_function(node) is not func or node.value is None:
+            continue
+        for one in node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]:
+            if isinstance(one, ast.Name):
+                found.add(one.id)
+    return found
+
+
+def _puts_into(loop: ast.AST, names: set[str]) -> list[tuple[ast.stmt, ast.expr]]:
+    """``(statement, value)`` for each put of *loop* into one of *names*: ``L.append(v)`` and the other builtin
+    puts (:data:`_PUTS_VALUE`), ``L[k] = v``."""
+    found: list[tuple[ast.stmt, ast.expr]] = []
+    for node in walk(loop):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            at = (
+                _PUTS_VALUE.get(call.func.attr)
+                if isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in names
+                else None
+            )
+            if at is not None and len(call.args) > at:
+                found.append((node, call.args[at]))
+        elif isinstance(node, ast.Assign):
+            if any(
+                isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in names
+                for target in node.targets
+            ):
+                found.append((node, node.value))
+    return found
+
+
 def _handed_at(
     func: ast.FunctionDef | ast.AsyncFunctionDef, key_from: KeyFrom, value: Optional[ast.AST]
 ) -> list[ast.AST]:
@@ -7732,6 +7925,9 @@ def attach_key_sources(
                 source.never_at = reader.never_at(sites[source.name], places)
     if landings:
         _landed_sources(froms, landings, sites, attributor, table_class)
+    if key_froms is not None and modules:
+        # Where a row loop's row is not handed on: read once the KeyFroms say which later statements its rows name.
+        _attach_falls(sites, froms, junctions, {module.rel_path: module.tree for module in modules}, of)
     _same_rows(froms, sites)
     if landings:
         _attach_reaches(froms, sites, _Reading(calls, {junction.owner for junction in junctions}, record, True))

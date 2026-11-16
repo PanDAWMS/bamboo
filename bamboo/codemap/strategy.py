@@ -130,6 +130,7 @@ from bamboo.codemap.models import (
     ReaderGap,
     Reading,
     ReadSiteNode,
+    RowFall,
     StageCut,
     StatementExit,
     StatementReading,
@@ -496,8 +497,9 @@ def name_the_arm(strategy: Strategy, diag: str) -> Strategy:
 _NO_ROWS = "no-rows:"
 
 
-def _statement_exit(text: str) -> StatementExit:
-    """Read back what the map stored -- ``"continue@390"`` / ``"no-rows:return@263"``.
+def _statement_exit(text: str, falls: Optional[dict[int, RowFall]] = None) -> StatementExit:
+    """Read back what the map stored -- ``"continue@390"`` / ``"no-rows:return@263"`` / ``"fall@1695"``, a fall
+    with the arms its other way writes (*falls*, :attr:`ReadSiteNode.falls` by line).
 
     The prefix is the whole of the difference between "the row came back and
     was passed over" and "nothing came back", which are answers pointing at
@@ -505,8 +507,10 @@ def _statement_exit(text: str) -> StatementExit:
     """
     no_rows = text.startswith(_NO_ROWS)
     kind, _at, where = text.removeprefix(_NO_ROWS).rpartition("@")
+    line = int(where) if where.isdigit() else 0
+    fall = (falls or {}).get(line) if kind == "fall" else None
     return StatementExit(
-        kind=kind or text, line=int(where) if where.isdigit() else 0, no_rows=no_rows
+        kind=kind or text, line=line, no_rows=no_rows, writes=list(fall.writes) if fall is not None else []
     )
 
 
@@ -540,7 +544,8 @@ def _statement_reading(site: ReadSiteNode) -> StatementReading:
         bind_window=list(site.bind_window),
         region=list(site.region),
         rows_handled=list(site.rows_handled),
-        exits=[_statement_exit(text) for text in site.exits],
+        exits=[_statement_exit(text, {fall.line: fall for fall in site.falls}) for text in site.exits],
+        falls=list(site.falls),
         crosses_to=list(site.crosses_to),
         crosses_open=list(site.crosses_open),
         crossing_selects={owner: list(values) for owner, values in site.crossing_selects.items()},
@@ -2722,14 +2727,23 @@ def _where_its_names_are_filled(entry) -> Optional[tuple[int, int]]:
 def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> None:
     """Fill each exit's block skeleton and the walk from where it is decided."""
     ours = _where_its_names_are_filled(entry)
+    falls = {fall.line: fall for fall in entry.falls}
     for leaving in entry.exits:
-        guard = trace.exit_guard(
-            roots,
-            file=entry.file,
-            owner=entry.owner,
-            line=leaving.line,
-            expected_sha=entry.blob_sha,
-        )
+        fall = falls.get(leaving.line) if leaving.kind == "fall" else None
+        guard: Optional[tuple[int, int, int]]
+        if fall is not None:
+            # The ``if`` decides it, and its block is the way that does not hand the row on -- none where there is no
+            # ``else``: the row goes on to the next one in silence.
+            first_line, last_line = fall.lines if fall.lines else (leaving.line, leaving.line)
+            guard = (leaving.line, first_line, last_line)
+        else:
+            guard = trace.exit_guard(
+                roots,
+                file=entry.file,
+                owner=entry.owner,
+                line=leaving.line,
+                expected_sha=entry.blob_sha,
+            )
         if guard is None:
             continue
         decided, first, last = guard
@@ -2763,7 +2777,7 @@ def _attach_exit_traces(entry, roots: dict, strategy: Strategy, classify) -> Non
         # hands back the branch the row did not take -- and an empty list here
         # is the finding the request asked for: six of the corpus's fourteen
         # no-rows exits print nothing at all.
-        leaving.skeleton = walked.skeleton
+        leaving.skeleton = walked.skeleton if fall is None or fall.lines else []
 
 
 def _report_what_the_lines_cannot_separate(strategy: Strategy) -> None:
