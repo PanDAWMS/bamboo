@@ -7009,8 +7009,8 @@ class Rerun:
         Where the run of the mover's own (*up*'s) is one pass, and a run before it on its machine came through a call the
         caller makes before its calls into the mover, ending at most windows.SLACK before it, the mover took the row in
         the step after that one in one pass of the caller (P8): PostProcessor.start's prepareTasksToBeFinished_JEDI,
-        then its getTasksToBeFinished_JEDI.  An END and True; False where no such run is read; asks no record answers
-        stop."""
+        then its getTasksToBeFinished_JEDI.  An END and True; False where no such run is read, or where a log of them
+        is not in the records (the asks kept)."""
         rel, func = c.owner.split("::", 1)
         try:
             fn = R.function(rel, func, c.lines)
@@ -7041,9 +7041,14 @@ class Rerun:
         asking = W.Asking((start, end), None, T.Said("for-the-callers-callees", {"caller": func, "start": start, "end": end,
                                                                                  "n": len(printing)}))
         runs, missed, _holes = self._ask(up.key, to_hand, asking, {}, quiet=True)
-        # a callee's log not in the records may hold a pass of the caller on the row: nothing is read without it, as
-        # (C) reads no cycle without its lines (NT-assigning-late's panda-AtlasProdTaskBroker.log)
-        self._stop_unanswered(missed)
+        if missed:
+            # a callee's log not in the records may hold a pass of the caller on the row: nothing is read without it
+            # (NT-assigning-late's panda-AtlasProdTaskBroker.log); the asks are kept and U2 goes on its own way, whose
+            # asks come in the same round (NT-throttled-late's marks near the key's runs)
+            self._keep_unanswered(missed)
+            self.say(f"{func}'s callees: {len({ask.key for ask, _ in missed})} ask(s) of their logs over the window are "
+                     "not in the records: their passes are not read")
+            return False
         passes = []
         lo, hi = W.when(start), W.when(end) + datetime.timedelta(seconds=1)
         for name in to_hand:

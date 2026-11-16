@@ -14837,23 +14837,20 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
             # no run of the key but the mover's own: not read
             r = rerun(runs[3:])
             got["none"] = [RR.Rerun._call_tied(r, c, up), r.ended]
-            # a callee's log not in the records may hold a pass: it stops on the ask, nothing said
+            # a callee's log not in the records may hold a pass: nothing read, nothing ended, the ask kept
             r = rerun(runs)
             r._ask = lambda key, names, asking, owners=None, whole=False, quiet=False: (
                 {"panda-JediDBProxy.log": runs}, [(N(key="k"), "why")], {})
-            r.hop, r.args = "U2", N(asks="asks.jsonl")
-            try:
-                RR.Rerun._call_tied(r, c, up)
-                got["missed"] = ["no stop", r.ended]
-            except RR.Stop as e:
-                got["missed"] = [e.code, r.ended]
+            kept = []
+            r._keep_unanswered = lambda missed: kept.extend(missed)
+            got["missed"] = [RR.Rerun._call_tied(r, c, up), r.ended, len(kept)]
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
     assert got["reach"] == {"b::B.g": [[10, 12], 1], "c::C.h": [[20], 1], "d::D.k": [[10, 12, 20], 2]}, got
-    assert got["missed"] == ["asks", []], got
+    assert got["missed"] == [False, [], 1], got
     assert got["others"] == 1, got
     assert got["bursts"] == [["2026-11-13 14:34:02,000", "2026-11-13 14:34:02,197"],
                              ["2026-11-13 14:35:06,139", "2026-11-13 14:35:06,139"]], got
