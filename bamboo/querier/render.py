@@ -394,6 +394,7 @@ TEMPLATES: dict[str, str] = {
     "rests-on": "; it rests on: {premises:join=; }",
     "an-end-resting-on": "{what}{rests}",
     "the-one-arm-left-moved-it-on": "the one arm H2 left moved it on, {arm} ({premises:join=; }; KNOWN_ISSUES.md K38)",
+    "the-pass-changed-it": "the pass changed it: {arm} is shown to write it, and which of it and the pass's other writes {others:join=, } wrote it last is not read",
     "or-older": "; or at an older row it may have written at: {older:join=, }",
     "the-one-arm-left": "the one arm left",
     "one-of-the-arms-left": "one of the {n_left} arm(s) left",

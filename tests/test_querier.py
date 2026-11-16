@@ -5746,8 +5746,10 @@ def test_of_one_pass_s_writes_the_last_that_changed_the_value_is_the_answer_and_
     assert reported["why"][f"handle_failed:{c['handle']}"].startswith(
         f"rule R: a stay, self.job.jobStatus already held 'failed' before it (row process:{c['row']} at reported.log:3"
     ) and reported["why"][f"handle_failed:{c['handle']}"].endswith("the frames between process and handle_failed not read)")
-    assert reported["chosen"] is None and reported["how"] == (
-        f"3 may have changed it last in the pass: c.py::process:{c['plugin']}, c.py::parse:{c['parse']}, c.py::process:{c['from_report']}"
+    # parse's arm alone is shown to write: the pass changed it, which of its three writes last not read (P34, B-6)
+    assert reported["chosen"] == f"parse:{c['parse']}" and reported["how"] == (
+        f"the pass changed it: c.py::parse:{c['parse']} is shown to write it, and which of its writes "
+        f"c.py::process:{c['plugin']}, c.py::parse:{c['parse']}, c.py::process:{c['from_report']} wrote it last is not read"
     )
     # the report said finished: the assignment from it wrote 'finished' (the row's jobStatus), and the plugin's arm,
     # which ran, is the last change -- handle_failed's, after it, a stay by the value it assigned and the row before
@@ -5971,8 +5973,10 @@ def test_a_call_and_a_write_inside_one_are_stays_read_before_the_order_the_insid
     assert stays["chosen"] == assign and stays["how"] == "the last change in the pass"
     # the 'failed' arm printed its row: the start row's value is not carried, and the write is read at the call, where
     # its own target is bound before it -- it may be the change
-    assert got["ran"]["dropped"] == [stays["dropped"][0]] and got["ran"]["chosen"] is None
-    assert got["ran"]["how"] == f"2 may have changed it last in the pass: {write}, {assign}"
+    # -- and the assignment alone is shown to write: the pass changed it, which of the two last not read (P34, B-6)
+    assert got["ran"]["dropped"] == [stays["dropped"][0]] and got["ran"]["chosen"] == assign
+    assert got["ran"]["how"] == (f"the pass changed it: {assign} is shown to write it, and which of its writes {write}, {assign} "
+                                 "wrote it last is not read")
     # the start row printed twice: not read as the one call that ran the write
     assert got["twice"] == got["ran"]
     # another value before finalize: the call is no stay, and no write of another value either -- it changed it last
@@ -5981,8 +5985,10 @@ def test_a_call_and_a_write_inside_one_are_stays_read_before_the_order_the_insid
     # two writes inside the one call, no order between them: archive's is a stay read without the order, and the
     # order is read between the rest -- the unmerged job's write (another object, K58) is left
     unmerged = got["unmerged"]
-    assert [name for name, _ in unmerged["dropped"]] == [finalize, write] and unmerged["chosen"] is None
-    assert unmerged["how"] == f"2 may have changed it last in the pass: db.py::unmerged:{at['unmerged']}, {assign}"
+    # -- the assignment shown, the pass changed it, with the unmerged job's write named among its writes (P34, B-6)
+    assert [name for name, _ in unmerged["dropped"]] == [finalize, write] and unmerged["chosen"] == assign
+    assert unmerged["how"] == (f"the pass changed it: {assign} is shown to write it, and which of its writes "
+                               f"db.py::unmerged:{at['unmerged']}, {assign} wrote it last is not read")
     # a raise writes through a handler, not through the call that builds its exception: none of the pass's writes
     assert got["raise"] == stays
 
@@ -16900,3 +16906,194 @@ def test_a_selection_waiting_on_other_rows_is_read_at_their_last_move_and_the_qu
     assert "(2 running): it waits on them -- next: why JobSpec 2 has not left running since 2026-01-01 03:00:00.000" in text, got
     ok, said = got["stuck, all moved on"]
     assert ok is False and any("and the value has not moved on" in s for s in said), got
+
+
+_P35 = """
+import logging
+
+
+class C:
+    def cmdexec(self, resList, cur):
+        tmpLog = logging.getLogger("x")
+        for jediTaskID, commandStr in resList:
+            tmpLog.debug(f"start jediTaskID={jediTaskID} command={commandStr}")
+            taskStatus, taskOldStatus = cur.fetchone()
+            tmpLog.debug(f"jediTaskID={jediTaskID} in status:{taskStatus} old:{taskOldStatus}")
+            if commandStr == "retry":
+                if taskOldStatus == "scouting" and cur.walltime:
+                    newTaskStatus = "running"
+                else:
+                    newTaskStatus = taskOldStatus
+            elif commandStr == "resume":
+                newTaskStatus = "staged"
+            else:
+                newTaskStatus = "dummy"
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            if newTaskStatus != "dummy":
+                varMap[":status"] = newTaskStatus
+            sql = "UPDATE T "
+            if newTaskStatus != "dummy":
+                sql += "SET status=:status "
+            else:
+                sql += "SET status=oldStatus "
+            tmpLog.debug(sql + str(varMap))
+            cur.execute(sql, varMap)
+
+    def feed(self, jediTaskID, taskSpec, cur):
+        tmpLog = logging.getLogger("y")
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if taskSpec is not None:
+            varMap[":status"] = taskSpec.status
+            varMap[":oldStatus"] = taskSpec.oldStatus
+        elif cur.cloud is None:
+            varMap[":status"] = "assigning"
+        else:
+            varMap[":status"] = "ready"
+        tmpLog.debug("UPDATE T SET status=:status " + str(varMap))
+        cur.execute("UPDATE T SET status=:status ", varMap)
+
+    def nested(self, taskList, cur):
+        tmpLog = logging.getLogger("z")
+        for jediTaskID, commandStr in taskList:
+            tmpLog.debug(f"begin jediTaskID={jediTaskID} for {commandStr}")
+            for iLoop in range(2):
+                tmpLog.debug(f"loop {iLoop}")
+"""
+
+
+def test_p35_the_arms_of_a_write_statement_are_read_off_its_printed_bind_map_in_the_keys_turn(tmp_path):
+    """Bundle B (P35; out/gm/qk-design.md, tmaeno's OK 2026-11-16 21:40): getTasksToExecCommand_JEDI's UPDATE printed
+    ``':status': 'running'`` in the key's turn of ``for jediTaskID, commandStr in resList``: ``newTaskStatus =
+    taskOldStatus`` gives 'scouting' there (the turn printed ``old:scouting``), ``SET status=oldStatus`` runs under
+    ``newTaskStatus == 'dummy'``, false with the ``:status`` entry's value -- the constant 'running' is left and wrote
+    it.  updateTaskStatusByContFeeder_JEDI's map holds no ``:oldStatus``, which is filled on every way from
+    ``taskSpec.status``'s arm to the print: that arm did not run, and 'ready' is left.  A key's turn is the outer
+    loop's where the inner one binds no key."""
+    (_corpus(tmp_path) / "pandaserver" / "c.py").write_text(_P35)
+    lines = _P35.splitlines()
+
+    def at(text: str, after: str = "") -> int:
+        return int(lines.index(text, lines.index(after) if after else 0)) + 1
+
+    a = {"running": at('                    newTaskStatus = "running"'),
+         "start": at('            tmpLog.debug(f"start jediTaskID={jediTaskID} command={commandStr}")'),
+         "status": at('            tmpLog.debug(f"jediTaskID={jediTaskID} in status:{taskStatus} old:{taskOldStatus}")'),
+         "old": at("                    newTaskStatus = taskOldStatus"),
+         "staged": at('                newTaskStatus = "staged"'),
+         "sql_old": at('                sql += "SET status=oldStatus "'),
+         "store": at("                varMap[\":status\"] = newTaskStatus"),
+         "print": at("            tmpLog.debug(sql + str(varMap))"),
+         "spec": at("            varMap[\":status\"] = taskSpec.status"),
+         "spec_old": at("            varMap[\":oldStatus\"] = taskSpec.oldStatus"),
+         "assigning": at('            varMap[":status"] = "assigning"'),
+         "ready": at('            varMap[":status"] = "ready"'),
+         "feed_print": at('        tmpLog.debug("UPDATE T SET status=:status " + str(varMap))'),
+         "jid": at("            varMap[\":jediTaskID\"] = jediTaskID", "    def cmdexec(self, resList, cur):"),
+         "feed_jid": at("        varMap[\":jediTaskID\"] = jediTaskID", "    def feed(self, jediTaskID, taskSpec, cur):"),
+         "loop": at('                tmpLog.debug(f"loop {iLoop}")'),
+         "begin": at('            tmpLog.debug(f"begin jediTaskID={jediTaskID} for {commandStr}")')}
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.X: DEBUG    <label=x> {}\n"
+
+    def turn(key: int, command: str, status: str, old: str, new: str) -> list[str]:
+        return [f"start jediTaskID={key} command={command}", f"jediTaskID={key} in status:{status} old:{old}",
+                "UPDATE T SET status=:status " + str({":jediTaskID": key, ":status": new})]
+
+    logs = {
+        "cmd": turn(1, "resume", "staging", "registered", "staged") + turn(2, "retry", "exhausted", "scouting", "running")
+        + turn(3, "retry", "exhausted", "running", "running"),
+        "feed": ["UPDATE T SET status=:status " + str({":jediTaskID": 2, ":status": "ready"})],
+        "feed_old": ["UPDATE T SET status=:status " + str({":jediTaskID": 2, ":status": "ready", ":oldStatus": None})],
+        "nested": [f"begin jediTaskID={k} for retry" if i == 0 else f"loop {i - 1}" for k in (1, 2, 3) for i in range(3)],
+        "nested_twice": [f"begin jediTaskID={k} for retry" if i == 0 else f"loop {i - 1}" for k in (2, 2) for i in range(3)],
+    }
+    for name, texts in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rows as R
+            from bamboo.querier import which_ran as W
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import Candidate, Verdict
+
+            R.ROWS_FROM = "walk"
+            A = AT
+            S = "JediTaskSpec.status"
+            entries = {
+                "cmdexec": [N(key=":jediTaskID", expression="jediTaskID", line=A["jid"]),
+                            N(key=":status", expression="newTaskStatus", line=A["store"])],
+                "feed": [N(key=":jediTaskID", expression="jediTaskID", line=A["feed_jid"]),
+                         N(key=":status", expression="taskSpec.status", line=A["spec"]),
+                         N(key=":oldStatus", expression="taskSpec.oldStatus", line=A["spec_old"]),
+                         N(key=":status", expression="'assigning'", line=A["assigning"]),
+                         N(key=":status", expression="'ready'", line=A["ready"])],
+            }
+            prints = {"cmdexec": A["print"], "feed": A["feed_print"]}
+            arms = {"cmdexec": [A["running"], A["old"], A["staged"], A["sql_old"]], "feed": [A["spec"], A["assigning"], A["ready"]]}
+
+            def judged(func, log, key, observed, lines):
+                env = E.Env(subject="<task>.status", keys=frozenset({"jediTaskID"}), written=S, call=None,
+                            table={"task": {"jediTaskID": E.Value(key, "the rows file")}})
+                run, = runs_for(read_log(log), str(key))
+                fn = R.function("pandaserver/c.py", func, lines)
+                for row in fn.rows:
+                    if row.line == prints[func]:
+                        row.map_rows = [N(holes=[N(entries=entries[func], entries_open=[])])]
+                wp = N(owner=f"pandaserver/c.py::C.{func}", statement=prints[func] + 1, arms={S: arms[func]},
+                       binds=[N(column=S, bind=":status")], printed_by=[N(line=prints[func], lead="", gap="")])
+                W.write_prints = lambda owner: [wp] if owner.endswith("::" + func) else []
+                c = Candidate("pandaserver/c.py", func, lines, [run.log.name], run=run)
+                vs = [Verdict(c, line, "kept") for line in lines]
+                W.printed_write_arms(fn, R.seen(fn, run, "outside"), vs, S, observed, env, "outside", set())
+                return {v.line: [v.kind, [r for r in v.reasons if r.startswith("P35")]] for v in vs}
+
+            got = {"running": judged("cmdexec", "cmd.log", 2, "running", [A["running"], A["old"], A["sql_old"]]),
+                   # task 3's old status was 'running': taskOldStatus gives it
+                   "both": judged("cmdexec", "cmd.log", 3, "running", [A["running"], A["old"], A["sql_old"]]),
+                   "staged": judged("cmdexec", "cmd.log", 1, "staged", [A["staged"], A["old"], A["sql_old"]]),
+                   "ready": judged("feed", "feed.log", 2, "ready", [A["spec"], A["ready"]]),
+                   "ready_old": judged("feed", "feed_old.log", 2, "ready", [A["spec"], A["ready"]])}
+            turns = {}
+            for log in ("nested", "nested_twice"):
+                run, = runs_for(read_log(f"{log}.log"), "retry")
+                fn = R.function("pandaserver/c.py", "nested", [A["loop"]])
+                env = E.Env(subject="<task>.status", keys=frozenset({"jediTaskID"}), call=None,
+                            table={"task": {"jediTaskID": E.Value(2, "the rows file")}})
+                t = W.key_turn(fn, R.seen(fn, run, "outside"), R.statement_at(fn.node, A["loop"]), W._key_values(env), set())
+                turns[log] = None if t is None else [t.lo, t.hi, t.start.line, t.where]
+            got["turns"] = turns
+            print(json.dumps(got))
+            """.replace("AT", repr(a)),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    r = {k: {int(line): v for line, v in got[k].items()} for k in ("running", "both", "staged", "ready", "ready_old")}
+    turn2 = f"in the turn of jediTaskID=2 (row {a['start']} at cmd.log:4), at cmd.log:6"
+    assert r["running"][a["old"]] == ["excluded", [
+        f"P35: it gives :status taskOldStatus, 'scouting' {turn2} ({{'taskOldStatus': 'hole of cmdexec:{a['status']} at cmd.log:5'}})"]], r
+    assert r["running"][a["sql_old"]][0] == "excluded"
+    assert r["running"][a["sql_old"]][1][0].startswith("P35: its test \"not (newTaskStatus != 'dummy')\" is false " + turn2)
+    assert r["running"][a["running"]] == ["positive", [
+        f"P35: row {a['print']} printed the map {a['print'] + 1}'s statement ran with {turn2}, :status='running'; of its "
+        f"arms of JediTaskSpec.status, the others ({sorted([a['old'], a['sql_old']])}) did not give it there"]], r
+    # task 3's old status was 'running': the constant's test reads old 'scouting', false there, and taskOldStatus gave it
+    assert r["both"][a["running"]][0] == "excluded", r
+    assert r["both"][a["running"]][1][0].startswith('P35: its test "taskOldStatus == \'scouting\' and cur.walltime" is false'), r
+    assert r["both"][a["old"]][0] == "positive" and r["both"][a["sql_old"]][0] == "excluded", r
+    assert r["staged"][a["staged"]][0] == "positive" and r["staged"][a["old"]][0] == "excluded", r
+    # no :oldStatus in the call's map: the spec's arm did not run, and 'ready' wrote it
+    assert r["ready"][a["spec"]] == ["excluded", [
+        f"P35: row {a['feed_print']} printed a map with no :oldStatus in the call, at feed.log:1, and every way from it to "
+        f"the print fills :oldStatus (at [{a['spec_old']}])"]], r
+    assert r["ready"][a["ready"]][0] == "positive", r
+    # the map holds :oldStatus: the spec's arm may have run, and nothing is shown
+    assert r["ready_old"] == {a["spec"]: ["kept", []], a["ready"]: ["kept", []]}, r
+    # the inner loop binds no key: the turn is the outer loop's, from task 2's begin to task 3's; a key begun twice is none
+    assert got["turns"] == {"nested": [3, 6, a["begin"], f"in the turn of jediTaskID=2 (row {a['begin']} at nested.log:4)"],
+                            "nested_twice": None}, got["turns"]

@@ -177,6 +177,7 @@ from bamboo.querier.which_ran import (
     recorded_in_pass,
     spans,
     stable_holes,
+    write_prints,
 )
 from bamboo.scripts.derive_strategy import _investigate
 
@@ -543,22 +544,6 @@ def _landed(fn, sn, i: int, line: int, b) -> bool | None:
 #: a write whose statement's printed bind map leaves its column out: an object's ``valuesMap(onlyChanged=True)`` holds
 #: only the attributes changed, so the statement ran without writing that column (:func:`_printed_write`)
 UNWRITTEN = object()
-
-_WP: list = [None, {}]
-
-
-def write_prints(owner: str) -> list:
-    """The installed dump's ``write_prints`` of *owner* (``file::function``, as :func:`_bare` spells it): the map's
-    ``WritePrint``, a write statement whose function prints its text and the bind map it runs with, and the column each
-    bind writes.  None before an install or from a dump that has none."""
-    wps = getattr(mapdump.fragment(), "write_prints", None) or []
-    if _WP[0] is not wps:
-        index: dict[str, list] = {}
-        for wp in wps:
-            index.setdefault(_bare(wp.owner), []).append(wp)
-        _WP[:] = [wps, index]
-    held: dict[str, list] = _WP[1]
-    return held.get(_bare(owner), [])
 
 
 def _printed_write(fn, sn, run, i: int, line: int, owner: str, b, subject: str) -> tuple[datetime.datetime, Any, int] | None:
@@ -5802,6 +5787,13 @@ class Rerun:
         self.say(j.report(question))
         self._dropped_by_guard = self._dropped_by_guard | self._guard_dropped(j.verdicts)
         chosen = self.pick(T.Said("which-candidate-ran"), j)
+        if j.pass_writes and chosen is j.chosen and chosen is not None:
+            # the pass changed it, its write shown; which of its writes wrote it last is what the steps after rest on
+            # (P34, bundle B's B-6)
+            changed = T.Said("the-pass-changed-it", {"arm": f"{Path(chosen.candidate.rel).name}::{chosen.candidate.func}:{chosen.line}",
+                                                     "others": j.pass_writes})
+            self.say(f"{changed}")
+            self.rests = (*self.rests, changed)
         if question is None and chosen.kind != "positive" and j.runs.get(chosen.candidate.owner) is None:
             # left by elimination with no pass of it at the window (KNOWN_ISSUES.md K47): no run is the question's
             self.say(f"no run: no pass of {chosen.candidate.func} at {when} shows it ran")

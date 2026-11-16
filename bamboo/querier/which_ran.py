@@ -63,7 +63,7 @@ from bamboo.codemap import (  # noqa: E402
 )
 from bamboo.codemap.calls import Target  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
-from bamboo.codemap.panda import fills, flow  # noqa: E402
+from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
@@ -378,6 +378,9 @@ class Judgement:
     runs: dict[str, Run | None] = field(default_factory=dict)
     #: the run the value changed in where the judgement found it (:func:`inside_call`), not the caller
     question: Run | None = None
+    #: where rule R chose the one write shown of several left in the pass (P34): the others, which may have written it
+    #: last in that pass (``changed.Change.others``)
+    pass_writes: list[str] = field(default_factory=list)
 
     def count(self, kind: str) -> int:
         return sum(1 for v in self.verdicts if v.kind == kind)
@@ -925,6 +928,61 @@ def turn_start(fn: R.Function, site: ast.stmt, loop: ast.stmt, raised_at: set[in
     return fn.row_at(first) if first is not None else None
 
 
+def _target_names(target: ast.expr) -> list[str]:
+    """The names a ``for`` binds each turn: its target's, a tuple's elements' too (``for jediTaskID, commandStr,
+    comComment in resList``)."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _target_names(element)]
+    return []
+
+
+class Turn(NamedTuple):
+    """The key's turn of a loop in a run (:func:`key_turn`): records ``lo`` up to ``hi`` of the run."""
+
+    lo: int
+    hi: int
+    start: R.Row
+    loop: ast.stmt
+    where: str
+
+
+def key_turn(fn: R.Function, sn: R.Seen, site: ast.stmt, keys: set[str], raised_at: set[int] | None) -> Turn | None:
+    """The key's turn around *site* in the run *sn* reads: of the ``for`` loops holding it, innermost first, the first
+    whose :func:`turn_start` prints the question's key (``Env.keys``) in the hole of a name its target binds -- in the
+    message, or in the mark of the logger it prints through (``rows.prefix_holes``) -- once in the run; the turn runs
+    from that record to the start's next one.  None where no loop's start prints it, or one prints it twice.
+
+    getTasksToExecCommand_JEDI's ``for jediTaskID, commandStr, comComment in resList`` binds the key with two other
+    names; TaskCommando's runImpl prints it only in the mark of ``start for {commandStr}``, and its ``for iLoop in
+    range(2)`` inside binds no key, so its turn is the outer loop's."""
+    if not keys:
+        return None
+    records = sn.run.records
+    for loop in _loops_holding(site, fn.node):
+        if not isinstance(loop, (ast.For, ast.AsyncFor)) or not (names := _target_names(loop.target)):
+            continue
+        start = turn_start(fn, site, loop, raised_at)
+        if start is None or start.stmt is site:
+            continue
+        starts = sorted(i for i, _, _ in sn.hits.get(start.line, ()))
+        mine: list[tuple[int, str, str]] = []
+        for i in starts:
+            holes = {**R.prefix_holes(fn, start, records[i]), **start.capture(records[i])}
+            held = next(((n, holes[n].strip()) for n in names if holes.get(n, "").strip() in keys), None)
+            if held is not None:
+                mine.append((i, *held))
+        if not mine:
+            continue
+        if len(mine) != 1:
+            return None
+        lo, name, value = mine[0]
+        hi = next((i for i in starts if i > lo), len(records))
+        return Turn(lo, hi, start, loop, f"in the turn of {name}={value} (row {start.line} at {records[lo].span})")
+    return None
+
+
 def _key_values(env: E.Env | None) -> set[str]:
     """The question's key as the rows file holds it: the values of its key columns (``Env.keys``) in the row."""
     m = re.fullmatch(r"<(\w+)>\.\w+", env.subject) if env is not None else None
@@ -939,9 +997,8 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
     """Why the arm *stmt*, binding a local to the observed value as a constant (``newTaskStatus = "prepared"``), ran in
     the pass *sn* reads; '' where that is not read (P1, KNOWN_ISSUES.md K72).
 
-    A row *R* of *fn* printed the local with the observed value in the pass: in the key's turn of the innermost ``for``
-    around *R* -- from the record of the loop's :func:`turn_start` whose hole of the loop's target is the question's key
-    (``Env.keys``), to that row's next record -- or, *R* in no loop, in a run that is one call (``Seen.single_call``);
+    A row *R* of *fn* printed the local with the observed value in the pass: in the key's turn around *R*
+    (:func:`key_turn`) -- or, *R* in no loop, in a run that is one call (``Seen.single_call``);
     one record of *R* there, placed.  *Q*, the latest placed record before it in the turn or call from which every way
     to *R* binds the local (the map's ``flow.runs_after``, the local's bindings and the turn start as stops): what *R*
     printed was bound after *Q*, in the same turn.  Without such a record, *R* in no loop, the call's entry, where no
@@ -977,21 +1034,10 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         loops = _loops_holding(row.stmt, func)
         turn_stops: list[ast.stmt] = []
         if loops:
-            loop = next((lp for lp in loops if isinstance(lp, (ast.For, ast.AsyncFor))), None)
-            if not isinstance(loop, (ast.For, ast.AsyncFor)) or not isinstance(loop.target, ast.Name) or not keys:
+            if (turn := key_turn(fn, sn, row.stmt, keys, raised_at)) is None:
                 continue
-            var = loop.target.id
-            start = turn_start(fn, row.stmt, loop, raised_at)
-            if start is None or start.line == row.line:
-                continue
-            starts = sorted(i for i, _, _ in sn.hits.get(start.line, ()))
-            mine = [i for i in starts if start.capture(records[i]).get(var, "").strip() in keys]
-            if len(mine) != 1:
-                continue
-            lo = mine[0]
-            hi = next((i for i in starts if i > lo), len(records))
-            turn_stops = [start.stmt]
-            where = f"in the turn of {var}={start.capture(records[lo])[var].strip()} (row {start.line} at {records[lo].span})"
+            lo, hi, where = turn.lo, turn.hi, turn.where
+            turn_stops = [turn.start.stmt]
         elif sn.single_call():
             lo, hi, where = -1, len(records), "in the call"
         else:
@@ -1032,6 +1078,222 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
             return (f"P1: row {row.line} printed {name}={shown!r} {where}, at {records[r_i].span}; every way from {since} to "
                     f"it binds {name}, and of the bindings run since ({lines}) only {stmt.lineno} gives {shown!r}")
     return ""
+
+
+_WP: list = [None, {}]
+
+
+def write_prints(owner: str) -> list:
+    """The installed dump's ``write_prints`` of *owner* (``file::function``, a method named without its class): the
+    map's ``WritePrint``, a write statement whose function prints its text and the bind map it runs with, and the
+    column each bind writes.  Empty before an install or from a dump that has none."""
+    wps = getattr(mapdump.fragment(), "write_prints", None) or []
+    if _WP[0] is not wps:
+        index: dict[str, list] = {}
+        for wp in wps:
+            index.setdefault(_bare_owner(wp.owner), []).append(wp)
+        _WP[:] = [wps, index]
+    held: dict[str, list] = _WP[1]
+    return held.get(_bare_owner(owner), [])
+
+
+def _bare_owner(owner: str) -> str:
+    rel, _, qual = owner.partition("::")
+    return f"{rel}::{qual.rpartition('.')[2]}"
+
+
+class PrintedBinds(NamedTuple):
+    """A write statement's print read in the key's turn (:func:`printed_binds`)."""
+
+    row: R.Row
+    at: int
+    #: the bind map it printed, as the map cuts it (``sqltext.cut``)
+    binds: dict[Any, Any]
+    #: the map's entries of the printed map (``SkeletonHole.entries``), one per key and line
+    entries: list[Any]
+    #: whether the map read every way the map is filled (no ``entries_open``): a key it lacks was not filled
+    whole: bool
+    #: the key's turn; None where the run is one call and the print in no loop
+    turn: Turn | None
+    where: str
+
+
+def printed_binds(fn: R.Function, sn: R.Seen, wp: Any, keys: set[str], raised_at: set[int] | None) -> PrintedBinds | None:
+    """The one record of a print of *wp*'s statement with the map it runs with (``WritePrint.printed_by``) in the key's
+    turn (:func:`key_turn`) -- or, the print in no loop, in a run that is one call -- placed there, cut as the map cuts
+    it; None where none is."""
+    for p in wp.printed_by:
+        stmt = R.statement_at(fn.node, p.line)
+        row = fn.row_at(stmt) if stmt is not None else None
+        if row is None:
+            continue
+        turn: Turn | None = None
+        if _loops_holding(row.stmt, fn.node):
+            if (turn := key_turn(fn, sn, row.stmt, keys, raised_at)) is None:
+                continue
+            lo, hi, where = turn.lo, turn.hi, turn.where
+        elif sn.single_call():
+            lo, hi, where = -1, len(sn.run.records), "in the call"
+        else:
+            continue
+        at = [i for i, _, _ in sn.hits.get(row.line, ()) if lo < i < hi]
+        if len(at) != 1 or at[0] not in sn.unambiguous.get(row.line, ()):
+            continue
+        got = sqltext.cut(sn.run.records[at[0]].text, p.lead, p.gap)
+        if got is None:
+            continue
+        holes = [h for m in row.map_rows for h in getattr(m, "holes", ()) if getattr(h, "entries", None) is not None]
+        entries = list({(e.key, e.line): e for h in holes for e in h.entries}.values())
+        whole = bool(holes) and not any(getattr(h, "entries_open", None) for h in holes)
+        return PrintedBinds(row, at[0], got[1], entries, whole, turn, f"{where}, at {sn.run.records[at[0]].span}")
+    return None
+
+
+def _same_value(value: Any, text: str) -> bool:
+    return str(value).strip() == str(text).strip()
+
+
+def _names_read(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def _entry_names(fn: R.Function, stmt: ast.stmt, shown: PrintedBinds, loops: list[ast.stmt]) -> list[tuple[str, Any, str]]:
+    """``(name, value, source)`` for each name an entry of the printed map is filled from alone (``':status'`` <-
+    ``newTaskStatus`` at 4460), with the value printed, where *stmt*'s tests read it as the store left it: *stmt* can
+    run after the store in the turn, no binding of the name can, and no test around *stmt* reading it is entered
+    before the store."""
+    out = []
+    for e in shown.entries:
+        if e.key not in shown.binds or getattr(e, "computed", False) or sum(1 for o in shown.entries if o.key == e.key) != 1:
+            continue
+        try:
+            node = ast.parse(e.expression, mode="eval").body
+        except SyntaxError:
+            continue
+        if not isinstance(node, ast.Name) or (store := R.statement_at(fn.node, e.line)) is None:
+            continue
+        name = node.id
+        sites = [b.site for b in pathcond.bindings(fn.node, name) if not b.nested]
+        # a handler's or a ``:=``'s binding is not read here: the name is left out
+        if not all(isinstance(s, ast.stmt) for s in sites):
+            continue
+        if any(flow.runs_after(store, s, once=loops) for s in sites if isinstance(s, ast.stmt)) \
+                or not flow.runs_after(store, stmt, once=loops):
+            continue
+        around_store = {id(a) for a in pathcond.ancestors(store)}
+        tests = [a for a in pathcond.ancestors(stmt) if isinstance(a, (ast.If, ast.While)) and id(a) in around_store]
+        if any(name in _names_read(a.test) for a in tests):
+            continue
+        out.append((name, shown.binds[e.key], f"entry {e.key} of row {shown.row.line}'s map, filled at {e.line}"))
+    return out
+
+
+def _bind_value(stmt: ast.stmt, bind: str, shown: PrintedBinds) -> ast.expr | None:
+    """What the arm *stmt* gives the bind: the value of its store into the map (``varMap[":status"] =
+    taskSpec.status``), or of its binding of the name the bind's entry is filled from (``newTaskStatus =
+    taskOldStatus``); None where it gives it neither way."""
+    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+        target, value = stmt.targets[0], stmt.value
+    elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+        target, value = stmt.target, stmt.value
+    else:
+        return None
+    if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) and target.slice.value == bind:
+        return value
+    if isinstance(target, ast.Name) and any(e.key == bind and e.expression == target.id for e in shown.entries):
+        return value
+    return None
+
+
+def _not_by(fn: R.Function, sn: R.Seen, stmt: ast.stmt, shown: PrintedBinds, bind: str, observed: str, env: E.Env,
+            mode: str, raised_at: set[int] | None) -> str:
+    """Why the arm *stmt* did not give the printed bind its value in the turn *shown* read it in; '' where that is not
+    read.  An entry the printed map lacks, filled on every way from the arm to the print; the value it gives the bind,
+    read in the turn's values; a test it runs under, false in them.  The turn's values: its own locals printed once
+    in it (:func:`stable_holes` for the function), the ones printed before the arm on every way (:func:`printed_before`),
+    and the names the printed map's entries are filled from (:func:`_entry_names`)."""
+    loops = [shown.turn.loop] if shown.turn is not None else []
+    row = shown.row
+    if shown.whole and flow.runs_after(stmt, row.stmt, once=loops):
+        lacking: dict[str, list[int]] = {}
+        for e in shown.entries:
+            if e.key not in shown.binds and not getattr(e, "computed", False):
+                lacking.setdefault(e.key, []).append(e.line)
+        for key, lines in sorted(lacking.items()):
+            stores = [s for n in sorted(lines) if (s := R.statement_at(fn.node, n)) is not None]
+            if len(stores) == len(lines) and not flow.runs_after(stmt, row.stmt, stores, once=loops):
+                return (f"P35: row {row.line} printed a map with no {key} {shown.where}, and every way from it to the "
+                        f"print fills {key} (at {sorted(lines)})")
+    tenv = env.reading(fn.owner, stmt.lineno, arm=(fn.owner, stmt.lineno))
+    turn = sn.run if shown.turn is None else sn.run.part(shown.turn.lo, shown.turn.hi)
+    tsn = R.seen(fn, turn, mode)
+    stable_holes([tsn], tenv, class_of(fn), local_to=fn.owner)
+    before, _ = R.must_rows(fn.node, stmt, raised_at)
+    printed_before(fn, tsn, stmt, before, tenv)
+    for name, value, source in _entry_names(fn, stmt, shown, loops):
+        if not tenv.knows(name):
+            tenv.put(name, value, source)
+    if (value := _bind_value(stmt, bind, shown)) is not None:
+        try:
+            got = E.evaluate(ast.unparse(value), tenv)
+        except SyntaxError:
+            got = E.UNKNOWN
+        if got is not E.UNKNOWN and not _same_value(got, observed):
+            return f"P35: it gives {bind} {ast.unparse(value)}, {got!r} {shown.where} ({_used(tenv, ast.unparse(value))})"
+    for guard in pathcond.arm_condition(stmt):
+        if E.read_elsewhere(guard):
+            continue
+        try:
+            if E.evaluate(guard, tenv) is False:
+                return f"P35: its test {guard!r} is false {shown.where} ({_used(tenv, guard)})"
+        except SyntaxError:
+            continue
+    return ""
+
+
+def _used(env: E.Env, text: str) -> dict[str, Any]:
+    return {k: v for k, v in env.used.items() if k in text}
+
+
+def printed_write_arms(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subject: str, observed: str, env: E.Env,
+                       mode: str, raised_at: set[int] | None) -> None:
+    """P35 (out/gm/qk-design.md, bundle B, tmaeno's OK 2026-11-16 21:40) on *verdicts*, the arms of *fn* standing: a
+    write statement of *subject* (the map's ``WritePrint``, binding it to one bind) printed the bind map it ran with in
+    the key's turn (:func:`printed_binds`), the bind holding the observed value.  An arm of the statement that did not
+    give it that value there (:func:`_not_by`) is excluded; where one arm is left, it gave it, and is positive.
+
+    getTasksToExecCommand_JEDI's 4486 printed ``':status': 'running'`` in NT-exhausted-late's task's turn: 4436
+    (``newTaskStatus = taskOldStatus``) gives 'scouting' there (4386 printed ``old:scouting``), 4469's ``SET
+    status=oldStatus`` runs under ``newTaskStatus == 'dummy'``, false with the ``:status`` entry's
+    ``newTaskStatus='running'``; 4434 is left.  updateTaskStatusByContFeeder_JEDI's 1380 printed no ``:oldStatus``,
+    which 1357 fills on every way from 1356 to it: 1356 did not run, and 1376 is left."""
+    keys = _key_values(env)
+    for wp in write_prints(fn.owner):
+        arms = set(wp.arms.get(subject) or ())
+        mine = [v for v in verdicts if v.line in arms and v.kind in ("kept", "positive")]
+        binds = {w.bind for w in wp.binds if w.column == subject}
+        if not mine or len(binds) != 1:
+            continue
+        bind = binds.pop()
+        shown = printed_binds(fn, sn, wp, keys, raised_at)
+        if shown is None or bind not in shown.binds or not _same_value(shown.binds[bind], observed):
+            continue
+        for v in mine:
+            stmt = R.statement_at(fn.node, v.line)
+            if v.kind != "kept" or stmt is None:
+                continue
+            if shown.turn is not None and not any(lp is shown.turn.loop for lp in _loops_holding(stmt, fn.node)):
+                continue
+            if why := _not_by(fn, sn, stmt, shown, bind, observed, env, mode, raised_at):
+                v.kind = "excluded"
+                v.reasons.append(why)
+        left = [v for v in mine if v.kind != "excluded"]
+        if len(left) == 1 and left[0].kind == "kept":
+            out = sorted(v.line for v in mine if v is not left[0])
+            left[0].kind = "positive"
+            left[0].reasons.append(
+                f"P35: row {shown.row.line} printed the map {wp.statement}'s statement ran with {shown.where}, "
+                f"{bind}={observed!r}; of its arms of {subject}, the others ({out}) did not give it there")
 
 
 #: the installed dump's handler records by owner and ``except`` line (:func:`_handler_marks`), with the fragment read
@@ -1854,6 +2116,15 @@ def judge(
                 v.kind = "positive"
                 v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
 
+    # P35 on the arms of one write statement: its print in the key's turn shows the bind map it ran with, and the arms
+    # that did not give the bind its value there are out (printed_write_arms)
+    if observed and env is not None and env.written:
+        for owner, sn in seens.items():
+            arms_standing = [v for v in verdicts if v.candidate.owner == owner and v.kind in ("kept", "positive")]
+            if arms_standing:
+                named, raised = R.raised_in(sn.fn, sn.run)
+                printed_write_arms(sn.fn, sn, arms_standing, env.written, observed, env, mode, raised if named else set())
+
     # P1 on each kept candidate: a row of its pass printed the local it binds to the observed value, and of the
     # bindings that can be what the row printed, only it gives that value (printed_local)
     if observed:
@@ -1898,9 +2169,10 @@ def judge(
         if v.kind in ("positive", "kept")
         and ((r := runs_of[v.candidate.owner]) is question_run or (r is not None and id(r) in joined))
     ]
-    chosen, how = None, "undecided"
+    chosen, how, pass_writes = None, "undecided", []
     if change is not None and change.chosen is not None and (decide != "strict" or not unexamined):
         chosen, how = change.chosen, change.how
+        pass_writes = [CH._name(v) for v in change.others]
     elif change is not None and len(change.left) > 1:
         how = change.how
     elif len(positives) == 1 and (decide != "strict" or not unexamined):
@@ -1921,5 +2193,5 @@ def judge(
         read = sorted({f"{v.candidate.func}:{v.line}" for v in left if v.kind != "unexamined"})
         how = f"{len(left)} left: " + ", ".join(read) if read else f"{len(left)} left, all unexamined"
     notes = join_notes + [f"MAP: {m}" for m in sorted(map_findings)] + p_notes
-    return Judgement(verdicts, chosen, how, bracket, notes, runs_of, question_run if joined else None)
+    return Judgement(verdicts, chosen, how, bracket, notes, runs_of, question_run if joined else None, pass_writes)
 
