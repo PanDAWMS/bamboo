@@ -942,6 +942,62 @@ def spec_unset_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]
     return found
 
 
+def spec_map_keys(modules: list[SourceModule]) -> dict[str, str]:
+    """``{spec_class: prefix}``: the key a spec's ``valuesMap`` stores each attribute under, a fixed prefix and the
+    attribute's name -- ``ret[f":{attr}"] = val`` in its loop over its attributes is ``":"``.
+
+    **The store, not the name.**  As :func:`spec_unset_values` reads a value: off the method's own body, the stores
+    into the dict it returns made in a ``for`` over an attribute of ``self``, each keyed by an f-string of a literal
+    and the loop's variable, one prefix for all.  A class keying them any other way -- ``ret[attr.upper()]``, two
+    forms -- has none here, and a reader binding a column to that map's key reads nothing.
+    """
+    found: dict[str, str] = {}
+    for module in modules:
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
+            method = next(
+                (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "valuesMap"),
+                None,
+            )
+            if method is None:
+                continue
+            returned = {n.value.id for n in walk(method) if isinstance(n, ast.Return) and isinstance(n.value, ast.Name)}
+            forms: set[Optional[str]] = set()
+            for loop in (n for n in walk(method) if isinstance(n, ast.For)):
+                if not (
+                    isinstance(loop.target, ast.Name)
+                    and isinstance(loop.iter, ast.Attribute)
+                    and isinstance(loop.iter.value, ast.Name)
+                    and loop.iter.value.id == "self"
+                ):
+                    continue
+                for node in walk(loop):
+                    for target in node.targets if isinstance(node, ast.Assign) else ():
+                        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and (
+                            target.value.id in returned
+                        ):
+                            forms.add(_key_prefix(target.slice, loop.target.id))
+            if len(forms) == 1 and None not in forms:
+                found[cls.name] = forms.pop()  # type: ignore[assignment]
+    return found
+
+
+def _key_prefix(key: ast.expr, variable: str) -> Optional[str]:
+    """``":"`` of ``f":{attr}"`` where *variable* is ``attr``; ``None`` for any other key."""
+    if (
+        isinstance(key, ast.JoinedStr)
+        and len(key.values) == 2
+        and isinstance(key.values[0], ast.Constant)
+        and isinstance(key.values[0].value, str)
+        and isinstance(key.values[1], ast.FormattedValue)
+        and key.values[1].conversion == -1
+        and key.values[1].format_spec is None
+        and isinstance(key.values[1].value, ast.Name)
+        and key.values[1].value.id == variable
+    ):
+        return key.values[0].value
+    return None
+
+
 def _unset_membership(test: ast.expr) -> Optional[str]:
     """``_zeroAttrs`` of ``attr in self._zeroAttrs``; ``None`` for any other test."""
     if (

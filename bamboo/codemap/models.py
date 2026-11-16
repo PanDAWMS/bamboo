@@ -4483,6 +4483,65 @@ class MessageRead(BaseModel):
     name: str = Field(description="The name it binds: ``task_id``.")
 
 
+class WriteBind(BaseModel):
+    """A column a write statement sets to a bind itself, and the bind: the printed map's entry of that key is the value
+    the column was written with."""
+
+    column: str = Field(
+        description="The column, as a junction's subject names it: ``JediTaskSpec.modificationTime``, ``T_TASK.status``."
+    )
+    bind: str = Field(description="The bind, the printed map's key: ``:updateTime``, ``:modificationTime``.")
+
+
+class WritePrint(BaseModel):
+    """Where a write statement's values print: a logging call of its function prints its text and the bind map it runs
+    with (:class:`PrintedBy`, the reading a read statement's prints have), so a run's line of that print holds the
+    values the statement ran with.
+
+    ``updateTask_JEDI`` logs ``sqlU + sql + comment + str(varMap)`` the line before it executes ``sqlU + sql +
+    comment`` with ``varMap``, the map holding the task's changed fields (``taskSpec.valuesMap(useSeq=False,
+    onlyChanged=True)``): a run's line says ``':modificationTime': datetime.datetime(...)``, the value the row's
+    ``modificationTime`` was written with -- the arm at 1441 or the one at 1443, whichever ran.
+    ``updateTaskStatusByContFeeder_JEDI`` sets ``modificationTime=:updateTime``, filled at 1352, 1373 or 1379 by the
+    branch: the printed ``:updateTime`` is the one the run wrote.  Said of the statement, not of an arm: which arm
+    filled an entry is the run's, and a reader needing the value needs only the statement's.
+
+    The map printed is the map executed (:class:`PrintedBy` holds only where nothing rebinds or changes it between),
+    and a bind's name in the text and its key in the map are one bind of that call, so the entry of *bind* is the
+    column's value.  A print ``before`` the execute says the statement was run with these values, not that it changed
+    a row: the row count (:attr:`Branch.count_prints`) and the lines after say that.  Where the map is an object's
+    ``valuesMap(onlyChanged=True)``, an attribute is in it only where it changed on the object, and so is its column in
+    the ``SET`` (``bindUpdateChangesExpression()``): an attribute's key missing from a run's line says the statement
+    did not write that column.
+    """
+
+    owner: str = Field(description="``file::name`` of the function running the write, as :attr:`KeyFrom.owner`.")
+    statement: int = Field(description="The line of the call running it, as :attr:`KeyFrom.statement`.")
+    table: str = Field(description="The table written, as the statement names it.")
+    printed_by: list[PrintedBy] = Field(description="The prints of its text and the map it runs with.")
+    binds: list[WriteBind] = Field(
+        default_factory=list,
+        description=(
+            "Each column the text sets to a bind itself (``status=:status``; not ``attemptNr=attemptNr+:inc``), and, "
+            "where the map is an object's (*object_map*), each attribute of its class the text does not spell, bound "
+            "by the key form its class's ``valuesMap`` stores (:func:`progress.spec_map_keys`).  Empty where neither "
+            "is read: the print is said, no value is."
+        ),
+    )
+    object_map: str = Field(
+        default="",
+        description="Where the map is an object's ``valuesMap(...)`` -- copied or bound -- the object as spelled: ``taskSpec``.",
+    )
+    only_changed: bool = Field(
+        default=False,
+        description="Whether that ``valuesMap`` is ``onlyChanged=True``: only the attributes changed are in the map.",
+    )
+    arms: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description="The arms whose writes land at the statement, as :attr:`KeyFrom.writes` lists them.",
+    )
+
+
 class ExitKeeps(BaseModel):
     """What one exit of a function keeps a run from (:mod:`bamboo.codemap.panda.exitkeeps`): the junction arms and the
     prints a run leaving there can no longer reach and could have reached had it gone on past it
@@ -4663,6 +4722,13 @@ class MapFragment(BaseModel):
         description=(
             "What each exit of a function holding arms or prints keeps a run from (:class:`ExitKeeps`), in the order "
             "of the files and lines."
+        ),
+    )
+    write_prints: list[WritePrint] = Field(
+        default_factory=list,
+        description=(
+            "Each write statement whose function prints its text and the bind map it runs with, and the column each "
+            "bind writes (:class:`WritePrint`), in the order of the files and lines."
         ),
     )
     declaration_yields: dict[str, int] = Field(

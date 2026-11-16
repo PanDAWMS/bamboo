@@ -400,6 +400,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: the arms and prints each exit of a function keeps a run from -- see "
         "ExitKeeps; a dump's section compare reads them"
     ),
+    "write_prints": (
+        "records beside the nodes, not nodes: where a write statement's text and bind map print, and the column each "
+        "bind writes -- see WritePrint; a dump's section compare reads them"
+    ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,
     "spec_annotation_forms": _REPORT,

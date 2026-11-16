@@ -574,6 +574,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             row_keys=fragment.row_key_sources,
             key_froms=fragment.key_froms,
             set_froms=writes,
+            write_prints=fragment.write_prints,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -870,6 +871,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
             ),
         )
+        # Where each write's values print, with the arms its KeyFroms say land there, now that those are all said.
+        printed_writes = sqlwrite.attach_write_arms(fragment.write_prints, fragment.key_froms)
+        logger.info("PandaCodeMapPlugin: %d write statement(s) print their text and bind map", printed_writes)
         # Each message a run sends and the function another run takes it with: beside reach, not in it.
         fragment.message_edges = messages.edges(self._modules, self._calls, values)
         # And which column each payload key names rows by in the receiver's run, read from the key and parameter

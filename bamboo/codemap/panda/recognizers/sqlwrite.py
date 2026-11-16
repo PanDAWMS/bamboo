@@ -154,7 +154,9 @@ from bamboo.codemap.models import (
     SubjectNode,
     TermGuard,
     TermPlace,
+    WriteBind,
     WriteFrom,
+    WritePrint,
     pooled_cuts,
     pooled_frames,
 )
@@ -1220,6 +1222,83 @@ def _object_set_froms(
             )
 
 
+def _write_print(
+    printed: dict[tuple[str, int, str], WritePrint],
+    write_prints: list[WritePrint],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    statement: Optional[sqltext.SqlWrite],
+    table: str,
+    rel_path: str,
+    attributor: SpecAttributor,
+    map_keys: dict[str, str],
+    sequenced: dict[str, frozenset[str]],
+) -> None:
+    """Say where *run*'s values print (:class:`WritePrint`): the prints of its text and map (:func:`_printed_by`), each
+    column its text sets to a bind itself, and, where the map is one object's ``valuesMap``, each attribute of its
+    class the text does not spell under the key its class's map stores it by (*map_keys*) -- less those a sequence
+    fills where the map is ``useSeq=True``.  *run* is one call's (:func:`_each_call`); *statement* is ``None`` for an
+    ``INSERT`` whose columns are the object's (``{JobSpec.columnNames()}``)."""
+    owner = f"{rel_path}::{func.name}"
+    name = (owner, run.call.lineno, table)
+    if name in printed:
+        return
+    found = _printed_by(func, run)
+    if not found:
+        return
+    binds: list[WriteBind] = []
+    spelled: set[str] = set()
+    for column, supplied in statement.columns.items() if statement is not None else ():
+        spelled.add(column.lower())
+        if supplied.kind == SET_BIND:
+            binds.append(WriteBind(column=_column_subject(attributor, table, column), bind=supplied.text))
+    objects = _objects_of(run, func)
+    object_map, only_changed = "", False
+    if len(objects) == 1:
+        obj, made = objects[0]
+        object_map, only_changed = ast.unparse(obj), _changed_only(made)
+        obj_class = attributor.class_of(obj, func, owner_class)
+        prefix = map_keys.get(obj_class) if obj_class is not None else None
+        if obj_class is not None and prefix is not None:
+            use_seq = any(
+                one.arg == "useSeq" and isinstance(one.value, ast.Constant) and one.value.value for one in made.keywords
+            )
+            for attribute in sorted(attributor.declared_attributes(obj_class)):
+                if attribute.lower() in spelled or (use_seq and attribute in sequenced.get(obj_class, ())):
+                    continue
+                binds.append(WriteBind(column=SubjectNode.make_name(obj_class, attribute), bind=f"{prefix}{attribute}"))
+    record = printed[name] = WritePrint(
+        owner=owner,
+        statement=run.call.lineno,
+        table=table,
+        printed_by=found,
+        binds=binds,
+        object_map=object_map,
+        only_changed=only_changed,
+    )
+    write_prints.append(record)
+
+
+def attach_write_arms(write_prints: list[WritePrint], key_froms: list[KeyFrom]) -> int:
+    """Give each :class:`WritePrint` the arms whose writes land at its statement -- :attr:`KeyFrom.writes` of the
+    statement's records, all its terms together -- and keep those some arm lands at: a statement no arm of the map
+    writes through is no write a reader asks the value of.  Sorted by file and line; returns how many are kept."""
+    writes: dict[tuple[str, int, str], dict[str, set[int]]] = {}
+    for one in key_froms:
+        held = writes.setdefault((one.owner, one.statement, one.table), {})
+        for subject, lines in one.writes.items():
+            held.setdefault(subject, set()).update(lines)
+    kept = []
+    for record in write_prints:
+        arms = writes.get((record.owner, record.statement, record.table), {})
+        record.arms = {subject: sorted(lines) for subject, lines in sorted(arms.items()) if lines}
+        if record.arms:
+            kept.append(record)
+    write_prints[:] = sorted(kept, key=lambda one: (one.owner.partition("::")[0], one.statement, one.table))
+    return len(kept)
+
+
 def _inserted_table(run: sql.Execution) -> str:
     """The table an ``INSERT``'s text names, schema stripped; empty where the text names it by a variable."""
     matched = _INSERT_INTO.match(run.sql or "")
@@ -1268,6 +1347,7 @@ def extract(
     row_keys: Optional[list[RowKeySource]] = None,
     key_froms: Optional[list[KeyFrom]] = None,
     set_froms: Optional[list[SetFrom]] = None,
+    write_prints: Optional[list[WritePrint]] = None,
 ) -> tuple[
     list[SubjectNode],
     list[JunctionNode],
@@ -1317,6 +1397,11 @@ def extract(
     keyed: dict[tuple[str, int, str, str], KeyFrom] = {}
     wrote: dict[tuple[str, int, str, str, str], SetFrom] = {}
     sequenced = _sequenced_attributes(modules) if key_froms is not None else {}
+    # Where each write's values print: read beside its KeyFroms, so only where those are.
+    printed_writes: dict[tuple[str, int, str], WritePrint] = {}
+    if key_froms is None:
+        write_prints = None
+    map_keys = progress.spec_map_keys(modules) if write_prints is not None else {}
     stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
@@ -1367,6 +1452,11 @@ def extract(
                         _object_set_froms(
                             wrote, set_froms, func, _owner, run, made_of, _inserted_table(run), (),
                             module.rel_path, attributor, True,
+                        )
+                    if write_prints is not None:
+                        _write_print(
+                            printed_writes, write_prints, func, _owner, run, None, _inserted_table(run),
+                            module.rel_path, attributor, map_keys, sequenced,
                         )
                 # A SET item ``{}=:{}`` read for each key of the mapping its loop walks is a column.  Its stop stays:
                 # the text names the column through an interpolation, and derive-strategy, reading one file, says so
@@ -1515,6 +1605,11 @@ def extract(
                         # A record per call: each place runs the text with the binds that reach it.
                         for one, lines in _each_call(attributor, func, run, statement, spec_class, settle, written):
                             _key_froms(keyed, key_froms, func, one, statement, module.rel_path, lines)
+                            if write_prints is not None:
+                                _write_print(
+                                    printed_writes, write_prints, func, _owner, one, statement, statement.table,
+                                    module.rel_path, attributor, map_keys, sequenced,
+                                )
                             if set_froms is not None:
                                 # An insert's row is new but where the statement may update it instead.
                                 new_row = (

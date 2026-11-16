@@ -1923,6 +1923,54 @@ def _printed_problem(printed, source, statements) -> str:
     return ""
 
 
+def write_prints_are_rows(fragment: MapFragment) -> GateResult:
+    """(i) Every print a :class:`WritePrint` names is a print statement of the map whose every row prints a map whole
+    (its entries read), every bind a key that map holds -- or, where the record names the map's object, an entry of
+    that object's ``valuesMap`` --, and its statement a :class:`KeyFrom`'s: the reader reads each bind's value off that
+    hole of a run's line."""
+    statements = {
+        f"{node.owner.partition('::')[0]}:{statement.line}": statement
+        for node in fragment.function_prints
+        for statement in node.statements
+    }
+    keyed = {(one.owner, one.statement) for one in fragment.key_froms}
+    checked, failures = 0, []
+    for record in fragment.write_prints:
+        checked += 1
+        problem = _write_print_problem(record, statements, keyed)
+        if problem:
+            failures.append(f"{record.owner}:{record.statement}: {problem}")
+    return GateResult(
+        gate="write-prints-are-rows",
+        passed=not failures,
+        checked=checked,
+        unit="write statements printed with their map",
+        question="does a record of where a write's values print name a print, or a key, the print's rows do not hold?",
+        finding="a write's values are said to print where the print's rows do not put them",
+        failures=failures,
+    )
+
+
+def _write_print_problem(record, statements, keyed) -> str:
+    if (record.owner, record.statement) not in keyed:
+        return "the statement has no KeyFrom"
+    file = record.owner.partition("::")[0]
+    for printed in record.printed_by:
+        statement = statements.get(f"{file}:{printed.line}")
+        if statement is None:
+            return f"print {printed.line} is no print statement of the map"
+        for row in statement.rows or [None]:
+            held = [hole for hole in row.holes if hole.entries is not None] if row is not None else []
+            if not held:
+                return f"print {printed.line}: a row prints no map"
+            keys = {entry.key for hole in held for entry in hole.entries or () if entry.key and not entry.computed}
+            objects = {entry.row for hole in held for entry in hole.entries or () if entry.row}
+            for bind in record.binds:
+                if bind.bind not in keys and not (record.object_map and record.object_map in objects):
+                    return f"bind {bind.bind} is no key of the printed map"
+    return ""
+
+
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
     """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at a statement's rows names a read site
     of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
@@ -3053,6 +3101,8 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(guard_fields_are_read(fragment))
         if fragment.function_prints:
             results.append(printed_holes_are_rows(fragment))
+    if fragment.function_prints and fragment.key_froms:
+        results.append(write_prints_are_rows(fragment))
     if fragment.runnables:
         results.append(runnable_fields_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))
