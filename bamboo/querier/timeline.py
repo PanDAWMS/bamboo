@@ -74,6 +74,11 @@ class Timeline:
     opens: tuple[Opening, ...] = ()
     #: the arms shown not to have written it (judgement 3's premises held), "func:line" each
     absent: tuple[str, ...] = ()
+    #: where the arms that may have begun the stay were narrowed (P3), those left, as M3(a)-1 names them
+    begun_by: tuple[str, ...] = ()
+    #: those of them no print names the row at the stay's start, while another's does: named, where the open arms
+    #: are, as having not begun it (*first_assumed* leaves them out)
+    begun_assumed: tuple[str, ...] = ()
 
     def pieces(self, assume: bool = False) -> list[tuple[datetime.datetime, datetime.datetime, datetime.datetime,
                                                           datetime.datetime, tuple[Opening, ...]]]:

@@ -14603,16 +14603,22 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
                        N(owner="t.py::staged", branches=[br(5710, "runtime(CURRENT_DATE-1)")])]
             m82 = "aipanda082.cern.ch"
 
-            def rerun(hits):
+            def rerun(hits, missed=()):
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.args, r.result = N(key="53641080"), {}
                 r._before = lambda subject, q: (before, "2026-11-13 20:29:16")
                 r._subject_writers = lambda subject: writers
                 r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
-                r._column_writes = lambda j, b, keys, window, ws: hits[b.line]
+
+                def column_writes(j, b, keys, window, ws, missed_out=None):
+                    if missed_out is not None and b.line in missed:
+                        missed_out.append(("an ask", "why"))
+                    return hits[b.line]
+
+                r._column_writes = column_writes
                 return r
 
-            q = N(subject=S, observed="tobroken", since=t("20:29:16.423630"), moved=t("20:34:45.105988"))
+            q = N(subject=S, observed="tobroken", since=t("20:29:16.423630"), moved=t("20:34:45.105988"), writers=[])
             term = N(node="compare", op="<", values=[N(base="CURRENT_DATE", offset_seconds=-300.0)], subject=C, settled=True,
                      text="modificationtime<:timeLimit")
             got = {}
@@ -14636,6 +14642,36 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
             r._assuming = {}
             got["assumed2"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q)]
             got["assuming"] = r._assuming
+            # P3: the arm writing the status alone shown not to write it as the stay began, so the one writing the column
+            # in the same pass did: the column held the stay's start, and the term holds 5 min after it
+            q3 = N(subject=S, observed="tobroken", since=q.since, moved=q.moved,
+                   writers=[N(owner="t.py::prep", branches=[br(3971, "'tobroken'")]),
+                            N(owner="t.py::feed", branches=[br(742, "'tobroken'")])])
+            begin = {3971: ([(t("20:29:16.0"), "aipanda091.cern.ch", "prep:3856", TL.REACHED)], True), 742: ([], True)}
+            r = rerun({**hits, **begin})
+            tl3 = RR.Rerun._timeline(r, C, q3)
+            got["begun_by"] = [list(tl3.begun_by), [str(x) for x in tl3.first]]
+            r._assuming = {}
+            got["p3"] = [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q3)]
+            got["p3_words"] = RR.T.text(RR._timeline_said(C, tl3)).rpartition("; ")[2]
+            # one not shown either way, and no print of it naming the row while prep's does: named as having not begun
+            # it, where the open arms are; nothing sure without that
+            r = rerun({**hits, **begin, 742: ([], False)})
+            tl4 = RR.Rerun._timeline(r, C, q3)
+            got["p3_strict"] = RR.Rerun._timeline_spans(r, term, q3)
+            r._assuming = {}
+            got["p3_open"] = [list(tl4.begun_by), list(tl4.begun_assumed),
+                              [[str(a), str(b)] for a, b in RR.Rerun._timeline_spans(r, term, q3)], r._assuming]
+            got["p3_premises"] = [RR.T.text(p) for p in RR.Rerun._held_premises(r, r._assuming, {}, "2026-11-13 20:34:44")]
+            st3 = N(condition_trees=[N(entry="e", tree=N(node="all", items=[term]))])
+            r._assuming = None
+            got["p3_terms"] = [RR.T.text(x) for x in RR.Rerun._timeline_terms(r, st3, q3)]
+            # nobody's print names the row as it began: none is named
+            r = rerun({**hits, 3971: ([], False), 742: ([], False)})
+            got["p3_none"] = list(RR.Rerun._timeline(r, C, q3).begun_assumed)
+            # one whose logs there are not in the records is not named: its ask stays
+            r = rerun({**hits, **begin, 742: ([], False)}, missed=(742,))
+            got["p3_asked"] = list(RR.Rerun._timeline(r, C, q3).begun_assumed)
             # what M3(a)-1 settles, or a timeline that reads nothing, is read as before
             r = rerun({2099: ([], False), 1441: ([], False), 1443: ([], False), 767: ([], False), 5710: ([], False)})
             got["nothing"] = RR.Rerun._timeline_spans(r, term, q)
@@ -14674,6 +14710,21 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
     assert got["strict2"] == [], got
     assert got["assumed2"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
     assert got["assuming"] == {"JediTaskSpec.modificationTime": ["staged:5710"]}, got
+    assert got["begun_by"] == [["prep:3971 with 3839"], ["2026-11-13 20:29:16.423630", "2026-11-13 20:29:16.423630"]], got
+    # the open arm staged:5710 named as having not written it: 5 min after the stay's start, the hand's reading
+    assert got["p3"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
+    assert got["p3_words"] == ("the stay begun by prep:3971 with 3839 (the other arms writing the value shown not to then, "
+                               "judgement 3)"), got
+    assert got["p3_strict"] == [], got
+    assert got["p3_open"] == [[], ["feed:742"], [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]],
+                              {"JediTaskSpec.modificationTime": ["staged:5710"]}], got
+    assert got["p3_premises"] == [
+        "none of feed:742 began the stay (they print nothing naming the row as it began, while another arm that may have does)",
+        "none of staged:5710 wrote JediTaskSpec.modificationTime in the stay, besides the 2 write(s) the records show"], got
+    assert got["p3_terms"] == ["modificationtime<:timeLimit: surely held for the row from 2026-11-13 20:34:16.423630 to 2026-11-13 20:34:45.105988, "
+                               "on the writes the records show, where none of staged:5710 wrote "
+                               "JediTaskSpec.modificationTime in the stay and none of feed:742 began the stay"], got
+    assert got["p3_none"] == [] and got["p3_asked"] == [], got
     assert got["nothing"] is None, got
     assert got["holes"] == [True, False, True, False], got
 
@@ -14786,12 +14837,23 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
             # no run of the key but the mover's own: not read
             r = rerun(runs[3:])
             got["none"] = [RR.Rerun._call_tied(r, c, up), r.ended]
+            # a callee's log not in the records may hold a pass: it stops on the ask, nothing said
+            r = rerun(runs)
+            r._ask = lambda key, names, asking, owners=None, whole=False, quiet=False: (
+                {"panda-JediDBProxy.log": runs}, [(N(key="k"), "why")], {})
+            r.hop, r.args = "U2", N(asks="asks.jsonl")
+            try:
+                RR.Rerun._call_tied(r, c, up)
+                got["missed"] = ["no stop", r.ended]
+            except RR.Stop as e:
+                got["missed"] = [e.code, r.ended]
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
     assert got["reach"] == {"b::B.g": [[10, 12], 1], "c::C.h": [[20], 1], "d::D.k": [[10, 12, 20], 2]}, got
+    assert got["missed"] == ["asks", []], got
     assert got["others"] == 1, got
     assert got["bursts"] == [["2026-11-13 14:34:02,000", "2026-11-13 14:34:02,197"],
                              ["2026-11-13 14:35:06,139", "2026-11-13 14:35:06,139"]], got
