@@ -39,12 +39,13 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts, values
+from bamboo.codemap import callfacts, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import (
     Anchor,
     Branch,
     ConditionValue,
+    CountPrint,
     CoverageStat,
     DiagnosticTemplate,
     EnumerationWrite,
@@ -52,7 +53,7 @@ from bamboo.codemap.models import (
     SourceModule,
     SubjectNode,
 )
-from bamboo.codemap.panda import sql
+from bamboo.codemap.panda import rowcounts, sql
 from bamboo.codemap.panda.attribution import (
     NOT_A_SPEC,
     UNRESOLVED_CLASS,
@@ -293,7 +294,10 @@ def _recorded_argument(call: ast.Call, setters: dict[str, _Setter]) -> Optional[
 
 
 def _recorded_in(
-    statement: ast.stmt, setters: dict[str, _Setter], settling: Optional[str]
+    statement: ast.stmt,
+    setters: dict[str, _Setter],
+    settling: Optional[str],
+    func: Optional[ast.AST] = None,
 ) -> Iterator[Optional[ast.expr]]:
     """Every message *statement* records, by any of the three spellings.
 
@@ -306,8 +310,20 @@ def _recorded_in(
     "exhausted"`` is a string assigned to a declared field like any other, and
     reading it as this branch's message would make the value its own
     description -- a frame that matches any message with the word in it.
+
+    So is what an ``if`` testing a statement's row count records (*func*
+    given): ``failed to lock jediTaskID=...`` under ``if n_row != 1:`` says how
+    the lock ``UPDATE`` ran, not what the block decided
+    (:func:`count_prints`).
     """
+    counted: set[int] = set()
+    if func is not None:
+        for node in walk(statement):
+            if isinstance(node, ast.If) and id(node) not in counted and rowcounts.is_count_test(node, func):
+                counted.update(id(one) for one in walk(node))
     for node in walk(statement):
+        if id(node) in counted:
+            continue
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
@@ -444,7 +460,7 @@ def recorded_signature(
     tags: set[str] = set()
     messages: list[str] = []
     for statement in block:
-        for argument in _recorded_in(statement, setters, attribute):
+        for argument in _recorded_in(statement, setters, attribute, func):
             if argument is None:
                 continue
             held = (
@@ -460,6 +476,36 @@ def recorded_signature(
                 if values.has_literal_text(text) and text not in messages:
                     messages.append(text)
     return sorted(tags), messages
+
+
+def count_prints(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.AST,
+    setters: dict[str, _Setter],
+) -> list[CountPrint]:
+    """What *func* records under each ``if`` testing the row count of the run *call* makes
+    (:func:`rowcounts.tests_of`), with what each says of the rows changed -- frames read as
+    :func:`recorded_signature` reads a block's, each at the line recording it."""
+    found: dict[tuple[int, str, str], CountPrint] = {}
+    for node, body, other in rowcounts.tests_of(func, call):
+        for rows, block in ((body, node.body), (other, node.orelse)):
+            if rows is None:
+                continue
+            for statement in block:
+                for argument in _recorded_in(statement, setters, None, func):
+                    if argument is None:
+                        continue
+                    at = pathcond.site_of(argument)
+                    if not isinstance(at, ast.stmt):
+                        continue
+                    held = _reaching(argument.id, at, func) if isinstance(argument, ast.Name) else [argument]
+                    for expression in held:
+                        text = values.rendered_text(expression)
+                        if text and values.has_literal_text(text):
+                            found.setdefault(
+                                (at.lineno, text, rows), CountPrint(line=at.lineno, frame=text, rows=rows)
+                            )
+    return [found[key] for key in sorted(found)]
 
 
 def _persisted_templates(

@@ -864,6 +864,37 @@ class RewriteOpen(BaseModel):
     why: str = Field(description="One of the ``REWRITE_*`` reasons above :class:`SamePassWrite`.")
 
 
+#: :attr:`CountPrint.rows`: the statement changed no row.
+ROWS_NONE = "none"
+#: One row or more.
+ROWS_SOME = "some"
+#: Exactly one row.
+ROWS_ONE = "one"
+#: Not exactly one: none, or more than one.
+ROWS_NOT_ONE = "not_one"
+
+
+class CountPrint(BaseModel):
+    """A line the function prints in an arm of an ``if`` testing the row count of the run of the statement a branch's
+    write lands at (:attr:`Branch.count_prints`, :mod:`bamboo.codemap.panda.rowcounts`).
+
+    ``_read_task_with_unprocessed_inputs`` runs ``UPDATE ... SET lockedBy=:newLockedBy ... WHERE ... lockedBy IS
+    NULL``, reads ``n_row = self.cur.rowcount`` and prints ``failed to lock jediTaskID={}`` under ``if n_row != 1:``.
+    That line says the statement changed no row (or more than one), so the write did not land: it is the run's
+    outcome, not a frame of the decision, and it is not among :attr:`Branch.messages`.
+    """
+
+    line: int = Field(description="The print's line in the owner.")
+    frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
+    rows: str = Field(
+        description=(
+            f"What its printing says of the rows the run changed: {ROWS_NONE!r}, {ROWS_SOME!r}, {ROWS_ONE!r} or "
+            f"{ROWS_NOT_ONE!r}.  The body of an ``and`` holds its count comparison's reading; an ``else`` holds the "
+            "opposite only where the test is the comparison alone."
+        )
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -950,7 +981,9 @@ class Branch(BaseModel):
             "retry refusals and the goal check, which write prose.  Weaker "
             "evidence than a tag, since wording drifts between releases and "
             "two arms can share a frame, so a match names an arm only where it "
-            "is the only one."
+            "is the only one.  A frame printed under a test of a statement's "
+            "row count is not one: it says how the statement's run ended "
+            "(``count_prints``)."
         ),
     )
     line: Optional[int] = Field(
@@ -1039,6 +1072,15 @@ class Branch(BaseModel):
             "``modificationTime=CURRENT_DATE-1`` is kind ``clock``, base ``CURRENT_DATE``, offset -86400.  So a "
             "reader holding the time the value was made reads the value.  ``None`` where the value reads as no "
             "base and offset (a constant the outcome states, a value only said), or as a parameter as it stands."
+        ),
+    )
+    count_prints: list[CountPrint] = Field(
+        default_factory=list,
+        description=(
+            "The lines the owner prints under a test of the row count of a run of the statement this branch's write "
+            "lands at (:attr:`KeyFrom.writes`), each with what it says of the rows changed: a run's ``failed to lock "
+            "jediTaskID=...`` after the lock ``UPDATE`` says the write did not land.  Its absence says the row "
+            "changed only where the line's level is in the log and the run is read past it.  Sorted by line."
         ),
     )
     must_prints: Optional[list[int]] = Field(

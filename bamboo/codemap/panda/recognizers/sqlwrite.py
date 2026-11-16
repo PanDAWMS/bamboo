@@ -7886,6 +7886,42 @@ def unset_births(
 _COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try, ast.FunctionDef, ast.ClassDef)
 
 
+def attach_count_prints(
+    key_froms: Iterable[KeyFrom], junctions: Iterable[JunctionNode], setters: dict[str, Any]
+) -> None:
+    """Give each branch whose write lands at a statement (:attr:`KeyFrom.writes`) what its function prints under a
+    test of the row count of the statement's runs (:attr:`Branch.count_prints`, :func:`progress.count_prints`): the
+    lock ``UPDATE``'s ``lockedBy``, ``lockedTime`` and ``modificationTime`` arms get ``failed to lock
+    jediTaskID={}``, said where the run changed not exactly one row.  The SQL arms and the attribute arms an object's
+    write carries alike, by the lines the statement writes each subject on."""
+    by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
+    done: set[tuple[str, int]] = set()
+    for key_from in key_froms:
+        if key_from._runs is None or (key_from.owner, key_from.statement) in done:
+            continue
+        done.add((key_from.owner, key_from.statement))
+        func, calls = key_from._runs
+        printed = sorted(
+            {(one.line, one.frame, one.rows): one for call in calls for one in progress.count_prints(func, call, setters)}.items()
+        )
+        if not printed:
+            continue
+        together = [one for one in key_froms if one.owner == key_from.owner and one.statement == key_from.statement]
+        written: dict[str, set[int]] = {}
+        for one in together:
+            for subject, at in one.writes.items():
+                written.setdefault(subject, set()).update(at)
+        for subject, lines in written.items():
+            junction = by_subject.get((subject, key_from.owner))
+            if junction is None:
+                continue
+            for branch in junction.branches:
+                if branch.line in lines or lines & set(branch.other_lines):
+                    held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
+                    held.update(printed)
+                    branch.count_prints = [held[key] for key in sorted(held)]
+
+
 def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str]]:
     """``(file, function, parameter)`` for each parameter a KeyFrom's source ends at -- the function reading the
     term's binds was handed the value there -- each once; and each such source pointed at the parameter's

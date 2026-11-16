@@ -856,6 +856,15 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.map_id,
             fragment.derived_from,
         )
+        # What the function prints under a test of the row count of a run each write lands at: whether it landed.
+        sqlwrite.attach_count_prints(
+            fragment.key_froms,
+            fragment.junctions,
+            progress.spec_setters(
+                self._modules,
+                {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
+            ),
+        )
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(

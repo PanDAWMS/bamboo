@@ -22223,3 +22223,60 @@ def test_an_object_write_holds_a_field_however_it_is_assigned(tmp_path):
         "JediFileSpec.proc_status": [bumped],
         "JediFileSpec.status": [fetched],
     }
+
+
+#: ``_read_task_with_unprocessed_inputs``'s lock: the ``UPDATE`` changes the row only where nobody holds it, and the
+#: function says so under a test of the row count; then a second statement, with its own count test.
+_COUNTED = '''
+class TaskModule:
+    def lock(self, jediTaskID, pid, timeLimit):
+        sqlL = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=:newLockedBy,modificationTime=CURRENT_DATE "
+        sqlL += "WHERE jediTaskID=:jediTaskID AND lockedBy IS NULL AND modificationTime<:timeLimit "
+        sqlC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET errorDialog=:err WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":newLockedBy"] = pid
+        varMap[":timeLimit"] = timeLimit
+        tmpLog.debug(sqlL + str(varMap))
+        self.cur.execute(sqlL, varMap)
+        nRow = self.cur.rowcount
+        if nRow != 1:
+            tmpLog.debug(f"failed to lock jediTaskID={jediTaskID}")
+            return False
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":err"] = "locked"
+        self.cur.execute(sqlC, varMap)
+        if self.cur.rowcount == 0:
+            tmpLog.debug(f"no task to mark jediTaskID={jediTaskID}")
+        return True
+'''
+
+
+def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_landed(tmp_path):
+    """``failed to lock jediTaskID=...`` runs only where the lock ``UPDATE`` changed not exactly one row: it says the
+    lock's writes did not land, not which value the block chose.  So it is no frame of the lock's arms
+    (:attr:`Branch.messages`) but a count print of each (:attr:`Branch.count_prints`, ``not_one``); the second
+    statement's ``no task to mark`` under ``if self.cur.rowcount == 0:`` is its arm's (``none``), the count being
+    that run's, not the lock's."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _COUNTED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    failed, unmarked = _at("failed to lock", _COUNTED), _at("no task to mark", _COUNTED)
+    arms = {
+        j.subject.split(".")[-1]: [([(p.line, p.frame, p.rows) for p in b.count_prints], b.messages) for b in j.branches]
+        for j in junctions
+    }
+
+    lock = [(failed, "failed to lock jediTaskID={}", "not_one")]
+    assert arms["lockedBy"] == [(lock, [])]
+    assert arms["modificationTime"] == [(lock, [])]
+    assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
