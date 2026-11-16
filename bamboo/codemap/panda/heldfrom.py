@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Iterable, NamedTuple, Optional
+from typing import Any, Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts, evaluate, pathcond
 from bamboo.codemap.astwalk import walk
@@ -174,6 +174,8 @@ class _Way(NamedTuple):
     #: ``(at, by, key)`` of each selection by a computed key the way went through where the key the end sat under is
     #: known, in the order run (:attr:`HeldSource.keyed`, :func:`_selected`).
     keyed: tuple[tuple[str, str, str], ...] = ()
+    #: Where the end is a statement's rows and the item is one column's ``MAX`` or ``MIN`` (:class:`sqltext.Aggregate`).
+    aggregate: Optional[Any] = None
 
 
 #: What a way may go through and still be the value it came from: a copy, the same value as another type.
@@ -196,6 +198,8 @@ class RowItem(NamedTuple):
     #: What the first call or operator the way went through that makes another value of it gives
     #: (:attr:`HeldThrough.gives`, ``text`` for ``f"{id},"``); empty where none did.
     made: str = ""
+    #: The item is one column's ``MAX`` or ``MIN`` (:class:`sqltext.Aggregate`): that.
+    aggregate: Optional[Any] = None
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -1253,7 +1257,7 @@ class _Reader:
                 continue
             made = next((through.gives for through in one.through if through.gives not in _SAME_VALUE), "")
             whole = not made and not one.steps and not one.loose and all(path in ("", "()") for path in one.paths)
-            items.append(RowItem(one.name, one.column, one.attr, one.column_unread, whole, made))
+            items.append(RowItem(one.name, one.column, one.attr, one.column_unread, whole, made, one.aggregate))
         return items, bool(ways) and len(items) == len(ways)
 
     def _ways_of(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()) -> list[_Way]:
@@ -1760,8 +1764,10 @@ class _Reader:
         site = next((one for one in filled.sites if one.name == way.name), None)
         if site is None:
             return way
-        column, attr, unread = self._sqlwrite._column_choice(filled.items(site), [slot], expr, site, filled.attr)
-        return way._replace(column=column, attr=attr or way.attr, column_unread=unread)
+        items = filled.items(site)
+        column, attr, unread = self._sqlwrite._column_choice(items, [slot], expr, site, filled.attr)
+        aggregate = self._sqlwrite._column_aggregate(items, [slot]) if not column else None
+        return way._replace(column=column, attr=attr or way.attr, column_unread=unread, aggregate=aggregate)
 
     def _changed(
         self,

@@ -5922,6 +5922,14 @@ class SkeletonHole(BaseModel):
             "finds a row's value inside the printed list."
         ),
     )
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            "Where the hole prints a select item that is a column's ``MAX`` or ``MIN`` over a ``GROUP BY`` (the one "
+            "aggregate its stops carry, :attr:`KeyStop.aggregate`): copyArchive's ``maxModTime={maxModificationTime}``, "
+            "``MAX(JobSpec.creationTime)`` by ``JobSpec.jobDefinitionID``, ...  Not among *columns*: no row holds it."
+        ),
+    )
 
 
 class SkeletonLine(BaseModel):
@@ -6219,6 +6227,22 @@ KEY_STOPS: dict[str, str] = {
 }
 
 
+class RowAggregate(BaseModel):
+    """A select item that is one column's ``MAX`` or ``MIN`` over the rows a ``GROUP BY`` makes one: no row's value of
+    the column, but the greatest or least of the group's.  copyArchive's ``MAX(creationTime)`` of ``jobsDefined4``
+    grouped by ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}``."""
+
+    fn: str = Field(description="``MAX`` or ``MIN``.")
+    column: str = Field(description="The column it is of, as the table's class declares it: ``JobSpec.creationTime``.")
+    group_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The ``GROUP BY`` columns, as the table's class declares each, else ``table.column`` as written; empty "
+            "where the statement groups nothing (one value over every row it selects)."
+        ),
+    )
+
+
 class KeyStop(BaseModel):
     """Where one reading of a run key's value ended without a column of a class holding rows (:attr:`RunKey.stops`).
 
@@ -6252,6 +6276,13 @@ class KeyStop(BaseModel):
             "(:class:`HeldSource`) that came back through calls of the corpus, those calls first, as the way's "
             "*route* lists them, then the stop's own site; an ``uncarried`` stop has no site of its own, so its *at* "
             "is the route alone (``TaskBuffer.py:1025``, then ``adder_gen.py:111``)."
+        ),
+    )
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            "On a ``row_item`` stop whose item is a column's ``MAX`` or ``MIN``: that column and the grouping.  The "
+            "value is no row's, so no column is said; a reader comparing it with rows' values reads it here."
         ),
     )
 

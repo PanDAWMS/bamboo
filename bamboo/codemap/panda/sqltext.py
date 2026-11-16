@@ -2155,6 +2155,19 @@ def term_spans(sql: str) -> tuple[tuple[int, int], ...]:
 ITEM_COLUMN, ITEM_STAR, ITEM_HOLE, ITEM_EXPRESSION, ITEM_AFTER_HOLE = "column", "star", "hole", "expression", "after hole"
 
 
+class Aggregate(NamedTuple):
+    """An :data:`ITEM_EXPRESSION` that is one column's ``MAX`` or ``MIN``: ``MAX(creationTime)`` of ``jobsDefined4``
+    under ``GROUP BY jobDefinitionID, prodUserName, ...`` (:class:`~bamboo.codemap.models.RowAggregate`)."""
+
+    #: ``MAX`` or ``MIN``.
+    fn: str
+    #: The column's table, as :attr:`SelectItem.table`, and the column, lowered.
+    table: str
+    column: str
+    #: The ``GROUP BY`` columns, ``(table, column)`` lowered, the table ``""`` where none is read.
+    group_by: tuple[tuple[str, str], ...] = ()
+
+
 class SelectItem(NamedTuple):
     """One item of a statement's select list, at its position in each row the statement returns."""
 
@@ -2163,6 +2176,8 @@ class SelectItem(NamedTuple):
     table: str = ""
     #: Its column, lowered; ``""`` but for :data:`ITEM_COLUMN`.
     column: str = ""
+    #: An expression that is one column's ``MAX`` or ``MIN``: that.
+    aggregate: Optional[Aggregate] = None
 
 
 @functools.lru_cache(maxsize=None)
@@ -2210,8 +2225,29 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
             else:
                 items.append(SelectItem(ITEM_EXPRESSION))
         else:
-            items.append(SelectItem(ITEM_EXPRESSION))
+            items.append(SelectItem(ITEM_EXPRESSION, aggregate=_aggregate(column, select, scope, root)))
     return tuple(items)
+
+
+def _aggregate(node: object, select: exp.Select, scope, root) -> Optional[Aggregate]:
+    """*node*, a select item, as one column's ``MAX`` or ``MIN`` with *select*'s grouping, where it is one."""
+    if not isinstance(node, (exp.Max, exp.Min)) or not isinstance(node.this, exp.Column) or scope is None:
+        return None
+    if node.expressions or _NAMED_HOLE.search(node.this.name):
+        return None
+
+    def placed(column: exp.Column) -> tuple[str, str]:
+        owned, why = _owner(column, scope, root)
+        return (owned[0].lower() if owned and not why else "", column.name.lower())
+
+    table, column = placed(node.this)
+    if not table:
+        return None
+    group = select.args.get("group")
+    grouped = tuple(
+        placed(one) for one in (group.expressions if isinstance(group, exp.Group) else ()) if isinstance(one, exp.Column)
+    )
+    return Aggregate("MAX" if isinstance(node, exp.Max) else "MIN", table, column, grouped)
 
 
 def is_hole(name: str) -> bool:

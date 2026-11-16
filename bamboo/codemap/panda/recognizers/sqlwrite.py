@@ -6701,6 +6701,19 @@ def _column_choice(
     return "", subjects.pop() if len(subjects) == 1 else "", KEY_COLUMN_TEXTS
 
 
+def _column_aggregate(lists: tuple[tuple[sqltext.SelectItem, ...], ...], held: list[int]) -> Optional[sqltext.Aggregate]:
+    """The aggregate (:attr:`sqltext.SelectItem.aggregate`) the one select item at *held* is on every select list of
+    the statement -- copyArchive's ``MAX(creationTime)`` -- where :func:`_column_choice` says an expression; else
+    ``None``."""
+    found = set()
+    for items in lists:
+        placed = [number for number in held if number < len(items) and items[number].kind != sqltext.ITEM_AFTER_HOLE]
+        if len(placed) != 1 or items[placed[0]].aggregate is None:
+            return None
+        found.add(items[placed[0]].aggregate)
+    return found.pop() if len(found) == 1 else None
+
+
 def _item_choice(
     items: tuple[sqltext.SelectItem, ...], held: list[int], value: Optional[ast.AST], site: ReadSiteNode
 ) -> tuple[str, str]:

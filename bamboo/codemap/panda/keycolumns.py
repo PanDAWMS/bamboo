@@ -77,7 +77,13 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from bamboo.codemap import callfacts, objects, pathcond, reach
 from bamboo.codemap import calls as C
-from bamboo.codemap.models import MAP_KEY, KeyStop, MapFragment, SourceModule
+from bamboo.codemap.models import (
+    MAP_KEY,
+    KeyStop,
+    MapFragment,
+    RowAggregate,
+    SourceModule,
+)
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.objects import is_parameter
@@ -461,7 +467,31 @@ class Reader:
                     if item.column
                     else ""
                 )
-                stops.append(_stop("row_item", name=item.site, what=what, at=where))
+                stop = _stop("row_item", name=item.site, what=what, at=where)
+                if item.whole and item.aggregate is not None:
+                    stop.aggregate = self._aggregate(item.aggregate)
+                stops.append(stop)
+
+    def _aggregate(self, aggregate) -> Optional[RowAggregate]:
+        """*aggregate* (:class:`sqltext.Aggregate`) with its columns as their tables' classes declare them; ``None``
+        where its own column's is not."""
+        column = self._declared(aggregate.table, aggregate.column)
+        if column is None:
+            return None
+        return RowAggregate(
+            fn=aggregate.fn,
+            column=column,
+            group_by=[
+                self._declared(table, name) or (f"{table}.{name}" if table else name)
+                for table, name in aggregate.group_by
+            ],
+        )
+
+    def _declared(self, table: str, column: str) -> Optional[str]:
+        """``Class.attribute`` of *table*'s *column*, as :meth:`_column` spells it, or ``None``."""
+        cls = self.tables.get(table.rpartition(".")[2].lower())
+        attribute = self.declared.get(cls, {}).get(column.lower()) if cls is not None else None
+        return f"{cls}.{attribute}" if attribute is not None else None
 
     def _handed(
         self,
@@ -703,11 +733,11 @@ def _stop(kind: str, name: str = "", what: str = "", at: str = "") -> KeyStop:
 
 def _merged(stops: list[KeyStop]) -> list[KeyStop]:
     """*stops* once each, those saying one thing at several sites as one, with each site."""
-    kept: dict[tuple[str, str, str], KeyStop] = {}
+    kept: dict[tuple[str, str, str, str], KeyStop] = {}
     for stop in stops:
         held = kept.setdefault(
-            (stop.kind, stop.name, stop.what),
-            KeyStop(kind=stop.kind, name=stop.name, what=stop.what),
+            (stop.kind, stop.name, stop.what, stop.aggregate.model_dump_json() if stop.aggregate else ""),
+            KeyStop(kind=stop.kind, name=stop.name, what=stop.what, aggregate=stop.aggregate),
         )
         held.at.extend(site for site in stop.at if site not in held.at)
     return list(kept.values())

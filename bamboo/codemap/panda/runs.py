@@ -657,6 +657,16 @@ class _Reader:
                         hole.listed = bool(hole.columns) and self._hole_listed(
                             file, func, *at
                         )
+                        aggregates = {
+                            stop.aggregate.model_dump_json(): stop.aggregate
+                            for stop in hole.stops
+                            if stop.aggregate is not None
+                        }
+                        hole.aggregate = (
+                            next(iter(aggregates.values()))
+                            if len(aggregates) == 1
+                            else None
+                        )
                         named += any(self.keys.holds_rows(one) for one in hole.columns)
         return named
 

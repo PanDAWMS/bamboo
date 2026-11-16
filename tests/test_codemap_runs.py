@@ -2514,6 +2514,14 @@ class Rows(DBProxy):
             more.append(panda_id)
         more.extend(self.others())
         tmp_log.debug(f"more ({str(more[0:100])})")  # W7
+        self.cur.execute(
+            "SELECT jobStatus,MAX(PandaID),COUNT(*) FROM ATLAS_PANDA.jobsActive4 "
+            "WHERE jobStatus IN (:s1,:s2) GROUP BY jobStatus",
+            {":s1": "sent", ":s2": "running"},
+        )
+        grouped = self.cur.fetchall()
+        for (status, newest, n) in grouped:
+            tmp_log.debug(f"newest {newest} of {n} in {status}")  # W9
 
     def others(self):
         return [1, 2]
@@ -2586,6 +2594,28 @@ def test_a_message_hole_printing_a_list_of_a_select_item_s_values_is_that_item_s
     assert again.listed is False
     more = holes[("str(more[0:100])", _line(ROWS, "W7"))]
     assert (more.columns, more.listed) == ([], False)
+
+
+def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_not_the_column(
+    tmp_path: Path,
+) -> None:
+    """copyArchive's ``maxModTime={maxModificationTime}``: the item is ``MAX(creationTime)`` of ``jobsDefined4``
+    grouped by ``jobDefinitionID, ...`` -- the greatest of a group's values, no row's.  So the hole names no column,
+    and says the aggregate (:attr:`SkeletonHole.aggregate`): the function, the column and the grouping, as the
+    classes declare them.  A ``COUNT`` is no column's value at all and says nothing; the grouping column itself is
+    that column."""
+    holes = _row_holes(tmp_path, read_rows=True)
+    line = _line(ROWS, "W9")
+    newest = holes[("newest", line)]
+    assert newest.columns == []
+    assert newest.aggregate is not None
+    assert (newest.aggregate.fn, newest.aggregate.column, newest.aggregate.group_by) == (
+        "MAX",
+        "JobSpec.PandaID",
+        ["JobSpec.jobStatus"],
+    )
+    assert holes[("n", line)].aggregate is None
+    assert (holes[("status", line)].columns, holes[("status", line)].aggregate) == (["JobSpec.jobStatus"], None)
 
 
 def test_a_message_hole_holding_a_text_made_from_a_select_item_is_not_that_item_s_column(
