@@ -20,6 +20,8 @@ question is :func:`runs_after`, and the others are made of it.
   shows; handed them, a raise is read by where it is, not by what raises -- any statement of a ``try`` holding
   one, before a catch-all not among them -- and only they are entered (:func:`reaching.catching_try`).  A run
   with no mark hands none: every ``try`` ran to its end.
+* **Where a run would have gone.**  :func:`kept_from` reads an exit as a ``pass`` too (:func:`reaching`'s
+  *passing*): what a run leaving there no longer reaches and would have, the pass's or the turn's.
 * **Not read.**  A ``with`` whose manager swallows what its body raised, and a call that never returns.  The
   first is watched: :func:`swallowing_managers` lists each such manager of the corpus into the dump, and the
   ``with-exits-are-read`` gate fails on one (none in PanDA).
@@ -34,7 +36,7 @@ import ast
 from typing import Iterable, Iterator, Optional, Sequence
 
 from bamboo.codemap.models import SwallowingManager
-from bamboo.codemap.reaching import reaching, reaching_end
+from bamboo.codemap.reaching import reaching, reaching_each, reaching_end
 
 #: The nodes whose body is a scope of its own, as :mod:`~bamboo.codemap.reaching` reads them.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
@@ -202,6 +204,59 @@ def ends_after(
     return bool(
         reaching_end(func, [first], killers, entered=passed, once=once, raised=raised)
     )
+
+
+def kept_from(
+    exit_: ast.Return | ast.Raise | ast.Continue | ast.Break,
+    statements: Sequence[ast.stmt],
+) -> list[ast.stmt]:
+    """Of *statements*, the ones a run leaving by *exit_* can no longer reach and could have reached had it gone on
+    past it as a ``pass``, in the order given: what the exit keeps the run from.
+
+    A ``return`` or a raise ends the call's pass: a ``finally`` it runs and a handler catching the raise -- and what
+    follows them -- are still reached.  A ``continue`` or a ``break`` ends one turn of its loop: the loop and every
+    loop around it are read as gone round once, and only statements in the loop's body or ``else`` count (a
+    ``break`` keeps the run from the ``else``; a ``continue`` does not).  So ``getTasksToBeFinished_JEDI``'s
+    ``continue`` at 1667 keeps a run from the turn's writes at 1673, 1676 and 1690, and its ``raise`` at 1666,
+    caught by the ``except`` around the loop that returns, from the count print at 1717 after the loop.  The flow is
+    path-insensitive: a statement only an impossible way after the exit reaches is read as reached, so an answer
+    may leave out what the exit does keep the run from, never add what it does not."""
+    _one_function(exit_, *statements)
+    once: list[ast.AST] = []
+    asked = list(statements)
+    if isinstance(exit_, (ast.Continue, ast.Break)):
+        loops = _loops_around(exit_)
+        if not loops:
+            return []
+        once = list(loops)
+        asked = [statement for statement in statements if _under(statement, loops[0])]
+    if not asked:
+        return []
+    after = reaching_each(asked, [exit_], entered=[exit_], once=once)
+    passing = reaching_each(asked, [exit_], entered=[exit_], once=once, passing=[exit_])
+    return [statement for statement, left, went in zip(asked, after, passing, strict=True) if went and not left]
+
+
+def _loops_around(node: ast.AST) -> list[ast.AST]:
+    """The loops whose body holds *node* in its function, inside out: a ``continue`` or ``break`` in a loop's
+    ``else`` is the loop around it's."""
+    found: list[ast.AST] = []
+    child: ast.AST = node
+    current = getattr(node, "parent", None)
+    while current is not None and not isinstance(current, _SCOPES):
+        if isinstance(current, (ast.For, ast.AsyncFor, ast.While)) and any(one is child for one in current.body):
+            found.append(current)
+        child, current = current, getattr(current, "parent", None)
+    return found
+
+
+def _under(node: ast.AST, ancestor: ast.AST) -> bool:
+    current = getattr(node, "parent", None)
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = getattr(current, "parent", None)
+    return False
 
 
 # -- the premise: no with goes on past a raise in its body ------------------------------------------------------ #

@@ -172,6 +172,55 @@ def scanned(log, c, items):
         log.info("start")  # U2
         if c:
             return  # U3
+
+
+def finished(proxy, log, tasks):
+    try:
+        if not proxy.commit():
+            raise RuntimeError("commit")  # K1
+        for task in tasks:
+            try:
+                proxy.lock(task)
+            except Exception:
+                log.debug("skip")  # K2
+                if not proxy.commit():
+                    raise RuntimeError("commit")  # K3
+                continue  # K4
+            if task.scouted:
+                task.status = "running"  # K5
+            else:
+                task.locked = True  # K6
+            for chunk in task.chunks:
+                if chunk:
+                    break  # K7
+                chunk.read = True  # K8
+            else:
+                task.read = True  # K9
+        log.debug("got")  # K10
+        return tasks  # K11
+    except Exception:
+        log.error("failed")  # K12
+        return None  # K13
+
+
+def tolerant(log, task):
+    try:
+        if task.bad:
+            raise ValueError("bad")  # T1
+        task.checked = True  # T2
+    except ValueError:
+        log.debug("bad")  # T3
+    task.done = True  # T4
+
+
+def tolerant_each(log, tasks):
+    for task in tasks:
+        try:
+            if task.bad:
+                raise ValueError("bad")  # T5
+            task.checked = True  # T6
+        except ValueError:
+            log.debug("bad")  # T7
 """
 
 
@@ -399,6 +448,40 @@ def test_the_end_is_asked_of_one_function_s_pass() -> None:
     pathcond.attach_parents(module)
     with pytest.raises(ValueError, match="a function's pass"):
         flow.ends_after(module.body[0])
+
+
+def test_a_raise_or_return_keeps_a_run_from_what_its_pass_would_have_reached_and_no_handler_reaches() -> None:
+    """A ``raise`` before the loop that the outer ``except`` catches keeps the run from the loop's writes and the
+    print after it, not from the handler's print; the ``raise`` in the loop's handler from the rest of the loop; the
+    last ``return`` from nothing."""
+    asked = _prints("K5", "K6", "K8", "K9", "K10", "K12")
+    assert flow.kept_from(S["K1"], asked) == _prints("K5", "K6", "K8", "K9", "K10")
+    assert flow.kept_from(S["K3"], asked) == _prints("K5", "K6", "K8", "K9", "K10")
+    assert flow.kept_from(S["K11"], asked) == []
+    assert flow.kept_from(S["K13"], asked) == []
+
+
+def test_a_continue_or_break_keeps_a_run_from_the_rest_of_its_loop_s_turn_only() -> None:
+    """``continue`` keeps the run from the turn's writes after it, not from the print after the loop nor the
+    handler's print before it; ``break`` from the rest of its loop's turn and the loop's ``else``."""
+    assert flow.kept_from(S["K4"], _prints("K2", "K5", "K6", "K8", "K9", "K10")) == _prints("K5", "K6", "K8", "K9")
+    assert flow.kept_from(S["K7"], _prints("K5", "K8", "K9", "K10")) == _prints("K8", "K9")
+
+
+def test_a_raise_a_handler_catches_keeps_the_run_only_from_what_the_handler_skips() -> None:
+    """``raise ValueError`` caught in the function skips ``task.checked``; the handler's print and the write after
+    the ``try`` are reached either way.  Caught inside a loop, the run goes on to the next turn, which reaches
+    ``task.checked`` again: a raise is read over the call's pass, not the turn."""
+    assert flow.kept_from(S["T1"], _prints("T2", "T3", "T4")) == _prints("T2")
+    assert flow.kept_from(S["T5"], _prints("T6", "T7")) == []
+
+
+def test_an_exit_read_as_a_pass_goes_on_and_its_flow_is_kept_apart_from_the_exit_s() -> None:
+    """reaching's *passing*: the ``raise`` read as a ``pass`` reaches ``task.checked``; asked again without it, the
+    flow kept for the first question is not the answer."""
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]]) == []
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]], passing=[S["T1"]]) == [S["T1"]]
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]]) == []
 
 
 MANAGERS = """\
