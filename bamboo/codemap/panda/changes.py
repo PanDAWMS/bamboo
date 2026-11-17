@@ -353,14 +353,35 @@ def _held(
     expression: ast.expr, held: dict[str, tuple[str, ...]]
 ) -> Optional[tuple[str, ...]]:
     """The attributes from *expression* to the value, where it is a name of *held* or an attribute on the way from
-    one -- ``self.job`` for ``self`` holding ``job.PandaID`` -- and not the value itself."""
+    one -- ``self.job`` for ``self`` holding ``job.PandaID`` -- and not the value itself.  An attribute read by its
+    name is that attribute (:func:`_named_read`): ``getattr(self, "job")``."""
     if isinstance(expression, ast.Name):
         return held.get(expression.id)
     if isinstance(expression, ast.Attribute):
         rest = _held(expression.value, held)
         if rest is not None and len(rest) > 1 and expression.attr == rest[0]:
             return rest[1:]
+    named = _named_read(expression)
+    if named is not None:
+        rest = _held(named[0], held)
+        if rest is not None and len(rest) > 1 and named[1] == rest[0]:
+            return rest[1:]
     return None
+
+
+def _named_read(expression: Optional[ast.AST]) -> Optional[tuple[ast.expr, Optional[str]]]:
+    """The object and the attribute name, ``None`` where it is not a literal, of a builtin's read of an attribute by
+    its name (:data:`callfacts.ATTRIBUTE`, not ``vars``): ``getattr(x, "a")``, ``object.__getattribute__(x, "a")``
+    -- ``JobSpec.addFile`` reads its raw ``PandaID`` so.  Read as ``x.a``, as the carry reads it."""
+    if not isinstance(expression, ast.Call) or len(expression.args) < 2:
+        return None
+    function = callfacts.builtin_function_at(expression)
+    if function is None or function.gives != callfacts.ATTRIBUTE:
+        return None
+    obj, name = expression.args[0], expression.args[1]
+    if isinstance(obj, ast.Starred) or isinstance(name, ast.Starred):
+        return None
+    return obj, name.value if isinstance(name, ast.Constant) and isinstance(name.value, str) else None
 
 
 def _first(
@@ -485,6 +506,13 @@ class _Reading:
             keyword.arg is None and held_by(keyword.value) for keyword in call.keywords
         ):
             return _ESCAPED
+        by_name = _named_read(call)
+        if by_name is not None and receiver is None and [by_name[0]] == handed:
+            # An attribute read off the object by its name hands it nothing: ``x.a``, whose value the reading of where
+            # it goes reads on (:func:`_held`, :func:`_loses`).  One read by a name not written may be the next
+            # object on the way to the value.
+            rest = held_by(by_name[0])
+            return _ESCAPED if by_name[1] is None and rest is not None and len(rest) > 1 else []
         if isinstance(called, ast.Name) and self.types.is_builtin(
             file, func, called.id
         ):
@@ -2048,11 +2076,9 @@ def _loses(name: ast.Name, held: dict[str, tuple[str, ...]]) -> bool:
     here: ast.expr = name
     rest = held[name.id]
     parent = getattr(here, "parent", None)
-    while (
-        isinstance(parent, ast.Attribute)
-        and parent.value is here
-        and len(rest) > 1
-        and parent.attr == rest[0]
+    while len(rest) > 1 and isinstance(parent, (ast.Attribute, ast.Call)) and (
+        (isinstance(parent, ast.Attribute) and parent.value is here and parent.attr == rest[0])
+        or _named_read(parent) == (here, rest[0])
     ):
         here, rest = parent, rest[1:]
         parent = getattr(here, "parent", None)
