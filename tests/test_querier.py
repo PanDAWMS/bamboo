@@ -4900,6 +4900,116 @@ def test_a_pass_on_the_key_s_object_went_round_its_loop_once_and_a_jump_of_a_loo
     assert got["other"][0] == [once] and got["other"][1] is None
 
 
+def test_a_run_of_the_key_s_rounds_is_cut_at_its_loop_s_turns_and_s4_reads_a_datetime_printed_before_the_arm(tmp_path):
+    """Bundle D, D-2 (P30) and D-3 (P50): a run of the key's records holding several rounds of a worker over objects,
+    its function with no entry row, is cut where a record's row cannot run after the one before it in one turn of the
+    loop whose rows print the run's mark as its element's -- a skip in the inner loop after a Wait starts a turn, the
+    rows after it in that turn do not; and S3 puts in each turn's values what the rows every way to the arm prints
+    before it printed there, a ``str()`` of a datetime read as one, so S4 reads the arm's test false on them."""
+    corpus = _corpus(tmp_path) / "pandaserver"
+    (corpus / "fin.py").write_text(_FINISHER_LOOP)
+    (corpus / "fin2.py").write_text(_FINISHER_LOOP.replace("Limit:{timeOut} End:{endTime}",
+                                                           "Limit:{str(timeOut)} End:{str(endTime)}"))
+    stamp = "2026-01-01 00:00:{:02d},000 panda.log.datasetManager: DEBUG    {}\n"
+    wait = ["7 Cloud:WORLD", "7 Limit:2025-12-26 00:00:00 End:2026-01-01 08:49:24", "7 Finisher : Wait"]
+    logs = {"twice": wait * 2, "skip": [*wait, "7 skip f.root", *wait], "once": wait}
+    for name, said in logs.items():
+        (tmp_path / f"{name}.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(said)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import rerun as RR
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+            from bamboo.querier.which_ran import cut_passes
+
+            R.ROWS_FROM = "walk"
+            got = {}
+            for rel in ("pandaserver/fin.py", "pandaserver/fin2.py"):
+                fn = R.function(rel, "run", (24,))
+                for name in ("twice", "skip", "once"):
+                    run, = runs_for(read_log(f"{name}.log"), "7")
+                    parts, how = cut_passes(fn, run, "outside")
+                    got[f"{rel[-6:-3]} {name}"] = [[len(p.records) for p in parts], how]
+            fn = R.function("pandaserver/fin2.py", "run", (24,))
+            run, = runs_for(read_log("twice.log"), "7")
+            parts, _ = cut_passes(fn, run, "outside")
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.opened, r.ends, r.rests, r.end_code, r.hand, r.hand_used = [], [], [], [], None, {}, []
+            r.hop, r.mode, r.decide = "S2", "outside", "positive"
+            r.base_env = lambda at=None, file_row=None: E.Env()
+            r._printed = lambda env: {}
+            b = r._which_way(fn, "pandaserver/fin2.py", "run", parts, [RR.Arm(24, ["failed"], ["endTime < timeOut"])])
+            r.input(r.blocked(b))
+            got["s4"] = [x for x in r.lines if x.startswith("'endTime") or (x.startswith("  pass ") and " is False" in x)]
+            got["end"] = [str(w) for _, w in r.ends]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    turns = ("cut at the turns of the loop at 8, whose rows print the run's mark as its element's: 2 pass(es), one "
+             "starting where a record's row cannot run after the one before it in a turn")
+    for rel in ("fin", "in2"):
+        # two rounds in one run: the second Cloud row cannot follow the first round's Wait in a turn
+        assert got[f"{rel} twice"][0] == [3, 3] and got[f"{rel} twice"][1].endswith(f"the run is not split; {turns}"), got
+        # the skip row (16, in the inner loop) starts the second round, and the rows after it stay in that round
+        assert got[f"{rel} skip"][0] == [3, 4] and got[f"{rel} skip"][1].endswith(turns), got
+        # one round: kept whole, as before
+        assert got[f"{rel} once"][0] == [3] and got[f"{rel} once"][1].endswith("the run is not split"), got
+    assert len(got["s4"]) == 3, got
+    assert got["s4"][0] == "'endTime < timeOut' at 22: false in every pass (2) on the values read, by ['endTime < timeOut']"
+    for line in got["s4"][1:]:
+        assert line.startswith("  pass ") and "endTime < timeOut is False: endTime = datetime.datetime(2026, 1, 1, 8, 49, 24) (hole of run:21 at " in line
+        assert "printed as str() of a datetime (read as one)); timeOut = datetime.datetime(2025, 12, 26, 0, 0) (hole of run:21 at " in line
+    assert len(got["end"]) == 1, got
+
+
+def test_a_selection_that_stamps_the_column_its_term_reads_says_the_row_s_value_falls_in_the_stay(tmp_path):
+    """Bundle D, D-5 (P24): a selection refusing the row by a term on a column its own function writes with the clock
+    (lockJobsForFinisher's 895 ``SET modificationTime=CURRENT_DATE``) says so where the row's value falls in the stay,
+    stuck's one-moment reading taking the stay's start from ``Missed.began``.  Not where the value is before the stay,
+    nor for a column it writes no clock to, nor for a selection whose function writes none (another's clock write)."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            lock = "pandaserver/taskbuffer/db_proxy_mods/job_standalone_module.py::lockJobsForFinisher"
+            clock = lambda line: N(line=line, outcome="runtime(CURRENT_DATE)", amount=None)
+            writers = {"JobSpec.modificationTime": [N(owner=lock, branches=[clock(895)]), N(owner="x.py::updateJob", branches=[clock(10)])],
+                       "JobSpec.currentPriority": [N(owner=lock, branches=[N(line=901, outcome="800", amount=None)])]}
+            held = {"JobSpec.modificationTime": "2026-11-15 09:39:56", "JobSpec.currentPriority": 320}
+            r = RR.Rerun.__new__(RR.Rerun)
+            r._subject_writers = lambda s: writers.get(s, [])
+            r._held = lambda s, q: (s in held, held.get(s))
+            at = datetime.datetime(2026, 11, 15, 9, 43, 30)
+
+            def said(owner, began):
+                q = RR.Missed("JobSpec.jobStatus", "transferring", "", at, at, [], "", None, at_end=True, began=began)
+                return r._stamps_itself(N(owner=owner), q, {"JobSpec.modificationTime", "JobSpec.currentPriority"})
+
+            print(json.dumps({"in": said(lock, datetime.datetime(2026, 11, 14, 8, 49, 28)),
+                              "before": said(lock, datetime.datetime(2026, 11, 15, 9, 40)),
+                              "other": said("x.py::getJobs", datetime.datetime(2026, 11, 14, 8, 49, 28))}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["in"] == [
+        "lockJobsForFinisher writes JobSpec.modificationTime with the clock itself on the rows it takes (at [895]), and "
+        "the row's 2026-11-15 09:39:56 falls in the stay, after 2026-11-14 08:49:28 (which write put it there is not "
+        "read): each pass of it that takes the row stamps it again, so it takes the row no more often than its term's "
+        "gap"], got
+    assert got["before"] == [] and got["other"] == [], got
+
+
 def test_a_late_value_s_mover_that_ran_in_the_stay_goes_on_alone_and_one_whose_runs_fall_outside_it_is_excluded(tmp_path):
     (_corpus(tmp_path) / "pandaserver" / "fin.py").write_text(_FINISHER_LOOP)
     stamp = "2026-01-01 00:00:0{},000 panda.log.datasetManager: DEBUG    {}\n"
@@ -16235,7 +16345,7 @@ def test_a_write_whose_statement_s_guard_its_pass_read_false_did_not_run_and_the
             # A-5
             st1, st2 = N(owner="t.py::prep", line=3696), N(owner="t.py::prep", line=3741)
             mv = N(records=[N(stamp="2026-10-29 12:47:05,000", text="r", token="")])
-            RR.R.passes = lambda fn, run, mode: ([mv], "cut")
+            RR.R.passes = RR.cut_passes = lambda fn, run, mode: ([mv], "cut")
             RR.R.function = lambda rel, name, lines: N(node=None, row_at=lambda stmt: N(line=stmt.line, map_rows=[
                 N(text="f'got jediTaskID={jediTaskID} finished for early avalanche'", holes=[N(expression="jediTaskID",
                                                                                               columns=["JediTaskSpec.jediTaskID"])])]))
@@ -16283,7 +16393,7 @@ def test_a_selection_whose_hand_ons_print_the_key_every_way_and_printed_none_han
             S = "JediTaskSpec.status"
             st = {n: N(owner="t.py::prep", line=n) for n in (3696, 3741, 3789)}
             mv = N(records=[N(stamp="2026-11-15 20:03:00,500", text="r", token="")])
-            RR.R.passes = lambda fn, run, mode: ([mv], "cut")
+            RR.R.passes = RR.cut_passes = lambda fn, run, mode: ([mv], "cut")
             RR.R.statement_at = lambda node, line: N(line=line)
             key_hole = N(text="f'got jediTaskID={jediTaskID} ...'", holes=[N(expression="jediTaskID", columns=["JediTaskSpec.jediTaskID"])])
             RR.R.function = lambda rel, name, lines: N(node=None, rows=[N(line=3643, stmt="s3643"), N(line=3695, stmt="s3695")],

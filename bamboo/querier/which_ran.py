@@ -62,7 +62,11 @@ from bamboo.codemap import (  # noqa: E402
     trace,  # noqa: E402
 )
 from bamboo.codemap.calls import Target  # noqa: E402
-from bamboo.codemap.models import MUST_PART_BIND, MUST_PART_MARK, MUST_ROW_WRITTEN  # noqa: E402
+from bamboo.codemap.models import (  # noqa: E402
+    MUST_PART_BIND,
+    MUST_PART_MARK,
+    MUST_ROW_WRITTEN,
+)
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
@@ -141,8 +145,64 @@ def of_mover(run: Run, owner: str) -> bool:
     return m is None or m[1] == owner.split("::")[-1]
 
 
+def turn_parts(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
+    """*run* cut at the turns of *fn*'s loop over objects whose rows print the run's mark as the element's
+    (:func:`keyed_loops`), with a word on how; ``([run], '')`` where no one such loop is, or the run holds one turn.
+
+    A record starts a turn where its row cannot run after the row of the record before it in one turn of that loop
+    (the map's ``flow.runs_after``, the loop gone round once).  A record of no row of *fn*, or of several, starts none,
+    and the row before it stays the one read.  A run of a key's records holds one turn per call of a worker that takes
+    the object once in what it goes over: datasetManager's FinisherThr.run prints ``{job.PandaID} Cloud:`` at 696 and
+    four rows after it in each turn of 662, and NJ-transferring-stuck's run of the job on one machine holds three rounds
+    of the Finisher in 15 records.  A turn that leaves before 696 (675's error, then ``continue``) is a turn too: 675
+    cannot run after 734 in one turn.  Bundle D, D-2 (P30; out/gm/qk-design.md, tmaeno's OK 2026-11-17)."""
+    sn = R.seen(fn, run, mode)
+    keyed = keyed_loops(fn, sn, run)
+    loops = [node for node in R.own_nodes(fn.node) if isinstance(node, (ast.For, ast.AsyncFor)) and id(node) in keyed]
+    if len(loops) != 1:
+        return [run], ""
+    loop = loops[0]
+    stmt_of = {row.line: row.stmt for row in fn.rows}
+    lines_of: dict[int, set[int]] = {}
+    for line, found in sn.hits.items():
+        for i, _, _ in found:
+            lines_of.setdefault(i, set()).add(line)
+    starts = [0]
+    before: ast.stmt | None = None
+    for i in range(len(run.records)):
+        lines = lines_of.get(i, set())
+        if len(lines) != 1:
+            continue
+        stmt = stmt_of[next(iter(lines))]
+        if before is not None:
+            try:
+                follows = flow.runs_after(before, stmt, once=[loop], printed=True)
+            except ValueError:
+                follows = True
+            if not follows:
+                starts.append(i)
+        before = stmt
+    if len(starts) < 2:
+        return [run], ""
+    cuts = starts + [len(run.records)]
+    parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+    return parts, (f"cut at the turns of the loop at {loop.lineno}, whose rows print the run's mark as its element's: "
+                   f"{len(parts)} pass(es), one starting where a record's row cannot run after the one before it in a turn")
+
+
+def cut_passes(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
+    """*run* cut into *fn*'s passes: at its entry row (``rows.passes``), else at the turns of its loop over the run's
+    object (:func:`turn_parts`); with a word on how."""
+    parts, how = R.passes(fn, run, mode)
+    if parts == [run]:
+        turns, said = turn_parts(fn, run, mode)
+        if len(turns) > 1:
+            return turns, f"{how}; {said}"
+    return parts, how
+
+
 def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
-    """*run* cut into *fn*'s passes (``rows.passes``), with a word on how.  A run kept whole that holds no record only
+    """*run* cut into *fn*'s passes (:func:`cut_passes`), with a word on how.  A run kept whole that holds no record only
     *fn*'s rows can have printed (:func:`_rows_shown`), under a mark that does not name *fn*, is *fn*'s pass only where
     it shows *fn* was called (:func:`called_in`); otherwise it is not shown to be one, and is set aside.  Another
     function shares the mark -- TaskBrokerThread's runImpl prints under the same time token as TaskCheckerThread's --
@@ -150,7 +210,7 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     doBasicPostProcess.  Kept whole, judge read the absent rows as the way the pass went and chose an exit by
     elimination (KNOWN_ISSUES.md K69).  Set aside is not shown not to be: a caller's row after the call that another
     class's method prints alike does not show it (AtlasAnal.doRefine's "done", AtlasProd.doRefine's too)."""
-    parts, how = R.passes(fn, run, mode)
+    parts, how = cut_passes(fn, run, mode)
     if parts != [run]:
         return parts, how
     m = re.match(r"([A-Za-z_]\w*) <", run.token)

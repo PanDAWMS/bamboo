@@ -167,6 +167,7 @@ from bamboo.querier.which_ran import (
     before_stretch,
     branches_at,
     class_of,
+    cut_passes,
     holds_key,
     hole_values,
     inside_call,
@@ -175,6 +176,7 @@ from bamboo.querier.which_ran import (
     of_mover,
     once_loops_of,
     passes_of,
+    printed_before,
     printed_row_column,
     recorded_in_pass,
     spans,
@@ -2296,6 +2298,9 @@ class Missed:
     #: what the amounts a statement's runs print are asked over (:meth:`Rerun._fill`): stuck's S1 window, read at one
     #: moment; None: the part of [since, moved] judgement 3 asks first (``W.last_part``)
     amounts: W.Asking | None = None
+    #: when the stay began, where the window is one moment (stuck's as_of, ``since`` = ``moved``): the observed value's
+    #: last statuslog row (:meth:`Rerun._stamps_itself`); None: ``since``
+    began: datetime.datetime | None = None
 
 
 @dataclass
@@ -8251,7 +8256,7 @@ class Rerun:
             fn = R.function(rel, name, [st.line for st in own])
         except (LookupError, ValueError, SyntaxError):
             return None
-        parts, _ = R.passes(fn, cast(Any, q.run), self.mode)
+        parts, _ = cut_passes(fn, cast(Any, q.run), self.mode)
         begun = [p for p in parts if p.records and W.when(p.records[0].stamp) <= q.moved + datetime.timedelta(seconds=1)]
         if not begun:
             return None
@@ -9358,6 +9363,14 @@ class Rerun:
         for n, (run, env) in enumerate(zip(q.passes, q.envs, strict=True), 1):
             for line in self._held_printed(fn, run, env, guarded, tested):
                 self.say(f"  pass {n}: {line}")
+            # D-3 (P50, bundle D): what the rows every way to a guarded arm prints before it printed in the pass, put as
+            # the values its tests read (``printed_before``): FinisherThr's 727 prints the Limit and End 728 compares
+            if run is not None:
+                sn = R.claim([R.seen(fn, run, self.mode)])[0]
+                for a in guarded:
+                    stmt = R.statement_at(fn.node, a.line)
+                    if stmt is not None:
+                        printed_before(fn, sn, stmt, R.must_rows(fn.node, stmt)[0], env)
         per_pass = []
         for run, env, path in zip(q.passes, q.envs, paths, strict=True):
             fixed: dict[str, bool] = {}
@@ -9811,8 +9824,10 @@ class Rerun:
             return []
         at, words, header = self._reading_moment(q.subject, as_of)
         asked = f"{q.subject}={q.observed}"
+        rows = [s for s in self.data.get("statuslog", {}).get("states", []) if s["status"] == q.observed]
         mq = Missed(q.subject, q.observed, "", at, at, [rs for rs in follow.reader_statements if asked in rs.selects], "", None,
-                    end=words, start=words, at_end=True, amounts=W.stuck(self.data.get("statuslog", {}), q.observed))
+                    end=words, start=words, at_end=True, amounts=W.stuck(self.data.get("statuslog", {}), q.observed),
+                    began=_when(str(rows[-1].get("time_extended") or rows[-1]["time"])) if rows else None)
         paths = paths_of(follow, writers, q.subject, q.observed)
         self.say(header)
         out = []
@@ -10731,7 +10746,7 @@ class Rerun:
                         and set(kf.writes.get(j.subject, [])) & {b.line, *(getattr(b, "other_lines", None) or [])}})
         cache: dict[tuple[int, int], list] = self.__dict__.setdefault("_passes_cut", {})
         if (id(fn), id(run)) not in cache:
-            cache[(id(fn), id(run))] = [fn, run, R.passes(fn, run, self.mode)[0]]
+            cache[(id(fn), id(run))] = [fn, run, cut_passes(fn, run, self.mode)[0]]
         record = run.records[i]
         part = next((p for p in cache[(id(fn), id(run))][2] if any(r is record for r in p.records)), None)
         if part is None:
@@ -11128,10 +11143,11 @@ class Rerun:
             return f"{entry} {leaves[0].why}"
         return f"{entry}: " + "; ".join(f"{leaf.text} {leaf.why}" for leaf in leaves)
 
-    def _route_refuses(self, route, q: Missed) -> list[str]:
+    def _route_refuses(self, route, q: Missed, terms: set[str] | None = None) -> list[str]:
         """What refuses the row on one route of calls, read from its record alone: a refused pair it holds, a
         restricted subject whose values lack the row's (the asked one compared too: a call that never asks for the
-        observed value did not pass the row over), a condition false for it all the window."""
+        observed value did not pass the row over), a condition false for it all the window.  *terms*, where handed,
+        gets the subjects of the false conditions' terms."""
         said, said_on = [], set()
         for pair in route.refuses:
             if self._row_holds(pair, q):
@@ -11142,20 +11158,56 @@ class Rerun:
             if why:
                 said.append(f"restricts {subject} to {sorted(values)}; {why}")
                 said_on.add(subject)
-        said += [self._tree_words(entry, leaves) for entry, leaves in self._trees_false(route.condition_trees, q, said_on)]
+        false = self._trees_false(route.condition_trees, q, said_on)
+        if terms is not None:
+            terms.update(leaf.subject for _, leaves in false for leaf in leaves)
+        said += [self._tree_words(entry, leaves) for entry, leaves in false]
         return said
+
+    def _stamps_itself(self, st, q: Missed, subjects: set[str]) -> list[str]:
+        """Bundle D, D-5 (P24, out/gm/qk-design.md, tmaeno's OK 2026-11-17): of the columns *subjects* whose terms keep
+        the selection *st* from the row, those its own function writes with the clock (the map's arm with
+        ``_written_offset`` 0): lockJobsForFinisher's 895 ``SET modificationTime=CURRENT_DATE`` on each row its 892
+        takes, lockJobsForActivator's 941 ``prodDBUpdateTime``.  Where the row's value of one is a time inside the stay
+        (after its start, by the time the window ends), every pass that takes the row stamps it again: the selection
+        takes the row no more often than the gap its term reads.  Which write put the row's value is not read: a pass
+        of the selection, or another write after it (NJ-transferring-stuck's 09:39:56, 24 s after the last Finisher
+        round's prints, by the updateJob that follows the round)."""
+        out = []
+        own = _bare(st.owner)
+        began = q.began if q.began is not None else q.since
+        for subject in sorted(subjects):
+            # the row's value first: the map's writers are read only for a time in the stay
+            known, held = self._held(subject, q)
+            try:
+                value = _when(str(held)) if known and held is not None else None
+            except (TypeError, ValueError):
+                value = None
+            if value is None or not began < value <= q.moved:
+                continue
+            arms = sorted({b.line for j in self._subject_writers(subject) if _bare(j.owner) == own for b in j.branches
+                           if _written_offset(b) == datetime.timedelta(0)})
+            if not arms:
+                continue
+            out.append(f"{own.split('::')[-1]} writes {subject} with the clock itself on the rows it takes (at {arms}), "
+                       f"and the row's {held} falls in the stay, after {began} (which write put it there is not read): "
+                       "each pass of it that takes the row stamps it again, so it takes the row no more often than "
+                       "its term's gap")
+        return out
 
     def _routes(self, st, q: Missed) -> tuple[str, list[str]]:
         """L2's verdict from the routes of calls into *st* (the map's ``call_readings``): ``refused`` when the map
         places every call (``callers_complete``) and every route that runs the statement refuses the row;
         ``refused on a call`` for the routes that do; else nothing.  A route reading as the statement refuses only
-        what the statement does, and that was said before the routes are asked."""
+        what the statement does, and that was said before the routes are asked.  A refusing term on a column the
+        selection stamps with the clock itself is said so (:meth:`_stamps_itself`)."""
         lines, running, refusing = [], 0, 0
+        terms: set[str] = set()
         for route in st.call_readings:
             if route.not_run:
                 continue
             running += 1
-            why = [] if route.as_statement else self._route_refuses(route, q)
+            why = [] if route.as_statement else self._route_refuses(route, q, terms)
             if not why:
                 continue
             refusing += 1
@@ -11164,6 +11216,7 @@ class Rerun:
             lines.append(f"called from {route.chain[-1]}{via} ({constants}): " + "; ".join(why))
         if not refusing:
             return "not settled", []
+        lines += self._stamps_itself(st, q, terms)
         if st.callers_complete and refusing == running:
             return "refused", [f"every call refuses it: {running} route(s), and the map places every call", *lines]
         stop = "; ".join(st.callers_stop) or "the map does not say it places every call"
