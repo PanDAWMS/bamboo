@@ -59,6 +59,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import re
+from bisect import bisect_left
 from collections import defaultdict
 from functools import lru_cache, partial
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence
@@ -76,6 +77,7 @@ from bamboo.codemap.models import (
     DbWrite,
     EntityNode,
     LoopLines,
+    PathBinding,
     ReachNode,
     WrittenValue,
 )
@@ -193,6 +195,9 @@ class _Link(NamedTuple):
 #: (:func:`follow`'s *kept*).
 HeldKept = dict[tuple[str, frozenset[str], frozenset[str]], tuple[dict[str, Optional[tuple[str, int, str]]], bool, tuple["Site", ...]]]
 
+#: Each caller's bindings of a call's result, by line, in their order: read once per caller in one :func:`follow`.
+_ResultsAt = dict[str, dict[int, list[PathBinding]]]
+
 
 def follow(
     rows: dict[str, ReachNode],
@@ -224,6 +229,7 @@ def follow(
     cut = ""
     entered: dict[_State, tuple[_State, int, str]] = {}
     returned: dict[_State, dict[str, tuple[int, str, str]]] = defaultdict(dict)
+    results: _ResultsAt = {}
 
     def into(child: _State, link: _Link) -> None:
         """Bring the object into *child* by *link*; what *child* already says of it goes back at once."""
@@ -241,7 +247,7 @@ def follow(
             entered.setdefault(child, (link.caller, link.line, link.handed))
         if link not in links[child]:
             links[child].add(link)
-            if _hand_back(rows, link, outputs[child], extra, returned, capped):
+            if _hand_back(rows, link, outputs[child], extra, returned, capped, results):
                 work.append(link.caller)
         if child not in read_with:
             work.append(child)
@@ -318,7 +324,7 @@ def follow(
         if not ends <= outputs[state]:
             outputs[state] |= ends
             for link in sorted(links[state]):
-                if _hand_back(rows, link, outputs[state], extra, returned, capped):
+                if _hand_back(rows, link, outputs[state], extra, returned, capped, results):
                     work.append(link.caller)
     escapes: dict[Site, None] = {}
     for end in sorted(outputs[root]):
@@ -372,9 +378,11 @@ def _hand_back(
     extra: dict[_State, set[str]],
     returned: dict[_State, dict[str, tuple[int, str, str]]],
     capped: dict[Site, None],
+    results: Optional["_ResultsAt"] = None,
 ) -> bool:
     """Put where the object ends up in the callee into the caller's state; whether that added a path.  A path
-    longer than :data:`MAX_PARTS` is not put, and goes into *capped*."""
+    longer than :data:`MAX_PARTS` is not put, and goes into *capped*.  *results* keeps each caller's bindings of a
+    call's result by line for one :func:`follow`, which hands back to one caller many times."""
     caller = rows.get(link.caller[0])
     if caller is None or not ends:
         return False
@@ -385,10 +393,8 @@ def _hand_back(
             # ``x = f()[0]``: x is what is at [0] of what f returns, and the end is below that, or not x's.
             names = [
                 result.name + below
-                for result in caller.bindings
-                if result.how == BIND_RESULT
-                and result.line == link.line
-                and link.to in result.to
+                for result in _results_at(caller, results).get(link.line, ())
+                if link.to in result.to
                 and (below := _under(RETURN + result.path, end)) is not None
             ]
         else:
@@ -411,6 +417,19 @@ def _hand_back(
             returned[link.caller].setdefault(name, (link.line, link.to, link.handed))
             added = True
     return added
+
+
+def _results_at(caller: ReachNode, results: Optional[_ResultsAt]) -> dict[int, list[PathBinding]]:
+    """*caller*'s bindings of a call's result by line, in their order; kept in *results* where given."""
+    got = results.get(caller.owner) if results is not None else None
+    if got is None:
+        got = defaultdict(list)
+        for binding in caller.bindings:
+            if binding.how == BIND_RESULT:
+                got[binding.line].append(binding)
+        if results is not None:
+            results[caller.owner] = got
+    return got
 
 
 def _held_kept(
@@ -479,6 +498,13 @@ def _held_steps(
     impl.taskSpec`` and handed to ``tmpTaskSpec.setErrDiag()``, is not read
     back to the ``jediTaskID`` the other branch gives it.  The others join
     as starts once the bindings are read.
+
+    The bindings are read again until none reaches a new path, and each
+    pass reads a binding only against the paths reached since its last
+    pass: reading it again against an older path changes nothing, since
+    what a binding reaches from a path is the same each time, a path once
+    held never steps on again, and what ``entered`` is read for -- whether a
+    path was reached forward at all -- only ever turns on.
     """
     held: dict[str, Optional[tuple[str, int, str]]] = {}
     # held's paths in the order reached, and where each root's are in it: a path is below another only with
@@ -497,17 +523,29 @@ def _held_steps(
     entered: dict[str, set[int]] = defaultdict(
         set
     )  # path -> the bindings it was reached forward by
+    # Each stepped binding with its index and its two sides' roots; and how many paths were reached when a pass last
+    # read it, so the next pass reads it against the newer paths only.
+    stepped = [
+        (index, binding, {_root(binding.path), _root(binding.name)})
+        for index, binding in enumerate(row.bindings)
+        if binding.how in STEPPED
+    ]
+    read_to: dict[int, int] = {}
     changed = True
     while changed:
         changed = False
-        for index, binding in enumerate(row.bindings):
-            if binding.how not in STEPPED:
-                continue
+        for index, binding, sides in stepped:
             # The name says where it holds the path: ``updatedJobList[]`` for ``updatedJobList.append(job)``.
             target = binding.name
-            sides = {_root(binding.path), _root(target)}
+            since = read_to.get(index, 0)
+            read_to[index] = len(order)
             for one in [
-                order[at] for at in sorted(at for root in sides for at in by_root[root])
+                order[at]
+                for at in sorted(
+                    at
+                    for root in sides
+                    for at in by_root[root][bisect_left(by_root[root], since) :]
+                )
             ]:
                 for frm, to, way in (
                     (binding.path, target, _FORWARD),
@@ -570,12 +608,14 @@ def steps_to(row: ReachNode, start: str, path: str) -> list[tuple[int, str, str]
     return list(reversed(way)) if path == start else []
 
 
+@lru_cache(maxsize=1 << 20)
 def _under(base: str, path: str) -> Optional[str]:
     """What *path* goes on with below *base* -- ``.job`` for ``self`` and ``self.job`` -- or ``None`` where it is not below it.
 
     Part by part, where ``[]`` -- an element, at a position not known --
     matches ``[i]`` and ``['k']`` as well as itself: ``d['a'].x`` is below
     ``d[]`` and ``d[].x`` below ``d['a']``, and neither is below ``d['b']``.
+    Kept by (base, path): :func:`_held_steps` asks the same pairs of one function many times over a follow.
     """
     if path == base:
         return ""
