@@ -977,3 +977,50 @@ def test_two_keys_naming_one_column_give_a_hole_one_name(tmp_path: Path) -> None
     branch = _branch(fragment, "W")
     named = [(one.line, one.expression, one.column, one.part) for one in branch.must_names or []]
     assert named and len(named) == len(set(named))
+
+
+MADE = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+class JediTaskSpec(object):
+    attributes = ("jediTaskID", "status", "attemptNr")
+    _zeroAttrs = ("attemptNr",)
+
+    def __init__(self):
+        for attr in self.attributes:
+            if attr in self._zeroAttrs:
+                object.__setattr__(self, attr, 0)
+            else:
+                object.__setattr__(self, attr, None)
+
+
+def made(self, tasks):
+    for jediTaskID in tasks:
+        tmpTaskSpec = JediTaskSpec()  # NEW
+        tmpTaskSpec.status = "done"  # S
+        tmpTaskSpec.attemptNr = 3  # Z
+
+
+def either(self, task, spec):
+    if task:
+        tmpTaskSpec = JediTaskSpec()
+    else:
+        tmpTaskSpec = spec
+    tmpTaskSpec.status = "done"  # E
+"""
+
+
+def test_an_arm_on_an_object_its_function_makes_says_what_the_constructor_left_in_the_field(tmp_path: Path) -> None:
+    """``tmpTaskSpec = JediTaskSpec()`` is the only binding reaching the arm: made, ``status`` is ``None`` and
+    ``attemptNr`` -- one of ``_zeroAttrs`` -- ``0``, as ``__init__`` stores them.  Where another binding (a spec
+    handed in) reaches the arm too, nothing is said."""
+    status = _build(tmp_path, MADE, ("made", "S"), ("either", "E"), subject="JediTaskSpec.status", declared=TASKS)
+    made = _branch(status, "S").made_before
+    assert made is not None and (made.line, made.cls, made.value) == (_line(MADE, "NEW"), "JediTaskSpec", "None")
+    assert _branch(status, "E").made_before is None
+    zero = _build(tmp_path, MADE, ("made", "Z"), subject="JediTaskSpec.attemptNr", declared=TASKS)
+    made = _branch(zero, "Z").made_before
+    assert made is not None and made.value == "0"

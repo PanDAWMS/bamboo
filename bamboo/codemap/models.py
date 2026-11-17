@@ -446,6 +446,24 @@ class MustName(BaseModel):
     )
 
 
+class MadeBefore(BaseModel):
+    """The object an arm writes, made in the arm's function by a spec's constructor that is the only binding of it
+    reaching the arm (:attr:`Branch.made_before`), with the value the written field holds as the constructor left it.
+
+    ``TaskCommando.runImpl`` makes ``tmpTaskSpec = JediTaskSpec()`` at 154, and its arm at 197 sets ``status``: made,
+    ``status`` is ``None`` (:func:`bamboo.codemap.panda.recognizers.progress.spec_initial_values`).  A reader of
+    ``set task_status=None`` at 200 knows the arm did not set it on that way.  The value in memory, not the row's:
+    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  Nor the
+    value just before the arm: what runs between the construction and the arm is not read here -- ``peekJobLog``
+    makes ``job = JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm
+    at 1618.
+    """
+
+    line: int = Field(description="The construction's line: ``tmpTaskSpec = JediTaskSpec()``.")
+    cls: str = Field(description="The class constructed: ``JediTaskSpec``.")
+    value: str = Field(description="The written field's value as the constructor left it, a literal's ``repr``: ``None``.")
+
+
 class AfterPrint(BaseModel):
     """A print the owner can run after an arm's write in the same call (:attr:`Branch.after_prints`), with the holes
     holding the written row's columns.
@@ -1234,6 +1252,16 @@ class Branch(BaseModel):
     must_hole: str = Field(
         default="",
         description="Why ``must_prints``, ``must_names`` or ``after_prints`` is ``None``.",
+    )
+    made_before: Optional[MadeBefore] = Field(
+        default=None,
+        description=(
+            "Where the object the arm writes is made in its function by a spec's constructor called with nothing, "
+            "the only binding of the name reaching the arm -- on every write of a branch, the same one --: that "
+            "construction and the written field's value as the constructor left it (:class:`MadeBefore`).  None "
+            "where it is not so made, or the constructor's value for the field is not read; read by "
+            ":mod:`bamboo.codemap.panda.mustprints`."
+        ),
     )
     after_prints: Optional[list[AfterPrint]] = Field(
         default=None,

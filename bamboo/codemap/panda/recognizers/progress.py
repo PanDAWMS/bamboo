@@ -911,17 +911,7 @@ def spec_unset_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]
     found: dict[tuple[str, str], str] = {}
     for module in modules:
         for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
-            declared: dict[str, list[str]] = {}
-            for stmt in cls.body:
-                value = getattr(stmt, "value", None)
-                if not isinstance(value, (ast.Tuple, ast.List)):
-                    continue
-                names = [one.value for one in value.elts if isinstance(one, ast.Constant) and isinstance(one.value, str)]
-                if len(names) != len(value.elts):
-                    continue
-                for target in targets_of(stmt):
-                    if isinstance(target, ast.Name):
-                        declared[target.id] = names
+            declared = _name_tuples(cls)
             unset_tests = [n for n in walk(cls) if isinstance(n, ast.If) and _tests_unset(n.test)]
             inner = [n for outer in unset_tests for stmt in outer.body for n in walk(stmt) if isinstance(n, ast.If)]
             for test in inner:
@@ -940,6 +930,95 @@ def spec_unset_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]
                 if literal is not None:
                     found.update(((cls.name, attribute), literal) for attribute in declared[held])
     return found
+
+
+def _name_tuples(cls: ast.ClassDef) -> dict[str, list[str]]:
+    """The tuples or lists of names *cls*'s body binds, by name: ``_attributes``, ``_zeroAttrs``."""
+    declared: dict[str, list[str]] = {}
+    for stmt in cls.body:
+        value = getattr(stmt, "value", None)
+        if not isinstance(value, (ast.Tuple, ast.List)):
+            continue
+        names = [one.value for one in value.elts if isinstance(one, ast.Constant) and isinstance(one.value, str)]
+        if len(names) != len(value.elts):
+            continue
+        for target in targets_of(stmt):
+            if isinstance(target, ast.Name):
+                declared[target.id] = names
+    return declared
+
+
+def spec_initial_values(modules: list[SourceModule]) -> dict[tuple[str, str], str]:
+    """``{(spec_class, attribute): value}`` a spec's constructor leaves in each field, as the literal's ``repr``:
+    ``JobSpec()`` starts every field ``None``; ``JediTaskSpec()`` and ``JediFileSpec()`` start a field of
+    ``_zeroAttrs`` at ``0`` and every other ``None``.  What the object holds in memory, not what its row is given:
+    :func:`spec_unset_values` reads that, ``valuesMap``'s ``0`` for a ``JobSpec`` field of ``_zeroAttrs`` left
+    ``None``.
+
+    **The stores, not the names.**  ``__init__``'s own loop over a tuple of names the class declares -- ``for attr
+    in self._attributes:`` -- storing a literal into ``self`` by the loop's name (``object.__setattr__(self, attr,
+    None)``, ``setattr(self, attr, None)``) gives each name that literal; under ``if attr in self._zeroAttrs:`` the
+    body's for the names of that tuple, the ``else``'s for the rest.  A constructor storing any other way gives
+    nothing for its fields.
+    """
+    found: dict[tuple[str, str], str] = {}
+    for module in modules:
+        for cls in (n for n in walk(module.tree) if isinstance(n, ast.ClassDef)):
+            init = next(
+                (n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__init__"),
+                None,
+            )
+            if init is None:
+                continue
+            declared = _name_tuples(cls)
+            for loop in init.body:
+                if not (
+                    isinstance(loop, ast.For)
+                    and isinstance(loop.target, ast.Name)
+                    and isinstance(loop.iter, ast.Attribute)
+                    and isinstance(loop.iter.value, ast.Name)
+                    and loop.iter.value.id == "self"
+                    and loop.iter.attr in declared
+                ):
+                    continue
+                for attribute in declared[loop.iter.attr]:
+                    value = _initial_in(loop.body, loop.target.id, attribute, declared)
+                    if value is not None:
+                        found[(cls.name, attribute)] = value
+    return found
+
+
+def _initial_in(
+    body: list[ast.stmt], variable: str, attribute: str, declared: dict[str, list[str]]
+) -> Optional[str]:
+    """The literal *body* stores into ``self`` by *variable* when it holds *attribute*, as its ``repr``; None where
+    the way to the store is not read."""
+    for stmt in body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            stores = (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "__setattr__"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "object"
+            ) or (isinstance(call.func, ast.Name) and call.func.id == "setattr")
+            if (
+                stores
+                and len(call.args) == 3
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == "self"
+                and isinstance(call.args[1], ast.Name)
+                and call.args[1].id == variable
+                and isinstance(call.args[2], ast.Constant)
+            ):
+                return repr(call.args[2].value)
+        elif isinstance(stmt, ast.If):
+            held = _unset_membership(stmt.test)
+            left = stmt.test.left if isinstance(stmt.test, ast.Compare) else None
+            if held is None or held not in declared or not (isinstance(left, ast.Name) and left.id == variable):
+                return None
+            return _initial_in(stmt.body if attribute in declared[held] else stmt.orelse, variable, attribute, declared)
+    return None
 
 
 def spec_map_keys(modules: list[SourceModule]) -> dict[str, str]:

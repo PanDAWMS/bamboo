@@ -21187,6 +21187,54 @@ def test_an_insert_making_a_row_of_an_object_written_whole_writes_its_classs_val
     assert born.writes["JobSpec.taskBufferErrorCode"] == [line]
 
 
+#: PanDA's two constructors: JobSpec leaves every field None (valuesMap gives the row 0 for _zeroAttrs); JediFileSpec
+#: leaves a field of _zeroAttrs 0 in memory already; DatasetSpec stores by setattr.
+_CONSTRUCTED = """
+class JobSpec(object):
+    _attributes = ("PandaID", "taskBufferErrorCode")
+    _zeroAttrs = ("taskBufferErrorCode",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            object.__setattr__(self, attr, None)
+        object.__setattr__(self, "Files", [])
+
+
+class JediFileSpec(object):
+    _attributes = ("fileID", "attemptNr")
+    _zeroAttrs = ("attemptNr",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            if attr in self._zeroAttrs:
+                object.__setattr__(self, attr, 0)
+            else:
+                object.__setattr__(self, attr, None)
+
+
+class DatasetSpec(object):
+    _attributes = ("vuid",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            setattr(self, attr, None)
+"""
+
+
+def test_a_spec_s_constructor_says_what_each_field_holds_in_memory_not_what_its_row_is_given():
+    """``progress.spec_initial_values`` reads ``__init__``'s stores: a JobSpec's ``taskBufferErrorCode`` is ``None``
+    as made, though its ``valuesMap`` gives a row ``0`` for it (``spec_unset_values``); a JediFileSpec's
+    ``attemptNr`` is ``0`` already; ``setattr`` stores as ``object.__setattr__`` does."""
+    modules = [_module(_CONSTRUCTED, "pandaserver/taskbuffer/Specs.py")]
+    assert progress.spec_initial_values(modules) == {
+        ("JobSpec", "PandaID"): "None",
+        ("JobSpec", "taskBufferErrorCode"): "None",
+        ("JediFileSpec", "fileID"): "None",
+        ("JediFileSpec", "attemptNr"): "0",
+        ("DatasetSpec", "vuid"): "None",
+    }
+
+
 _READ_TWICE = '''
 class TaskModule:
     def countTasks(self, vo):

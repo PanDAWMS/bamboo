@@ -76,6 +76,7 @@ from bamboo.codemap.models import (
     FunctionPrintsNode,
     JunctionNode,
     KeyFrom,
+    MadeBefore,
     MapEntry,
     MustName,
     PrintRow,
@@ -83,6 +84,7 @@ from bamboo.codemap.models import (
     TableRecord,
 )
 from bamboo.codemap.panda import changes, flow, mapentries
+from bamboo.codemap.panda.recognizers import progress
 from bamboo.codemap.reaching import reaching
 
 if TYPE_CHECKING:
@@ -190,6 +192,7 @@ def _attach(
     tables: Sequence[TableRecord],
 ) -> int:
     trees = {module.rel_path: module.tree for module in modules}
+    initial = progress.spec_initial_values(modules)
     printed: dict[str, list[int]] = {}
     holes: dict[tuple[str, int], list[str]] = {}
     maps_read: dict[tuple[str, int], dict[str, Optional[_MapRead]]] = {}
@@ -231,6 +234,7 @@ def _attach(
             branch.must_prints = None
             branch.must_names = None
             branch.after_prints = None
+            branch.made_before = None
             branch.must_hole = ""
             sites = _sites(junction, branch, trees)
             if isinstance(sites, str):
@@ -295,6 +299,13 @@ def _attach(
         ]
         branch.must_prints = lines
         found += bool(lines)
+        made = [
+            _made_before(site, written, junction.subject, initial)
+            for site in reached
+            for written in [_written_object(site.statement, junction.subject)]
+        ]
+        if made and made[0] is not None and all(one == made[0] for one in made[1:]):
+            branch.made_before = made[0]
         each: list[list[MustName]] = []
         afters: list[dict[int, AfterPrint]] = []
         counted: dict[int, str] = {}
@@ -420,6 +431,35 @@ def _after_prints(
             rows=counted.get(line, ""),
         )
     return found
+
+
+def _made_before(
+    site: _Site, written: Optional[ast.expr], subject: str, initial: dict[tuple[str, str], str]
+) -> Optional[MadeBefore]:
+    """The construction making the object *written* that is the only binding of its name reaching the arm --
+    ``tmpTaskSpec = JediTaskSpec()``, a class called with nothing -- and the written field's value as its constructor
+    left it (*initial*, :func:`progress.spec_initial_values`); None otherwise."""
+    if not isinstance(written, ast.Name) or not isinstance(site.func, _FUNCTIONS):
+        return None
+    held = pathcond.held_at(site.func, written.id, site.statement)
+    if len(held.sites) != 1:
+        return None
+    (made,) = held.sites
+    value = getattr(made, "value", None)
+    if not (
+        isinstance(made, ast.Assign)
+        and len(made.targets) == 1
+        and isinstance(made.targets[0], ast.Name)
+        and made.targets[0].id == written.id
+        and isinstance(value, ast.Call)
+        and not value.args
+        and not value.keywords
+    ):
+        return None
+    called = value.func
+    cls = called.id if isinstance(called, ast.Name) else called.attr if isinstance(called, ast.Attribute) else ""
+    left = initial.get((cls, subject.rpartition(".")[2]))
+    return MadeBefore(line=made.lineno, cls=cls, value=left) if left is not None else None
 
 
 def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
