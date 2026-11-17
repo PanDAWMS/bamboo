@@ -8526,7 +8526,12 @@ def attach_count_prints(
     (:func:`flow.ruled_out_after`): ``reactivatePendingTasks_JEDI``'s two statements share one run, and the
     ``timeoutFlag`` each arm's way binds gives ``sqlTU``'s arms only ``action=reactivate`` and ``sqlTO``'s only
     ``timeout``.  The prints holding the count itself in a hole go to :attr:`Branch.printed_counts` the same way
-    (:func:`progress.printed_counts`): ``updateJobStatus``'s ``nUp={nUp}``."""
+    (:func:`progress.printed_counts`): ``updateJobStatus``'s ``nUp={nUp}``.
+
+    Each print with the run it is of (:attr:`CountPrint.run`, :attr:`PrintedCount.run`): a branch whose write lands
+    at several statements gets the prints of each one's runs, and the line alone does not say which run counted --
+    ``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm writes in ``sqlTU`` and ``sqlTUU``, and its ``nRow`` at 4092
+    is ``sqlTUU``'s run's."""
     by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
     done: set[tuple[str, int]] = set()
     for key_from in key_froms:
@@ -8534,11 +8539,20 @@ def attach_count_prints(
             continue
         done.add((key_from.owner, key_from.statement))
         func, calls = key_from._runs
+        run = key_from.statement
         printed = sorted(
-            {(one.line, one.frame, one.rows): one for call in calls for one in progress.count_prints(func, call, setters)}.items()
+            {
+                (one.line, one.frame, one.rows, run): one.model_copy(update={"run": run})
+                for call in calls
+                for one in progress.count_prints(func, call, setters)
+            }.items()
         )
         counted = sorted(
-            {(one.line, one.frame): one for call in calls for one in progress.printed_counts(func, call, setters)}.items()
+            {
+                (one.line, one.frame, run): one.model_copy(update={"run": run})
+                for call in calls
+                for one in progress.printed_counts(func, call, setters)
+            }.items()
         )
         if not printed and not counted:
             continue
@@ -8557,10 +8571,10 @@ def attach_count_prints(
                 if not arm_lines:
                     continue
                 arms = [statements[line] for line in sorted(arm_lines) if line in statements]
-                held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
+                held = {(one.line, one.frame, one.rows, one.run): one for one in branch.count_prints}
                 held.update((key, one) for key, one in printed if _can_follow(arms, one.line, statements))
                 branch.count_prints = [held[key] for key in sorted(held)]
-                kept = {(one.line, one.frame): one for one in branch.printed_counts}
+                kept = {(one.line, one.frame, one.run): one for one in branch.printed_counts}
                 kept.update((key, one) for key, one in counted if _can_follow(arms, one.line, statements))
                 branch.printed_counts = [kept[key] for key in sorted(kept)]
 

@@ -22910,6 +22910,53 @@ def test_a_print_holding_a_statements_row_count_in_a_hole_is_its_branches_printe
     assert arms["errorDialog"] == [([(marked, "marked nUp={}", [0])], [])]
 
 
+#: ``prepareTasksToBeFinished_JEDI``: one arm writes ``lockedBy`` in two statements, and the count printed is the
+#: second's run's.
+_TWO_STATEMENT_ARM = '''
+class TaskModule:
+    def prepare(self, jediTaskID, done):
+        sqlTU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET errorDialog=:err,lockedBy=NULL WHERE jediTaskID=:jediTaskID "
+        sqlTUU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=NULL WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        if done:
+            varMap[":err"] = "done"
+            self.cur.execute(sqlTU, varMap)
+        else:
+            self.cur.execute(sqlTUU, varMap)
+            nRow = self.cur.rowcount
+            tmpLog.debug(f"unlock jediTaskID={jediTaskID} with {nRow}")
+        return True
+'''
+
+
+def test_a_printed_count_says_which_run_of_a_branch_written_at_two_statements_it_is_of(tmp_path):
+    """The ``lockedBy`` arm lands at ``sqlTU`` and at ``sqlTUU`` (*other_lines*), and ``nRow`` is the count of
+    ``sqlTUU``'s run alone: the printed count carries that run's line (:attr:`PrintedCount.run`), which its own line
+    does not say."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _TWO_STATEMENT_ARM})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    locked = next(j for j in junctions if j.subject.endswith(".lockedBy"))
+    printed = _at("unlock jediTaskID", _TWO_STATEMENT_ARM)
+    second = _at("self.cur.execute(sqlTUU", _TWO_STATEMENT_ARM)
+
+    assert [(b.line, b.other_lines) for b in locked.branches] == [
+        (_at("sqlTU = ", _TWO_STATEMENT_ARM), [_at("sqlTUU = ", _TWO_STATEMENT_ARM)])
+    ]
+    assert [(p.line, p.run, p.frame, p.holes) for p in locked.branches[0].printed_counts] == [
+        (printed, second, "unlock jediTaskID={} with {}", [1])
+    ]
+
+
 #: ``reactivatePendingTasks_JEDI``: two statements share one run, and a flag each arm's way binds to a literal
 #: chooses the count print after it.
 _COUNTED_ARMS = '''

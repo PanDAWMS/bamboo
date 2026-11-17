@@ -565,7 +565,11 @@ class AfterPrint(BaseModel):
         default="",
         description=(
             "For one of the branch's count prints (:attr:`Branch.count_prints`), what its printing says of the rows "
-            "the run changed, as :attr:`CountPrint.rows`; empty for any other print."
+            "the run changed, as :attr:`CountPrint.rows`; empty for any other print.  Taken from the branch's count "
+            "print at the same line, whose :attr:`CountPrint.run` says which run counted: on a branch written at "
+            "several statements the print follows every write and may count only one statement's run -- "
+            "``retryTask_JEDI``'s ``proc_status`` arm writes at 5180 and 5198, and its 5231 says ``none`` of the "
+            "5198 statement's run at 5201."
         ),
     )
 
@@ -1013,6 +1017,15 @@ class CountPrint(BaseModel):
     """
 
     line: int = Field(description="The print's line in the owner.")
+    run: int = Field(
+        default=0,
+        description=(
+            "The line the run it is of runs on (:attr:`KeyFrom.statement`).  A branch whose write lands at several "
+            "statements (*other_lines*) has the prints of each statement's runs, each with its own: "
+            "``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm prints ``nRow`` at 4092, the count of ``sqlTUU``'s "
+            "run at 4090, not of ``sqlTU``'s at 4075.  0 on a record made before it was kept."
+        ),
+    )
     frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
     rows: str = Field(
         description=(
@@ -1033,6 +1046,15 @@ class PrintedCount(BaseModel):
     """
 
     line: int = Field(description="The print's line in the owner.")
+    run: int = Field(
+        default=0,
+        description=(
+            "The line the run it is of runs on (:attr:`KeyFrom.statement`).  A branch whose write lands at several "
+            "statements (*other_lines*) has the prints of each statement's runs, each with its own: "
+            "``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm prints ``nRow`` at 4092, the count of ``sqlTUU``'s "
+            "run at 4090, not of ``sqlTU``'s at 4075.  0 on a record made before it was kept."
+        ),
+    )
     frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
     holes: list[int] = Field(
         description=(
