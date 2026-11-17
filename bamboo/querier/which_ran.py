@@ -62,6 +62,7 @@ from bamboo.codemap import (  # noqa: E402
     trace,  # noqa: E402
 )
 from bamboo.codemap.calls import Target  # noqa: E402
+from bamboo.codemap.models import MUST_PART_BIND, MUST_PART_MARK, MUST_ROW_WRITTEN  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
@@ -1426,6 +1427,78 @@ def printed_write_arms(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subj
                 f"{bind}={observed!r}; of its arms of {subject}, the others ({out}) did not give it there")
 
 
+def branches_at(subject: str, owner: str, line: int, fragment: Any = None) -> list:
+    """The map's branches of *subject* at *owner*'s *line*, in *fragment* (the installed dump's where None).  A
+    reading's owner is ``file::function``, a junction's ``file::Class.function``: matched by the file, the function's
+    name and the line."""
+    fragment = mapdump.fragment() if fragment is None else fragment
+    file, _, qual = owner.partition("::")
+    name = qual.rpartition(".")[2]
+    return [b for j in (getattr(fragment, "junctions", None) or []) if j.subject == subject
+            and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
+            for b in j.branches if b.line == line]
+
+
+def hole_values(row: R.Row, record: Any, name: Any) -> list[str]:
+    """What *record*, a line of the print *row*, holds in the hole the map's name *name* reads (``MustName``): an
+    entry of its printed bind map (``sqltext.cut``: ``str(var_map)`` after the statement), or a hole of its logger's
+    mark or of its message as the map's rows read them back (``trace.hole_values``, the record whole first), each
+    stripped of its quotes -- ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID``."""
+    if name.part == MUST_PART_BIND:
+        got = sqltext.cut(record.text)
+        values = [got[1].get(name.bind)] if got is not None else []
+    else:
+        values = []
+        for m in row.map_rows:
+            for whole in (True, False):
+                read = trace.hole_values(m, record.text, record.token, whole=whole)
+                if read is None:
+                    continue
+                holes, printed = (m.prefix_holes, read[1]) if name.part == MUST_PART_MARK else (m.holes, read[0])
+                values += [v for h, v in zip(holes, printed, strict=False) if h.expression == name.expression]
+                break
+    return [str(v).strip().strip("'\"") for v in values if v is not None]
+
+
+def after_key_others(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subject: str, env: E.Env) -> None:
+    """B-5 (P36, out/gm/qk-design.md's bundle B, tmaeno's OK 2026-11-16 21:40) on *verdicts*, kept arms of *fn* writing
+    *subject* in the run *sn*: an arm is excluded where a print the map says runs after its write on every way, the
+    object not bound again between (``Branch.after_prints``: ``every_way``, not ``rebound``), holds the written row's
+    key column (a name with ``row`` written, a column of the question's key), every loop holding the arm holds the print
+    too (a print after the loop shows its last object only), and each of its records in the run -- one at least -- holds
+    a value of that hole other than the question's key: no turn of the arm wrote the key's row.  Not where a traceback
+    in the run names *fn* (a raise may end a way before the print).  updateUnmergedJobs's 1236 ``umJob.jobStatus =
+    job.jobStatus`` runs 50 times in NJ-holding-late's run, each turn's 1252 ``update unmerged PandaID={umJob.PandaID}``
+    printing another job's ID.  K64 (:func:`other_objects`) reads such a print the same way where it is one of the
+    arm's own must rows, for rule 4; 1252 is not one, and the map says it runs after 1236 on every way."""
+    keys = _key_values(env)
+    if not keys or R.raised_in(fn, sn.run)[0]:
+        return
+    # the key's columns under the class the map names them by (env.subject holds the row's name, "<job>.jobStatus")
+    columns = {f"{subject.partition('.')[0]}.{k}" for k in env.keys}
+    for v in verdicts:
+        stmt = R.statement_at(fn.node, v.line) if v.kind == "kept" else None
+        if stmt is None:
+            continue
+        for b in branches_at(subject, fn.owner, v.line):
+            for p in getattr(b, "after_prints", None) or ():
+                names = [n for n in p.names if n.row == MUST_ROW_WRITTEN and n.column in columns]
+                row = next((r for r in fn.rows if r.line == p.line), None)
+                if (not p.every_way or p.rebound or not names or row is None
+                        or not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node)):
+                    continue
+                at = [i for i, _, _ in sn.hits.get(row.line, ())]
+                held = [hole_values(row, sn.run.records[i], n) for i in at for n in names]
+                if held and all(vals and not keys & set(vals) for vals in held):
+                    v.kind = "excluded"
+                    v.reasons.append(f"P36: row {p.line} prints the written row's {names[0].column} after it on every way, "
+                                     f"and its {len(at)} record(s) in the run hold another than the key's: it wrote no "
+                                     f"row of the key")
+                    break
+            if v.kind == "excluded":
+                break
+
+
 #: the installed dump's handler records by owner and ``except`` line (:func:`_handler_marks`), with the fragment read
 _MARKS: list[tuple[Any, dict[str, dict[int, Any]]]] = []
 _TRIES: tuple[type, ...] = (ast.Try, getattr(ast, "TryStar", ast.Try))
@@ -2250,6 +2323,13 @@ def judge(
             if proof.kind == "positive":
                 v.kind = "positive"
                 v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
+
+    # P36 on each kept arm: a print after its write on every way holds the written row's key, and every record of it in
+    # the run holds another key (after_key_others)
+    if env is not None and env.written:
+        for owner, sn in seens.items():
+            if arms_kept := [v for v in verdicts if v.candidate.owner == owner and v.kind == "kept"]:
+                after_key_others(sn.fn, sn, arms_kept, env.written, env)
 
     # P35 on the arms of one write statement: its print in the key's turn shows the bind map it ran with, and the arms
     # that did not give the bind its value there are out (printed_write_arms)

@@ -107,7 +107,6 @@ from bamboo.codemap.models import (
     KEY_ROWS,
     KEY_UNKNOWN,
     MUST_PART_BIND,
-    MUST_PART_MARK,
     MUST_PART_MESSAGE,
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
@@ -166,8 +165,10 @@ from bamboo.querier.which_ran import (
     Verdict,
     at_window,
     before_stretch,
+    branches_at,
     class_of,
     holds_key,
+    hole_values,
     inside_call,
     judge,
     key_env,
@@ -413,21 +414,8 @@ def _hole_holds(row: R.Row, record, name, key: str) -> bool:
     """Whether *record*, a line of the print *row*, holds *key* in the hole the map's must name *name* reads: an entry
     of its printed bind map (``sqltext.cut``: ``str(var_map)`` after the statement), or a hole of its logger's mark or
     of its message as the map's rows read them back (``trace.hole_values``, the record whole first) --
-    ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID``."""
-    if name.part == MUST_PART_BIND:
-        got = sqltext.cut(record.text)
-        values = [got[1].get(name.bind)] if got is not None else []
-    else:
-        values = []
-        for m in row.map_rows:
-            for whole in (True, False):
-                read = trace.hole_values(m, record.text, record.token, whole=whole)
-                if read is None:
-                    continue
-                holes, printed = (m.prefix_holes, read[1]) if name.part == MUST_PART_MARK else (m.holes, read[0])
-                values += [v for h, v in zip(holes, printed, strict=False) if h.expression == name.expression]
-                break
-    return any(v is not None and str(v).strip().strip("'\"") == key for v in values)
+    ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID`` (:func:`which_ran.hole_values`)."""
+    return key in hole_values(row, record, name)
 
 
 def _written_offset(b) -> datetime.timedelta | None:
@@ -1578,14 +1566,9 @@ def _condition_read(p: object, read: set[str]) -> bool:
 
 
 def _branches_at(subject: str, owner: str, line: int) -> list:
-    """The map's branches of *subject* at *owner*'s *line*.  A reading's owner is ``file::function``, a junction's
-    ``file::Class.function``: matched by the file, the function's name and the line."""
-    fragment = mapdump.fragment()
-    file, _, qual = owner.partition("::")
-    name = qual.rpartition(".")[2]
-    return [b for j in (fragment.junctions if fragment else []) if j.subject == subject
-            and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
-            for b in j.branches if b.line == line]
+    """The map's branches of *subject* at *owner*'s *line* (:func:`which_ran.branches_at`), in the map this module
+    reads."""
+    return branches_at(subject, owner, line, mapdump.fragment())
 
 
 #: a path condition's term tested in a method the arm's statement calls, in that method's names: ``X  [in f()]``

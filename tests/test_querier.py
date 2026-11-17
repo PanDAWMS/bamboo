@@ -5629,6 +5629,72 @@ def test_a_writer_printing_the_key_after_its_write_on_every_way_is_asked_by_that
     assert got["around"] == ["X jediTaskID=", "jediTaskID=X with", "with X", "", ""]
 
 
+def test_an_arm_whose_print_after_it_on_every_way_shows_another_key_in_every_record_wrote_no_row_of_the_key(tmp_path):
+    # B-5 (P36): updateUnmergedJobs's 1236 umJob.jobStatus = job.jobStatus; 1252 prints umJob.PandaID after it on every
+    # way; NJ-holding-late's run has 1252 once for each other job
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as NS
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import which_ran as WR
+
+            name = NS(row="written", column="JobSpec.PandaID", part="message", expression="umJob.PandaID")
+            other = NS(row="written", column="JobSpec.jobsetID", part="message", expression="umJob.jobsetID")
+
+            def branches(after):
+                return lambda subject, owner, line: [NS(after_prints=[after])] if line == 1236 else []
+
+            WR.hole_values = lambda row, record, n: [record.text.rpartition("=")[2]] if record.text else []
+            WR.R.raised_in = lambda fn, run: (raised, set())
+            # 1236 and 1252 both in the loop over the unmerged jobs (1228), unless a case says 1252 is after it
+            WR.R.statement_at = lambda node, line: NS(line=line)
+            WR.R.loops_over = lambda stmt, node: loops.get(stmt.line, {1228})
+            loops = {}
+            fn = NS(owner="j.py::JobComplexModule.updateUnmergedJobs", node=None, rows=[NS(line=1252, stmt=NS(line=1252))])
+            env = E.Env(subject="<job>.jobStatus", written="JobSpec.jobStatus", keys=frozenset({"PandaID"}),
+                        table={"job": {"PandaID": E.Value(7, "row")}})
+
+            def run(texts, after=NS(line=1252, every_way=True, rebound=False, names=[name]), kind="kept"):
+                WR.branches_at = branches(after)
+                sn = NS(run=NS(records=[NS(text=t) for t in texts]), hits={1252: [(i, None, None) for i in range(len(texts))]})
+                v = NS(line=1236, kind=kind, reasons=[])
+                WR.after_key_others(fn, sn, [v], "JobSpec.jobStatus", env)
+                return [v.kind] + v.reasons
+
+            raised = False
+            got = {
+                "others": run(["update unmerged PandaID=8", "update unmerged PandaID=9"]),
+                "the key once": run(["update unmerged PandaID=8", "update unmerged PandaID=7"]),
+                "no record": run([]),
+                "unread": run(["update unmerged PandaID=8", ""]),
+                "not every way": run(["update unmerged PandaID=8"], NS(line=1252, every_way=False, rebound=False, names=[name])),
+                "bound again": run(["update unmerged PandaID=8"], NS(line=1252, every_way=True, rebound=True, names=[name])),
+                "not the key": run(["update unmerged jobsetID=8"], NS(line=1252, every_way=True, rebound=False, names=[other])),
+                "positive": run(["update unmerged PandaID=8"], kind="positive"),
+            }
+            loops = {1252: set()}
+            got["after the loop"] = run(["update unmerged PandaID=8"])
+            loops = {}
+            raised = True
+            got["raised"] = run(["update unmerged PandaID=8"])
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["others"] == ["excluded", "P36: row 1252 prints the written row's JobSpec.PandaID after it on every way, and "
+                                         "its 2 record(s) in the run hold another than the key's: it wrote no row of the key"]
+    # a record holding the key, none, one unread, a print not on every way or after a new binding, a hole not the
+    # key's, a print outside a loop holding the arm, an arm already positive, a traceback naming the function: nothing
+    # is excluded
+    for case in ("the key once", "no record", "unread", "not every way", "bound again", "not the key", "after the loop", "raised"):
+        assert got[case] == ["kept"], case
+    assert got["positive"] == ["positive"]
+
+
 def test_a_writer_of_a_parameter_every_call_into_which_hands_another_literal_is_no_candidate(tmp_path):
     # M2 (P40(a)): reassignShare:477 writes gshare = runtime(gshare); its calls hand 'Express Analysis', 'Express', and
     # values made at run time (the database, a part of a value); a second writer's every call hands a literal
