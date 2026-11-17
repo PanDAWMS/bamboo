@@ -5248,7 +5248,7 @@ def test_a_pair_whose_write_is_the_mover_s_own_call_is_read_on_the_callee_s_run_
             run = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:01,400", last="2026-01-01 00:00:01,600")
             # its next call by another pass after this one ended, in the same second as far as the window reads
             again = N(token="record < 7 >", machine="h1", first="2026-01-01 00:00:05,500", last="2026-01-01 00:00:05,600")
-            RR.runs_for, RR.of_mover, RR.at_window = (lambda log, key: [run]), (lambda r_, m: True), (lambda r_, w: True)
+            RR.runs_for, RR.of_mover, RR.at_window = (lambda log, key, other=None: [run]), (lambda r_, m: True), (lambda r_, w: True)
             RR.passes_of = lambda fn_, r_, mode: ([r_, again], "")
             RR.recorded_in_pass = lambda fn_, found, w, inner, sites, mode: (p, sites[0])
             got["printing"] = r._own_call_pass(own, callee, "7", row, asking, [p], at("01.500000"))[1]
@@ -8261,7 +8261,7 @@ def test_h2_reads_no_run_of_the_key_at_a_row_as_no_pass_only_of_a_log_some_recor
 
             r.logs = N(names=lambda wanted: wanted + ["panda-DataService.log"], log=log)
             rerun.owners_of = lambda ids: {}
-            rerun.runs_for = lambda log, key: log.runs
+            rerun.runs_for = lambda log, key, other=None: log.runs
             tries = [({"status": "pending"}, rerun.W.Asking(("10:05", "10:05"), "m86", "the row"), None),
                      ({"status": "defined"}, rerun.W.Asking(("04:10", "04:10"), "m91", "the row"), None)]
             named = r._named("JobSpec.nucleus", "7", ["every writer"], tries)
@@ -8353,7 +8353,7 @@ def test_h2_reads_an_arm_whose_logs_never_name_the_key_on_the_run_that_recorded_
             recs = {"pandajedi/g.py::doGenerate": [rec], "pandajedi/j.py::setSplitRule": [rec, rec2]}
             rerun.recorders = lambda subject, owner, line: recs.get(owner, [])
             rerun.owners_of = lambda ids: {}
-            rerun.runs_for = lambda log, key: log.runs
+            rerun.runs_for = lambda log, key, other=None: log.runs
             rerun.R.function = lambda rel, name, arms=(): N(rel=rel, name=name, owner=f"{rel}::{name}")
             # the method's mark holds the task (``mark_columns``); the pass's mark is asked for it (``_pass_marks``)
             rerun.mark_columns = lambda owner, lines, run: {"JobSpec.jediTaskID": run.token.split("=")[1].split()[0]}
@@ -18971,6 +18971,63 @@ def test_i_the_writers_of_a_line_read_a_print_beginning_with_a_hole_as_the_line_
         "marked": ["< jediTaskID=1 >", ["ActivatorThr"], []],
         # a record the search cut: as found
         "with_rule_cut": ["777", ["ActivatorThr", "ActivatorWithRuleThr"], ["ActivatorWithRuleThr"]],
+    }, got
+
+
+def test_k67b_a_record_naming_the_keys_digits_only_as_another_column_makes_no_run_of_the_key(tmp_path):
+    """K67b B: a job's run prints its files' jediTaskID (getJediFileAttributes 3003), a hole the map names
+    JediFileSpec.jediTaskID: under a mark that does not hold the task's key, that record makes no run of the task.  A
+    hole naming the task's identity does, and so does a record no row of the map reads (as before)."""
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    {} {}\n"
+    (tmp_path / "x.log").write_text("".join(stamp.format(i, mark, text) for i, (mark, text) in enumerate([
+        ("getJediFileAttributes < PandaID=777 >", "jediTaskID=53 files read"),
+        ("updateTask < vo=atlas >", "jediTaskID=53 updated"),
+        ("other < vo=atlas >", "saw 53 here")])))
+    out = _ok(_run(tmp_path, """
+        import json
+        from dataclasses import replace
+        from types import SimpleNamespace as N
+        from bamboo.codemap.models import PrintRow, SkeletonHole
+        from bamboo.querier import key_holes as KH, mapdump
+        from bamboo.querier.records import read_log, runs_for
+
+        log = read_log("x.log")
+
+        def prints(owner, method, mark_hole, text, column):
+            esc = text.replace(" ", "\\\\ ")
+            row = PrintRow(text=f"f'jediTaskID={{x}} {text}'", pattern=f"jediTaskID=.*?\\\\ {esc}",
+                           capture=f"jediTaskID=(.*?)\\\\ {esc}",
+                           prefix=f"{method}\\\\ <\\\\ {mark_hole}=.*?\\\\ >\\\\ ",
+                           prefix_capture=f"{method}\\\\ <\\\\ {mark_hole}=(.*?)\\\\ >",
+                           holes=[SkeletonHole(expression="x", group=1, columns=[column])],
+                           prefix_holes=[SkeletonHole(expression=mark_hole, group=1)])
+            return N(owner=owner, statements=[N(line=1, rows=[row], log_files=[log.name], log_files_basis="logger")])
+
+        fragment = N(function_prints=[
+            prints("pandaserver/a.py::getJediFileAttributes", "getJediFileAttributes", "PandaID", "files read",
+                   "JediFileSpec.jediTaskID"),
+            prints("pandaserver/a.py::updateTask", "updateTask", "vo", "updated", "JediTaskSpec.jediTaskID")],
+            tables=[N(spec_class="JediTaskSpec", identity_attrs=["JediTaskSpec.jediTaskID"])], write_prints=[])
+        mapdump.fragment = lambda: fragment
+        other = lambda r: KH.other_column(r, log.name, "53", "JediTaskSpec")
+        rows = KH._table()[1][log.name]
+        print(json.dumps({
+            "as_before": sorted(r.token.split(" <")[0] for r in runs_for(log, "53")),
+            "other": sorted(r.token.split(" <")[0] for r in runs_for(log, "53", other)),
+            "verdicts": [KH.verdict(r, rows, {"JediTaskSpec.jediTaskID"}, "53")[0] for r in log.records],
+            "cut": KH.other_column(replace(log.records[0], cut=True), log.name, "53", "JediTaskSpec"),
+            "another_key": KH.other_column(log.records[0], log.name, "54", "JediTaskSpec"),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        "as_before": ["getJediFileAttributes", "other", "updateTask"],
+        # the file's jediTaskID is another column: no run of the task under the job's mark
+        "other": ["other", "updateTask"],
+        "verdicts": ["other", "key", "open"],
+        # a record the search cut, or one whose digits are not the key's: as before
+        "cut": False,
+        "another_key": False,
     }, got
 
 

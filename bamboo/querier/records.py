@@ -710,20 +710,27 @@ class Run:
         return T.text(self.said())
 
 
-def runs_for(log: Log, key: str) -> list[Run]:
+def runs_for(log: Log, key: str, other: Callable[[Record], bool] | None = None) -> list[Run]:
     """Every run of *log* the key appears in, keyed by the machine and the instance token: one mark on two machines
     is two runs (a file handed in is one machine's).  A line its logger writes with no mark is a run of its own
     (:func:`unmarked`, ``Run.alone``): the word :data:`PREFIX` takes for its mark is its text's first, which joins the
-    lines of every pass and object (KNOWN_ISSUES.md K70)."""
+    lines of every pass and object (KNOWN_ISSUES.md K70).  *other*: a record whose message alone holds the key and
+    which names it only as another column (``key_holes.other_column``, K67b B) does not make its mark a run of the
+    key; a mark with another record of the key still is one."""
     pattern = keyed(key)
     heads = _heads_of(log.name)
 
     def alone(r: Record) -> bool:
         return r.token in heads and unmarked(log.name, r.token, r.text)
 
+    def holds(r: Record) -> bool:
+        if key in r.token and pattern.search(r.token):
+            return True
+        return key in r.message and bool(pattern.search(r.message)) and not (other is not None and other(r))
+
     # the pattern finds the key only where its text is, so a record without the text is passed over without it (most
     # of a day-long mark's records: MT-ready-stuck's S1, 62% of its time in this line)
-    hits = [r for r in log.records if (key in r.message and pattern.search(r.message)) or (key in r.token and pattern.search(r.token))]
+    hits = [r for r in log.records if holds(r)]
     # each mark's records in one pass over the log, not one pass a mark: a log of thousands of marks was read again for
     # each (MT-running-stuck's day-long marks: 879 of its 928 s under cProfile)
     by_mark: dict[tuple[str, str], list[Record]] = {}

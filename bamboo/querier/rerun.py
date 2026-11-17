@@ -132,6 +132,7 @@ from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
 from bamboo.querier import hop as HOP
+from bamboo.querier import key_holes as KH
 from bamboo.querier import map_reach as MR
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
@@ -154,6 +155,7 @@ from bamboo.querier.records import (
     Log,
     Logs,
     Owners,
+    Record,
     Run,
     Unrecorded,
     Window,
@@ -3740,6 +3742,10 @@ class Rerun:
         self.hand = json.loads(Path(args.hand).read_text()) if args.hand else {}
         self.hand_used: list[str] = []
         self.logs: Logs = RecordedLogs(args.records) if args.records else FileLogs(args.log)
+        if isinstance(self.logs, RecordedLogs):
+            # K67b B: a record naming the key only as another column makes no mark of the key's run
+            cls = args.subject.partition(".")[0]
+            self.logs.other = lambda key, log, r: key == args.key and KH.other_column(r, log, key, cls)
         self.lines: list[str] = []
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
@@ -3822,6 +3828,17 @@ class Rerun:
         self.ends.append((self.hop, what))
         self.say(f"END {what}")
 
+    def _other_of(self, key: str, log: Log) -> Callable[[Record], bool] | None:
+        """K67b B (``key_holes``): ``records.runs_for``'s *other* for the question's key in *log* -- a record whose
+        message names it only as another column than the question's class's identity makes no run of it; None for any
+        other key (a caller's value, a bare mark, a function's name), read as before, and None where no question is
+        held (a Rerun made without one)."""
+        args = getattr(self, "args", None)
+        if args is None or key != args.key:
+            return None
+        cls = args.subject.partition(".")[0]
+        return lambda r: KH.other_column(r, log.name, key, cls)
+
     def files_of(self, owner: str, today: list[str], lines) -> list[str]:
         """Where *owner*'s own rows are looked for (``R.own_log_files``)."""
         return R.own_log_files(owner, list(today), lines)
@@ -3894,7 +3911,7 @@ class Rerun:
                 self.say(f"  {name}: {note}")
             if log.holes:
                 holes[name] = log.holes
-            out[name] = runs_for(log, key)
+            out[name] = runs_for(log, key, self._other_of(key, log))
         return out, unanswered, holes
 
     def _keep_unanswered(self, unanswered: list) -> None:
@@ -5748,7 +5765,7 @@ class Rerun:
                                         strings=asking.strings, whole=True)
                 except Unrecorded:
                     continue
-                if runs_for(log, key):
+                if runs_for(log, key, self._other_of(key, log)):
                     out.add(name)
         return out
 
@@ -5857,7 +5874,7 @@ class Rerun:
         there = {name: log for name, log in logs.items() if host not in log.without}
         # the host's runs: a log the host is not listed for comes asked of every machine (K13), and another machine's
         # run is not the host's (a run of a file handed in names no machine)
-        inner = [r for log in there.values() for r in runs_for(log, key)
+        inner = [r for log in there.values() for r in runs_for(log, key, self._other_of(key, log))
                  if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi
                  and r.machine in (host, "")]
         # a method's run under its own mark holds every call of it (updateTask_JEDI's 21 records over 15 hours, for
@@ -7986,7 +8003,7 @@ class Rerun:
         # the callee's mark holds every call of it for the key (record_task_status_change's at 'staged' and at
         # 'defined', 17 minutes apart): each run is cut at its entry rows, and the calls at the row are read
         cfn, when = R.function(crel, cfunc, [], lines), (str(row["time"]), str(row["time"]))
-        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key)
+        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key, self._other_of(key, log))
                  if of_mover(r, callee) and r.machine == host and r.last[:19] >= edge[0] and r.first[:19] <= edge[1]
                  for part in passes_of(cfn, r, self.mode)[0] if at_window(part, when)]
         for p in mine:
@@ -9808,7 +9825,7 @@ class Rerun:
             for log in logs.values() if not unanswered else ():
                 if run.machine in log.without:
                     continue
-                for r in runs_for(log, self.args.key):
+                for r in runs_for(log, self.args.key, self._other_of(self.args.key, log)):
                     if not of_mover(r, callee) or r.machine != run.machine:
                         continue
                     for i, _, _ in R.seen(cfn, r, self.mode).hits.get(row.line, ()):

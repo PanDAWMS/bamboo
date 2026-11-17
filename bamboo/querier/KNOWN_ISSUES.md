@@ -2092,6 +2092,23 @@ kind, step, code or branch count:
   pair crosses it, so the server's 'defined' is read as no row of the arm's pass, not as a row its pass caused.
 - A status's question, where the row's writer is the answer ("which run wrote the row"): the same reading.
 
+**K67b B: a record naming the key's digits only as another column makes no run of the key** (`key_holes`, tmaeno's
+OK 2026-11-17 22:42).  A record whose message alone holds the key's digits made its mark a mark of the key's run: in
+`records.runs_for`, and among the marks `recorded` asks for.  So a child task's `updateTask_JEDI < jediTaskID=<child>
+>`, which prints the parent's ID as `:parent_tid` (1483) or `parent_tid=` (233), was asked as a run of the parent
+(NR-T-53639338-modificationTime's H2 ask, stopped by the harness in rq2).  Now such a record is read by the map's rows
+of its log (whole first, loosened only where none reads it whole).  Where every hole holding the digits names columns
+-- a printed bind map's bind by its WritePrint column, any other hole by its `columns` -- and none is the question's
+class's identity, it names another column, and makes no mark of the key's run.  This holds for the question's key
+only (`Rerun._other_of`, `RecordedLogs.other`); a caller's value, a bare mark and a function's name are read as before.
+A record no row reads, a hole naming no column, a WHERE bind no WritePrint writes, or a cut record: the key, as before.
+A mark with another record of the key stays a run of it.  The census over the 48 cases (rq2b records, 22:00-22:05)
+found 4 kinds dropped, all task questions: getJediFileAttributes 3003/2984 (a job's run printing its files'
+jediTaskID), updateDataset 1262/1270/1275 (Panda dataset rows), increaseRamLimitJobJEDI 2668, and child tasks' prints;
+job questions dropped none.
+*Risk:* a print of another class's column holding the key's value (a file's or dataset's jediTaskID), in a run that
+writes the key's row without printing it, would lose that run.  None of the four kinds writes the task's row.
+
 ### K68. A local printed before an arm on every path is read by the arm's guards, through a conversion too
 
 H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column
