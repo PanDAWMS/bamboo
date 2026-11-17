@@ -943,6 +943,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # code cannot print.
         fragment.function_prints.extend(self._function_prints())
         fragment.print_calls = _print_calls(self._modules)
+        # Which of those prints every way through a row loop's hand-on passes: what a run's lines name each row
+        # a statement handed on by.
+        sqlwrite.attach_hand_on_prints(fragment.read_sites, fragment.function_prints, self._modules)
         # Which of those prints every path to an arm passes, and which of their
         # holes hold a column of the row the arm writes: what tells the run that
         # wrote a value from the runs that only printed the same lines.

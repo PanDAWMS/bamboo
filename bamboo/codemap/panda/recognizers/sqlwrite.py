@@ -132,8 +132,11 @@ from bamboo.codemap.models import (
     CoverageStat,
     DiagnosticTemplate,
     EntityNode,
+    FunctionPrintsNode,
     GuardRead,
     HandedParameter,
+    HandOn,
+    HandOnPrint,
     HeldSource,
     JoinPair,
     JunctionNode,
@@ -175,6 +178,7 @@ from bamboo.codemap.pathcond import (
     arm_condition,
     attach_parents,
     binding_tests,
+    bindings,
     compatible,
     enclosing_function,
     entries,
@@ -7666,18 +7670,34 @@ def _attach_falls(
         if func is None:
             continue
         loops, _names = _row_loops(func, site.anchor.line_start, site.region[1])
-        returned = _returned_names(func) if loops else set()
-        if not returned:
+        if not loops:
             continue
+        returned = _returned_names(func)
         rows = {site.name} | named_by.get(site.name, set())
         reader = of(func, site.anchor.file)
         falls: dict[int, RowFall] = {}
+        hand_ons: dict[int, HandOn] = {}
+        # A list the row loops work the rows through again is a copy of them, not where they are handed on.
+        copies = {
+            one.id
+            for loop in loops
+            for one in walk(loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else loop.test)
+            if isinstance(one, ast.Name)
+        }
         for loop in loops:
-            handing = [
-                statement
-                for statement, value in _puts_into(loop, returned)
-                if reader.holds_rows(value, statement, rows)
-            ]
+            handing = []
+            for statement, value, key, into in _puts_into(loop):
+                if into in copies:
+                    continue
+                if not (
+                    reader.holds_rows(value, statement, rows)
+                    or (key is not None and reader.holds_rows(key, statement, rows))
+                ):
+                    continue
+                if into not in returned and not _read_after(func, loop, into, statement):
+                    continue
+                handing.append(statement)
+                hand_ons.setdefault(statement.lineno, HandOn(line=statement.lineno, into=into))
             held = {id(statement) for statement in handing}
             for statement in handing:
                 node: ast.AST = statement
@@ -7686,7 +7706,9 @@ def _attach_falls(
                     if isinstance(parent, ast.If) and parent.lineno not in falls:
                         kept = FALL_BODY if node in parent.body else FALL_ELSE
                         other = parent.orelse if kept == FALL_BODY else parent.body
-                        if not any(id(one) in held for way in other for one in walk(way)):
+                        if not any(id(one) in held for way in other for one in walk(way)) and not _leads_on(
+                            parent, other, handing
+                        ):
                             first = other[0].lineno if other else 0
                             last = max((one.end_lineno or one.lineno for one in other), default=0)
                             falls[parent.lineno] = RowFall(
@@ -7705,6 +7727,26 @@ def _attach_falls(
         if falls:
             site.falls = [falls[line] for line in sorted(falls)]
             site.exits = sorted(set(site.exits) | {f"fall@{line}" for line in falls})
+        site.hand_ons = [hand_ons[line] for line in sorted(hand_ons)]
+
+
+def _leads_on(test: ast.If, other: list[ast.stmt], handing: list[ast.stmt]) -> bool:
+    """Whether a way taking *test*'s other way -- *other*, or on past the ``if`` where it has none -- can still reach
+    a hand-on after the ``if`` in the same turn: then the row is not dropped there.  ``prepareTasksToBeFinished_JEDI``'s
+    ``if taskstatus == "scouting" ...`` at 3759 sets ``to_trigger = True`` and the row is handed on at 3767.  The ways
+    are the flow's, every branch both ways: an ``if`` whose other way leads on only by a way no run takes is no fall
+    either -- a fall unsaid, never one said wrongly."""
+    later = [one for one in handing if not any(up is test for up in ancestors(one))]
+    if not later:
+        return False
+    if other:
+        start: ast.stmt = other[0]
+        killers: list[ast.stmt] = []
+    else:
+        start, killers = test, test.body[:1]
+    return any(
+        reaching(one, [start], killers, entered=[start, *killers], once=flow.turn_loops(test, one)) for one in later
+    )
 
 
 def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -7719,29 +7761,128 @@ def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     return found
 
 
-def _puts_into(loop: ast.AST, names: set[str]) -> list[tuple[ast.stmt, ast.expr]]:
-    """``(statement, value)`` for each put of *loop* into one of *names*: ``L.append(v)`` and the other builtin
-    puts (:data:`_PUTS_VALUE`), ``L[k] = v``."""
-    found: list[tuple[ast.stmt, ast.expr]] = []
+def _puts_into(loop: ast.AST) -> list[tuple[ast.stmt, ast.expr, Optional[ast.expr], str]]:
+    """``(statement, value, key, name)`` for each put of *loop* into a name: ``L.append(v)`` and the other builtin
+    puts (:data:`_PUTS_VALUE`), with no key; ``L[k] = v``, with its key."""
+    found: list[tuple[ast.stmt, ast.expr, Optional[ast.expr], str]] = []
     for node in walk(loop):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             call = node.value
-            at = (
-                _PUTS_VALUE.get(call.func.attr)
-                if isinstance(call.func, ast.Attribute)
-                and isinstance(call.func.value, ast.Name)
-                and call.func.value.id in names
-                else None
-            )
-            if at is not None and len(call.args) > at:
-                found.append((node, call.args[at]))
+            method = call.func
+            if isinstance(method, ast.Attribute) and isinstance(method.value, ast.Name):
+                at = _PUTS_VALUE.get(method.attr)
+                if at is not None and len(call.args) > at:
+                    found.append((node, call.args[at], None, method.value.id))
         elif isinstance(node, ast.Assign):
-            if any(
-                isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id in names
-                for target in node.targets
-            ):
-                found.append((node, node.value))
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    found.append((node, node.value, target.slice, target.value.id))
+                    break
     return found
+
+
+def _read_after(func: ast.FunctionDef | ast.AsyncFunctionDef, loop: ast.AST, name: str, put: ast.stmt) -> bool:
+    """Whether a statement after *loop* reads what *put* puts into *name*: a read of the name outside the loop that a
+    way on from the loop reaches, where a binding of the name live at the put still is -- not a bind map filled again
+    for each statement, ``varMap = {}`` before the next one's run.  A loop of a function nested in *func* is read by
+    no way of *func*'s: none."""
+    if enclosing_function(loop) is not func:
+        return False
+    sites: list[ast.AST] = [func.args]
+    for binding in bindings(func, name):
+        if binding.nested or isinstance(binding.site, ast.arg):
+            continue
+        sites.append(binding.site if isinstance(binding.site, (ast.stmt, ast.ExceptHandler)) else site_of(binding.site))
+    live = {id(one) for one in reaching(put, sites)}
+    if not live:
+        return False
+    # The function's own reads: a nested function runs elsewhere, when it is called.
+    for node in own_nodes(func):
+        if not (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)):
+            continue
+        statement = site_of(node)
+        if not isinstance(statement, ast.stmt) or statement is loop or any(one is loop for one in ancestors(statement)):
+            continue
+        if flow.runs_after(loop, statement) and any(id(one) in live for one in reaching(statement, sites)):  # type: ignore[arg-type]
+            return True
+    return False
+
+
+def attach_hand_on_prints(
+    read_sites: Iterable[ReadSiteNode], function_prints: Iterable[FunctionPrintsNode], modules: Iterable[SourceModule]
+) -> int:
+    """Give each hand-on of a read site (:attr:`ReadSiteNode.hand_ons`, read by :func:`_attach_falls`) the owner's
+    prints every way through it passes in the same turn of the innermost loop around it (:attr:`HandOn.sure_prints`)
+    -- after it (:func:`flow.passes_after`) or before it (:func:`flow.passes_before`), read for a run that entered no
+    handler -- each with its message's holes spelling what the hand-on keys the row by, nothing binding it between
+    the two in the turn (:func:`flow.changed_between`).  ``prepareTasksToBeFinished_JEDI`` hands a task on at 3767
+    and prints ``got jediTaskID={jediTaskID} ...`` at 3768 on every way past it.  Returns how many hand-ons have
+    one."""
+    trees = {module.rel_path: module.tree for module in modules}
+    printing = {(node.anchor.file, node.anchor.line_start): node for node in function_prints if node.anchor is not None}
+    found = 0
+    for site in read_sites:
+        if not site.hand_ons or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        node = printing.get((site.anchor.file, func.lineno)) if func is not None else None
+        if func is None or node is None:
+            continue
+        statements = _own_statements(func)
+        for hand_on in site.hand_ons:
+            put = statements.get(hand_on.line)
+            loops = flow.loops_around(put) if put is not None else []
+            if put is None or not loops:
+                continue
+            keyed = _put_key(put)
+            spelled = ast.unparse(keyed) if keyed is not None else ""
+            root = _root_name(keyed)
+            changing = (
+                [one.site for one in bindings(func, root) if not one.nested and isinstance(one.site, ast.stmt)]
+                if root
+                else []
+            )
+            sure: list[HandOnPrint] = []
+            for printed in node.statements:
+                at = statements.get(printed.line)
+                if at is None or at is put or flow.turn_loops(put, at)[:1] != loops[:1]:
+                    continue
+                after = flow.passes_after(put, at)
+                if not (after or flow.passes_before(put, [at], once=flow.turn_loops(put, at), raised=())):
+                    continue
+                first, then = (put, at) if after else (at, put)
+                holes = sorted(
+                    {
+                        hole.expression
+                        for row in printed.rows
+                        for hole in row.holes
+                        if spelled and hole.expression == spelled and not flow.changed_between(first, then, changing)
+                    }
+                )
+                sure.append(HandOnPrint(line=printed.line, holes=holes))
+            hand_on.sure_prints = sure
+            found += bool(sure)
+    return found
+
+
+def _put_key(put: ast.stmt) -> Optional[ast.expr]:
+    """What a hand-on keys the row by: the subscript's key of ``map[key] = value``, else the value put."""
+    if isinstance(put, ast.Assign):
+        for target in put.targets:
+            if isinstance(target, ast.Subscript):
+                return target.slice
+        return None
+    if isinstance(put, ast.Expr) and isinstance(put.value, ast.Call) and isinstance(put.value.func, ast.Attribute):
+        at = _PUTS_VALUE.get(put.value.func.attr)
+        return put.value.args[at] if at is not None and len(put.value.args) > at else None
+    return None
+
+
+def _root_name(expression: Optional[ast.expr]) -> str:
+    """The name an attribute chain or a name starts from: ``taskSpec`` of ``taskSpec.jediTaskID``; ``""`` else."""
+    while isinstance(expression, ast.Attribute):
+        expression = expression.value
+    return expression.id if isinstance(expression, ast.Name) else ""
 
 
 def _handed_at(

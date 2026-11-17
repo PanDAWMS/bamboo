@@ -412,7 +412,7 @@ def _after_prints(
             line=line,
             names=names,
             rebound=any(
-                _changed_between(site.func, start, printed, _object_sites(site.func, one), flow.turn_loops(start, printed))
+                flow.changed_between(start, printed, _object_sites(site.func, one))
                 for start in after
                 for one in objects
             ),
@@ -949,7 +949,12 @@ def _key_names(
                             part=MUST_PART_MARK,
                         )
                     )
-    return names
+    # Two keys can name one column -- two terms of the statements a line fills, the same column -- and give one
+    # hole the same name twice.
+    unique: dict[tuple[int, str, str, str, str, str, str], MustName] = {}
+    for name in names:
+        unique.setdefault((name.line, name.expression, name.column, name.row, name.why, name.part, name.bind), name)
+    return list(unique.values())
 
 
 def _printed_map(expression: str) -> str:
@@ -991,9 +996,9 @@ def _map_holds_key(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
 
 def _kept_after(func: ast.AST, arm: ast.stmt, printed: ast.stmt, written: ast.expr, attribute: str) -> bool:
     """Whether *written*'s *attribute* holds at *printed*, after *arm*, what the arm left it: nothing that may change
-    it (:func:`_changes_of`) between them in the turn (:func:`_changed_between`)."""
+    it (:func:`_changes_of`) between them in the turn (:func:`flow.changed_between`)."""
     sites = _changes_of(func, written, attribute)
-    return sites is not None and not _changed_between(func, arm, printed, sites, flow.turn_loops(arm, printed))
+    return sites is not None and not flow.changed_between(arm, printed, sites)
 
 
 def _holds_after(func: ast.AST, write: ast.stmt, printed: ast.stmt, expression: ast.expr) -> bool:
@@ -1003,7 +1008,7 @@ def _holds_after(func: ast.AST, write: ast.stmt, printed: ast.stmt, expression: 
         return _kept_after(func, write, printed, expression.value, expression.attr)
     if isinstance(expression, ast.Name):
         sites = _rebindings(func, expression.id, printed)
-        return not _changed_between(func, write, printed, sites, flow.turn_loops(write, printed))
+        return not flow.changed_between(write, printed, sites)
     return False
 
 
@@ -1068,7 +1073,7 @@ def _map_holds_key_after(func: ast.AST, key: _Key, printed: ast.stmt) -> bool:
         statement = site if isinstance(site, (ast.stmt, ast.ExceptHandler)) else _statement_of(site)
         if statement is not None:
             sites.append(statement)
-    return not _changed_between(func, key.at, printed, sites, flow.turn_loops(key.at, printed))
+    return not flow.changed_between(key.at, printed, sites)
 
 
 def _spells_key(func: ast.AST, key: _Key, expression: str) -> bool:
@@ -1347,23 +1352,6 @@ def _changes_of(func: ast.AST, written: ast.expr, attribute: str) -> Optional[li
         ):
             sites.append(_statement_of(node))
     return [site for site in sites if site is not None]
-
-
-def _changed_between(
-    func: ast.AST, first: ast.stmt, then: ast.stmt, sites: Sequence[ast.AST], once: Sequence[ast.AST]
-) -> bool:
-    """Whether one of *sites* can run on a way from *first* to *then* in one turn of the loops *once* -- after the
-    arm, before a print after it.  Not :func:`_unbound_since`'s question turned round: a site reaching *then* on a
-    way that never ran *first* -- ``TaskCommando.runImpl``'s ``tmpTaskSpec.status = oldStatus`` at 181, on the way
-    that skips the arm at 197 -- is not between them.  A site that is the last write before *then* on some way and
-    that *first* reaches is: the two ways make one."""
-    others = [site for site in sites if site is not first and site is not then]
-    if not others:
-        return False
-    last = reaching(then, [first, *others], once=once)
-    return any(
-        site is not first and reaching(site, [first], entered=[first], once=once) for site in last
-    )
 
 
 def _given(call: ast.Call, holding: set[str]) -> bool:

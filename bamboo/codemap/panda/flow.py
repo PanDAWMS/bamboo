@@ -208,6 +208,22 @@ def turn_loops(first: ast.stmt, then: ast.stmt) -> list[ast.AST]:
     return [loop for loop in loops_around(first) if any(then is one or _under(then, one) for one in loop.body)]  # type: ignore[attr-defined]
 
 
+def changed_between(first: ast.stmt, then: ast.stmt, sites: Sequence[ast.AST]) -> bool:
+    """Whether one of *sites* -- statements that bind or change a value -- can run on a way from *first* to *then*,
+    in one turn of each loop holding both (:func:`turn_loops`): after an arm and before a print after it.
+
+    A site reaching *then* on a way that never ran *first* is not between them -- ``TaskCommando.runImpl``'s
+    ``tmpTaskSpec.status = oldStatus`` at 181, on the way that skips the arm at 197.  A site that is the last write
+    before *then* on some way and that *first* reaches is: the two ways make one."""
+    _one_function(first, then)
+    others = [site for site in sites if site is not first and site is not then]
+    if not others:
+        return False
+    once = turn_loops(first, then)
+    last = reaching(then, [first, *others], once=once)
+    return any(site is not first and reaching(site, [first], entered=[first], once=once) for site in last)
+
+
 def ruled_out_after(first: ast.stmt, then: ast.stmt) -> bool:
     """Whether a call that ran *first* cannot run *then* after it in the same turn of each loop around *first* that
     holds *then* (:func:`turn_loops`), by the values *first*'s way gives: a test on *then*'s way reads a name that

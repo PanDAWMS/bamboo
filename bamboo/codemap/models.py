@@ -2536,6 +2536,43 @@ class RowFall(BaseModel):
     )
 
 
+class HandOnPrint(BaseModel):
+    """A print every way through a hand-on passes in the same turn of the row loop (:attr:`HandOn.sure_prints`)."""
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Its holes holding what the hand-on keys the row by -- the subscript's key of a ``map[key] = value`` put, "
+            "else the value put -- spelled so, with nothing binding it between the two in the turn, as "
+            ":attr:`SkeletonHole.expression` spells them: ``jediTaskID`` of ``got jediTaskID={jediTaskID} ...``."
+        ),
+    )
+
+
+class HandOn(BaseModel):
+    """A put, in a statement's row loop, of a value holding its rows into a name read after the loop or returned
+    (:attr:`ReadSiteNode.hand_ons`): where the loop hands a row on.
+
+    ``prepareTasksToBeFinished_JEDI``'s loop over the rows of the statement at 3741 puts
+    ``jediTaskIDstatusMap[jediTaskID] = taskstatus`` at 3767, the map read after the loop, and prints ``got
+    jediTaskID={jediTaskID} ...`` at 3768 on every way past it: a run's line names each task the statement handed
+    on.  Its loop over the rows of 3696 hands each on at 3702 and prints nothing in the turn.
+    """
+
+    line: int = Field(description="The put's line.")
+    into: str = Field(description="The name put into: ``jediTaskIDstatusMap``, ``retTasks``.")
+    sure_prints: list[HandOnPrint] = Field(
+        default_factory=list,
+        description=(
+            "The owner's prints every way through the put passes in the same turn of the innermost loop around it, "
+            "before or after it, read for a run that entered no handler (:func:`bamboo.codemap.panda.flow."
+            "passes_after`, :func:`~bamboo.codemap.panda.flow.passes_before`).  Empty: a row handed on there may "
+            "leave no line in the turn.  Sorted by line."
+        ),
+    )
+
+
 class ReadSiteNode(BaseNode):
     """One statement that asks the database for rows by a value.
 
@@ -2932,6 +2969,16 @@ class ReadSiteNode(BaseNode):
             "== \"scouted\"`` (its body sets the task running), ``if nRows "
             "== 1`` and ``if resTS is not None`` (no ``else``: silent).  "
             "Sorted by line."
+        ),
+    )
+    hand_ons: list[HandOn] = Field(
+        default_factory=list,
+        description=(
+            "Each put of its row loops that hands a row on (:class:`HandOn`) -- into a name the function returns, or "
+            "a container a statement after the loop reads, of a value holding its rows or under a key holding them "
+            "-- with the prints every way through it passes in the turn.  The same hand-ons are what ``falls`` are "
+            "read against.  A statement handing rows on with no sure print anywhere: ``hand_ons`` not empty and "
+            "every ``sure_prints`` empty.  Sorted by line."
         ),
     )
     rows_handled: list[int] = Field(

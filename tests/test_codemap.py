@@ -41,6 +41,7 @@ from bamboo.codemap.models import (
     EntryPoint,
     EnumerationWrite,
     FilterStageNode,
+    FunctionPrintsNode,
     HeldSource,
     HeldThrough,
     JunctionNode,
@@ -20704,6 +20705,143 @@ def test_a_row_worked_through_in_a_copy_and_not_handed_on_past_a_test_exits_ther
         (at("# LOCKED"), "body", [], []),
         (at("# FOUND"), "body", [], []),
     ]
+    # The copy into ``taskStatList`` is worked through again by a row loop: no hand-on.
+    assert [(one.line, one.into) for one in picked.hand_ons] == [(at("# HAND"), "retTasks")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s shape: two statements' rows put into one map read after the loops, the second's
+#: past a test and with a print after the put; a bind map filled in the loop and bound again before it is read; a
+#: nested function reading the map, which runs elsewhere.
+_HANDED_INTO = '''
+class TaskModule:
+    def prepare(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND walltimeUnit IS NULL "
+        sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET assessmentTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlRS + comment, varMap)  # RS
+        resList = self.cur.fetchall()
+        statusMap = {}
+        for jediTaskID, taskStatus in resList:
+            statusMap[jediTaskID] = taskStatus  # PUT1
+
+        def seen(task):
+            return task in statusMap
+
+        varMap = {}
+        varMap[":vo"] = vo
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        for jediTaskID, taskstatus in resList:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # BIND
+            self.cur.execute(sqlLK + comment, varMap)
+            if jediTaskID not in statusMap:  # NEW
+                statusMap[jediTaskID] = taskstatus  # PUT2
+                tmpLog.debug(f"got jediTaskID={jediTaskID} for avalanche")  # GOT
+        varMap = {}
+        tmpLog.debug(str(varMap))
+        return list(statusMap.keys())
+'''
+
+
+def test_a_row_put_into_a_map_read_after_the_loop_is_handed_on_with_the_prints_every_way_through_it_passes(tmp_path):
+    """A row loop hands a row on where it puts it, or puts under its key, into a name the function returns or a
+    statement after the loop reads (:attr:`ReadSiteNode.hand_ons`): ``statusMap`` at PUT1 and PUT2, not the bind map
+    ``varMap``, bound again before the read after the loop.  ``got jediTaskID=...`` follows PUT2 on every way and
+    names the key it puts under (:attr:`HandOn.sure_prints`); PUT1 has no print in its turn.  The test before PUT2,
+    whose other way hands nothing on, is a fall."""
+    from bamboo.codemap import trace
+
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_INTO})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    prints = [
+        FunctionPrintsNode(
+            name=f"m:{found.owner}",
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            owner=found.owner,
+            cls=found.cls,
+            function=found.func.name,
+            count=len(found.statements),
+            statements=found.statements,
+            anchor=Anchor(package="pandaserver", file=found.file, line_start=found.func.lineno),
+        )
+        for found in trace.function_prints({"pandaserver": tmp_path / "pandaserver"}, [rel])
+    ]
+    assert sqlwrite.attach_hand_on_prints(sites, prints, modules) == 1
+    lines = _HANDED_INTO.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    by_line = {site.anchor.line_start: site for site in sites}
+    first, second = by_line[at("# RS")], by_line[at("# EA")]
+    assert [(one.line, one.into, one.sure_prints) for one in first.hand_ons] == [(at("# PUT1"), "statusMap", [])]
+    assert [
+        (one.line, one.into, [(sure.line, sure.holes) for sure in one.sure_prints]) for one in second.hand_ons
+    ] == [(at("# PUT2"), "statusMap", [(at("# GOT"), ["jediTaskID"])])]
+    assert [(one.line, one.kept) for one in second.falls] == [(at("# NEW"), "body")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s turn at 3757-3768: one way sets a flag the row is handed on under after the
+#: ``if``s, another hands it on to a second name and sets the flag too.
+_HANDED_LATER = '''
+class TaskModule:
+    def trigger(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        statusMap = {}
+        started = set()
+        for jediTaskID, taskstatus in resList:
+            to_trigger = False
+            if taskstatus == "scouting":  # SCOUT
+                to_trigger = True
+            elif taskstatus == "running":  # RUN
+                started.add(jediTaskID)
+                to_trigger = True
+            if to_trigger:  # TRIGGER
+                statusMap[jediTaskID] = taskstatus
+        return statusMap, started
+'''
+
+
+def test_an_if_whose_other_way_leads_on_to_a_later_hand_on_is_no_fall(tmp_path):
+    """The scouting way holds no hand-on, but sets ``to_trigger`` and goes on to the put under ``if to_trigger:``: a
+    row taking it is handed on, so ``if taskstatus == "scouting"`` is no fall; nor is the ``elif``, whose way past it
+    goes on to the same put as the flow reads it.  ``if to_trigger:`` is: past it the turn ends with nothing put."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_LATER})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _HANDED_LATER.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (site,) = [one for one in sites if one.anchor.line_start == at("# EA")]
+    assert [one.into for one in site.hand_ons] == ["started", "statusMap"]
+    assert [(one.line, one.kept) for one in site.falls] == [(at("# TRIGGER"), "body")]
 
 
 #: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,

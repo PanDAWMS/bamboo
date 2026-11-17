@@ -961,3 +961,19 @@ def test_an_sql_arm_s_after_prints_follow_its_run_and_not_what_its_own_way_rules
         "B": ([("jediTaskID", "JediTaskSpec.jediTaskID", MUST_ROW_WRITTEN)], False, False),
         "E": ([], False, False),
     }
+
+
+def test_two_keys_naming_one_column_give_a_hole_one_name(tmp_path: Path) -> None:
+    """Two terms of the statements a line fills can name one column with one value: the hole is one name, in the
+    must names and in the after prints' names alike."""
+    fragment = _build(
+        tmp_path,
+        SQL_ARM,
+        ("h", "W"),
+        subject="JediTaskSpec.status",
+        key_froms=(_term("h", "X", "W", "K"), _term("h", "X", "W", "K")),
+        declared={**DECLARED, "JediTaskSpec": {"jediTaskID", "status"}},
+    )
+    branch = _branch(fragment, "W")
+    named = [(one.line, one.expression, one.column, one.part) for one in branch.must_names or []]
+    assert named and len(named) == len(set(named))
