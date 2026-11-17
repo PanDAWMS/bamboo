@@ -7363,6 +7363,37 @@ def test_reach_follows_self_calls_past_the_door():
     }
 
 
+_PROXY_TWO_MARKS = _PROXY + """
+
+class OtherModule:
+    def markTask(self):
+        pass
+"""
+
+
+def test_a_self_call_reaches_the_method_of_its_own_class_not_another_of_the_name():
+    """``self.markTask()`` in ``TaskModule`` runs ``TaskModule.markTask``.
+
+    Keyed by the name, the file's two ``markTask`` were one method, and a
+    junction in ``OtherModule.markTask`` took the entries of a door that never
+    reaches it.  Each definition is keyed by the map's spelling of it, the
+    owner a junction names.
+    """
+    reached = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::TaskModule.markTask")
+    other = _junction("pandaserver/taskbuffer/db_proxy_mods/task_module.py::OtherModule.markTask")
+    _attach(
+        (_KNIGHT, "pandajedi/jediorder/TaskCommando.py"),
+        (_PROXY_TWO_MARKS, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        junctions=[reached, other],
+    )
+
+    assert {(e.trigger, e.via) for e in reached.entry_points} == {
+        ("polled", "getTasksToExecCommand_JEDI"),
+        ("command", "getTasksToExecCommand_JEDI"),
+    }
+    assert other.entry_points == []
+
+
 def test_a_name_several_modules_implement_carries_no_edge():
     """``run`` is defined by every daemon, so following it invents callers.
 
@@ -7504,6 +7535,62 @@ def test_the_call_belongs_to_the_function_that_makes_it():
     ]
     assert refine.calls == [
         "pandaserver/taskbuffer/db_proxy_mods/task_module.py::markTask"
+    ]
+
+
+_SCRAPERS = """
+from pandaserver.utils import locks
+
+
+class BaseScraper:
+    def _insert(self, rows):
+        self._insert_rows(rows)
+
+    def _insert_rows(self, rows):
+        pass
+
+
+class Ingestor(BaseScraper):
+    def _insert(self, rows):
+        self._store(rows)
+
+    def _store(self, rows):
+        self.held.get()
+"""
+
+_LOCKS = """
+class ListWithLock:
+    def get(self):
+        pass
+
+
+class MapWithLock:
+    def get(self):
+        pass
+"""
+
+
+def test_what_a_def_consults_is_its_own_not_that_of_another_def_of_its_name():
+    """``hs_scrapers.py`` has two ``_insert``, and only one inserts the rows.
+
+    Keyed by the name, ``HS23Ingestor._insert`` consulted
+    ``BaseHS06Scraper._insert``'s ``_insert_cpu_perf_rows``, which it never
+    calls.  And a call into a module that defines the name twice is to one of
+    the two, which the name does not say -- so both are listed, each by its
+    spelling, rather than a ``file::get`` that is neither.
+    """
+    modules = [
+        _module(_SCRAPERS, "pandaserver/configurator/scrapers.py"),
+        _module(_LOCKS, "pandaserver/utils/locks.py"),
+    ]
+    insert = _junction("pandaserver/configurator/scrapers.py::Ingestor._insert")
+    store = _junction("pandaserver/configurator/scrapers.py::_store")
+    trigger.attach_calls([insert, store], modules)
+
+    assert insert.calls == ["pandaserver/configurator/scrapers.py::_store"]
+    assert store.calls == [
+        "pandaserver/utils/locks.py::ListWithLock.get",
+        "pandaserver/utils/locks.py::MapWithLock.get",
     ]
 
 

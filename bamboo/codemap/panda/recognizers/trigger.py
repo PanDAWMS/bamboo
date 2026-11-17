@@ -52,7 +52,7 @@ from typing import Collection, Iterator, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import bare_name, def_name
+from bamboo.codemap.calls import bare_name, binding, bound_defs, def_name, def_names
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
@@ -77,7 +77,12 @@ from bamboo.codemap.panda.attribution import (
 )
 from bamboo.codemap.panda.provenance import borrowed_proxies
 from bamboo.codemap.panda.recognizers.boundary import endpoint_decorator
-from bamboo.codemap.pathcond import functions_with_owner, targets_of, written_value
+from bamboo.codemap.pathcond import (
+    bases_in,
+    functions_with_owner,
+    targets_of,
+    written_value,
+)
 
 # The trigger vocabulary is imported rather than declared here.  It lives with
 # the field that carries it because both halves of the map read it: this one to
@@ -253,7 +258,7 @@ def _forwarded_call(
 
 def _forwarded_sites(
     module: SourceModule, forwarders: dict[str, tuple[str, int]]
-) -> list[tuple[tuple[str, ...], str, ast.Call]]:
+) -> list[tuple[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], str, ast.Call]]:
     """Call sites a forwarder's construction makes on someone else's behalf.
 
     The call recorded is the one made *on the constructed object*, not the
@@ -266,7 +271,7 @@ def _forwarded_sites(
     """
     if not forwarders:
         return []
-    sites: list[tuple[tuple[str, ...], str, ast.Call]] = []
+    sites: list[tuple[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], str, ast.Call]] = []
     for func, _owner in functions_with_owner(module.tree):
         built: list[tuple[Optional[str], str, ast.Call]] = []
         for node in walk(func):
@@ -285,7 +290,7 @@ def _forwarded_sites(
         for bound, method, construction in built:
             sites.append(
                 (
-                    (func.name,),
+                    (func,),
                     method,
                     _called_on(func, bound, construction) if bound else construction,
                 )
@@ -312,7 +317,7 @@ def _outward_call_sites(
     module: SourceModule,
     forwarders: Optional[dict[str, tuple[str, int]]] = None,
     doors: Optional[dict[str, set[str]]] = None,
-) -> list[tuple[tuple[str, ...], str, ast.Call]]:
+) -> list[tuple[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], str, ast.Call]]:
     """Return ``[(enclosing functions, method, call)]`` for *module*'s real calls.
 
     The primitive :func:`_outward_calls` and :func:`attach_calls` share, so the
@@ -323,9 +328,11 @@ def _outward_call_sites(
     junction consults -- a knight's two methods consult different things, and
     pooling them under the file is the shared-owner join by another name.
 
-    A tuple of names, not one, because a call inside a nested function is made
-    by the outer function too; :func:`_self_calls` walks whole function bodies
-    and says the same.  Module-level calls carry the empty tuple.
+    A tuple of functions, not one, because a call inside a nested function is
+    made by the outer function too; :func:`_self_calls` walks whole function
+    bodies and says the same.  Functions rather than their names, because a
+    name is no identity in a module that defines it twice.  Module-level calls
+    carry the empty tuple.
 
     **The receiver is what identifies a facade hop, not the name.**  ``TaskBuffer``
     and ``JediTaskBuffer`` borrow a connection from ``self.proxyPool`` and call
@@ -347,17 +354,17 @@ def _outward_call_sites(
     empty answer there reads as "this code never ran".  It sat on 71 junctions
     before the receiver rule removed it.
     """
-    sites: list[tuple[tuple[str, ...], str, ast.Call]] = []
+    sites: list[tuple[tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], str, ast.Call]] = []
     # Breadth-first, because which call a name resolves to decides the
     # ``arg_binding`` reported for that entry and that answer must not move.
-    queue: list[tuple[ast.AST, tuple[str, ...], frozenset[str]]] = [
+    queue: list[tuple[ast.AST, tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], frozenset[str]]] = [
         (module.tree, (), frozenset())
     ]
     while queue:
         node, enclosing, pooled = queue.pop(0)
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                inner_names = enclosing + (child.name,)
+                inner_names = enclosing + (child,)
                 inner_pooled = borrowed_proxies(child)
             else:
                 inner_names, inner_pooled = enclosing, pooled
@@ -370,7 +377,7 @@ def _outward_call_sites(
                     # *which* door is the one thing a caller of the facade needs
                     # to reach past it.  Recorded only when asked for, so the
                     # log question keeps reading exactly what it read before.
-                    doors.setdefault(enclosing[0], set()).add(child.func.attr)
+                    doors.setdefault(enclosing[0].name, set()).add(child.func.attr)
             queue.append((child, inner_names, inner_pooled))
     sites.extend(_forwarded_sites(module, forwarders or {}))
     return sites
@@ -499,6 +506,9 @@ def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
     today** -- neither pair actually collides in what it calls on ``self`` --
     so this is the shape being read correctly rather than a difference in the
     answer, and the second reader would fail silently if it stopped being.
+
+    Keyed by the name, which within one class is the method; the readers of a
+    whole module key by the definition instead (:func:`_def_self_calls`).
     """
     edges: dict[str, set[str]] = {}
     for func, _owner in functions_with_owner(tree):
@@ -512,6 +522,81 @@ def _self_calls(tree: ast.AST) -> dict[str, set[str]]:
             ):
                 targets.add(node.func.attr)
     return edges
+
+
+def _functions_and_classes(
+    scope: ast.AST, cls: Optional[ast.ClassDef] = None
+) -> Iterator[tuple[ast.FunctionDef | ast.AsyncFunctionDef, Optional[ast.ClassDef]]]:
+    """Every function under *scope* with the class whose ``self`` it reads: its
+    own, or that of the method it is nested in.  Under an ``if`` or a ``try``
+    too, as :func:`~bamboo.codemap.calls.bound_defs` reads a scope."""
+    for node in bound_defs(scope):
+        if isinstance(node, ast.ClassDef):
+            yield from _functions_and_classes(node, node)
+        else:
+            yield node, cls
+            yield from _functions_and_classes(node, cls)
+
+
+def _self_method(
+    line: list[ast.ClassDef], name: str
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The method ``self.<name>`` is in the first class of *line* that binds *name*."""
+    for holder in line:
+        found = binding(list(bound_defs(holder)), name)
+        if found is not None:
+            return found if isinstance(found, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+    return None
+
+
+def _def_self_calls(tree: ast.Module) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Return ``({def: the defs it runs on self}, {def: the names it calls on self and runs nothing here by})``.
+
+    :func:`_self_calls` per definition rather than per name, each by the map's
+    spelling of it (:func:`~bamboo.codemap.calls.def_name`), which is how a
+    junction names its owner.  A name is no identity in a module that defines it
+    twice: ``hs_scrapers.py`` has an ``_insert`` in ``BaseHS06Scraper`` and
+    another in ``HS23Ingestor``, and keyed by the name the second consulted the
+    first's ``_insert_cpu_perf_rows``, which it never calls.
+
+    ``self.<name>()`` runs the method that the caller's class, or the first of
+    its bases this module declares (:func:`~bamboo.codemap.pathcond.bases_in`),
+    binds the name to.  A nested function reads the ``self`` of the method it
+    is in, and its calls are the method's too, as :func:`_self_calls` walks
+    whole bodies.  Measured on ``88de65c7`` before this was written, over the
+    3475 ``self.<name>()`` calls of the corpus: 1284 resolve this way; none is
+    to a method that only a subclass in the module defines, none to a method of
+    an unrelated class of the module -- so no edge the name gave is lost --; and
+    2191 name a method the module does not define.  Those stay names, for
+    :func:`_inherited_homes` to follow into a base's module, as before.
+    """
+    names = def_names(tree)
+    runs: dict[str, set[str]] = {}
+    unplaced: dict[str, set[str]] = {}
+    lines: dict[int, list[ast.ClassDef]] = {}
+    for func, cls in _functions_and_classes(tree):
+        here = names.get(id(func), func.name)
+        ran = runs.setdefault(here, set())
+        left = unplaced.setdefault(here, set())
+        line: list[ast.ClassDef] = []
+        if cls is not None:
+            if id(cls) not in lines:
+                lines[id(cls)] = [cls, *bases_in(tree, cls)]
+            line = lines[id(cls)]
+        for node in walk(func):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+            ):
+                continue
+            method = _self_method(line, node.func.attr)
+            if method is None:
+                left.add(node.func.attr)
+            else:
+                ran.add(names.get(id(method), method.name))
+    return runs, unplaced
 
 
 def _ancestors(bases: dict[str, list[str]], cls: str) -> Iterator[str]:
@@ -1010,34 +1095,46 @@ def reaching_modules(
     homes = _inherited_homes(modules, bases) if through_inheritance else {}
     dispatched = _dispatch_families(modules, bases) if through_dispatch else {}
     kin = _declared_family(modules, bases) if through_dispatch else {}
-    self_calls = {module.rel_path: _self_calls(module.tree) for module in modules}
+    # Keyed by each definition, as a junction names its owner; a caller still
+    # reaches a door by the name it calls, so a module defining the name twice
+    # has two doors and the caller reaches both -- the name does not say which.
+    self_calls = {module.rel_path: _def_self_calls(module.tree) for module in modules}
+    by_name: dict[str, dict[str, list[str]]] = {}
+    for rel, (runs, _left) in self_calls.items():
+        for spelled in runs:
+            by_name.setdefault(rel, {}).setdefault(bare_name(spelled), []).append(spelled)
     inward: dict[str, dict[str, list[tuple[str, str, Optional[ast.Call]]]]] = {}
     for module in modules:
-        edges = self_calls[module.rel_path]
+        runs, unplaced = self_calls[module.rel_path]
         inherited = homes.get(module.rel_path, {})
-        for door in edges:
-            unambiguous = implemented.get(door) == module.rel_path
-            for entry, call, via in callers.get(door, ()):
+        for door in runs:
+            name = bare_name(door)
+            unambiguous = implemented.get(name) == module.rel_path
+            for entry, call, via in callers.get(name, ()):
                 if entry == module.rel_path:
                     continue
                 if not unambiguous and module.rel_path not in imports[entry]:
-                    stated = dispatched.get(entry, {}).get(door)
+                    stated = dispatched.get(entry, {}).get(name)
                     if stated is None or stated not in kin.get(module.rel_path, ()):
                         continue
-                for method in _downstream(edges, door):
+                for method in _downstream(runs, door):
                     inward.setdefault(module.rel_path, {}).setdefault(method, []).append(
-                        (entry, via or door, call)
+                        (entry, via or name, call)
                     )
-                    home = inherited.get(method)
-                    if home is None:
-                        continue
-                    # Inside the base's file the within-one-module rule applies
-                    # again, so the inherited method's own ``self`` calls are
-                    # followed there -- the same reading, not a second hop.
-                    for reached in _downstream(self_calls[home], method):
-                        inward.setdefault(home, {}).setdefault(reached, []).append(
-                            (entry, via or door, call)
-                        )
+                    for called in unplaced.get(method, ()):
+                        home = inherited.get(called)
+                        if home is None:
+                            continue
+                        # Inside the base's file the within-one-module rule
+                        # applies again, so the inherited method's own ``self``
+                        # calls are followed there -- the same reading, not a
+                        # second hop.  The base is found by the name, so every
+                        # definition of it there is the method.
+                        for start in by_name.get(home, {}).get(called, ()):
+                            for reached in _downstream(self_calls[home][0], start):
+                                inward.setdefault(home, {}).setdefault(reached, []).append(
+                                    (entry, via or name, call)
+                                )
     return inward
 
 
@@ -1628,7 +1725,8 @@ def attach(
 
     reached = 0
     for junction in junctions:
-        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
+        owner_module, _, spelled = junction.owner.partition("::")
+        method = bare_name(junction.owner)
         # Keyed by how it arrived as well as by where from.  Without that a
         # facade crossing and a plain call that share a door name collide, and
         # the survivor is whichever was built last -- which silently replaced
@@ -1641,7 +1739,7 @@ def attach(
             found[(kind, owner_module, None, ARRIVES_BY_CALL)] = EntryPoint(
                 trigger=kind, entry=owner_module
             )
-        for entry, door, call in inward.get(owner_module, {}).get(method, ()):
+        for entry, door, call in inward.get(owner_module, {}).get(spelled, ()):
             arrival = ARRIVES_BY_CALL if call is not None else ARRIVES_THROUGH_DOOR
             for kind in triggers.get(entry, ()):
                 found[(kind, entry, door, arrival)] = EntryPoint(
@@ -1742,9 +1840,9 @@ def unreached_reasons(
     for junction in junctions:
         if junction.entry_points:
             continue
-        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
-        callers = inward.get(owner_module, {}).get(method, ())
-        if method == "<module>":
+        owner_module, _, spelled = junction.owner.partition("::")
+        callers = inward.get(owner_module, {}).get(spelled, ())
+        if spelled == "<module>":
             reason = RUNS_AT_IMPORT
         elif not callers:
             reason = NO_CALLER_RESOLVED
@@ -1801,7 +1899,11 @@ def _consulted_targets(
     """Return ``{module: {function: qualified targets}}`` -- what each one consults.
 
     Qualified, because a bare name is not an identity in this corpus and the
-    reader of this field joins on it.  Two restrictions decide whether a name
+    reader of this field joins on it.  Each function and each target is a
+    definition, by the map's spelling of it (:func:`~bamboo.codemap.calls.def_name`):
+    the functions as :func:`_def_self_calls` keys them, and a target in another
+    module that defines the name twice as each of the two -- the name says it
+    is one of them and not which.  Two restrictions decide whether a name
     resolves at all, and they are the ones :func:`reaching_modules` already
     turns on, applied in the other direction: the name means one thing across
     the tree, or the caller imports the module it names.  Without them ``run``
@@ -1819,13 +1921,24 @@ def _consulted_targets(
     defined = definitions(modules)
     sole = sole_definitions(modules)
     imports = {module.rel_path: imported_modules(module) for module in modules}
+    spelled_as = {module.rel_path: def_names(module.tree) for module in modules}
+    # What a name means in the module that defines it: the definitions
+    # :func:`definitions` counts there, each by its spelling.
+    meaning: dict[str, dict[str, list[str]]] = {}
+    for module in modules:
+        for func, _owner in functions_with_owner(module.tree):
+            if not _forwards_to_itself(func):
+                meaning.setdefault(module.rel_path, {}).setdefault(func.name, []).append(
+                    spelled_as[module.rel_path].get(id(func), func.name)
+                )
 
     targets: dict[str, dict[str, set[str]]] = {}
     for module in modules:
         here = module.rel_path
-        for method, callees in _self_calls(module.tree).items():
-            targets.setdefault(here, {}).setdefault(method, set()).update(
-                f"{here}::{callee}" for callee in callees
+        runs, unplaced = _def_self_calls(module.tree)
+        for function, callees in runs.items():
+            targets.setdefault(here, {}).setdefault(function, set()).update(
+                f"{here}::{callee}" for callee in callees | unplaced[function]
             )
         for enclosing, method, call in _outward_call_sites(module):
             if not enclosing or not _reaches_from_self(call.func.value):
@@ -1835,10 +1948,10 @@ def _consulted_targets(
                     continue
                 if sole.get(method) != home and home not in imports[here]:
                     continue
-                for name in enclosing:
-                    targets.setdefault(here, {}).setdefault(name, set()).add(
-                        f"{home}::{method}"
-                    )
+                for func in enclosing:
+                    targets.setdefault(here, {}).setdefault(
+                        spelled_as[here].get(id(func), func.name), set()
+                    ).update(f"{home}::{target}" for target in meaning[home][method])
     return targets
 
 
@@ -1868,8 +1981,8 @@ def attach_calls(junctions: list[JunctionNode], modules: list[SourceModule]) -> 
     targets = _consulted_targets(modules)
     found = 0
     for junction in junctions:
-        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
-        junction.calls = sorted(targets.get(owner_module, {}).get(method, ()))
+        owner_module, _, spelled = junction.owner.partition("::")
+        junction.calls = sorted(targets.get(owner_module, {}).get(spelled, ()))
         if junction.calls:
             found += 1
     return found

@@ -595,10 +595,10 @@ def def_name(func: ast.AST) -> str:
     module = next((one for one in pathcond.ancestors(func) if isinstance(one, ast.Module)), None)
     if module is None:
         return name
-    return _def_names(module).get(id(func), name)
+    return def_names(module).get(id(func), name)
 
 
-def _def_names(module: ast.Module) -> dict[int, str]:
+def def_names(module: ast.Module) -> dict[int, str]:
     found = _DEF_NAMES.get(module)
     if found is None:
         functions = [node for node in walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -618,7 +618,7 @@ def def_named(module: ast.AST, name: str) -> Optional[ast.FunctionDef | ast.Asyn
     if found is None:
         if not isinstance(module, ast.Module):
             return None
-        names, ids = _def_names(module), def_ids(module)
+        names, ids = def_names(module), def_ids(module)
         functions = [node for node in walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
         found = _DEFS_NAMED[module] = {}
         for node in sorted(functions, key=_is_overload):

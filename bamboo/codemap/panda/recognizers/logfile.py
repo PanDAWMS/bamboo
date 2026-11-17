@@ -55,7 +55,7 @@ from typing import NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import Calls, CallSite, Target, bare_name, bind
+from bamboo.codemap.calls import Calls, CallSite, Target, bind
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     LOG_FILES_OF_MODULE,
@@ -879,12 +879,12 @@ def _caller_files(
 ) -> list[str]:
     """Files belonging to the modules that reach *owner*, minus its own.
 
-    One reading for the two nodes that carry it.  The enclosing class is part
-    of ``owner`` but not of the call graph's keys, which are bare method names
-    -- the same last-segment rule the attribution slice uses to name a
-    function.
+    One reading for the two nodes that carry it.  The call graph's keys are
+    the definitions as ``owner`` spells them
+    (:func:`~bamboo.codemap.calls.def_name`), so a module defining a name twice
+    gives each its own callers.
     """
-    reached = inward.get(owner.partition("::")[0], {}).get(bare_name(owner), ())
+    reached = inward.get(owner.partition("::")[0], {}).get(owner.partition("::")[2], ())
     return sorted(
         {file for entry, _door, _call in reached for file in files_of(entry, declared, inherited)}
         - set(mine)
