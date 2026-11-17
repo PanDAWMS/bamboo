@@ -1691,6 +1691,15 @@ _PRIMARY_KEY = re.compile(
 )
 _INLINE_PRIMARY_KEY = re.compile(r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?PRIMARY\s+KEY\s*\(([^)]*)\)', re.IGNORECASE)
 _COLUMN_PRIMARY_KEY = re.compile(r"\bPRIMARY\s+KEY\b(?!\s*\()", re.IGNORECASE)
+_FOREIGN_KEY = re.compile(
+    r'ALTER\s+TABLE\s+"(\w+)"\."(\w+)"\s+ADD\s+(?:CONSTRAINT\s+"?\w+"?\s+)?FOREIGN\s+KEY\s*\(([^)]*)\)\s*'
+    r'REFERENCES\s+"(\w+)"\."(\w+)"\s*\(([^)]*)\)',
+    re.IGNORECASE,
+)
+_INLINE_FOREIGN_KEY = re.compile(
+    r'^\s*(?:CONSTRAINT\s+"?\w+"?\s+)?FOREIGN\s+KEY\s*\(([^)]*)\)\s*REFERENCES\s+"(\w+)"\."(\w+)"\s*\(([^)]*)\)',
+    re.IGNORECASE,
+)
 
 
 def table_columns(table: str) -> frozenset[str]:
@@ -1782,6 +1791,41 @@ def read_keys(directory: Path) -> dict[str, frozenset[str]]:
         for match in _PRIMARY_KEY.finditer(text):
             found[match.group(2).lower()] = columns(match.group(3))
     return found
+
+
+#: A foreign key: its table's columns, the table it references and that table's columns, each lowered, the columns in
+#: the order declared -- the first of one with the first of the other.
+Reference = tuple[tuple[str, ...], str, tuple[str, ...]]
+
+
+def read_references(directory: Path) -> dict[str, list[Reference]]:
+    """``{table: its foreign keys}``, sorted, from the DDL :func:`read_schema` reads.
+
+    The schema declares one two ways, as it does a key (:func:`read_keys`): ``ALTER TABLE "ATLAS_PANDA"."JEDI_DATASETS"
+    ADD CONSTRAINT "JEDI_DATASETS_JEDITASKID_FK" FOREIGN KEY ("JEDITASKID") REFERENCES "ATLAS_PANDA"."JEDI_TASKS"
+    ("JEDITASKID")`` after the table, or a ``CONSTRAINT ... FOREIGN KEY (...) REFERENCES ...`` part of its body
+    (``ASYNC_RESULTS``).  A composite one is one reference, its columns together.  A join the corpus writes is a use,
+    not a declaration, and is not read here.
+    """
+    found: dict[str, set[Reference]] = {}
+
+    def columns(listed: str) -> tuple[str, ...]:
+        return tuple(one.strip().strip('"').lower() for one in listed.split(","))
+
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        for match in _CREATE_TABLE.finditer(text):
+            for part in _top_level_parts(text, match.end()):
+                inline = _INLINE_FOREIGN_KEY.match(part)
+                if inline is not None:
+                    found.setdefault(match.group(2).lower(), set()).add(
+                        (columns(inline.group(1)), inline.group(3).lower(), columns(inline.group(4)))
+                    )
+        for match in _FOREIGN_KEY.finditer(text):
+            found.setdefault(match.group(2).lower(), set()).add(
+                (columns(match.group(3)), match.group(5).lower(), columns(match.group(6)))
+            )
+    return {table: sorted(references) for table, references in found.items()}
 
 
 def _top_level_parts(text: str, start: int) -> list[str]:

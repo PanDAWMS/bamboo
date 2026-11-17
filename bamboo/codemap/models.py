@@ -4443,6 +4443,37 @@ class TableRecord(BaseModel):
             "another table."
         ),
     )
+    references: list["TableReference"] = Field(
+        default_factory=list,
+        description=(
+            "The foreign keys the schema declares on it (:func:`bamboo.codemap.panda.sqltext.read_references`), "
+            "sorted: ``jedi_datasets``' ``jeditaskid`` holds a ``jedi_tasks`` row's ``jeditaskid``.  Not the joins "
+            "the corpus writes."
+        ),
+    )
+
+
+class TableReference(BaseModel):
+    """One foreign key of a table (:attr:`TableRecord.references`): its *columns* hold the values of *table*'s
+    *table_columns*, ``columns[i]`` that of ``table_columns[i]`` and ``attrs[i]`` that of ``table_attrs[i]`` -- so a
+    composite one is followed a column at a time: ``jedi_dataset_contents``' ``(jeditaskid, datasetid)`` reference
+    ``jedi_datasets``', whose ``jeditaskid`` references ``jedi_tasks``'.  The referenced columns are as declared;
+    whether they are the referenced table's identity is the reader's to compare (:attr:`TableRecord.identity`)."""
+
+    columns: list[str] = Field(..., description="This table's columns, lowered, in the order declared.")
+    attrs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Each of *columns* as :attr:`TableRecord.rows_of`'s attribute (``JediDatasetSpec.jediTaskID``), ``\"\"`` "
+            "where it has none; empty where the table holds no class's rows."
+        ),
+    )
+    table: str = Field(..., description="The table referenced, lowered: ``jedi_tasks``.")
+    table_columns: list[str] = Field(..., description="Its columns, lowered, in the order declared.")
+    table_attrs: list[str] = Field(
+        default_factory=list,
+        description="Each of *table_columns* as the referenced table's rows' class's attribute, as *attrs*.",
+    )
 
 
 #: Why a value filling an endpoint's term is no parameter of the endpoint (:attr:`EndpointFill.why`): a literal; a

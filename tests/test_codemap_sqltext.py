@@ -1615,3 +1615,22 @@ def test_a_column_against_another_tables_column_by_an_order_is_a_joined_term_fro
         ("jobsActive4", "<>", False),
         ("jobsActive4", "<>", False),
     ]
+
+
+def test_a_foreign_key_is_read_in_each_form_the_schema_states_it(tmp_path):
+    """After the table (``JEDI_DATASETS``), a part of its body over two lines (``ASYNC_RESULTS``, DEFT's), and a
+    composite one whole: its columns in the order declared, the first with the first.  A table with none has no
+    entry."""
+    (tmp_path / "ATLAS_PANDA.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDA"."JEDI_TASKS" ("JEDITASKID" NUMBER(11,0));\n'
+        'CREATE TABLE "ATLAS_PANDA"."JEDI_DATASETS" ("JEDITASKID" NUMBER(11,0), "DATASETID" NUMBER(11,0));\n'
+        'CREATE TABLE "ATLAS_PANDA"."JEDI_DATASET_CONTENTS" ("JEDITASKID" NUMBER(11,0), "DATASETID" NUMBER(11,0),\n'
+        '\t CONSTRAINT "JEDI_DATASET_CONTENTS_FK" FOREIGN KEY ("JEDITASKID", "DATASETID")\n'
+        '\t  REFERENCES "ATLAS_PANDA"."JEDI_DATASETS" ("JEDITASKID", "DATASETID") ENABLE);\n'
+        'ALTER TABLE "ATLAS_PANDA"."JEDI_DATASETS" ADD CONSTRAINT "JEDI_DATASETS_JEDITASKID_FK" FOREIGN KEY ("JEDITASKID")\n'
+        '\t  REFERENCES "ATLAS_PANDA"."JEDI_TASKS" ("JEDITASKID") ENABLE;\n'
+    )
+    assert sqltext.read_references(tmp_path) == {
+        "jedi_datasets": [(("jeditaskid",), "jedi_tasks", ("jeditaskid",))],
+        "jedi_dataset_contents": [(("jeditaskid", "datasetid"), "jedi_datasets", ("jeditaskid", "datasetid"))],
+    }

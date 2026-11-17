@@ -21929,6 +21929,7 @@ def test_a_table_record_says_its_key_as_the_class_spells_it_its_family_and_its_r
             modules, entities, sites, froms, attributor, attributor.class_for_table, schema, keys,
             {"jobsarchived": ("range", ("modificationtime",))},
             {"jobsactive4": ("ATLAS_PANDA",), "jobsarchived": ("ATLAS_PANDAARCH",)},
+            {"jobsarchived": [(("pandaid",), "jobsactive4", ("pandaid",)), (("pandaid",), "t_other", ("id",))]},
         )
     by = {one.name: one for one in made}
     written = sorted(
@@ -21943,6 +21944,15 @@ def test_a_table_record_says_its_key_as_the_class_spells_it_its_family_and_its_r
         "JobSpec", ["pandaid"], ["JobSpec.PandaID"], True, ["jobsarchived"], ["JobSpec.creationTime"],
     )
     assert (live.schema_names, live.partitioned_by, live.spellings) == (["ATLAS_PANDA"], [], ["jobsActive4"])
+    # The schema's foreign keys, each column with its attribute; a table holding no class's rows has none.
+    assert live.references == []
+    assert [one.model_dump() for one in archive.references] == [
+        {
+            "columns": ["pandaid"], "attrs": ["JobSpec.PandaID"],
+            "table": "jobsactive4", "table_columns": ["pandaid"], "table_attrs": ["JobSpec.PandaID"],
+        },
+        {"columns": ["pandaid"], "attrs": ["JobSpec.PandaID"], "table": "t_other", "table_columns": ["id"], "table_attrs": []},
+    ]
     assert (
         archive.rows_of, archive.identity, archive.inserted, archive.family, archive.schema_names,
         archive.partition_kind, archive.partitioned_by, archive.partitioned_by_attrs, archive.creation,
