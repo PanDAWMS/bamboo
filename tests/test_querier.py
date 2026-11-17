@@ -15902,6 +15902,80 @@ def test_a_write_whose_statement_s_guard_its_pass_read_false_did_not_run_and_the
     assert got["two"] is None and got["one statement"] is None, got
 
 
+def test_a_selection_whose_hand_ons_print_the_key_every_way_and_printed_none_handed_no_row(tmp_path):
+    """The P25 reader (the map's ReadSiteNode.hand_ons and KeySource.through_hand_ons): where no selection of the mover
+    printed the row's key in the moving pass, one whose every hand-on the write's key is drawn through prints the key
+    on every way through it, and the pass shows none of those lines, handed no row on; the one statement left took it
+    -- prepareTasksToBeFinished_JEDI's 3696, its sqlEA (3767, printing 3768) and sqlFA (3794, 3796) ruled out.  A key
+    filled in the row loop, a hand-on with no sure print, or a pass holding a handler's row rules nothing out."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            S = "JediTaskSpec.status"
+            st = {n: N(owner="t.py::prep", line=n) for n in (3696, 3741, 3789)}
+            mv = N(records=[N(stamp="2026-11-15 20:03:00,500", text="r", token="")])
+            RR.R.passes = lambda fn, run, mode: ([mv], "cut")
+            RR.R.statement_at = lambda node, line: N(line=line)
+            key_hole = N(text="f'got jediTaskID={jediTaskID} ...'", holes=[N(expression="jediTaskID", columns=["JediTaskSpec.jediTaskID"])])
+            RR.R.function = lambda rel, name, lines: N(node=None, rows=[N(line=3643, stmt="s3643"), N(line=3695, stmt="s3695")],
+                                                       row_at=lambda stmt: N(line=stmt.line, map_rows=[key_hole]))
+            RR.trace.hole_values = lambda m, text, token, whole=True: ([], [])
+            RR.R.raised_in = lambda fn, run: (False, set())
+            handler = {"s": None}
+            RR.R._handler_of = lambda fn, stmt: handler["s"] if stmt == "s3695" else None
+            hits = {3643: [(0, "start", None)], 3695: [(0, "got", None)]}
+            RR.R.seen = lambda fn, run, mode: N(hits=hits)
+            RR._hole_holds = lambda row, record, name, key: True
+            source = lambda line, through: N(kind="rows", site_line=line, via=[], name=f"panda:prep@{line}", through_hand_ons=through)
+            sources = {3696: [3702], 3741: [3767], 3789: [3794]}
+            sure = {3702: [], 3767: [N(line=3768, holes=["jediTaskID"])], 3794: [N(line=3796, holes=["jediTaskID"])]}
+            def fragment():
+                kf = N(owner="t.py::P.prep", writes={S: [4075]}, sources=[source(n, t) for n, t in sources.items()])
+                sites = [N(name=f"panda:prep@{n}", hand_ons=[N(line=h, sure_prints=sure[h]) for h in t]) for n, t in sources.items()]
+                return N(key_froms=[kf], read_sites=sites)
+            RR.mapdump.fragment = fragment
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.mode = "outside"
+            r.args = N(key="777")
+            r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
+            r._row_key_print = lambda owner, st, subject, under_ifs=False: {3741: 3768, 3789: 3796}.get(st.line)
+            q = N(statements=list(st.values()), mover="t.py::prep", run=mv, moved=D.datetime(2026, 11, 15, 20, 3, 0, 900000),
+                  subject=S)
+            took = RR.Rerun._took_by(r, q)
+            got = {"took": [took.statement.line, took.line, [line for line, _ in took.ruled_out]], "why": took.text}
+            # the pass printed 3768 with the key: 3741 printed it, as before
+            hits[3768] = [(0, "got", None)]
+            took = RR.Rerun._took_by(r, q)
+            got["printed"] = [took.statement.line, took.line]
+            del hits[3768]
+            # a pass holding a handler's row of the mover rules none out
+            handler["s"] = "except"
+            got["handler"] = RR.Rerun._took_by(r, q)
+            handler["s"] = None
+            # sqlFA's key filled in its loop (no hand-on): two left
+            sources[3789] = []
+            got["loop"] = RR.Rerun._took_by(r, q)
+            sources[3789] = [3794]
+            # a hand-on with no sure print: two left
+            sure[3794] = []
+            got["unsure"] = RR.Rerun._took_by(r, q)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["took"] == [3696, None, [3741, 3789]], got
+    assert "@3741 handed no row on in that pass" in got["why"] and "3767 (printing 3768)" in got["why"], got
+    assert "3794 (printing 3796)" in got["why"], got
+    assert got["printed"] == [3741, 3768], got
+    assert got["handler"] is None and got["loop"] is None and got["unsure"] is None, got
+
+
 _C1 = """
 class W:
     def doIt(self):
@@ -17003,15 +17077,20 @@ def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_
             RR.R.function = lambda rel, func, lines: N(node=node)
             RR.R.statement_at = statement_at
 
-            def key_print(columns, line=3, exits=()):
+            def key_print(columns, line=3, exits=(), kind="", under_ifs=False):
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.args = N(key="7")
                 r._key_columns = lambda s, k: {"JobSpec.PandaID"}
                 RR.R._prints_of = lambda owner, lines: N(statements=[N(line=line, rows=[N(holes=[N(expression="id", columns=columns)], prefix_holes=[])])])
-                st = N(rows_handled=[2, 6], exits=[N(line=x) for x in exits])
-                return r._row_key_print("c.py::main", st, "JobSpec.jobStatus")
+                st = N(rows_handled=[2, 6], exits=[N(line=x, kind=kind) for x in exits])
+                return r._row_key_print("c.py::main", st, "JobSpec.jobStatus", under_ifs=under_ifs)
             got["key print"] = [key_print(["JobSpec.PandaID"]), key_print([]), key_print(["JobSpec.PandaID"], exits=(3,)),
                                 key_print(["JobSpec.PandaID"], line=5)]
+            # a fall (the if at 4 whose other way hands nothing on) is no exit for a print under the ifs; another exit
+            # is, and a print every selected row makes still counts it
+            got["fall"] = [key_print(["JobSpec.PandaID"], line=5, exits=(4,), kind="fall", under_ifs=True),
+                           key_print(["JobSpec.PandaID"], line=5, exits=(4,), kind="continue", under_ifs=True),
+                           key_print(["JobSpec.PandaID"], exits=(3,), kind="fall")]
 
             def keyed(before, first):
                 r = RR.Rerun.__new__(RR.Rerun)
@@ -17042,6 +17121,7 @@ def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_
     assert got["other value"] is None and got["not the clock"] is None and got["after the move"] is None, got
     assert got["premises"] == [["held-as-printed"], ["held-from-the-stay-s-start", "held-as-printed"]], got
     assert got["key print"] == [3, None, None, None], got
+    assert got["fall"] == [5, None, None], got
     late = got["late"]
     assert late[0] is True and late[1][0].startswith("main ran on the row at its first pass to reach main@1 after its turn "
                                                       "2026-01-01 00:30:01"), got

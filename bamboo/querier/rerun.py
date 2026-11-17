@@ -90,7 +90,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypedDict, cast
+from typing import Any, NamedTuple, TypedDict, cast
 
 from bamboo.codemap import pathcond, trace
 from bamboo.codemap import strategy as strategy_mod
@@ -2266,6 +2266,18 @@ class ArmsLeft:
 
     asked: Asked
     one_of: OneOf
+
+
+class TookBy(NamedTuple):
+    """Which of a mover's selecting statements took the row in the pass that moved it (:meth:`Rerun._took_by`)."""
+
+    statement: Any
+    #: the line of its print that named the row's key in the pass; None where the others were ruled out instead
+    line: int | None
+    #: the print's text; where *line* is None, why the others handed the row on to no write
+    text: str
+    #: ``(line, why)`` of each statement ruled out by its hand-ons (:meth:`Rerun._handed_none`)
+    ruled_out: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass
@@ -7892,7 +7904,10 @@ class Rerun:
         holds the row's key, a statement of the loop's own body with none of the statement's exits at or before it: a
         pass prints it for each row it selects.  None where there is none.  *under_ifs* (bundle A, A-5): a print
         under an ``if`` of the loop's body too, which a pass prints for a row it selects and keeps (its absence says
-        nothing): prepareTasksToBeFinished_JEDI's 3768 ``got jediTaskID=... finished for early avalanche``."""
+        nothing): prepareTasksToBeFinished_JEDI's 3768 ``got jediTaskID=... finished for early avalanche``.  For it a
+        fall (``fall@<line>``, the map's part B 5197de0: an ``if`` whose other way ends the row's turn handing nothing on)
+        is no exit: a print past it is printed for a row handed on -- read as an exit, sqlEA's falls at 3755 and 3764
+        hid its 3766 on pin d, and MT-scouting-late lost which statement took the row (measure bD to bE)."""
         handled = list(getattr(st, "rows_handled", None) or [])
         if len(handled) != 2:
             return None
@@ -7906,7 +7921,7 @@ class Rerun:
         found = R._prints_of(owner, [handled[0]])
         if loop is None or found is None:
             return None
-        exits = [e.line for e in getattr(st, "exits", None) or []]
+        exits = [e.line for e in getattr(st, "exits", None) or [] if not (under_ifs and getattr(e, "kind", "") == "fall")]
         for pst in getattr(found, "statements", None) or []:
             if not handled[0] < pst.line <= handled[1] or any(x <= pst.line for x in exits):
                 continue
@@ -7920,14 +7935,17 @@ class Rerun:
                 return int(pst.line)
         return None
 
-    def _took_by(self, q: Missed) -> tuple[Any, int, str] | None:
+    def _took_by(self, q: Missed) -> TookBy | None:
         """Bundle A, A-5 (P25, out/gm/qk-design.md, tmaeno's OK 2026-11-16): which of the mover's selecting statements
         took the row in the pass that moved it on, where it has more than one: the one whose loop over its rows printed
         the row's key in that pass (:meth:`_row_key_print`, under the loop's ifs too) --
         prepareTasksToBeFinished_JEDI's sqlEA (3741) prints ``got jediTaskID=... finished for early avalanche`` or
         ``... for reset in {taskstatus}`` (3768) for a row it takes, its sqlFA (3789) ``... to force avalanche`` (3796).
         ``(the statement, the print's line, the print's text the record matched)``; None where it has one, or not
-        exactly one printed the key in that pass (a print under an ``if`` says nothing where it is absent)."""
+        exactly one printed the key in that pass (a print under an ``if`` says nothing where it is absent).
+
+        Where none printed it, the others are ruled out by their hand-ons (:meth:`_handed_none`, the P25 reader,
+        tmaeno's OK 2026-11-17): the one left took it, the line None and the text why the others did not."""
         own = [st for st in q.statements if st.owner == q.mover]
         if len(own) < 2 or q.run is None:
             return None
@@ -7960,9 +7978,64 @@ class Rerun:
                     text = text.strip("'\"")
                     found.append((st, int(line), text))
                     break
-        if len({id(st) for st, _, _ in found}) != 1:
+        if found:
+            return TookBy(*found[0]) if len({id(st) for st, _, _ in found}) == 1 else None
+        ruled = self._handed_none(q, fn, own, moving)
+        left = [st for st in own if id(st) not in ruled]
+        if len(left) != 1:
             return None
-        return found[0]
+        out = tuple((st.line, ruled[id(st)]) for st in own if id(st) in ruled)
+        return TookBy(left[0], None, "; ".join(why for _, why in out), out)
+
+    def _handed_none(self, q: Missed, fn: R.Function, own: list, moving: Any) -> dict[int, str]:
+        """The P25 reader (out/gm/qk-design.md, the P25 reader part, tmaeno's OK 2026-11-17 02:2x; the map's
+        ``ReadSiteNode.hand_ons``, codemap-xl 5197de0, and ``KeySource.through_hand_ons``, d475eb9): of the mover's
+        selecting statements, those that handed no row on to its writes of the subject in the pass that moved it.  A
+        statement is one where every source of a write's key it is (the write's ``KeyFrom``, a ``rows`` source read in
+        the mover itself) draws the key through hand-ons, and every one of those hand-ons prints the key on every way
+        through it in the turn (``HandOn.sure_prints``, its holes holding the key) while the pass shows no such line.
+        prepareTasksToBeFinished_JEDI's writes take jediTaskID from 3696's rows through 3702, from 3741's through 3767
+        (3768 prints ``got jediTaskID=...`` on every way past it) and from 3789's through 3794 (3796): a pass with
+        neither line moved a row 3696 took.  A key filled in the row loop itself, or drawn through no hand-on the map
+        reads, rules nothing out.  The sure prints are read for a run that entered no handler: a pass holding a row of
+        a handler of the mover's, or a traceback naming it, rules none out.  By ``id`` of the statement, the words."""
+        fragment = mapdump.fragment()
+        if fragment is None or R.raised_in(fn, cast(Any, moving))[0]:
+            return {}
+        hits = R.seen(fn, moving, self.mode).hits
+        if any(R._handler_of(fn, r.stmt) is not None for r in fn.rows if r.line in hits):
+            return {}
+        mover = _bare(q.mover)
+        writes = [kf for kf in getattr(fragment, "key_froms", None) or [] if _bare(kf.owner) == mover and kf.writes.get(q.subject)]
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        out: dict[int, str] = {}
+        for st in own:
+            drawn = [s for kf in writes for s in kf.sources if s.kind == "rows" and s.site_line == st.line and not s.via]
+            if not drawn or any(not getattr(s, "through_hand_ons", None) for s in drawn):
+                continue
+            site = sites.get(drawn[0].name)
+            hand_ons = {h.line: h for h in getattr(site, "hand_ons", None) or []}
+            said: list[str] = []
+            for line in sorted({h for s in drawn for h in s.through_hand_ons}):
+                sure = [p for p in getattr(hand_ons.get(line), "sure_prints", None) or [] if p.holes]
+                if not sure or any(self._printed_key(fn, moving, hits, p) for p in sure):
+                    break
+                said.append(f"{line} (printing {' or '.join(str(p.line) for p in sure)})")
+            else:
+                out[id(st)] = (f"@{st.line} handed no row on in that pass: the hand-on(s) the write's key is drawn "
+                               f"through, {', '.join(said)}, print the key every way through, and the pass shows none")
+        return out
+
+    def _printed_key(self, fn: R.Function, moving: Any, hits: dict, p: Any) -> bool:
+        """Whether *moving* holds a record of *fn*'s print at ``p.line`` (a ``HandOnPrint``) whose hole of the hand-on's
+        key (``p.holes``) holds the question's key."""
+        stmt = R.statement_at(fn.node, p.line)
+        row = fn.row_at(stmt) if stmt is not None else None
+        if row is None:
+            return False
+        return any(_hole_holds(row, moving.records[i], SimpleNamespace(part=MUST_PART_MESSAGE, expression=e, bind=""),
+                               self.args.key)
+                   for i, _, _ in hits.get(row.line, ()) for e in p.holes)
 
     def _own_cycles(self, q: Callers) -> bool:
         """Q1 part 3, P6 (out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06): a mover that takes
@@ -9379,14 +9452,19 @@ class Rerun:
         # A-5 (P25): of the mover's statements, the one whose loop printed the row's key in the moving pass took it
         took_by = self._took_by(q)
         if took_by is not None:
-            self.result["took_by"] = {"line": took_by[0].line, "print": took_by[1], "text": took_by[2]}
+            self.result["took_by"] = {"line": took_by.statement.line, "print": took_by.line, "text": took_by.text}
+            if took_by.ruled_out:
+                self.result["took_by"]["ruled_out"] = [line for line, _ in took_by.ruled_out]
         for st in q.statements:
             # the call that moved the value on returned the row: a term the row fails was not in that build
-            took = st.owner == q.mover and (took_by is None or st is took_by[0])
+            took = st.owner == q.mover and (took_by is None or st is took_by.statement)
             kind, said = self._passed_over(st, q, took)
-            if took:
-                kind = f"took it at {q.moved}" + (f", its loop printing the row at {took_by[1]} in that pass: "
-                                                  f"{took_by[2]}" if took_by is not None else "")
+            if took and took_by is not None and took_by.line is None:
+                # the P25 reader: the others handed no row on in that pass (their hand-ons' sure prints are absent)
+                kind = f"took it at {q.moved}, the mover's other selections ruled out in that pass: {took_by.text}"
+            elif took:
+                kind = f"took it at {q.moved}" + (f", its loop printing the row at {took_by.line} in that pass: "
+                                                  f"{took_by.text}" if took_by is not None else "")
             kinds[(st.owner, st.line)] = kind
             goes_to = ", ".join(c.split("::")[-1] for c in st.crosses_to)
             if st.result == RESULT_AGGREGATE:
