@@ -312,6 +312,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "handed",
     "not_run_on",
     "count_prints",
+    "printed_counts",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

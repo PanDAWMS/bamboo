@@ -1023,6 +1023,25 @@ class CountPrint(BaseModel):
     )
 
 
+class PrintedCount(BaseModel):
+    """A line the function prints with the row count of the run of the statement a branch's write lands at in a hole
+    (:attr:`Branch.printed_counts`, :func:`bamboo.codemap.panda.rowcounts.count_of_run`).
+
+    ``updateJobStatus`` runs its ``UPDATE`` at 241, reads ``nUp = self.cur.rowcount`` and prints ``attemptNr={}
+    nUp={} old={} new={}`` at 243: the record's second hole is how many rows the run changed, 0 where the write did
+    not land.
+    """
+
+    line: int = Field(description="The print's line in the owner.")
+    frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
+    holes: list[int] = Field(
+        description=(
+            "The holes holding the count, counted from 0 as :attr:`SkeletonHole` lists a rendered message's "
+            "(each ``{...}`` of its f-string)."
+        )
+    )
+
+
 #: :attr:`HandedParameter.none`: the signature admits ``None``.
 NONE_ADMITS = "admits"
 #: The annotation names no ``None``.
@@ -1265,6 +1284,16 @@ class Branch(BaseModel):
             "keeps the line from it (:func:`bamboo.codemap.panda.flow.ruled_out_after`) -- "
             "``reactivatePendingTasks_JEDI``'s ``sqlTU`` arms have ``action=reactivate`` and not ``timeout``, which "
             "the same run prints after its ``sqlTO`` arms.  Sorted by line."
+        ),
+    )
+    printed_counts: list["PrintedCount"] = Field(
+        default_factory=list,
+        description=(
+            "The lines the owner prints with the row count of a run of the statement this branch's write lands at "
+            "in a hole, under a test of it or not: ``updateJobStatus`` prints ``nUp={nUp}`` after ``nUp = "
+            "self.cur.rowcount``, so the record says how many rows the run changed.  Only the lines this branch's "
+            "own way can be followed by, as *count_prints*.  Apart from *count_prints*, whose readers take its "
+            "*rows* as said there.  Sorted by line."
         ),
     )
     must_prints: Optional[list[int]] = Field(

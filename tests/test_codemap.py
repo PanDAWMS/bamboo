@@ -22765,6 +22765,64 @@ def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_
     assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
 
 
+#: ``updateJobStatus``: the row count of a run printed in a hole, after it and under a test of it; a second run binds
+#: the same name again.
+_PRINTED_COUNTS = '''
+class TaskModule:
+    def update(self, jediTaskID, status, attemptNr):
+        sqlS = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,modificationTime=CURRENT_DATE "
+        sqlS += "WHERE jediTaskID=:jediTaskID "
+        sqlC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET errorDialog=:err WHERE jediTaskID=:jediTaskID "
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":status"] = status
+        self.cur.execute(sqlS, varMap)
+        nUp = self.cur.rowcount
+        tmpLog.debug(f"attemptNr={attemptNr} nUp={nUp} new={status}")
+        if nUp == 0:
+            tmpLog.debug(f"nothing updated nUp={nUp}")
+        varMap = {}
+        varMap[":jediTaskID"] = jediTaskID
+        varMap[":err"] = "marked"
+        self.cur.execute(sqlC, varMap)
+        nUp = self.cur.rowcount
+        tmpLog.debug(f"marked nUp={nUp}")
+        return True
+'''
+
+
+def test_a_print_holding_a_statements_row_count_in_a_hole_is_its_branches_printed_count(tmp_path):
+    """``attemptNr={} nUp={} new={}`` prints the count of the ``status`` statement's run in its second hole: a printed
+    count of the statement's arms (:attr:`Branch.printed_counts`), apart from the count prints a test of it gives
+    (``nothing updated``, both).  ``marked nUp={}`` holds the second run's count -- ``nUp`` bound again -- and goes
+    to that statement's arm only."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _PRINTED_COUNTS})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    after = _at("attemptNr=", _PRINTED_COUNTS)
+    nothing = _at("nothing updated", _PRINTED_COUNTS)
+    marked = _at("marked nUp", _PRINTED_COUNTS)
+    arms = {
+        j.subject.split(".")[-1]: [
+            ([(p.line, p.frame, p.holes) for p in b.printed_counts], [(p.line, p.rows) for p in b.count_prints])
+            for b in j.branches
+        ]
+        for j in junctions
+    }
+    status = [(after, "attemptNr={} nUp={} new={}", [1]), (nothing, "nothing updated nUp={}", [0])]
+    assert arms["status"] == [(status, [(nothing, "none")])]
+    assert arms["modificationTime"] == [(status, [(nothing, "none")])]
+    assert arms["errorDialog"] == [([(marked, "marked nUp={}", [0])], [])]
+
+
 #: ``reactivatePendingTasks_JEDI``: two statements share one run, and a flag each arm's way binds to a literal
 #: chooses the count print after it.
 _COUNTED_ARMS = '''

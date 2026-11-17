@@ -8522,7 +8522,8 @@ def attach_count_prints(
     A branch gets only the prints one of its lines can be followed by in the same turn, by what its own way binds
     (:func:`flow.ruled_out_after`): ``reactivatePendingTasks_JEDI``'s two statements share one run, and the
     ``timeoutFlag`` each arm's way binds gives ``sqlTU``'s arms only ``action=reactivate`` and ``sqlTO``'s only
-    ``timeout``."""
+    ``timeout``.  The prints holding the count itself in a hole go to :attr:`Branch.printed_counts` the same way
+    (:func:`progress.printed_counts`): ``updateJobStatus``'s ``nUp={nUp}``."""
     by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
     done: set[tuple[str, int]] = set()
     for key_from in key_froms:
@@ -8533,7 +8534,10 @@ def attach_count_prints(
         printed = sorted(
             {(one.line, one.frame, one.rows): one for call in calls for one in progress.count_prints(func, call, setters)}.items()
         )
-        if not printed:
+        counted = sorted(
+            {(one.line, one.frame): one for call in calls for one in progress.printed_counts(func, call, setters)}.items()
+        )
+        if not printed and not counted:
             continue
         statements = _own_statements(func)
         together = [one for one in key_froms if one.owner == key_from.owner and one.statement == key_from.statement]
@@ -8551,14 +8555,17 @@ def attach_count_prints(
                     continue
                 arms = [statements[line] for line in sorted(arm_lines) if line in statements]
                 held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
-                held.update(
-                    (key, one)
-                    for key, one in printed
-                    if one.line not in statements
-                    or not arms
-                    or any(not flow.ruled_out_after(arm, statements[one.line]) for arm in arms)
-                )
+                held.update((key, one) for key, one in printed if _can_follow(arms, one.line, statements))
                 branch.count_prints = [held[key] for key in sorted(held)]
+                kept = {(one.line, one.frame): one for one in branch.printed_counts}
+                kept.update((key, one) for key, one in counted if _can_follow(arms, one.line, statements))
+                branch.printed_counts = [kept[key] for key in sorted(kept)]
+
+
+def _can_follow(arms: list[ast.stmt], line: int, statements: dict[int, ast.stmt]) -> bool:
+    """Whether the print at *line* can follow one of *arms* in the same turn (:func:`flow.ruled_out_after`); so it
+    can where either is not placed."""
+    return line not in statements or not arms or any(not flow.ruled_out_after(arm, statements[line]) for arm in arms)
 
 
 def _own_statements(func: ast.AST) -> dict[int, ast.stmt]:

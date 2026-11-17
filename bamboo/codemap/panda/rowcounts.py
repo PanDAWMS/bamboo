@@ -178,6 +178,19 @@ def tests_of(func: ast.AST, call: ast.AST) -> list[tuple[ast.If, Optional[str], 
     return sorted(found, key=lambda one: one[0].lineno)
 
 
+def count_of_run(node: ast.expr, func: ast.AST, call: ast.AST) -> bool:
+    """Whether *node* is the row count of the run *call* makes, read as an ``if`` reads one (see the module): the
+    count itself, or a name every binding of which reaching *node* binds it to the count, and that run the one
+    reaching each read with no other between -- ``updateJobStatus`` prints ``nUp={nUp}`` after ``nUp =
+    self.cur.rowcount`` and its ``execute``."""
+    read_at = _read_at(node, func)
+    if not read_at:
+        return False
+    runs = _tests(func)[0]
+    mine = pathcond.site_of(call)
+    return all(_one_run(site, runs) is mine for site in read_at)
+
+
 def _one_run(site: ast.AST, runs: list[ast.AST]) -> Optional[ast.AST]:
     """The one run reaching *site* with no other between, or ``None``."""
     reached = reaching(site, runs)

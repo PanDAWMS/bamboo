@@ -51,6 +51,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     HandedParameter,
     JunctionNode,
+    PrintedCount,
     SourceModule,
     SubjectNode,
 )
@@ -506,6 +507,34 @@ def count_prints(
                             found.setdefault(
                                 (at.lineno, text, rows), CountPrint(line=at.lineno, frame=text, rows=rows)
                             )
+    return [found[key] for key in sorted(found)]
+
+
+def printed_counts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.AST,
+    setters: dict[str, _Setter],
+) -> list[PrintedCount]:
+    """What *func* records with the row count of the run *call* makes in a hole (:func:`rowcounts.count_of_run`),
+    under a test of it or not -- ``nUp={nUp}`` --, frames read as :func:`count_prints` reads them, each at the line
+    recording it, with the holes holding the count."""
+    found: dict[tuple[int, str], PrintedCount] = {}
+    for statement in func.body:
+        for argument in _recorded_in(statement, setters, None):
+            if argument is None:
+                continue
+            at = pathcond.site_of(argument)
+            if not isinstance(at, ast.stmt):
+                continue
+            held = _reaching(argument.id, at, func) if isinstance(argument, ast.Name) else [argument]
+            for expression in held:
+                if not isinstance(expression, ast.JoinedStr):
+                    continue
+                parts = [part for part in expression.values if isinstance(part, ast.FormattedValue)]
+                holes = [number for number, part in enumerate(parts) if rowcounts.count_of_run(part.value, func, call)]
+                text = values.rendered_text(expression)
+                if holes and text and values.has_literal_text(text):
+                    found.setdefault((at.lineno, text), PrintedCount(line=at.lineno, frame=text, holes=holes))
     return [found[key] for key in sorted(found)]
 
 
