@@ -3282,16 +3282,52 @@ class Types:
         held = self.imports(file).get(annotation.id)
         if annotation.id == "Any":
             return held is None or held[0] == "typing"
-        where, alias = file, annotation.id
+        found = self._module_alias(file, annotation.id)
+        return found is not None and self.states_any(found[0], found[1], depth + 1)
+
+    def states_immutable(
+        self, file: str, annotation: Optional[ast.expr], binds: Optional[Bound] = None, depth: int = 0
+    ) -> bool:
+        """Whether *annotation* states only values no change in place can touch (:func:`callfacts.immutable_annotation`),
+        read through what the corpus defines: a field declared with a descriptor class by what the class's ``__get__``
+        returns, its type parameters bound -- ``PandaID: SpecColumn[int]`` is ``_T | Null``, ``_T`` the ``int`` and
+        ``Null`` the ``Literal["NULL"]`` ``spec_column.py`` binds it to --, a type parameter by what *binds* binds it to,
+        and a module's alias by its value."""
+        if annotation is None or depth > 4:
+            return False
+        annotation = _unquoted(annotation)
+        members = _union_members(annotation)
+        if members is not None:
+            return all(self.states_immutable(file, one, binds, depth) for one in members)
+        if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, (ast.Name, ast.Attribute)):
+            named = self.class_named(file, annotation.value)
+            getter = self._method_in(*named, "__get__") if named is not None else None
+            if getter is not None:
+                return self.states_immutable(getter[0], getter[2].returns, self._binds(file, annotation), depth + 1)
+        if isinstance(annotation, ast.Name) and annotation.id not in callfacts.IMMUTABLE_ANNOTATIONS:
+            holder = self._parameters_of(file).get(annotation.id)
+            if holder is not None:
+                given = (binds or {}).get((id(holder), annotation.id))
+                return given is not None and self.states_immutable(given[0], given[1], None, depth + 1)
+            found = self._module_alias(file, annotation.id)
+            if found is not None:
+                return self.states_immutable(found[0], found[1], binds, depth + 1)
+        return callfacts.immutable_annotation(annotation)
+
+    def _module_alias(self, file: str, name: str) -> Optional[tuple[str, ast.expr]]:
+        """What a module-level name of *file* is bound to, followed through an import: ``Null = Literal["NULL"]`` in
+        ``spec_column.py``, ``TaskBufferLike: TypeAlias = Any``; ``None`` where the module binds it to nothing."""
+        held = self.imports(file).get(name)
+        where, alias = file, name
         if held is not None:
-            where, alias = self.module_file(held[0]) or "", held[1] or annotation.id
+            where, alias = self.module_file(held[0]) or "", held[1] or name
         tree = self.tree(where) if where else None
         for node in tree.body if tree is not None else ():
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == alias:
-                return node.value is not None and self.states_any(where, node.value, depth + 1)
+                return (where, node.value) if node.value is not None else None
             if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == alias for t in node.targets):
-                return self.states_any(where, node.value, depth + 1)
-        return False
+                return where, node.value
+        return None
 
     def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its bases, nearest first, followed across files through imports."""

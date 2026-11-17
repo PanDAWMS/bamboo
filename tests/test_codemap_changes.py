@@ -495,10 +495,12 @@ def test_a_local_container_handing_nothing_out_keeps_no_change_and_a_builtin_han
     tmp_path,
 ):
     """``varMap`` only takes the map and goes to the driver: nothing changes it through there.  ``ret``, handed
-    back, may.  ``getattr`` hands back an attribute of the map, not the map; ``max`` one of its arguments."""
+    back, may.  ``getattr`` hands back an attribute of the map, not the map: a store into it changes inside that
+    part, as ``params.x["k"] = 1`` would; ``max`` one of its arguments."""
     found = _object_changes(tmp_path, "'x' in params", "holders")
 
     assert [(kind, key, what) for kind, key, what, *_rest in found] == [
+        ("inner", ".x", "part['k']"),
         ("store", "'b'", ""),
         ("escaped", "*", "ret['p']"),
     ]
@@ -1035,3 +1037,136 @@ def test_an_attribute_read_by_its_name_is_followed_as_the_attribute_not_as_the_o
     assert asked("job.renumberTask()", "task.PandaID") == ("PandaID", changes.STORED, line["task.PandaID = 0"])
     assert asked("job.touchTask(file)", "task.PandaID") is None
     assert asked("job.keep(store, file)", "task.PandaID") == set_id
+
+
+PARTS = """\
+class Job:
+    status: str
+
+
+class Holder:
+    PandaID: int
+    job: Job
+
+    def plain(self):
+        j = self.job
+        j.status = "done"
+
+    def named(self):
+        k = getattr(self, "job")
+        k.status = "done"
+
+    def value(self):
+        p = self.PandaID
+        touch(p)
+
+    def twice(self, other):
+        j = self.job
+        j = other
+        j.status = "done"
+
+
+def touch(x):
+    x.touched = 1
+"""
+
+
+def test_a_part_of_the_object_bound_to_a_name_is_changed_inside_where_the_name_s_object_is_changed(
+    tmp_path: Path,
+) -> None:
+    """``j = self.job`` then ``j.status = ...`` changes inside ``.job``, as ``self.job.status = ...`` does
+    (TaskRefiner.runImpl's ``tmpTaskSpec = impl.taskSpec`` at 576); so does a part read off by its name.  A part
+    declared ``int`` is a value no change in place touches, handed on or not; a name bound again is no part's."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "parts.py").write_text(PARTS)
+    tree = ast.parse(PARTS)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/parts.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=PARTS, blob_sha=blob_sha(PARTS))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    line: dict[str, int] = {}
+    for number, text in enumerate(PARTS.splitlines(), 1):
+        line.setdefault(text.strip(), number)
+
+    def found(name: str) -> list[tuple]:
+        func = functions[name]
+        return [(change.kind, change.key, change.line) for change in changes.object_changes(calls, file, func, "self", func.args, None)]
+
+    assert found("plain") == [("inner", ".job", line["j.status = \"done\""])]
+    assert found("named") == [("inner", ".job", line["k.status = \"done\""])]
+    assert found("value") == []
+    assert found("twice") == []
+
+
+COLUMNS = """\
+from typing import Generic, Literal, TypeVar
+
+_T = TypeVar("_T")
+
+Null = Literal["NULL"]
+
+
+class SpecColumn(Generic[_T]):
+    def __get__(self, obj: object, objtype: "type | None" = None) -> "_T | Null":
+        raise NotImplementedError
+"""
+
+COLUMN_SPECS = """\
+from typing import Any
+
+from pkg.spec_column import SpecColumn
+
+
+class Job:
+    PandaID: SpecColumn[int]
+    jobParameters: SpecColumn[Any]
+
+    def hand(self):
+        keep(self.PandaID)
+        keep(self.jobParameters)
+
+    def hand_bound(self):
+        pandaID = self.PandaID
+        keep(pandaID)
+
+
+def keep(x):
+    x.kept = 1
+"""
+
+
+def test_a_spec_column_is_read_through_its_descriptor_and_one_of_a_value_changes_nothing_inside(
+    tmp_path: Path,
+) -> None:
+    """``PandaID: SpecColumn[int]`` is what ``SpecColumn.__get__`` returns, ``_T | Null``, with ``_T`` the ``int`` and
+    ``Null`` the ``Literal["NULL"]`` its module binds: a value no change in place touches, handed on straight or
+    through a name bound to it (JobSpec's columns, ``Watcher``'s ``getWorkersForJob(job.PandaID)``).  A column of
+    ``Any`` may change."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    modules = []
+    trees = {}
+    for name, text in (("spec_column.py", COLUMNS), ("specs.py", COLUMN_SPECS)):
+        (root / name).write_text(text)
+        tree = ast.parse(text)
+        pathcond.attach_parents(tree)
+        trees[name] = tree
+        modules.append(
+            SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/{name}", tree=tree, source=text, blob_sha=blob_sha(text))
+        )
+    calls = sqlwrite.corpus_calls(modules, {PACKAGE: root})
+    assert calls is not None
+    file = f"{PACKAGE}/specs.py"
+    functions = {node.name: node for node in ast.walk(trees["specs.py"]) if isinstance(node, ast.FunctionDef)}
+
+    def found(name: str) -> list[tuple]:
+        func = functions[name]
+        return [(change.kind, change.key) for change in changes.object_changes(calls, file, func, "self", func.args, None)]
+
+    assert found("hand") == [("inner", ".jobParameters")]
+    assert found("hand_bound") == []
