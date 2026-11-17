@@ -1012,6 +1012,44 @@ class Proxy:
     assert re.search(row.pattern, line)
 
 
+def test_a_local_text_written_out_as_its_slice_is_no_token(tmp_path):
+    """``setScoutJobData_JEDI`` prints ``sqlTSD + comment + str(varMap)``; read through its bindings, the ``+=`` after
+    the slice is literal and the hole left is ``sqlTSD[:-1]``, no name.  The slice of a text the function builds with
+    spaces prints as text as the name does; the slice of a parameter, ``prefix[:-1]``, stays a token."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def scout(self, scoutData, schema, prefix):
+        comment = " /* Proxy.scout */"
+        if scoutData != {}:
+            varMap = {}
+            sqlTSD = f"UPDATE {schema}.JEDI_Tasks SET "
+            for scoutKey, scoutVal in scoutData.items():
+                if scoutKey in ["newNG"]:
+                    continue
+                varMap[f":{scoutKey}"] = scoutVal
+                sqlTSD += f"{scoutKey}=:{scoutKey},"
+            sqlTSD = sqlTSD[:-1]
+            sqlTSD += " WHERE jediTaskID=:jediTaskID "
+            tmpLog.debug(sqlTSD + comment + str(varMap))
+            tmpLog.debug(f"{prefix[:-1]} done")
+''',
+    )
+
+    (found,) = trace_mod.function_prints(roots, [f"{PACKAGE}/proxy"])
+    rows = [row for statement in found.statements for row in statement.rows]
+    prints = {hole.expression: hole.prints for row in rows for hole in row.holes}
+
+    assert prints["sqlTSD[:-1]"] == "text"
+    assert prints["prefix[:-1]"] == "token"
+    line = (
+        "UPDATE ATLAS_PANDA.JEDI_Tasks SET walltime=:walltime,ramCount=:ramCount WHERE jediTaskID=:jediTaskID "
+        " /* Proxy.scout */{':jediTaskID': 1}"
+    )
+    assert any(re.fullmatch(row.capture, line) for row in rows if "sqlTSD[:-1]" in {h.expression for h in row.holes})
+
+
 def test_a_number_and_a_fragment_the_function_wrote_out_are_matched(tmp_path):
     """``reg_msg_str`` is one of two f-strings and the line prints either.
     Written out, each is a variant; the ``:03d`` hole is a number."""

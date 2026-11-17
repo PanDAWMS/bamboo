@@ -668,7 +668,10 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     with ``sql = "WHERE "``, ``sql += f"{tmpKey}={crKey} AND "`` and ``sql =
     sql[:-4]``: closed at the first space, the hole stopped inside the ``WHERE``
     and no line of the run matched.  A parameter's or a global's value is not
-    the function's to say, and stays a token.
+    the function's to say, and stays a token.  Not only a name: an expression
+    built of such texts (:func:`_built_text`) reads the same.  Read through
+    its bindings, ``setScoutJobData_JEDI``'s ``sqlTSD + comment`` leaves the
+    hole ``sqlTSD[:-1]``, the ``+= " WHERE ..."`` after it folded to literal.
     """
     if getattr(part, "appended", False):
         return "text"
@@ -700,9 +703,9 @@ def _hole_prints(part: ast.FormattedValue) -> str:
         func = pathcond.enclosing_function(site)
         if isinstance(site, ast.stmt) and func is not None and mapentries.entries(func, held, site) is not None:
             return "text"
-    if isinstance(value, ast.Name):
-        func = pathcond.enclosing_function(pathcond.site_of(value))
-        text = _named_text(func, value.id) if func is not None else None
+    func = pathcond.enclosing_function(pathcond.site_of(value))
+    if func is not None:
+        text = _named_text(func, value.id) if isinstance(value, ast.Name) else _built_text(value, func, "", 0)
         if text is not None and " " in text:
             return "text"
     return ""
