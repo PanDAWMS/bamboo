@@ -7883,7 +7883,7 @@ def test_h2_asks_and_reads_each_row_of_an_attribute_on_the_logs_of_the_writers_t
                 r._ask = lambda key, names, asking, owners, whole: (None, [f"{asking.why} {n} {','.join(owners)} {whole}" for n in names], None)
                 r._stop_unanswered = lambda asks: seen["asked"].extend(asks)
                 r._scan = lambda *args: "scanned"
-                def wrote_at(subject, attr, value, key, readings, state, asking, last):
+                def wrote_at(subject, attr, value, key, readings, state, asking, last, no_run=False):
                     seen["read"] = [x.owner for x in readings]
                     return N(chosen=N(candidate=N(owner="x"), line=0))
                 r._wrote_at = wrote_at
@@ -7967,7 +7967,7 @@ def test_a_status_rows_single_window_whose_judge_chooses_no_writer_is_read_as_on
                 rerun.PT.history_holding = lambda subject: "jobs_statuslog" if held else None
                 rerun.W.value_held = lambda states, attr, value, created: N(window=("t", "t"), why="held", strings=None)
 
-                def wrote_at(subject, attr, value, key, readings, state, asking, at_row):
+                def wrote_at(subject, attr, value, key, readings, state, asking, at_row, no_run=False):
                     seen["row"] = at_row
                     return wrote
                 r._wrote_at = wrote_at
@@ -8671,7 +8671,7 @@ def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(
             r._writers, r._h2_candidates = (lambda subject, value, key: ["readings"]), cands
             r._handed_other = lambda subject, value, readings: readings
             r._writer_logs = lambda subject, readings, cands=None: ["panda-TaskRefiner.log"]
-            r._wrote_at = lambda *a: rerun.Wrote(["readings"], answer.question, ["cands"], env, Verdict(caller, 300, "positive", []))
+            r._wrote_at = lambda *a, **k: rerun.Wrote(["readings"], answer.question, ["cands"], env, Verdict(caller, 300, "positive", []))
             w = r._which_wrote("JobSpec.jobStatus", "running", "7", {"status": "running", "time": "2026-10-29 04:10:00"})
             singles["at a status's row"] = [w.chosen.line, w.via.line]
 
@@ -18077,23 +18077,31 @@ def test_f1_a_selecting_mover_s_passes_before_the_moving_one_whose_selection_pri
             spanning = N(records=[N(stamp="2026-01-01 09:30:00,500"), N(stamp="2026-01-01 13:00:00,000")], machine="h2.cern.ch")
             RR.R.seen = lambda fn, p, mode: N(hits={3768: [(0, None, None)], 3880: [(1, None, None)]})
 
-            def take(missed=(), runs=None):
+            def take(missed=(), runs=None, mode="read"):
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.args, r.mode, r.result, r.lines, r.unanswered, r.hop = N(key="7"), None, {}, [], [], "L2"
+                handed = []
+
+                def take_pass(q, at, machine, start, arms, since, before, token=""):
+                    handed.append([at, machine, str(start), since, before, [a.line for a in arms], token])
+                    where = {"first": "2026-01-01 08:50:00", "last": "2026-01-01 09:10:00"}
+                    return mode, N(owner="m.py::prepare") if mode == "read" else None, {**where, "n": 2} if mode == "asked" else where
+                r._take_pass = take_pass
                 r.logs = N(needs_window=True, names=lambda files: files)
                 r._row_key_print = lambda owner, st, subject, under_ifs=False: {3739: 3768}.get(st.line)
                 r._key_rows = lambda fn, p, subject=None: [3768, 3880] if p is spanning else [3768] if p is early else [3880]
                 asked = []
                 r._ask = lambda key, names, asking, owners, quiet=False: (asked.append((names, asking.window, owners)) or
-                                                                         ({"jedi.log": [N(passes=runs or [early, other, moving], machine="h2.cern.ch")]}, list(missed), {}))
+                                                                         ({"jedi.log": [N(passes=runs or [early, other, moving], machine="h2.cern.ch", token="prepare < vo=None >")]}, list(missed), {}))
                 q = N(statements=[N(owner="m.py::prepare", line=3739), N(owner="m.py::prepare", line=3694)],
                       mover="m.py::prepare", run=N(passes=[moving]), moved=t("2026-01-01 12:00:01"),
                       since=t("2026-01-01 08:00:00"), subject="JediTaskSpec.status", observed="scouting", writers=[])
                 said, passes = r._earlier_takes(q)
                 return {"said": [T.text(s) for s in said], "asked": asked and [asked[0][0], list(asked[0][1]), asked[0][2]],
-                        "passes": passes and [passes.owner, passes.before, list(passes.stay), passes.owners, [a.line for a in passes.arms]],
+                        "passes": [x.owner for x in passes], "handed": handed,
                         "result": r.result.get("earlier_takes"), "kept": len(r.unanswered)}
-            got = {"read": take(), "missed": take(missed=[(N(key="k1"), "why")]), "uncut": take(runs=[spanning, moving])}
+            got = {"read": take(), "missed": take(missed=[(N(key="k1"), "why")]), "uncut": take(runs=[spanning, moving], mode="asked"),
+                   "no_heads": take(runs=[spanning, moving], mode="no-heads")}
             print(json.dumps(got))
             """,
         )
@@ -18102,16 +18110,23 @@ def test_f1_a_selecting_mover_s_passes_before_the_moving_one_whose_selection_pri
     read = got["read"]
     assert read["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:00:00,300 on h2"], read
     assert read["asked"] == [["jedi.log"], ["2026-01-01 08:00:00", "2026-01-01 12:00:00"], {}], read
-    assert read["passes"] == ["m.py::prepare", "2026-01-01 12:00:00", ["2026-01-01 08:00:00", "2026-01-01 12:00:00"], {}, [4074]], read
-    assert read["result"] == [{"at": "2026-01-01 09:00:00,300", "machine": "h2.cern.ch", "statements": [3739], "cut": True}], read
-    assert got["missed"]["said"] == [] and got["missed"]["passes"] is None and got["missed"]["kept"] == 1, got
+    # H-1: each take's pass is read by its marks' heads (_take_pass), up to the moving pass's start; read, it goes to S2
+    assert read["handed"] == [["2026-01-01 09:00:00,300", "h2.cern.ch", "2026-01-01 12:00:00.100000", "2026-01-01 08:00:00",
+                               "2026-01-01 12:00:00", [4074], "prepare < vo=None >"]], read
+    assert read["passes"] == ["m.py::prepare"], read
+    assert read["result"] == [{"at": "2026-01-01 09:00:00,300", "machine": "h2.cern.ch", "statements": [3739], "cut": True,
+                               "pass": "read"}], read
+    assert got["missed"]["said"] == [] and got["missed"]["passes"] == [] and got["missed"]["kept"] == 1, got
     # a run of the key's records spanning the moving pass, not cut: the take is its print's record before the moving
-    # pass (3880's after it is none), said as not read, and no passes go to S2
+    # pass (3880's after it is none); its pass asked by the heads, and none goes to S2 until it is answered
     uncut = got["uncut"]
-    assert uncut["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:30:00,500 on h2, in a run of "
-                             "the key's records with no record of its entry row, not cut into passes: which way that pass went is not read"], uncut
-    assert uncut["passes"] is None and uncut["result"] == [{"at": "2026-01-01 09:30:00,500", "machine": "h2.cern.ch",
-                                                            "statements": [3739], "cut": False}], uncut
+    assert uncut["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:30:00,500 on h2: its pass is "
+                             "asked by its mark there from 2026-01-01 08:50:00 to 2026-01-01 09:10:00 (2 ask(s))"], uncut
+    assert uncut["passes"] == [] and uncut["result"] == [{"at": "2026-01-01 09:30:00,500", "machine": "h2.cern.ch",
+                                                          "statements": [3739], "cut": False, "pass": "asked"}], uncut
+    assert got["no_heads"]["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:30:00,500 on h2, "
+                                       "in a run of the key's records with no record of its entry row, not cut into passes: which "
+                                       "way that pass went is not read (no mark of it to ask its pass by)"], got
 
 
 def test_f3_f5_a_row_value_written_in_the_stay_is_its_left_writers_and_a_birth_in_the_window_is_a_write(tmp_path):
@@ -18205,8 +18220,10 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
                 def __init__(self):
                     self.asks = [(N(key="k1"), "w"), (N(key="k2"), "w")]
 
+            # the moving run's own mark is asked (H-1's fix of F-4: the heads fill vo with the row's 'atlas')
             q = N(mover="m.py::prepareTasksToBeFinished_JEDI", subject="JediTaskSpec.status", observed="scouting",
-                  since=t("2026-11-14 18:00:00"), moved=t("2026-11-14 21:00:00"))
+                  since=t("2026-11-14 18:00:00"), moved=t("2026-11-14 21:00:00"),
+                  run=N(token="prepareTasksToBeFinished_JEDI < vo=None label=user >"))
             start = t("2026-11-14 20:59:59.500")
             at = t("2026-11-14 19:53:41")
             RR.of_mover = lambda run, owner: True
@@ -18227,6 +18244,8 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
                         return files
 
                     def log(self, name, key, window, machine=None, owners=None, strings=None):
+                        if machine is not None:
+                            assert list(strings) == ["prepareTasksToBeFinished_JEDI < vo=None label=user >"], strings
                         if not recorded and machine is not None:
                             raise Unrec()
                         return N(machines={"aipanda084.cern.ch"}, without=set(), passes=[p])
@@ -18246,7 +18265,7 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
         "prepareTasksToBeFinished_JEDI took it before, at 2026-11-14 19:53:41, writing assessmentTime by "
         "prepareTasksToBeFinished_JEDI:3744 (the row's value): its pass on aipanda084 from 2026-11-14 19:53:40,900 to "
         "2026-11-14 19:53:42,000"], got
-    assert got["asked"]["kept"] == 2 and "asked by its marks' heads on every machine" in got["asked"]["said"][0], got
+    assert got["asked"]["kept"] == 2 and "asked by its mark on every machine" in got["asked"]["said"][0], got
     assert got["another"]["said"] == [] and got["outside"]["said"] == [] and got["already"]["said"] == [], got
     # the row value's second is the moving pass's own (its write fell in [20:59:59, 21:00:00), the pass began 20:59:59.x)
     assert got["its_second"]["said"] == [], got
@@ -18396,3 +18415,135 @@ def test_g3_a_writer_taking_the_row_by_its_key_is_asked_at_the_stay_s_start_too(
     assert got["none"]["verdict"] == "no-run-found" and got["none"]["passes"] is None, got
     # the stay's start not in the records: its ask is kept for a records round, and the step goes on as before (no stop)
     assert got["unrecorded"]["verdict"] == "no-run-found" and got["unrecorded"]["missed"] == 0 and got["unrecorded"]["kept"] == 1, got
+
+
+def test_h_a_take_s_pass_by_heads_a_self_stamping_term_by_writes_callers_by_service_and_mark_key_and_a_value_held_with_no_run(tmp_path):
+    """Bundle H.  H-1: a take's pass is asked by the mover's marks' heads on its machine, SLACK each side of it up to
+    the moving pass; a pass S2's cut holds around it, ending before the moving pass, goes to S2; an ask not in the
+    records is kept; a run not cut, or no head, hands nothing.  H-2: a column of the statement's terms whose every
+    write read in the stay is by the statement's own clock arm is said so; one other write says nothing.  H-3: where
+    the moving run is on a server machine, a caller all of whose routes enter in pandajedi/ goes and a mixed one is
+    said; on a JEDI machine nothing goes.  H-4: the moving run's mark holding another key of the asked class names it;
+    the row's own key, nothing.  H-5: a value held's window with no run of the key gives None to the caller."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T, windows as W
+
+            def t(s):
+                return datetime.datetime.fromisoformat(s)
+
+            def bare():
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args, r.mode, r.result, r.lines, r.unanswered, r.hop = N(key="7"), None, {}, [], [], "L2"
+                return r
+
+            got = {}
+            # H-1
+            RR.R.function = lambda rel, func, lines: N(node="node")
+            RR.of_mover = lambda run, owner: True
+            RR.owners_of = lambda owners: {"o": 1}
+            RR._entries_of = lambda writers, owner: ["main"]
+
+            def P(a, b):
+                return N(records=[N(stamp=a), N(stamp=b)])
+
+            def take(heads=("h <",), missed=(), how="cut at entry row 1: 2 pass(es)"):
+                r = bare()
+                r._row_mark_heads = lambda owner, lines: (tuple(heads), {})
+                r.files_of = lambda owner, today, lines: ["jedi.log"]
+                r.logs = N(names=lambda files: files)
+                asked = []
+                r._ask = lambda key, names, asking, owners, quiet=False: (
+                    asked.append([asking.machine, list(asking.window), list(asking.strings)]) or ({"jedi.log": [N()]}, list(missed), {}))
+                RR.passes_of = lambda fn, run, mode: ([P("2026-01-01 09:00:00,100", "2026-01-01 09:00:01,000"),
+                                                       P("2026-01-01 09:20:00,000", "2026-01-01 09:20:01,000")], how)
+                q = N(mover="m.py::prepare", since=t("2026-01-01 08:00:00"), statements=[N(owner="m.py::prepare", line=3739)],
+                      subject="JediTaskSpec.status", writers=[])
+                h, passes, where = r._take_pass(q, "2026-01-01 09:00:00,300", "h2.cern.ch", t("2026-01-01 12:00:00.100"),
+                                                [RR.Arm(4074, ["scouted"], [])], "2026-01-01 08:00:00", "2026-01-01 12:00:00")
+                return {"how": h, "where": where, "asked": asked, "kept": len(r.unanswered),
+                        "passes": passes and [passes.asking.machine, list(passes.asking.window), list(passes.asking.strings),
+                                              passes.before, list(passes.stay)]}
+            got["h1"] = {"read": take(), "asked": take(missed=[(N(key="k"), "w")]),
+                         "uncut": take(how="entry row 1 of f is read whole at none of its 1 record(s) in the run: the run is not split"),
+                         "no_heads": take(heads=())}
+            # H-2
+            RR._statement_subjects = lambda st: {"JediTaskSpec.modificationTime"}
+            RR._written_offset = lambda b: datetime.timedelta(0) if b.line == 4571 else datetime.timedelta(seconds=-60)
+            own = (N(at=t("2026-01-01 08:10:00"), arms=("getTasks:4571",)), N(at=t("2026-01-01 08:15:00"), arms=("getTasks:4571",)))
+
+            def stamps(writes):
+                r = bare()
+                r._timeline = lambda subject, q: N(writes=writes)
+                r._stamps_itself = lambda st, q, subjects: []
+                r._subject_writers = lambda subject: [N(owner="m.py::getTasks", branches=[N(line=4571), N(line=4600)])]
+                q = N(since=t("2026-01-01 08:00:00"), moved=t("2026-01-01 09:00:00.900"))
+                return [T.text(x) for x in r._stamps_by_writes(N(owner="m.py::getTasks"), q)]
+            # the move's own write (its second) is the moving pass's, not counted
+            got["h2"] = [stamps(own), stamps((*own, N(at=t("2026-01-01 08:20:00"), arms=("other:1",)))),
+                         stamps((*own, N(at=t("2026-01-01 09:00:00.500"), arms=("other:1",))))]
+            # H-3
+            def service(svc):
+                r = bare()
+                r._missed_q = N(mover="m.py::killJob", run=N(machine="a97.cern.ch", log=N(services={"a97.cern.ch": svc})))
+                c1 = RR.Caller("tb.py::killJobs", [1138], 1, "none",
+                               outer=[("pandajedi/x/TaskCommando.py:235", 1138), ("pandaserver/api/task_api.py:475", 1138)])
+                c2 = RR.Caller("tcm.py::reassign", [5758], 1, "marks", outer=[("pandajedi/jedicore/JediTaskBuffer.py:1065", 5758)])
+                c3 = RR.Caller("ca.py::main", [158], 2, "none", outer=[("pandaserver/daemons/scripts/copyArchive.py:158", 158)])
+                kept = r._callers_by_service(N(mover="m.py::killJob"), [c1, c2, c3])
+                return [[c.owner for c in kept], r.lines]
+            got["h3"] = [service("server"), service("jedi")]
+            # H-4
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(mark="upd < PandaID={} >", key=[N(columns=["JobSpec.PandaID"])])])
+            RR.mark_values = lambda token, mark: [token.split("=")[1].split()[0]]
+
+            def mark(token):
+                r = bare()
+                r._key_columns = lambda subject, key: {"JobSpec.PandaID"}
+                r._missed_q = N(mover="m.py::upd", run=N(token=token))
+                return r._mark_key(N(mover="m.py::upd", subject="JobSpec.jobStatus", key="7", arms=[RR.Arm(1236, ["merging"], [])]))
+            got["h4"] = [mark("upd < PandaID=99 >"), mark("upd < PandaID=7 >")]
+            # H-5
+            r = bare()
+            r._unborn = lambda readings, subject, state: (readings, "")
+            r._h2_candidates = lambda subject, readings: [N(log_files=["jg.log"], owner="j.py::run")]
+            r._mark_row_after = lambda *a: None
+            r._ask = lambda key, names, asking, owners, whole=False: ({"jg.log": []}, [], {})
+            r._batched = lambda *a: {}
+            r._ended_before = lambda *a: {}
+            RR.owners_of = lambda owners: {}
+            asking = W.Asking(("2026-01-01 09:10:22", "2026-01-01 09:10:23"), None, "w")
+            got["h5"] = r._wrote_at("JobSpec.cloud", "cloud", "WORLD", "7", [], None, asking, False, no_run=True) is None
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    h1 = got["h1"]
+    window = ["2026-01-01 08:50:00", "2026-01-01 09:10:00"]
+    assert h1["read"]["asked"] == [["h2.cern.ch", window, ["h <"]]], h1
+    assert h1["read"]["how"] == "read" and h1["read"]["passes"] == ["h2.cern.ch", window, ["h <"], "2026-01-01 12:00:00",
+                                                                      ["2026-01-01 08:00:00", "2026-01-01 12:00:00"]], h1
+    assert h1["asked"]["how"] == "asked" and h1["asked"]["kept"] == 1 and h1["asked"]["passes"] is None and h1["asked"]["where"]["n"] == 1, h1
+    assert h1["uncut"]["how"] == "heads-uncut" and h1["uncut"]["passes"] is None, h1
+    assert h1["no_heads"]["how"] == "no-heads" and h1["no_heads"]["asked"] == [], h1
+    assert got["h2"][0] == ["getTasks writes JediTaskSpec.modificationTime with the clock itself on the rows it takes (at getTasks:4571), "
+                            "and every write of it the records show in the stay (2, 08:10:00 .. 08:15:00) is one of those: each "
+                            "pass of it that took the row stamped it again, so it took the row no more often than its term's gap "
+                            "(on the writes the records show)"], got
+    assert got["h2"][1] == [] and got["h2"][2] == got["h2"][0], got
+    server, jedi = got["h3"]
+    assert server[0] == ["tb.py::killJobs", "ca.py::main"], server
+    assert server[1] == ["  killJobs at [1138]: its routes entering at pandajedi/x/TaskCommando.py:235, in a JEDI process, are not "
+                         "the run's: the run is on a97, a server machine as the records say (H-3)",
+                         "  reassign at [5758]: not the caller of the run that moved it: every route into it enters at "
+                         "pandajedi/jedicore/JediTaskBuffer.py:1065, in a JEDI process, and the run is on a97, a server machine as "
+                         "the records say (H-3)"], server
+    assert jedi == [["tb.py::killJobs", "tcm.py::reassign", "ca.py::main"], []], jedi
+    assert got["h4"] == ["99", None], got
+    assert got["h5"] is True, got

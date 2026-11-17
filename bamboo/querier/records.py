@@ -450,6 +450,9 @@ class Log:
     #: the machines a recorded answer lists the log on (``listed``): every machine one of its runs may be on (empty in a
     #: file handed in)
     machines: frozenset[str] = frozenset()
+    #: each machine read with its service as the record says (``server``, ``jedi``; empty in a file handed in): bundle
+    #: H's H-3 reads a moving run's machine by it
+    services: dict[str, str] = field(default_factory=dict)
 
     @property
     def name(self) -> str:

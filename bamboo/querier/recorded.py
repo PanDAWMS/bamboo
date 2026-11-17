@@ -705,6 +705,7 @@ class RecordedLogs:
         log.without = frozenset(got.without)
         log.unlisted = unlisted
         log.jedi = frozenset(m for m, service in got.services.items() if service == "jedi")
+        log.services = dict(got.services)
         log.machines = frozenset(got.listed)
         if partial:
             kinds = sorted(set(partial.values()))

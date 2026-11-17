@@ -757,13 +757,19 @@ TEMPLATES: dict[str, str] = {
     "mover-that-moved-it-label": "mover {owner}, which moved it on",
     # bundle F, F-1: the mover's own passes before the one that moved it, whose selection took the row
     "mover-earlier-takes-label": "mover {owner}, its passes before the one that moved it on, whose selection took the row",
-    "held-at-times-not-known-taken-before": "held for the row at times not known; {takes:join=; }: which way each pass cut from the key's records went is read on its own (S2)",
+    "held-at-times-not-known-taken-before": "held for the row at times not known; {takes:join=; }: which way each pass read from its mark's records went is read on its own (S2)",
     "held-at-times-not-known-taken-before-unread": "held for the row at times not known; {takes:join=; }",
     "took-it-before": "{func}{lines:join=, } took it before, at {at} on {machine}",
-    "took-it-before-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}, in a run of the key's records with no record of its entry row, not cut into passes: which way that pass went is not read",
+    "took-it-before-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}, in a run of the key's records with no record of its entry row, not cut into passes: which way that pass went is not read (no mark of it to ask its pass by)",
+    # bundle H, H-2 (P5): a selection that stamps its own term's column each time it takes the row, by the writes read
+    "stamps-itself-by-writes": "{func} writes {subject} with the clock itself on the rows it takes (at {arms:join=, }), and every write of it the records show in the stay ({n}, {first} .. {last}) is one of those: each pass of it that took the row stamped it again, so it took the row no more often than its term's gap (on the writes the records show)",
+    # bundle H, H-1 (F-1b): a take's pass asked by the mover's marks' heads on its machine around it
+    "the-take-s-pass-by-heads": "{func}'s pass at {at} on {machine}, by its mark from {first} to {last}",
+    "took-it-before-heads-asked": "{func}{lines:join=, } took it before, at {at} on {machine}: its pass is asked by its mark there from {first} to {last} ({n} ask(s))",
+    "took-it-before-heads-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}: its mark's records there from {first} to {last} hold no pass of it cut around the take: which way that pass went is not read",
     # bundle F, F-4: a take the row's value of a time column the mover's own arms alone wrote shows
     "took-it-by-the-row-value": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass on {machine} from {first} to {last}",
-    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its marks' heads on every machine from {first} to {last} ({n} ask(s))",
+    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on every machine from {first} to {last} ({n} ask(s))",
     "took-it-by-the-row-value-unread": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is not read",
     "for-the-key-before-the-moving-pass": "for the key alone in {func}'s prints' logs, from the stay's start {since} to its moving pass at {before}",
     "asks-of-its-logs-not-recorded": "{n} ask(s) of its logs not in the records ({why}): whether it ran is not known yet",
