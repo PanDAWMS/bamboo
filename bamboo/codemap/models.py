@@ -4085,6 +4085,21 @@ class HeldSource(KeySource):
             "any other end."
         ),
     )
+    elements: list["HeldSource"] = Field(
+        default_factory=list,
+        description=(
+            "Where the way ends at an object a class of the corpus builds (``object``, no *steps* taken of it there) "
+            "whose class hands out what one of its fields holds -- the field or a part of it is what its ``get`` "
+            "returns, or its ``__next__`` where its ``__iter__`` returns the object -- and whose ``__init__`` binds "
+            "that field to a parameter: the ways of what the construction hands the parameter, read at the "
+            "construction (``ListWithLock(tmpList)``: ``tmpList``'s).  The object's elements are that value's "
+            "elements.  What the class's methods put into the field afterwards (its ``append``) is not read.  Empty "
+            "for any other end."
+        ),
+    )
+    elements_stops: list["KeyStop"] = Field(
+        default_factory=list, description="Where reading *elements* stopped."
+    )
     at: list[str] = Field(
         default_factory=list,
         description=(

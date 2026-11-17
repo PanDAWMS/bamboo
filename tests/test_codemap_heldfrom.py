@@ -2973,3 +2973,118 @@ def test_a_change_s_value_text_is_cut_at_its_bound() -> None:
     assert heldfrom._value_text(None) == ""
     long = heldfrom._value_text(ast.parse("f(" + ", ".join(f"a{i}" for i in range(60)) + ")", mode="eval").body)
     assert len(long) == VALUE_TEXT_CUT and long.endswith("...")
+
+
+_HANDING = """\
+    class ListWithLock:
+        def __init__(self, dataList):
+            self.dataList = dataList
+            self.dataIndex = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            val = self.dataList[self.dataIndex]
+            self.dataIndex += 1
+            return val
+
+
+    class MapWithLock:
+        def __init__(self, dataMap=None):  # I
+            if dataMap is None:
+                dataMap = {}  # D
+            self.dataMap = dataMap
+
+        def get(self, item):
+            if item not in self.dataMap:
+                return 0
+            return self.dataMap[item]
+
+
+    class Pair:
+        def __init__(self, first, second):
+            self.first = first
+            self.second = second
+
+        def get(self, which):
+            if which:
+                return self.first
+            return self.second
+
+
+    class Wrapped:
+        def __init__(self, items):
+            self.items = items
+
+        def __iter__(self):
+            return iter(self.items)
+
+        def __next__(self):
+            return self.items[0]
+"""
+
+_HANDED = """\
+    from pkg.handing import ListWithLock, MapWithLock, Pair, Wrapped
+
+    def run(tasks, sites):
+        queue = ListWithLock(tasks)  # Q
+        counts = MapWithLock(sites)  # C
+        bare = MapWithLock()  # B
+        pair = Pair(tasks, sites)
+        wrapped = Wrapped(tasks)
+        field = ListWithLock(tasks).dataList
+"""
+
+
+def test_an_object_whose_class_hands_out_a_field_holds_as_elements_what_its_construction_binds_the_field_to(
+    tmp_path: Path,
+) -> None:
+    """``ListWithLock(tasks)``: the class's ``__next__`` hands out ``self.dataList``'s items where its ``__iter__``
+    returns the object, and ``__init__`` binds ``self.dataList`` to the parameter, so the object's elements are
+    ``tasks``' -- read at the construction, the object staying an object.  A ``get`` handing out a part of the field
+    does too (``MapWithLock``): ``__init__`` binds it to the parameter or the ``{}`` put in its stead, and to the
+    default where the construction hands nothing.  No elements where the class hands out two fields (``Pair``),
+    where ``__iter__`` does not return the object (``Wrapped``), or where the way takes a step of the object."""
+    root = tmp_path / "pkg"
+    root.mkdir()
+    (root / "__init__.py").write_text("")
+    for name, text in (("handing", _HANDING), ("m", _HANDED)):
+        (root / f"{name}.py").write_text(textwrap.dedent(text))
+    calls = calls_mod.Calls(calls_mod.Types({"pkg": root}, {}))
+    trees = {f"pkg/{name}.py": calls.types.tree(f"pkg/{name}.py") for name in ("handing", "m")}
+    run = next(n for n in ast.walk(trees["pkg/m.py"]) if isinstance(n, ast.FunctionDef) and n.name == "run")
+
+    class _Record:
+        def is_database(self, file: str, node: ast.AST) -> bool:
+            return False
+
+    def line(text: str, marker: str) -> int:
+        return _line("x", marker, {"x": text})
+
+    with sql.across_calls(calls):
+        reader = heldfrom._Reader(calls, _Record(), [], set(), trees)
+        held: dict[str, list[HeldSource]] = {}
+        for statement in run.body:
+            if isinstance(statement, ast.Assign) and isinstance(statement.targets[0], ast.Name):
+                held[statement.targets[0].id] = heldfrom._said(
+                    reader.read(statement.value, statement, "pkg/m.py", run)
+                )[0]
+
+    def elements(name: str) -> list[set[tuple]]:
+        return [
+            {(one.kind, one.name, one.made_empty, tuple(one.at), tuple(one.route)) for one in source.elements}
+            for source in held[name]
+        ]
+
+    assert [(one.kind, one.name, one.steps) for one in held["queue"]] == [("object", "ListWithLock", [])]
+    at_queue, at_counts, at_bare = (f"pkg/m.py:{line(_HANDED, marker)}" for marker in ("Q", "C", "B"))
+    assert elements("queue") == [{("parameter", "tasks", "", (), (at_queue,))}]
+    made = ("unknown", "{}", "mapping", (f"pkg/handing.py:{line(_HANDING, 'D')}",))
+    assert elements("counts") == [{("parameter", "sites", "", (), (at_counts,)), made + ((at_counts,),)}]
+    assert elements("bare") == [
+        {("constant", "None", "", (f"pkg/handing.py:{line(_HANDING, 'I')}",), (at_bare,)), made + ((at_bare,),)}
+    ]
+    assert elements("pair") == [set()]
+    assert elements("wrapped") == [set()]
+    assert [(one.kind, one.steps, one.elements) for one in held["field"]] == [("object", [".dataList"], [])]
