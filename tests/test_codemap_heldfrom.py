@@ -19,6 +19,7 @@ from bamboo.codemap.gates import (
 )
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    VALUE_TEXT_CUT,
     Anchor,
     Branch,
     FieldFrom,
@@ -2703,6 +2704,8 @@ def test_what_a_field_holds_changed_on_an_object_of_its_class_outside_its_method
     assert [(one.at, one.kind, one.what) for one in listed.changes] == [
         (proxy, "method", "append")
     ]
+    # The value put, as the source spells it: what a reader ties to the name bound where it was made.
+    assert [one.value_text for one in listed.changes] == ["datasetSpec"]
     ((put,),) = [one.value for one in listed.changes]
     assert (put.kind, put.name) == ("object", "JediDatasetSpec")
     assert [(one.kind, one.at) for one in listed.stops] == [
@@ -2722,6 +2725,7 @@ def test_a_value_put_by_a_change_keeps_what_changed_it_before(
     assert [(one.at, one.kind, one.key, one.what) for one in put.changes] == [
         (fill, "row", "*", "datasetSpec.pack")
     ]
+    assert [one.value_text for one in put.changes] == ["row"]
     ((row,),) = [one.value for one in put.changes]
     assert (row.name, row.changes) == ("rows", [])
     pad = f"{FIELDS_PROXY}:{_line(FIELDS_PROXY, 'PAD', FIELDS)}"
@@ -2961,3 +2965,11 @@ def test_a_value_chosen_by_a_computed_key_keeps_the_key_it_sat_under_and_the_key
             ("command",),
         ),
     }
+
+
+def test_a_change_s_value_text_is_cut_at_its_bound() -> None:
+    """:attr:`HeldChange.value_text` keeps a short value whole and cuts a long one, ``...`` ending it."""
+    assert heldfrom._value_text(ast.parse("tmpJob", mode="eval").body) == "tmpJob"
+    assert heldfrom._value_text(None) == ""
+    long = heldfrom._value_text(ast.parse("f(" + ", ".join(f"a{i}" for i in range(60)) + ")", mode="eval").body)
+    assert len(long) == VALUE_TEXT_CUT and long.endswith("...")

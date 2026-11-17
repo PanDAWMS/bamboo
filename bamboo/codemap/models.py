@@ -4104,6 +4104,10 @@ class HeldSource(KeySource):
     )
 
 
+#: :attr:`HeldChange.value_text` is cut at this many characters.
+VALUE_TEXT_CUT = 120
+
+
 class HeldChange(BaseModel):
     """One place the object a :class:`HeldSource`'s way holds may be changed in place before the read
     (:func:`bamboo.codemap.panda.changes.object_changes`): ``taskParamMap["transPath"] = ...`` at
@@ -4133,6 +4137,14 @@ class HeldChange(BaseModel):
         ),
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
+    value_text: str = Field(
+        default="",
+        description=(
+            "The value a store stores or a method puts as the source spells it, whether or not *value* reads it -- "
+            "``tmpJob`` for ``actJobs.append(tmpJob)``, ``vs`` for ``xs.extend(vs)`` (its elements put) --; empty "
+            f"where the change puts no value.  Cut at {VALUE_TEXT_CUT} characters, ``...`` ending it."
+        ),
+    )
 
 
 class AfterChange(HeldChange):

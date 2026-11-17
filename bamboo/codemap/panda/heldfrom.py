@@ -93,6 +93,7 @@ from bamboo.codemap.models import (
     THROUGH_DECODED,
     THROUGH_TEXT,
     THROUGH_UNKNOWN,
+    VALUE_TEXT_CUT,
     WRITE_OBJECT,
     WRITE_VALUE,
     AfterChange,
@@ -281,6 +282,8 @@ class _Change(NamedTuple):
     what: str
     via: tuple[str, ...]
     value: tuple[_Way, ...]
+    #: :attr:`HeldChange.value_text`.
+    value_text: str = ""
 
 
 def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
@@ -1916,6 +1919,7 @@ class _Reader:
                     one.what,
                     one.via,
                     value,
+                    _value_text(one.value),
                 )
             )
         return tuple(made)
@@ -3366,7 +3370,16 @@ def _change_said(change: _Change) -> HeldChange:
         via=list(change.via),
         value=value,
         value_stops=stops,
+        value_text=change.value_text,
     )
+
+
+def _value_text(value: Optional[ast.expr]) -> str:
+    """*value* as the source spells it (:attr:`HeldChange.value_text`), cut at :data:`VALUE_TEXT_CUT` characters."""
+    if value is None:
+        return ""
+    text = ast.unparse(value)
+    return text if len(text) <= VALUE_TEXT_CUT else text[: VALUE_TEXT_CUT - 3] + "..."
 
 
 def _statement_of(node: ast.AST) -> Optional[ast.stmt]:
