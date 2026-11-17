@@ -122,17 +122,19 @@ def subquery_terms(read_sites: Iterable, owner: str, subject: str, observed: str
 def carriers(junctions: Iterable, reach_graph: Iterable, inner: Iterable[str], status: str, depth: int = DEPTH) -> Carriers | None:
     """H-b: the writers of the *inner* columns (the map's junctions) and the functions nearest them, up the reach graph
     to *depth* calls, that record the history of *status* (a ``history`` call of theirs), with the values each records.
-    None where no writer is found, or no such function within *depth*."""
+    Nearest by the map's closure (:func:`value_reach.closure`): a function recording the history is a carrier at *n*
+    calls where its calls reach a writer within *n*, each call followed for the classes it holds for.  Whom to ask is
+    found by reading the calls backwards, every call whatever its classes.  None where no writer is found, or no such
+    function within *depth*."""
     inner = set(inner)
     writers = sorted({VR.bare(j.owner) for j in junctions if getattr(j, "subject", "") in inner})
     if not writers:
         return None
     nodes = list(reach_graph)
-    calls = VR.calls_of(nodes)
     callers: dict[str, set[str]] = {}
-    for a, bs in calls.items():
-        for b in bs:
-            callers.setdefault(b, set()).add(a)
+    for node in nodes:
+        for c in getattr(node, "calls", None) or []:
+            callers.setdefault(VR.bare(c.to), set()).add(VR.bare(node.owner))
     records: dict[str, frozenset[str]] = {}
     for node in nodes:
         vals = {v for h in getattr(node, "history", None) or [] if h.subject == status for v in h.values}
@@ -143,11 +145,11 @@ def carriers(junctions: Iterable, reach_graph: Iterable, inner: Iterable[str], s
     for n in range(1, depth + 1):
         level = {c for f in level for c in callers.get(f, ())} - seen
         seen |= level
-        found = sorted((f, records[f]) for f in level if f in records)
+        # the writers each reaches in as many calls: the ones whose writes it carries
+        carried = {f: VR.closure([f], n) & set(writers) for f in sorted(seen - set(writers)) if f in records}
+        found = sorted((f, records[f]) for f, ws in carried.items() if ws)
         if found:
-            # the writers the carriers reach in as many calls: the ones whose writes they carry
-            carried = VR.closure([f for f, _ in found], calls, n) & set(writers)
-            return Carriers(status.partition(".")[0], status, tuple(sorted(carried)), tuple(found))
+            return Carriers(status.partition(".")[0], status, tuple(sorted(set().union(*carried.values()))), tuple(found))
     return None
 
 

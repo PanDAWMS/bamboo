@@ -960,3 +960,78 @@ def test_a_builtin_class_s_method_read_off_the_class_runs_the_builtin_s_own_not_
     assert found("entries") == [
         ("method", "*", "dict.__setitem__", [str(line['entries.put("a", 1)'])]),
     ]
+
+
+NAMED = """\
+class FileSpec:
+    def set_id(self, value):
+        object.__setattr__(self, "PandaID", value)
+
+
+class JobSpec:
+    def addFile(self, file):
+        file.set_id(object.__getattribute__(self, "PandaID"))
+
+    def copyId(self, file):
+        file.set_id(getattr(self, "PandaID"))
+
+    def anyField(self, name, file):
+        file.set_id(getattr(self, name))
+
+    def renumberTask(self):
+        task = getattr(self, "task")
+        task.PandaID = 0
+
+    def touchTask(self, file):
+        task = getattr(self, "task")
+        file.set_id(task.size)
+
+    def keep(self, store, file):
+        store.append(getattr(self, "task"))
+        file.set_id(1)
+
+
+def read(job: JobSpec, file: FileSpec, store: list):
+    job.addFile(file)
+    job.copyId(file)
+    job.anyField("x", file)
+    job.renumberTask()
+    job.touchTask(file)
+    job.keep(store, file)
+"""
+
+
+def test_an_attribute_read_by_its_name_is_followed_as_the_attribute_not_as_the_object_escaping(tmp_path: Path) -> None:
+    """``object.__getattribute__(self, "PandaID")`` in ``JobSpec.addFile`` and ``getattr(self, "PandaID")`` read
+    the job's ``PandaID``: the job goes nowhere, so the file's own ``PandaID`` set by ``set_id`` is no change of the
+    job's -- read so, the job escaped and the call was read by the attribute's name.  Read by a name not written, an
+    attribute of the job is still no change of its ``PandaID``, but may be the task on the way to ``task.PandaID``.
+    ``getattr(self, "task")`` is the task, followed under the name bound to it (``renumberTask`` stores its
+    ``PandaID``; ``touchTask`` reads another field of it) and lost where it is put inside a list."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "named.py").write_text(NAMED)
+    tree = ast.parse(NAMED)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/named.py"
+    module = SourceModule(package=PACKAGE, rel_path=file, tree=tree, source=NAMED, blob_sha=blob_sha(NAMED))
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    read = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "read")
+    made = {ast.unparse(one.value): one.value for one in read.body if isinstance(one, ast.Expr)}
+    line = {text.strip(): number for number, text in enumerate(NAMED.splitlines(), 1)}
+
+    def asked(text: str, chain: str) -> object:
+        value = ast.parse(f"job.{chain}", mode="eval").body
+        change = changes.may_change(calls, file, read, made[text], value)
+        return None if change is None else (change.name, change.why, change.line)
+
+    set_id = ("PandaID", changes.STORED, line['object.__setattr__(self, "PandaID", value)'])
+    assert asked("job.addFile(file)", "PandaID") is None
+    assert asked("job.copyId(file)", "PandaID") is None
+    assert asked("job.anyField('x', file)", "PandaID") is None
+    assert asked("job.anyField('x', file)", "task.PandaID") == set_id
+    assert asked("job.renumberTask()", "task.PandaID") == ("PandaID", changes.STORED, line["task.PandaID = 0"])
+    assert asked("job.touchTask(file)", "task.PandaID") is None
+    assert asked("job.keep(store, file)", "task.PandaID") == set_id

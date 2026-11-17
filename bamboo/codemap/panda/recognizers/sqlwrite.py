@@ -79,6 +79,8 @@ from bamboo.codemap.calls import (
 )
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
+    FALL_BODY,
+    FALL_ELSE,
     KEY_ATTRIBUTE,
     KEY_BOUND,
     KEY_COLUMN_EXPRESSION,
@@ -90,6 +92,7 @@ from bamboo.codemap.models import (
     KEY_COLUMN_UNREAD,
     KEY_CONSTANT,
     KEY_HANDED,
+    KEY_JOINED,
     KEY_KEPT,
     KEY_NO_BIND,
     KEY_NO_MAP,
@@ -129,7 +132,11 @@ from bamboo.codemap.models import (
     CoverageStat,
     DiagnosticTemplate,
     EntityNode,
+    FunctionPrintsNode,
     GuardRead,
+    HandedParameter,
+    HandOn,
+    HandOnPrint,
     HeldSource,
     JoinPair,
     JunctionNode,
@@ -142,6 +149,7 @@ from bamboo.codemap.models import (
     ReachNode,
     ReadingStop,
     ReadSiteNode,
+    RowFall,
     RowKeySource,
     RowsTerm,
     SetFrom,
@@ -149,11 +157,13 @@ from bamboo.codemap.models import (
     SubjectNode,
     TermGuard,
     TermPlace,
+    WriteBind,
     WriteFrom,
+    WritePrint,
     pooled_cuts,
     pooled_frames,
 )
-from bamboo.codemap.panda import mapentries, sql, sqleval, sqltext
+from bamboo.codemap.panda import flow, mapentries, sql, sqleval, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 
 # The block a decision records about itself reads the same way whichever slice
@@ -168,6 +178,7 @@ from bamboo.codemap.pathcond import (
     arm_condition,
     attach_parents,
     binding_tests,
+    bindings,
     compatible,
     enclosing_function,
     entries,
@@ -1215,6 +1226,83 @@ def _object_set_froms(
             )
 
 
+def _write_print(
+    printed: dict[tuple[str, int, str], WritePrint],
+    write_prints: list[WritePrint],
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    owner_class: Optional[str],
+    run: sql.Execution,
+    statement: Optional[sqltext.SqlWrite],
+    table: str,
+    rel_path: str,
+    attributor: SpecAttributor,
+    map_keys: dict[str, str],
+    sequenced: dict[str, frozenset[str]],
+) -> None:
+    """Say where *run*'s values print (:class:`WritePrint`): the prints of its text and map (:func:`_printed_by`), each
+    column its text sets to a bind itself, and, where the map is one object's ``valuesMap``, each attribute of its
+    class the text does not spell under the key its class's map stores it by (*map_keys*) -- less those a sequence
+    fills where the map is ``useSeq=True``.  *run* is one call's (:func:`_each_call`); *statement* is ``None`` for an
+    ``INSERT`` whose columns are the object's (``{JobSpec.columnNames()}``)."""
+    owner = f"{rel_path}::{func.name}"
+    name = (owner, run.call.lineno, table)
+    if name in printed:
+        return
+    found = _printed_by(func, run)
+    if not found:
+        return
+    binds: list[WriteBind] = []
+    spelled: set[str] = set()
+    for column, supplied in statement.columns.items() if statement is not None else ():
+        spelled.add(column.lower())
+        if supplied.kind == SET_BIND:
+            binds.append(WriteBind(column=_column_subject(attributor, table, column), bind=supplied.text))
+    objects = _objects_of(run, func)
+    object_map, only_changed = "", False
+    if len(objects) == 1:
+        obj, made = objects[0]
+        object_map, only_changed = ast.unparse(obj), _changed_only(made)
+        obj_class = attributor.class_of(obj, func, owner_class)
+        prefix = map_keys.get(obj_class) if obj_class is not None else None
+        if obj_class is not None and prefix is not None:
+            use_seq = any(
+                one.arg == "useSeq" and isinstance(one.value, ast.Constant) and one.value.value for one in made.keywords
+            )
+            for attribute in sorted(attributor.declared_attributes(obj_class)):
+                if attribute.lower() in spelled or (use_seq and attribute in sequenced.get(obj_class, ())):
+                    continue
+                binds.append(WriteBind(column=SubjectNode.make_name(obj_class, attribute), bind=f"{prefix}{attribute}"))
+    record = printed[name] = WritePrint(
+        owner=owner,
+        statement=run.call.lineno,
+        table=table,
+        printed_by=found,
+        binds=binds,
+        object_map=object_map,
+        only_changed=only_changed,
+    )
+    write_prints.append(record)
+
+
+def attach_write_arms(write_prints: list[WritePrint], key_froms: list[KeyFrom]) -> int:
+    """Give each :class:`WritePrint` the arms whose writes land at its statement -- :attr:`KeyFrom.writes` of the
+    statement's records, all its terms together -- and keep those some arm lands at: a statement no arm of the map
+    writes through is no write a reader asks the value of.  Sorted by file and line; returns how many are kept."""
+    writes: dict[tuple[str, int, str], dict[str, set[int]]] = {}
+    for one in key_froms:
+        held = writes.setdefault((one.owner, one.statement, one.table), {})
+        for subject, lines in one.writes.items():
+            held.setdefault(subject, set()).update(lines)
+    kept = []
+    for record in write_prints:
+        arms = writes.get((record.owner, record.statement, record.table), {})
+        record.arms = {subject: sorted(lines) for subject, lines in sorted(arms.items()) if lines}
+        if record.arms:
+            kept.append(record)
+    write_prints[:] = sorted(kept, key=lambda one: (one.owner.partition("::")[0], one.statement, one.table))
+    return len(kept)
+
+
 def _inserted_table(run: sql.Execution) -> str:
     """The table an ``INSERT``'s text names, schema stripped; empty where the text names it by a variable."""
     matched = _INSERT_INTO.match(run.sql or "")
@@ -1263,6 +1351,7 @@ def extract(
     row_keys: Optional[list[RowKeySource]] = None,
     key_froms: Optional[list[KeyFrom]] = None,
     set_froms: Optional[list[SetFrom]] = None,
+    write_prints: Optional[list[WritePrint]] = None,
 ) -> tuple[
     list[SubjectNode],
     list[JunctionNode],
@@ -1312,6 +1401,11 @@ def extract(
     keyed: dict[tuple[str, int, str, str], KeyFrom] = {}
     wrote: dict[tuple[str, int, str, str, str], SetFrom] = {}
     sequenced = _sequenced_attributes(modules) if key_froms is not None else {}
+    # Where each write's values print: read beside its KeyFroms, so only where those are.
+    printed_writes: dict[tuple[str, int, str], WritePrint] = {}
+    if key_froms is None:
+        write_prints = None
+    map_keys = progress.spec_map_keys(modules) if write_prints is not None else {}
     stopped: list[ReadingStop] = []
     coverage: list[CoverageStat] = []
     attributed: set[tuple[str, str, str]] = set()
@@ -1362,6 +1456,11 @@ def extract(
                         _object_set_froms(
                             wrote, set_froms, func, _owner, run, made_of, _inserted_table(run), (),
                             module.rel_path, attributor, True,
+                        )
+                    if write_prints is not None:
+                        _write_print(
+                            printed_writes, write_prints, func, _owner, run, None, _inserted_table(run),
+                            module.rel_path, attributor, map_keys, sequenced,
                         )
                 # A SET item ``{}=:{}`` read for each key of the mapping its loop walks is a column.  Its stop stays:
                 # the text names the column through an interpolation, and derive-strategy, reading one file, says so
@@ -1510,6 +1609,11 @@ def extract(
                         # A record per call: each place runs the text with the binds that reach it.
                         for one, lines in _each_call(attributor, func, run, statement, spec_class, settle, written):
                             _key_froms(keyed, key_froms, func, one, statement, module.rel_path, lines)
+                            if write_prints is not None:
+                                _write_print(
+                                    printed_writes, write_prints, func, _owner, one, statement, statement.table,
+                                    module.rel_path, attributor, map_keys, sequenced,
+                                )
                             if set_froms is not None:
                                 # An insert's row is new but where the statement may update it instead.
                                 new_row = (
@@ -1646,6 +1750,8 @@ class _Outcome(NamedTuple):
     cuts: tuple[int, ...] = ()
     #: A run-time value as a base plus an offset -- see ``Branch.amount``.
     amount: Optional[ConditionValue] = None
+    #: A parameter as the call hands it -- see ``Branch.handed``.
+    handed: Optional[HandedParameter] = None
 
 
 def _outcomes(
@@ -1748,7 +1854,7 @@ def _outcomes(
                                     chosen,
                                     tuple(reading.frames),
                                     tuple(reading.cuts),
-                                    values.written_amount(held, func),
+                                    *values.written(held, func),
                                 )
                             )
                     continue
@@ -1765,7 +1871,7 @@ def _outcomes(
                     site,
                     tuple(reading.frames),
                     tuple(reading.cuts),
-                    values.written_amount(value, func),
+                    *values.written(value, func),
                 )
             )
         if not found:
@@ -1939,7 +2045,7 @@ def _record(
         )
 
     known = {(branch.outcome, tuple(branch.path_condition)): branch for branch in junction.branches}
-    for outcome, tier, node, extra, decided_at, frames, cuts, amount in outcomes:
+    for outcome, tier, node, extra, decided_at, frames, cuts, amount, handed in outcomes:
         tests = path_condition(node)
         # The early exits above the write, as arm_condition adds them, less what the value's own tests say.
         condition = tests + [one for one in exits_above(node) if one not in tests and one not in extra] + extra
@@ -1960,6 +2066,8 @@ def _record(
             if held.amount != amount:
                 # Two writes of one text that read as different amounts -- or one as none -- are one amount to neither.
                 held.amount = None
+            if held.handed != handed:
+                held.handed = None  # and two parameters, or one and another value, are neither's
             held.row_precondition = [term for term in held.row_precondition if term in guards]
             if decided_at.lineno != held.line and decided_at.lineno not in held.other_lines:
                 held.other_lines = sorted([*held.other_lines, decided_at.lineno])
@@ -1984,6 +2092,7 @@ def _record(
             value_frames=list(frames),
             value_cuts=list(cuts),
             amount=amount,
+            handed=handed,
         )
         known[(outcome, tuple(condition))] = branch
         junction.branches.append(branch)
@@ -3020,9 +3129,16 @@ def _bind_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue
     if value.constant:
         return ConditionValue(kind="bind", text=side.text, constant=value.constant)
     if value.base:
-        return ConditionValue(kind="bind", text=side.text, base=value.base, offset_seconds=value.offset, needs=list(value.needs))
+        return ConditionValue(
+            kind="bind",
+            text=side.text,
+            base=value.base,
+            offset_seconds=value.offset,
+            needs=list(value.needs),
+            scale_seconds=value.scale,
+        )
     if value.offset is None:
-        return ConditionValue(kind="bind", text=side.text, needs=list(value.needs))
+        return ConditionValue(kind="bind", text=side.text, needs=list(value.needs), scale_seconds=value.scale)
     return ConditionValue(kind="bind", text=side.text, constant=_number(value.offset))
 
 
@@ -3382,6 +3498,72 @@ def _assigned_names(node: ast.AST) -> set[str]:
     return {name for target in targets_of(node) for name, _slot, _unpacked in names_bound_by(target)}
 
 
+def _row_loops(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
+) -> tuple[list[ast.For | ast.AsyncFor | ast.While], set[str]]:
+    """The loops over the rows of the statement run at *line*, whose stretch ends at *last*, and the names they land in.
+
+    A loop is over the rows when its header reads a name they land in (:func:`_rows_written`), or a list a loop over
+    them puts a row into -- the loop's target, or a tuple of its names (:func:`_copies`): ``getTasksToBeFinished_JEDI``
+    copies its rows into ``taskStatList`` in ``for ... in resList``, commits, and works them through in
+    ``for ... in taskStatList``, which is where a row is passed over.  A loop over the cursor is over the rows itself;
+    its target is a row, and a loop over that is one nested in it.
+
+    The names are only where the rows land, not the copies: a test of a copy inside the loop filling it asks whether
+    this row was seen, not whether rows came (``checkAllEventsDone``'s ``if pandaID in checkedPandaIDs: continue``),
+    so it is not a ``no-rows`` exit (:func:`place_exits`).
+
+    The loop must **open** inside the stretch; only its end is followed.  Searching the function for every loop
+    over the same names gives 174 exits over 71 statements against 90 over 45, because ``res`` is reused:
+    ``copyArchive::main``'s first query picks up the ``continue`` that belongs to its query on line 381, and one
+    handler on line 1364 lands on 19 statements.  The stretch is what makes ``res`` mean *this* ``res``, and
+    keeping the opening inside it keeps that.
+    """
+    seeds = _rows_written(func, line, last)
+    names = {name for node in seeds for name in _assigned_names(node)}
+    cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
+
+    def over(held: set[str]) -> list[ast.For | ast.AsyncFor | ast.While]:
+        found: list[ast.For | ast.AsyncFor | ast.While] = []
+        for node in walk(func):
+            if not isinstance(node, _LOOPS) or not line < node.lineno <= last:
+                continue
+            header = node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
+            if {one.id for one in walk(header) if isinstance(one, ast.Name)} & held or id(node) in cursor_loops:
+                found.append(node)
+        return found
+
+    loops = over(names)
+    copies = {name for loop in loops for name in _copies(loop)} - names
+    if copies:
+        loops = over(names | copies)
+    return loops, names
+
+
+def _copies(loop: ast.AST) -> set[str]:
+    """The lists *loop* puts its row into: ``L.append(row)`` or ``L.add((a, b))`` whose value names nothing but the
+    loop's target -- a row copied, whole or by its parts."""
+    if not isinstance(loop, (ast.For, ast.AsyncFor)):
+        return set()
+    target = {one.id for one in walk(loop.target) if isinstance(one, ast.Name)}
+    found: set[str] = set()
+    for node in walk(loop):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("append", "add")
+            and isinstance(node.func.value, ast.Name)
+            and len(node.args) == 1
+            and not node.keywords
+        ):
+            continue
+        named = {one.id for one in walk(node.args[0]) if isinstance(one, ast.Name)}
+        held = [one for one in walk(node.args[0]) if not isinstance(one, (ast.Name, ast.Tuple, ast.expr_context))]
+        if named and named <= target and not held:
+            found.add(node.func.value.id)
+    return found
+
+
 def _rows_written(
     func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int
 ) -> list[ast.Assign | ast.AnnAssign | ast.For | ast.AsyncFor]:
@@ -3452,6 +3634,36 @@ def _flag_parameters(func: ast.AST) -> set[str]:
         if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
     }
     return tested - rebound
+
+
+def routes_ruling_out(
+    calls: Calls, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, arms: list[tuple[int, ...]]
+) -> list[list[list[str]]]:
+    """For each arm of *func*, given as the lines it writes on, the routes into *func* whose constants rule out every
+    one of those lines (:func:`pathcond.ruled_out_by`), each spelled as :attr:`CallReading.chain` spells a route --
+    read as a read site's routes are (:attr:`CallReading.not_run`).  ``getTaskWithID_JEDI``'s ``lockedBy=:newLockedBy``
+    under ``if lockTask:`` runs on no route handing ``lockTask`` the default ``False``.  A route not listed may run
+    the arm: one whose constants decide nothing, and one the routes do not reach (:meth:`Calls.routes`' stops)."""
+    found: list[list[list[str]]] = [[] for _ in arms]
+    tested = _flag_parameters(func)
+    if not tested or not arms:
+        return found
+    statements: dict[int, list[ast.stmt]] = {}
+    for node in walk(func):
+        if isinstance(node, ast.stmt) and enclosing_function(node) is func:
+            statements.setdefault(node.lineno, []).append(node)
+    owned = calls.types.method_class(file, func)
+    target = Target(file, func, owned[1] if owned else None)
+    routes, _stops = calls.routes(target)
+    for route in routes:
+        constants = _route_constants(calls, target, route.sites, tested)
+        if not constants:
+            continue
+        for at, lines in enumerate(arms):
+            written = [statement for line in lines for statement in statements.get(line, ())]
+            if written and all(pathcond.ruled_out_by(statement, func, constants) for statement in written):
+                found[at].append(list(route.chain))
+    return found
 
 
 def _module_of(node: ast.AST) -> Optional[ast.Module]:
@@ -4428,34 +4640,10 @@ def read_side(
             if own != owner or kept.region is None:
                 continue
             _first, last = kept.region
-            seeds = _rows_written(func, line, last)
-            names = {name for node in seeds for name in _assigned_names(node)}
-            # A loop over the cursor is over the rows itself; its target is a
-            # row, and a loop over that is one nested in it.
-            cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
             enclosing = _enclosing_loops(func)
-            spans: list[tuple[int, int]] = []
-            over_rows: set[int] = set()
-            for node in walk(func):
-                if not isinstance(node, _LOOPS):
-                    continue
-                # The loop must **open** inside the region; only its end is
-                # followed.  Searching the function for every loop over the
-                # same names gives 174 exits over 71 statements against 90
-                # over 45, because ``res`` is reused: ``copyArchive::main``'s
-                # first query picks up the ``continue`` that belongs to its
-                # query on line 381, and one handler on line 1364 lands on 19
-                # statements.  The region is what makes ``res`` mean *this*
-                # ``res``, and keeping the opening inside it keeps that.
-                if not line < node.lineno <= last:
-                    continue
-                header = (
-                    node.iter if isinstance(node, (ast.For, ast.AsyncFor)) else node.test
-                )
-                over = {n.id for n in walk(header) if isinstance(n, ast.Name)}
-                if over & names or id(node) in cursor_loops:
-                    spans.append((node.lineno, node.end_lineno or node.lineno))
-                    over_rows.add(id(node))
+            loops, names = _row_loops(func, line, last)
+            spans = [(node.lineno, node.end_lineno or node.lineno) for node in loops]
+            over_rows = {id(node) for node in loops}
             # Where the rows are worked through.  Kept as a field of its own
             # because it is not ``region``: a loop opened inside the region
             # runs to its own end, and for 64 of the corpus's 151 looping
@@ -5610,14 +5798,38 @@ class _PathCarry:
             for write in self.writes
             if write.forced or (write.name in names and (write.mentions & names or write.inner_calls & values))
         ]
+        # A write is worked out again only where a name its value is read from grew since it was last worked out:
+        # with the same names it gives what it gave (what a callee keeps is summarised once for what it is handed),
+        # so the writes grow as they do when every one is worked out each round.
+        grown: dict[str, int] = {}
+        reads = [self._reads(write) for write in live]
+        last: list[Optional[tuple[int, ...]]] = [None] * len(live)
         growing = True
         while growing:
             growing = False
-            for write in live:
+            for index, write in enumerate(live):
+                mark = tuple(grown.get(name, 0) for name in reads[index])
+                if mark == last[index]:
+                    continue
+                last[index] = mark
                 new = write.forced | self._value(write)
                 if not new <= write.paths:
                     write.paths = write.paths | new
+                    grown[write.name] = grown.get(write.name, 0) + 1
                     growing = True
+
+    def _reads(self, write: _Write) -> tuple[str, ...]:
+        """The names *write*'s value is read from: those it mentions, and those the comprehensions around it bind
+        their targets from (:meth:`_comprehension` reads a name there)."""
+        names = set(write.mentions)
+        looked = write.call if write.call is not None else write.source
+        scope = getattr(looked, "parent", None)
+        while scope is not None and scope is not self.func:
+            if isinstance(scope, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                for generator in scope.generators:
+                    names.update(n.id for n in walk(generator) if isinstance(n, ast.Name))
+            scope = getattr(scope, "parent", None)
+        return tuple(sorted(names))
 
     def _value(self, write: _Write) -> _Paths:
         if write.call is not None:
@@ -7075,6 +7287,37 @@ class _Filled:
             self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds) if seeds else None
         return self._carries[key]
 
+    def holds_rows(self, value: ast.AST, at: ast.AST, names: set[str]) -> bool:
+        """Whether *value*, where *at* runs, holds the rows of one of the read sites *names*, whole or a part -- as
+        :meth:`sources` reads a ``rows`` source -- or is an object such a row is read into: ``taskSpec`` after
+        ``taskSpec.pack(resTS)`` (:data:`callfacts.ROW_READ`), between each binding of the name reaching *at* and
+        *at*, holds every column of ``resTS``."""
+        if self._held_rows(value, at, names):
+            return True
+        if not isinstance(value, ast.Name):
+            return False
+        bound = [getattr(site_of(one), "lineno", 0) for one in reaching_definitions(self.func, value.id, at)]
+        line = getattr(at, "lineno", 0)
+        return bool(bound) and any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in callfacts.ROW_READ
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == value.id
+            and len(node.args) == 1
+            and max(bound) < node.lineno <= line
+            and self._held_rows(node.args[0], site_of(node), names)
+            for node in own_nodes(self.func)
+        )
+
+    def _held_rows(self, value: ast.AST, at: ast.AST, names: set[str]) -> bool:
+        for site in self.sites:
+            if site.name in names:
+                carry = self._rows(site)
+                if carry is not None and carry.held(value, at):
+                    return True
+        return False
+
     def sources(self, value: ast.AST, at: ast.AST) -> list[KeySource]:
         """Where *value*, filled at *at*, came from: each statement's rows, sequence's next values, parameter and
         field of ``self`` that reaches it, else what it is -- a literal, an attribute of something else, or a value
@@ -7239,9 +7482,9 @@ def _selected_value(selected: str) -> object:
 
 
 def _term_column(term: str) -> str:
-    """The column a KeyFrom's *term* compares: ``jediTaskID`` of ``jediTaskID=:jediTaskID`` or of
-    ``jediTaskID IN (:a, :b)``."""
-    return term.split(" IN ", 1)[0].split("=", 1)[0].strip()
+    """The column a KeyFrom's *term* compares: ``jediTaskID`` of ``jediTaskID=:jediTaskID``, of ``jediTaskID IN (:a,
+    :b)`` or of ``jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID``."""
+    return re.split(r" IN |[<>!=]", term, maxsplit=1)[0].strip()
 
 
 def _site_function(
@@ -7283,9 +7526,14 @@ def _read_keyed(
 
 def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) -> list[KeyFrom]:
     """A KeyFrom (:attr:`KeyFrom.reads`) for each row-naming term of each read site's run: a term on the statement's
-    own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding, every row meeting it -- as
-    :func:`_key_froms` makes a write's, its binds read the same way.  Its statement is the read site's line, its binds
-    those reaching that call (:func:`_read_runs`); an ``IN`` list of several binds is one term.
+    own rows (:data:`sqltext.ROW`) comparing a column with binds, not excluding -- as :func:`_key_froms` makes a
+    write's, its binds read the same way.  Its statement is the read site's line, its binds those reaching that call
+    (:func:`_read_runs`); an ``IN`` list of several binds is one term.  A term a returned row need not meet -- a way
+    of an ``OR`` -- says so (:attr:`KeyFrom.some_rows`).
+
+    And one for each term comparing a column with another table's (:func:`sqltext.joined_terms`), from each side, its
+    source that column (:data:`KEY_JOINED`): ``getTasksToBeFinished_JEDI``'s ``tabT.jediTaskID>=
+    tabA.min_jediTaskID``, which no bind brings nor a print of the binds shows.
     """
     found: dict[tuple[str, int, str, str], KeyFrom] = {}
     for site in sorted(sites, key=lambda one: (one.owner, one.anchor.line_start)):
@@ -7296,8 +7544,24 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
         for run in _read_runs(func):
             if run.call.lineno != line:
                 continue
+            for joined in sqltext.joined_terms(run.reading):
+                other = f"{joined.other_table}.{joined.other_column}"
+                spelled = f"{joined.column}{joined.op}{other}"
+                record = found.get((site.owner, line, joined.table, spelled))
+                if record is None:
+                    record = found[(site.owner, line, joined.table, spelled)] = KeyFrom(
+                        owner=site.owner,
+                        file=file,
+                        statement=line,
+                        table=joined.table,
+                        term=spelled,
+                        reads=True,
+                        sources=[KeySource(kind=KEY_JOINED, line=line, name=other)],
+                    )
+                record.some_rows = record.some_rows or not joined.every_row
+                _ran_by(record, func, run)
             for term in sqltext.terms(run.reading).terms:
-                if term.verb != "read" or term.scope != sqltext.ROW or term.excluding or not term.decided:
+                if term.verb != "read" or term.scope != sqltext.ROW or term.excluding:
                     continue
                 # A bind spelt with a hole is no term here: sqltext.terms reads none.
                 binds = list(term.binds)
@@ -7319,6 +7583,8 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                         reads=True,
                     )
                     record._binds = (func, file, [])
+                # A way of an OR, or a term only some runs append, in any of the texts the statement runs with.
+                record.some_rows = record.some_rows or not term.decided
                 _ran_by(record, func, run)
                 bound = [
                     filled
@@ -7360,6 +7626,342 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                 held[2].extend(bound)
                 record.unread = "" if held[2] else KEY_NO_BIND
     return list(found.values())
+
+
+#: The methods of a builtin container that put a value into it, and the argument the value is.
+_PUTS_VALUE = {"append": 0, "add": 0, "appendleft": 0, "extend": 0, "insert": 1}
+
+
+def _attach_falls(
+    sites: dict[str, ReadSiteNode],
+    froms: list[KeyFrom],
+    junctions: list[JunctionNode],
+    trees: dict[str, ast.AST],
+    of: Callable[[ast.FunctionDef | ast.AsyncFunctionDef, str], "_Filled"],
+) -> None:
+    """Add to each read site the ``if`` s of its row loops a row falls through without being handed on
+    (:attr:`ReadSiteNode.falls`, ``fall@<line>`` among its ``exits``).
+
+    A hand-on is a put, in a row loop (:func:`_row_loops`), into a name the function returns, of a value holding the
+    rows of the statement or of a later statement of the function its rows name (a read KeyFrom with a ``rows``
+    source of it) -- ``retTasks.append(taskSpec)``, ``taskSpec`` packed from the rows of the statement 1644's row
+    names at 1699.  Each ``if`` between the loop and a hand-on whose other way holds none is one: the row's turn
+    ends there without it.  A function that returns no name its loop puts into has none.
+    """
+    by_line = {(site.owner, site.anchor.line_start): site.name for site in sites.values() if site.anchor is not None}
+    named_by: dict[str, set[str]] = {}
+    for key_from in froms:
+        reader_name = by_line.get((key_from.owner, key_from.statement)) if key_from.reads else None
+        if reader_name is None:
+            continue
+        for source in key_from.sources:
+            if source.kind == KEY_ROWS and source.site_owner == key_from.owner and source.name in sites:
+                named_by.setdefault(source.name, set()).add(reader_name)
+    written: dict[str, list[tuple[str, int]]] = {}
+    for junction in junctions:
+        for branch in junction.branches:
+            for line in (branch.line, *branch.other_lines):
+                if line is not None:
+                    written.setdefault(junction.owner, []).append((junction.subject, line))
+    for site in sites.values():
+        if not site.region or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        if func is None:
+            continue
+        loops, _names = _row_loops(func, site.anchor.line_start, site.region[1])
+        if not loops:
+            continue
+        returned = _returned_names(func)
+        rows = {site.name} | named_by.get(site.name, set())
+        reader = of(func, site.anchor.file)
+        falls: dict[int, RowFall] = {}
+        hand_ons: dict[int, HandOn] = {}
+        # A list the row loops work the rows through again is a copy of them, not where they are handed on.
+        copies = {
+            one.id
+            for loop in loops
+            for one in walk(loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else loop.test)
+            if isinstance(one, ast.Name)
+        }
+        for loop in loops:
+            handing = []
+            for statement, value, key, into in _puts_into(loop):
+                if into in copies:
+                    continue
+                if not (
+                    reader.holds_rows(value, statement, rows)
+                    or (key is not None and reader.holds_rows(key, statement, rows))
+                ):
+                    continue
+                if into not in returned and not _read_after(func, loop, into, statement):
+                    continue
+                handing.append(statement)
+                hand_ons.setdefault(statement.lineno, HandOn(line=statement.lineno, into=into))
+            held = {id(statement) for statement in handing}
+            for statement in handing:
+                node: ast.AST = statement
+                while node is not loop and isinstance(getattr(node, "parent", None), ast.AST):
+                    parent = node.parent  # type: ignore[attr-defined]
+                    if isinstance(parent, ast.If) and parent.lineno not in falls:
+                        kept = FALL_BODY if node in parent.body else FALL_ELSE
+                        other = parent.orelse if kept == FALL_BODY else parent.body
+                        if not any(id(one) in held for way in other for one in walk(way)) and not _leads_on(
+                            parent, other, handing
+                        ):
+                            first = other[0].lineno if other else 0
+                            last = max((one.end_lineno or one.lineno for one in other), default=0)
+                            falls[parent.lineno] = RowFall(
+                                line=parent.lineno,
+                                kept=kept,
+                                lines=[first, last] if other else [],
+                                writes=sorted(
+                                    {
+                                        f"{subject}@{line}"
+                                        for subject, line in written.get(site.owner, ())
+                                        if other and first <= line <= last
+                                    }
+                                ),
+                            )
+                    node = parent
+        if falls:
+            site.falls = [falls[line] for line in sorted(falls)]
+            site.exits = sorted(set(site.exits) | {f"fall@{line}" for line in falls})
+        site.hand_ons = [hand_ons[line] for line in sorted(hand_ons)]
+
+
+def _leads_on(test: ast.If, other: list[ast.stmt], handing: list[ast.stmt]) -> bool:
+    """Whether a way taking *test*'s other way -- *other*, or on past the ``if`` where it has none -- can still reach
+    a hand-on after the ``if`` in the same turn: then the row is not dropped there.  ``prepareTasksToBeFinished_JEDI``'s
+    ``if taskstatus == "scouting" ...`` at 3759 sets ``to_trigger = True`` and the row is handed on at 3767.  The ways
+    are the flow's, every branch both ways: an ``if`` whose other way leads on only by a way no run takes is no fall
+    either -- a fall unsaid, never one said wrongly."""
+    later = [one for one in handing if not any(up is test for up in ancestors(one))]
+    if not later:
+        return False
+    if other:
+        start: ast.stmt = other[0]
+        killers: list[ast.stmt] = []
+    else:
+        start, killers = test, test.body[:1]
+    return any(
+        reaching(one, [start], killers, entered=[start, *killers], once=flow.turn_loops(test, one)) for one in later
+    )
+
+
+def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    """The names *func*'s own ``return`` s hand back, alone or in a tuple."""
+    found: set[str] = set()
+    for node in walk(func):
+        if not isinstance(node, ast.Return) or enclosing_function(node) is not func or node.value is None:
+            continue
+        for one in node.value.elts if isinstance(node.value, ast.Tuple) else [node.value]:
+            if isinstance(one, ast.Name):
+                found.add(one.id)
+    return found
+
+
+def _puts_into(loop: ast.AST) -> list[tuple[ast.stmt, ast.expr, Optional[ast.expr], str]]:
+    """``(statement, value, key, name)`` for each put of *loop* into a name: ``L.append(v)`` and the other builtin
+    puts (:data:`_PUTS_VALUE`), with no key; ``L[k] = v``, with its key."""
+    found: list[tuple[ast.stmt, ast.expr, Optional[ast.expr], str]] = []
+    for node in walk(loop):
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            call = node.value
+            method = call.func
+            if isinstance(method, ast.Attribute) and isinstance(method.value, ast.Name):
+                at = _PUTS_VALUE.get(method.attr)
+                if at is not None and len(call.args) > at:
+                    found.append((node, call.args[at], None, method.value.id))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+                    found.append((node, node.value, target.slice, target.value.id))
+                    break
+    return found
+
+
+def _read_after(func: ast.FunctionDef | ast.AsyncFunctionDef, loop: ast.AST, name: str, put: ast.stmt) -> bool:
+    """Whether a statement after *loop* reads what *put* puts into *name*: a read of the name outside the loop that a
+    way on from the loop reaches, where a binding of the name live at the put still is -- not a bind map filled again
+    for each statement, ``varMap = {}`` before the next one's run.  A loop of a function nested in *func* is read by
+    no way of *func*'s: none."""
+    if enclosing_function(loop) is not func:
+        return False
+    sites = _name_sites(func, name)
+    live = {id(one) for one in reaching(put, sites)}
+    if not live:
+        return False
+    # The function's own reads: a nested function runs elsewhere, when it is called.
+    for node in own_nodes(func):
+        if not (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)):
+            continue
+        statement = site_of(node)
+        if not isinstance(statement, ast.stmt) or statement is loop or any(one is loop for one in ancestors(statement)):
+            continue
+        if flow.runs_after(loop, statement) and any(id(one) in live for one in reaching(statement, sites)):  # type: ignore[arg-type]
+            return True
+    return False
+
+
+def _name_sites(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[ast.AST]:
+    """The places *name* is bound in *func* itself, as :func:`reaching` takes them: the parameters, then each
+    statement binding it."""
+    sites: list[ast.AST] = [func.args]
+    for binding in bindings(func, name):
+        if binding.nested or isinstance(binding.site, ast.arg):
+            continue
+        sites.append(binding.site if isinstance(binding.site, (ast.stmt, ast.ExceptHandler)) else site_of(binding.site))
+    return sites
+
+
+def _drawn_reads(func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.expr, at: ast.AST) -> list[tuple[str, ast.AST]]:
+    """The names *value*, read at *at*, is drawn from in *func*, each with the statement reading it: the value's own,
+    then back through each binding reaching a read -- an assignment's value, an augmented one's name too, a ``for``'s
+    iterable.  Data only: a name a test reads on the way is none."""
+    found: list[tuple[str, ast.AST]] = []
+    todo = [(one.id, at) for one in walk(value) if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)]
+    seen: set[tuple[str, int]] = set()
+    while todo:
+        name, here = todo.pop()
+        if (name, id(here)) in seen:
+            continue
+        seen.add((name, id(here)))
+        found.append((name, here))
+        for site in reaching(here, _name_sites(func, name)):  # type: ignore[arg-type]
+            if isinstance(site, (ast.For, ast.AsyncFor)):
+                source: Optional[ast.expr] = site.iter
+            elif isinstance(site, (ast.Assign, ast.AnnAssign)):
+                source = site.value
+            elif isinstance(site, ast.AugAssign):
+                source = site.value
+                todo.append((name, site))
+            else:
+                continue
+            if source is not None:
+                todo.extend(
+                    (one.id, site) for one in walk(source) if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)
+                )
+    return found
+
+
+def _attach_through(froms: list[KeyFrom], sites: dict[str, ReadSiteNode]) -> None:
+    """Give each ``rows`` source of a key filled in its statement's own function the hand-ons of that statement the
+    key's value is drawn through (:attr:`KeySource.through_hand_ons`): a put into a name the value is drawn from
+    (:func:`_drawn_reads`) where a binding of the name live at the put reaches that read, as :func:`_read_after`
+    reads the put's way on."""
+    puts: dict[int, dict[int, ast.stmt]] = {}
+    for key_from in froms:
+        for source in key_from.sources:
+            site = sites.get(source.name)
+            if (
+                source.kind != KEY_ROWS
+                or source.via
+                or source._drawn_from is None
+                or site is None
+                or not site.hand_ons
+                or source.site_owner != key_from.owner
+            ):
+                continue
+            func, value, at = source._drawn_from
+            by_line = puts.get(id(func))
+            if by_line is None:
+                by_line = puts[id(func)] = {
+                    statement.lineno: statement
+                    for statement, _value, _key, _into in _puts_into(func)
+                    if enclosing_function(statement) is func
+                }
+            reads = _drawn_reads(func, value, at)
+            through = []
+            for hand_on in site.hand_ons:
+                put = by_line.get(hand_on.line)
+                if put is None:
+                    continue
+                named = _name_sites(func, hand_on.into)
+                live = {id(one) for one in reaching(put, named)}
+                if any(
+                    name == hand_on.into and any(id(one) in live for one in reaching(here, named))  # type: ignore[arg-type]
+                    for name, here in reads
+                ):
+                    through.append(hand_on.line)
+            source.through_hand_ons = through
+
+
+def attach_hand_on_prints(
+    read_sites: Iterable[ReadSiteNode], function_prints: Iterable[FunctionPrintsNode], modules: Iterable[SourceModule]
+) -> int:
+    """Give each hand-on of a read site (:attr:`ReadSiteNode.hand_ons`, read by :func:`_attach_falls`) the owner's
+    prints every way through it passes in the same turn of the innermost loop around it (:attr:`HandOn.sure_prints`)
+    -- after it (:func:`flow.passes_after`) or before it (:func:`flow.passes_before`), read for a run that entered no
+    handler -- each with its message's holes spelling what the hand-on keys the row by, nothing binding it between
+    the two in the turn (:func:`flow.changed_between`).  ``prepareTasksToBeFinished_JEDI`` hands a task on at 3767
+    and prints ``got jediTaskID={jediTaskID} ...`` at 3768 on every way past it.  Returns how many hand-ons have
+    one."""
+    trees = {module.rel_path: module.tree for module in modules}
+    printing = {(node.anchor.file, node.anchor.line_start): node for node in function_prints if node.anchor is not None}
+    found = 0
+    for site in read_sites:
+        if not site.hand_ons or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        node = printing.get((site.anchor.file, func.lineno)) if func is not None else None
+        if func is None or node is None:
+            continue
+        statements = _own_statements(func)
+        for hand_on in site.hand_ons:
+            put = statements.get(hand_on.line)
+            loops = flow.loops_around(put) if put is not None else []
+            if put is None or not loops:
+                continue
+            keyed = _put_key(put)
+            spelled = ast.unparse(keyed) if keyed is not None else ""
+            root = _root_name(keyed)
+            changing = (
+                [one.site for one in bindings(func, root) if not one.nested and isinstance(one.site, ast.stmt)]
+                if root
+                else []
+            )
+            sure: list[HandOnPrint] = []
+            for printed in node.statements:
+                at = statements.get(printed.line)
+                if at is None or at is put or flow.turn_loops(put, at)[:1] != loops[:1]:
+                    continue
+                after = flow.passes_after(put, at)
+                if not (after or flow.passes_before(put, [at], once=flow.turn_loops(put, at), raised=())):
+                    continue
+                first, then = (put, at) if after else (at, put)
+                holes = sorted(
+                    {
+                        hole.expression
+                        for row in printed.rows
+                        for hole in row.holes
+                        if spelled and hole.expression == spelled and not flow.changed_between(first, then, changing)
+                    }
+                )
+                sure.append(HandOnPrint(line=printed.line, holes=holes))
+            hand_on.sure_prints = sure
+            found += bool(sure)
+    return found
+
+
+def _put_key(put: ast.stmt) -> Optional[ast.expr]:
+    """What a hand-on keys the row by: the subscript's key of ``map[key] = value``, else the value put."""
+    if isinstance(put, ast.Assign):
+        for target in put.targets:
+            if isinstance(target, ast.Subscript):
+                return target.slice
+        return None
+    if isinstance(put, ast.Expr) and isinstance(put.value, ast.Call) and isinstance(put.value.func, ast.Attribute):
+        at = _PUTS_VALUE.get(put.value.func.attr)
+        return put.value.args[at] if at is not None and len(put.value.args) > at else None
+    return None
+
+
+def _root_name(expression: Optional[ast.expr]) -> str:
+    """The name an attribute chain or a name starts from: ``taskSpec`` of ``taskSpec.jediTaskID``; ``""`` else."""
+    while isinstance(expression, ast.Attribute):
+        expression = expression.value
+    return expression.id if isinstance(expression, ast.Name) else ""
 
 
 def _handed_at(
@@ -7650,6 +8252,7 @@ def attach_key_sources(
         for bind in unique:
             for source in reader.sources(bind.value, bind.site):
                 handed[id(source)] = bind.value
+                source._drawn_from = (func, bind.value, bind.site)
                 key_from.sources.append(source)
         read += 1
     for key_from in froms:
@@ -7665,6 +8268,11 @@ def attach_key_sources(
                 source.never_at = reader.never_at(sites[source.name], places)
     if landings:
         _landed_sources(froms, landings, sites, attributor, table_class)
+    if key_froms is not None and modules:
+        # Where a row loop's row is not handed on: read once the KeyFroms say which later statements its rows name.
+        _attach_falls(sites, froms, junctions, {module.rel_path: module.tree for module in modules}, of)
+        # Which of those hand-ons a key drawn from the rows comes through.
+        _attach_through(froms, sites)
     _same_rows(froms, sites)
     if landings:
         _attach_reaches(froms, sites, _Reading(calls, {junction.owner for junction in junctions}, record, True))
@@ -7906,7 +8514,12 @@ def attach_count_prints(
     test of the row count of the statement's runs (:attr:`Branch.count_prints`, :func:`progress.count_prints`): the
     lock ``UPDATE``'s ``lockedBy``, ``lockedTime`` and ``modificationTime`` arms get ``failed to lock
     jediTaskID={}``, said where the run changed not exactly one row.  The SQL arms and the attribute arms an object's
-    write carries alike, by the lines the statement writes each subject on."""
+    write carries alike, by the lines the statement writes each subject on.
+
+    A branch gets only the prints one of its lines can be followed by in the same turn, by what its own way binds
+    (:func:`flow.ruled_out_after`): ``reactivatePendingTasks_JEDI``'s two statements share one run, and the
+    ``timeoutFlag`` each arm's way binds gives ``sqlTU``'s arms only ``action=reactivate`` and ``sqlTO``'s only
+    ``timeout``."""
     by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
     done: set[tuple[str, int]] = set()
     for key_from in key_froms:
@@ -7919,6 +8532,7 @@ def attach_count_prints(
         )
         if not printed:
             continue
+        statements = _own_statements(func)
         together = [one for one in key_froms if one.owner == key_from.owner and one.statement == key_from.statement]
         written: dict[str, set[int]] = {}
         for one in together:
@@ -7929,10 +8543,36 @@ def attach_count_prints(
             if junction is None:
                 continue
             for branch in junction.branches:
-                if branch.line in lines or lines & set(branch.other_lines):
-                    held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
-                    held.update(printed)
-                    branch.count_prints = [held[key] for key in sorted(held)]
+                arm_lines = {line for line in (branch.line, *branch.other_lines) if line is not None} & lines
+                if not arm_lines:
+                    continue
+                arms = [statements[line] for line in sorted(arm_lines) if line in statements]
+                held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
+                held.update(
+                    (key, one)
+                    for key, one in printed
+                    if one.line not in statements
+                    or not arms
+                    or any(not flow.ruled_out_after(arm, statements[one.line]) for arm in arms)
+                )
+                branch.count_prints = [held[key] for key in sorted(held)]
+
+
+def _own_statements(func: ast.AST) -> dict[int, ast.stmt]:
+    """The statement holding no block (:data:`_COMPOUND`) that starts each line of *func*'s own body -- not a nested
+    function's or class's --, the first on its line where a line holds two."""
+    found: dict[int, ast.stmt] = {}
+    stack: list[ast.AST] = list(getattr(func, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.stmt) and not isinstance(node, _COMPOUND):
+            held = found.get(node.lineno)
+            if held is None or node.col_offset < held.col_offset:
+                found[node.lineno] = node
+        stack.extend(ast.iter_child_nodes(node))
+    return found
 
 
 def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str]]:

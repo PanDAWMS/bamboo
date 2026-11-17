@@ -20,6 +20,14 @@ question is :func:`runs_after`, and the others are made of it.
   shows; handed them, a raise is read by where it is, not by what raises -- any statement of a ``try`` holding
   one, before a catch-all not among them -- and only they are entered (:func:`reaching.catching_try`).  A run
   with no mark hands none: every ``try`` ran to its end.
+* **Where a run would have gone.**  :func:`kept_from` reads an exit as a ``pass`` too (:func:`reaching`'s
+  *passing*): what a run leaving there no longer reaches and would have, the pass's or the turn's.
+* **What a way's own literals rule out.**  The ways are path-insensitive, but a name a statement's way binds to one
+  literal decides a test after it: :func:`ruled_out_after`.
+* **A print prints only through a bound logger.**  A print through a name the function binds prints nothing on a way
+  where no binding of it ran -- reading the name raises -- so a print's ways are counted from a binding of its
+  logger (:func:`printed_before`, :func:`entry_print`); prints through one logger are those its bindings reach
+  (:func:`logger_groups`), not those spelling it alike.
 * **Not read.**  A ``with`` whose manager swallows what its body raised, and a call that never returns.  The
   first is watched: :func:`swallowing_managers` lists each such manager of the corpus into the dump, and the
   ``with-exits-are-read`` gate fails on one (none in PanDA).
@@ -33,8 +41,9 @@ from __future__ import annotations
 import ast
 from typing import Iterable, Iterator, Optional, Sequence
 
+from bamboo.codemap import pathcond
 from bamboo.codemap.models import SwallowingManager
-from bamboo.codemap.reaching import reaching, reaching_end
+from bamboo.codemap.reaching import reaching, reaching_each, reaching_end
 
 #: The nodes whose body is a scope of its own, as :mod:`~bamboo.codemap.reaching` reads them.
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
@@ -173,6 +182,190 @@ def together(
     ) or runs_after(site, printed, once=once, raised=raised)
 
 
+def passes_after(first: ast.stmt, then: ast.stmt, *, raised: Sequence[ast.ExceptHandler] = ()) -> bool:
+    """Whether every way a call goes on by after *first* passes *then* before the turn of the innermost loop around
+    *first* ends -- before the call ends where no loop holds it: ``TaskCommando.runImpl`` prints ``set
+    task_status=...`` after its ``tmpTaskSpec.status`` arm on every way.  A *then* outside that turn -- past the
+    loop, in its ``else`` -- is passed in no turn of it.
+
+    Read for a run that entered none of the handlers but *raised* (none by default), as a reader of a run with no
+    handler's mark reads it: a statement raises only into them (:func:`reaching`'s *raised*), and a ``raise``
+    statement ends its way short of *then*.  With every statement able to raise, almost no print would follow every
+    way."""
+    _one_function(first, then)
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise ValueError("the flow answers of a function's pass")
+    loops = loops_around(first)
+    if loops and not any(then is one or _under(then, one) for one in loops[0].body):  # type: ignore[attr-defined]
+        return False
+    ends = [node for node in _own(func) if isinstance(node, (ast.Return, ast.Raise))]
+    if any(reaching_each(ends, [first], [then], entered=[first], once=loops, raised=raised)):
+        return False
+    return not reaching_end(func, [first], [then], entered=[first], once=loops, raised=raised)
+
+
+def turn_loops(first: ast.stmt, then: ast.stmt) -> list[ast.AST]:
+    """The loops around *first* whose body holds *then* too, inside out: a way from *first* to *then* stays in one
+    turn of each, and goes round any other as often as it may -- a print past the loop follows the arm's turn and
+    every later one."""
+    return [loop for loop in loops_around(first) if any(then is one or _under(then, one) for one in loop.body)]  # type: ignore[attr-defined]
+
+
+def changed_between(first: ast.stmt, then: ast.stmt, sites: Sequence[ast.AST]) -> bool:
+    """Whether one of *sites* -- statements that bind or change a value -- can run on a way from *first* to *then*,
+    in one turn of each loop holding both (:func:`turn_loops`): after an arm and before a print after it.
+
+    A site reaching *then* on a way that never ran *first* is not between them -- ``TaskCommando.runImpl``'s
+    ``tmpTaskSpec.status = oldStatus`` at 181, on the way that skips the arm at 197.  A site that is the last write
+    before *then* on some way and that *first* reaches is: the two ways make one."""
+    _one_function(first, then)
+    others = [site for site in sites if site is not first and site is not then]
+    if not others:
+        return False
+    once = turn_loops(first, then)
+    last = reaching(then, [first, *others], once=once)
+    return any(site is not first and reaching(site, [first], entered=[first], once=once) for site in last)
+
+
+def ruled_out_after(first: ast.stmt, then: ast.stmt) -> bool:
+    """Whether a call that ran *first* cannot run *then* after it in the same turn of each loop around *first* that
+    holds *then* (:func:`turn_loops`), by the values *first*'s way gives: a test on *then*'s way reads a name that
+    holds one literal where *first* runs (:func:`pathcond.held_at`), nothing binds it again on a way from *first* to
+    *then* in that turn, and the literal decides the test against *then* (:func:`pathcond.ruled_out_at`).
+
+    ``reactivatePendingTasks_JEDI``'s ``sql = sqlTU`` arm runs with the ``timeoutFlag = False`` its turn starts
+    with, so ``if timeoutFlag:`` keeps it from the ``timeout`` print after the run, which its ``sqlTO`` arm, beside
+    ``timeoutFlag = True``, reaches.  False where no test is so decided: a test on a value computed, or on a name
+    bound to different literals on the ways to *first*, rules on nothing."""
+    _one_function(first, then)
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    once = turn_loops(first, then)
+    names = sorted(
+        {node.id for test in pathcond.tests_on(then, func) for node in ast.walk(test) if isinstance(node, ast.Name)}
+    )
+    for name in names:
+        held = pathcond.held_at(func, name, first)
+        if held.kind != pathcond.HELD_CONSTANT:
+            continue
+        # A parameter is bound as the call starts, before any turn.
+        sites = [
+            one.site if isinstance(one.site, (ast.stmt, ast.ExceptHandler)) else pathcond.site_of(one.site)
+            for one in pathcond.bindings(func, name)
+            if not one.nested and not isinstance(one.site, ast.arg)
+        ]
+        if any(
+            reaching(site, [first], entered=[first], once=once) and reaching(then, [site], once=once)
+            for site in sites
+        ):
+            continue
+        if pathcond.ruled_out_at(then, func, name, held.value):
+            return True
+    return False
+
+
+def printed_before(
+    first: ast.stmt, then: ast.stmt, *, raised: Optional[Sequence[ast.ExceptHandler]] = None
+) -> bool:
+    """Whether every way of one call from its entry to the print *then*, on which the logger *then* prints through is
+    bound there, passes the print *first* printed -- so a pass that printed *then* printed *first* before it.
+
+    A logger the function binds counts only ways through one of its bindings: on any other way reading it raises and
+    *then* prints nothing.  ``AtlasAnalWatchDog.doForPreStaging`` binds ``tmpLog`` at 135 inside its ``try`` and prints
+    ``start`` at 136; its handler prints through ``tmpLog`` at 296.  A raise before 135 reaches 296 with ``tmpLog``
+    unbound: no way of it.  A raise of 136 itself does reach 296 bound, so 136 comes before 296 only for a run that
+    shows no handler's mark (*raised* ``[]``), not where every statement may raise (None) or the run shows the
+    handler (``[handler]``).  A logger the call is handed, an attribute's or a global's, is bound from the entry."""
+    _one_function(first, then)
+    if first is then:
+        return True
+    func = _scope(first)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        raise ValueError("the flow answers from a function's entry")
+    sites = _logger_bindings(func, then)
+    if sites is None:
+        return not reaching(then, [func.args], [first], raised=raised)
+    # The last binding before *then* on a way that does not print *first*, and a way from the entry to it that does
+    # not either: together one way.
+    return not any(
+        reaching(site, [func.args], [first], raised=raised) for site in reaching(then, sites, [first], raised=raised)
+    )
+
+
+def entry_print(
+    prints: Sequence[ast.stmt], *, raised: Optional[Sequence[ast.ExceptHandler]] = None
+) -> Optional[ast.stmt]:
+    """Of *prints* -- one function's prints through one logger (:func:`logger_groups`) -- the one every other is
+    printed after on every way (:func:`printed_before`): each pass prints it once, before the others, so a run under
+    a mark many passes share is cut at its records.  None where none is, or one print is all."""
+    if len(prints) < 2:
+        return None
+    for one in sorted(prints, key=lambda statement: (statement.lineno, statement.col_offset)):
+        if all(other is one or printed_before(one, other, raised=raised) for other in prints):
+            return one
+    return None
+
+
+def logger_groups(prints: Sequence[ast.stmt]) -> list[list[ast.stmt]]:
+    """*prints* of one function by the logger each prints through, in order of their first print: a logger the
+    function binds by what the bindings reaching the print make it (:func:`_made_by`) -- ``JobGenerator.runImpl``
+    binds ``tmpLog`` at 602 for its ``submitted`` line and again at 622 for each input chunk's mark: two loggers --,
+    any other by its spelling (``self.logger``)."""
+    groups: dict[object, list[ast.stmt]] = {}
+    for one in prints:
+        receiver = _receiver(one)
+        func = _scope(one)
+        sites = (
+            _logger_bindings(func, one)
+            if receiver is not None and isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+            else None
+        )
+        if sites is None:
+            key: object = ("spelled", ast.unparse(receiver) if receiver is not None else "")
+        else:
+            key = ("bound", frozenset(_made_by(site) for site in reaching(one, sites)))
+        groups.setdefault(key, []).append(one)
+    return list(groups.values())
+
+
+def _made_by(site: ast.AST) -> object:
+    """What a binding of a logger makes it: the value's text for an assignment -- ``main_log = get_logger()`` bound
+    again at the end of ``master.main`` is the same logger --, else the binding itself."""
+    value = getattr(site, "value", None)
+    if isinstance(site, (ast.Assign, ast.AnnAssign)) and value is not None:
+        return ast.unparse(value)
+    return id(site)
+
+
+def _receiver(printed: ast.stmt) -> Optional[ast.expr]:
+    """The logger *printed* calls a method of: ``tmpLog`` of ``tmpLog.debug(...)``."""
+    value = getattr(printed, "value", None)
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+        return value.func.value
+    return None
+
+
+def _logger_bindings(func: ast.AST, printed: ast.stmt) -> Optional[list[ast.AST]]:
+    """Where the name *printed*'s logger is bound in *func* -- the entry too, for a parameter -- or None where it is
+    no name *func* binds (an attribute, a global): bound from the entry."""
+    receiver = _receiver(printed)
+    if not isinstance(receiver, ast.Name):
+        return None
+    sites: list[ast.AST] = []
+    for binding in pathcond.bindings(func, receiver.id):
+        if binding.nested:
+            continue
+        if isinstance(binding.site, ast.arg):
+            sites.append(func.args)  # type: ignore[attr-defined]
+        elif isinstance(binding.site, (ast.stmt, ast.ExceptHandler)):
+            sites.append(binding.site)
+        else:
+            sites.append(pathcond.site_of(binding.site))
+    return sites or None
+
+
 def ends_after(
     first: ast.stmt | ast.arguments,
     stops: Sequence[ast.stmt] = (),
@@ -202,6 +395,72 @@ def ends_after(
     return bool(
         reaching_end(func, [first], killers, entered=passed, once=once, raised=raised)
     )
+
+
+def kept_from(
+    exit_: ast.Return | ast.Raise | ast.Continue | ast.Break,
+    statements: Sequence[ast.stmt],
+    over: Optional[ast.AST] = None,
+) -> list[ast.stmt]:
+    """Of *statements*, the ones a run leaving by *exit_* can no longer reach and could have reached had it gone on
+    past it as a ``pass``, in the order given: what the exit keeps the run from.
+
+    A ``return`` or a raise ends the call's pass: a ``finally`` it runs and a handler catching the raise -- and what
+    follows them -- are still reached.  A ``continue`` or a ``break`` ends one turn of its loop: the loop and every
+    loop around it are read as gone round once, and only statements in the loop's body or ``else`` count (a
+    ``break`` keeps the run from the ``else``; a ``continue`` does not).  So ``getTasksToBeFinished_JEDI``'s
+    ``continue`` at 1667 keeps a run from the turn's writes at 1673, 1676 and 1690, and its ``raise`` at 1666,
+    caught by the ``except`` around the loop that returns, from the count print at 1717 after the loop.
+
+    *over*, a loop whose body holds *exit_*, asks the same over one turn of it, whatever the exit: that loop and
+    every loop around it gone round once, every loop inside it as often as it may, and only statements in its body
+    or ``else`` counted.  ``TaskCommandoThread.runImpl``'s ``break`` at 211, over a turn of the ``for`` at 123 around
+    its own loop, keeps a run from the arms another turn of its own loop reaches.
+
+    The flow is path-insensitive on both sides: a statement only an impossible way after the exit reaches is read as
+    reached, so an answer may leave out what the exit does keep the run from; and one only an impossible way past the
+    exit reaches is read as reachable, so an answer may hold what no run going on past it could reach."""
+    _one_function(exit_, *statements)
+    once: list[ast.AST] = []
+    asked = list(statements)
+    loops = loops_around(exit_)
+    if over is None and isinstance(exit_, (ast.Continue, ast.Break)):
+        if not loops:
+            return []
+        over = loops[0]
+    if over is not None:
+        index = next((number for number, loop in enumerate(loops) if loop is over), None)
+        if index is None:
+            raise ValueError(f"line {getattr(over, 'lineno', '?')} is no loop whose body holds the exit")
+        once = loops[index:]
+        asked = [statement for statement in statements if _under(statement, over)]
+    if not asked:
+        return []
+    after = reaching_each(asked, [exit_], entered=[exit_], once=once)
+    passing = reaching_each(asked, [exit_], entered=[exit_], once=once, passing=[exit_])
+    return [statement for statement, left, went in zip(asked, after, passing, strict=True) if went and not left]
+
+
+def loops_around(node: ast.AST) -> list[ast.AST]:
+    """The loops whose body holds *node* in its function, inside out: a ``continue`` or ``break`` in a loop's
+    ``else`` is the loop around it's."""
+    found: list[ast.AST] = []
+    child: ast.AST = node
+    current = getattr(node, "parent", None)
+    while current is not None and not isinstance(current, _SCOPES):
+        if isinstance(current, (ast.For, ast.AsyncFor, ast.While)) and any(one is child for one in current.body):
+            found.append(current)
+        child, current = current, getattr(current, "parent", None)
+    return found
+
+
+def _under(node: ast.AST, ancestor: ast.AST) -> bool:
+    current = getattr(node, "parent", None)
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = getattr(current, "parent", None)
+    return False
 
 
 # -- the premise: no with goes on past a raise in its body ------------------------------------------------------ #

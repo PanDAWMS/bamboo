@@ -3669,6 +3669,41 @@ def f(self, taskSpec, criteria, comment, tmp_log):
     assert second.holes[-1].entries_open == []
 
 
+
+def test_a_map_named_in_an_f_string_is_printed_whole_where_it_is_printed_not_as_its_binding(tmp_path):
+    """``f"... {var_map} ..."`` prints the map ``var_map`` holds at the print.  Bound to a literal and given an entry
+    after it, its hole is the name, read by its entries at the print -- not the literal written out, which the map
+    reader cannot read and which is not even the value printed.  A map prints a dict's repr, spaces in it, so its hole
+    runs as text up to what follows, as ``str(varMap)``'s does; a map handed in and filled here too.  A name the map
+    reader does not read as a map stays a token."""
+    roots = _tree(
+        tmp_path,
+        m='''\
+def f(self, jedi_task_id, resource_name, params, tmp_log):
+    var_map = {":jedi_task_id": jedi_task_id}
+    var_map[":resource_type"] = resource_name
+    params["n"] = 1
+    tmp_log.error(f"sql {var_map} for {resource_name} end")
+    tmp_log.debug(f"params {params} end")
+    self.status = "done"
+''',
+    )
+
+    first, second = _printed(roots, file="m", owner="f", lines=[7])
+
+    mapped, name = first.holes
+    assert (mapped.expression, mapped.line, mapped.prints) == ("var_map", 5, "text")
+    assert [(e.key, e.expression, e.line) for e in mapped.entries] == [
+        (":jedi_task_id", "jedi_task_id", 2),
+        (":resource_type", "resource_name", 3),
+    ]
+    assert (name.expression, name.prints, name.entries) == ("resource_name", "token", None)
+    assert first.pattern == r"sql\ .*?\ for\ [^\ ]*\ end"
+    (handed,) = second.holes
+    assert (handed.expression, handed.prints) == ("params", "text")
+    assert second.pattern == r"params\ .*?\ end"
+
+
 def test_a_row_reads_a_record_whole_only_where_its_mark_and_message_run_end_to_end(tmp_path):
     """A search finds ``start`` in another row's line, ``start 7 jediTaskID=12``; ``reads_whole`` tells the row's own
     line from it.  The record comes as a reader splits it after the level -- the mark, or the first word where none

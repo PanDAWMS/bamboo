@@ -83,6 +83,8 @@ class Change:
     left: list[Any] = field(default_factory=list)
     chosen: Any = None
     how: str = ""
+    #: with *chosen* the one shown of several left (P34): the others, which may have written it last in the same pass
+    others: list[Any] = field(default_factory=list)
 
 
 def _name(v: Any) -> str:
@@ -571,8 +573,15 @@ def last_change(
             break
     if not change.left:
         return None
+    shown_writes = [v for v in change.left if v.kind == "positive"]
     if len(change.left) == 1 and change.left[0].kind == "positive":
         change.chosen, change.how = change.left[0], "the last change in the pass"
+    elif len(shown_writes) == 1:
+        # P34 (bundle B, B-6): every write left is the question's pass's, and one is shown to write -- the pass changed
+        # it, whichever of them wrote last; that is said as what the steps after rest on (Judgement.pass_writes)
+        change.chosen, change.others = shown_writes[0], [v for v in change.left if v is not shown_writes[0]]
+        change.how = (f"the pass changed it: {_name(shown_writes[0])} is shown to write it, and which of its writes "
+                      f"{', '.join(_name(v) for v in change.left)} wrote it last is not read")
     else:
         change.how = f"{len(change.left)} may have changed it last in the pass: {', '.join(_name(v) for v in change.left)}"
     return change

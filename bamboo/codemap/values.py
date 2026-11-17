@@ -44,7 +44,13 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.models import ConditionValue
+from bamboo.codemap.models import (
+    NONE_ADMITS,
+    NONE_EXCLUDES,
+    NONE_UNANNOTATED,
+    ConditionValue,
+    HandedParameter,
+)
 from bamboo.codemap.pathcond import single_definition
 from bamboo.codemap.reaching import reaching
 
@@ -1354,6 +1360,10 @@ class Stated(NamedTuple):
     duration: bool = False
     #: The value is a number (or a duration): an offset alone, no base and no constant.
     numeric: bool = False
+    #: Seconds per unit of the one parameter an unsettled offset waits for, where the offset is that parameter times
+    #: this and nothing settled beside it: ``timedelta(minutes=timeLimit)`` is 60, ``naive_utcnow() -
+    #: timedelta(minutes=timeLimit)`` -60.  ``None`` for any other value.
+    scale: Optional[float] = None
 
 
 def _said(node: ast.AST, why: str = "") -> Stated:
@@ -1389,18 +1399,24 @@ def _sum(left: Stated, right: Stated, sign: float, node: ast.AST) -> Stated:
         # ``now - then`` is a duration the source does not state.
         return _said(node)
     base = left.base or right.base
-    other = right if left.base else left
+    based, other = (left, right) if left.base else (right, left)
     if base and _clock(base) and not other.duration:
         return _said(node)  # a clock plus a plain number is not Python
     if not base and left.duration != right.duration:
         return _said(node)
     offset = None if left.offset is None or right.offset is None else left.offset + sign * right.offset
+    scale = None
+    if base and _clock(base) and based.offset == 0 and not based.needs and other.scale is not None:
+        # The clock itself, and a parameter's worth of units: the offset is the parameter times the unit, turned
+        # by the sign where the units are taken off.  The clock on the right is only ever added to.
+        scale = (sign if other is right else 1.0) * other.scale
     return Stated(
         base=base,
         offset=offset,
         needs=tuple(dict.fromkeys(left.needs + right.needs)),
         duration=not base and left.duration,
         numeric=not base,
+        scale=scale,
     )
 
 
@@ -1430,6 +1446,7 @@ def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
     """``datetime.timedelta(...)`` as seconds, or the parameters its amounts wait for."""
     amounts = [*zip(_TIMEDELTA_POSITIONS, call.args, strict=False), *((one.arg, one.value) for one in call.keywords)]
     total, needs = 0.0, ()
+    unsettled: list[tuple[str, Stated]] = []
     for unit, amount in amounts:
         if unit not in TIMEDELTA_UNITS:
             return _said(call)
@@ -1438,10 +1455,21 @@ def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
             return _said(call)
         if value.base or value.offset is None:
             needs += _needed(value)
+            unsettled.append((unit, value))
         else:
             total += value.offset * TIMEDELTA_UNITS[unit]
     if needs:
-        return Stated(offset=None, needs=tuple(dict.fromkeys(needs)), duration=True, numeric=True)
+        # One amount that is a parameter as it stands and nothing else: so many seconds per unit of it.  ``2 * p``,
+        # ``p + 5``, a second parameter or an hour beside it say no one unit.
+        unit, value = unsettled[0]
+        bare = len(unsettled) == 1 and total == 0 and value.offset == 0 and not value.needs
+        return Stated(
+            offset=None,
+            needs=tuple(dict.fromkeys(needs)),
+            duration=True,
+            numeric=True,
+            scale=TIMEDELTA_UNITS[unit] if bare else None,
+        )
     return Stated(offset=total, duration=True, numeric=True)
 
 
@@ -1512,8 +1540,11 @@ def stated(
         inner = stated(expression.operand, func, at, depth + 1, handed)
         if not inner.numeric or inner.base:
             return _said(expression)
-        if isinstance(expression.op, ast.UAdd) or inner.offset is None:
+        if isinstance(expression.op, ast.UAdd):
             return inner
+        if inner.offset is None:
+            # Still waiting for its parameter; its unit, if it has one, turns with it.
+            return inner if inner.scale is None else inner._replace(scale=-inner.scale)
         return inner._replace(offset=-inner.offset)
     if isinstance(expression, ast.Call):
         clock = clock_of(expression)
@@ -1535,23 +1566,135 @@ def stated(
     return _said(expression)
 
 
-def written_amount(node: ast.expr, func) -> Optional[ConditionValue]:
-    """*node*, a value a write puts into a column, as an amount (:attr:`Branch.amount`), read as a condition's value is
-    (:func:`stated`, where the write evaluates it): ``timeNow - datetime.timedelta(hours=1)`` after ``timeNow =
-    naive_utcnow()`` is the base ``naive_utcnow`` and -3600 seconds.  ``None`` where that says nothing the outcome
-    does not: no base (a constant, a number, a value said) or a parameter as it stands."""
+class Written(NamedTuple):
+    """What :func:`written` reads of a value a write puts into a column."""
+
+    #: :attr:`Branch.amount`.
+    amount: Optional[ConditionValue] = None
+    #: :attr:`Branch.handed`.
+    handed: Optional[HandedParameter] = None
+
+
+def written(node: ast.expr, func) -> Written:
+    """*node*, a value a write puts into a column, read as a condition's value is (:func:`stated`, where the write
+    evaluates it).
+
+    As an amount (:attr:`Branch.amount`): ``timeNow - datetime.timedelta(hours=1)`` after ``timeNow =
+    naive_utcnow()`` is the base ``naive_utcnow`` and -3600 seconds, and ``naive_utcnow() -
+    datetime.timedelta(minutes=timeLimit)`` the base less ``timeLimit`` times 60 seconds.  None where that says
+    nothing the outcome does not: no base (a constant, a number, a value said) or a parameter as it stands.
+
+    A parameter as it stands is the caller's value, and what the signature says of it is read instead
+    (:attr:`Branch.handed`): ``lockedBy = pid`` under ``pid: str`` writes a ``str``, as far as the annotation goes.
+    """
     try:
-        amount = stated(node, func, pathcond.site_of(node))
+        value = stated(node, func, pathcond.site_of(node))
     except RecursionError:
-        return None
-    if amount.said or not amount.base:
-        return None
-    if not is_clock(amount.base) and amount.offset == 0 and not amount.needs:
-        return None
-    return ConditionValue(
-        kind="bind",
-        text=ast.unparse(node),
-        base=amount.base,
-        offset_seconds=amount.offset,
-        needs=list(amount.needs),
+        return Written()
+    if value.said or not value.base:
+        return Written()
+    if _as_handed(value):
+        return Written(handed=_handed(value.base, func))
+    return Written(
+        amount=ConditionValue(
+            kind="bind",
+            text=ast.unparse(node),
+            base=value.base,
+            offset_seconds=value.offset,
+            needs=list(value.needs),
+            scale_seconds=value.scale,
+        )
     )
+
+
+def parameter_as_handed(node: ast.expr, func) -> str:
+    """``<function>.<parameter>`` where *node*, read where it is evaluated (:func:`stated`), is *func*'s parameter as
+    the call hands it -- bound again on no way to *node* -- and ``""`` for any other value (:attr:`RunKey.parameter`).
+    ``reactivatePendingTasks_JEDI``'s mark ``limit={timeLimit}`` is ``reactivatePendingTasks_JEDI.timeLimit``, the
+    spelling the amount its statement compares with waits for (:attr:`ConditionValue.needs`)."""
+    try:
+        value = stated(node, func, pathcond.site_of(node))
+    except RecursionError:
+        return ""
+    return value.base if _as_handed(value) else ""
+
+
+def _as_handed(value: Stated) -> bool:
+    """Whether *value* is a parameter as the call hands it: its base, nothing added and nothing waited for."""
+    return not value.said and bool(value.base) and not is_clock(value.base) and value.offset == 0 and not value.needs
+
+
+def _handed(base: str, func) -> Optional[HandedParameter]:
+    """The parameter *base* names in *func*'s signature -- ``<function>.<parameter>``, as :func:`_named` spells it --
+    and what the signature says of ``None``."""
+    name = getattr(func, "name", "")
+    if not base.startswith(name + "."):
+        return None
+    return declared(func, base[len(name) + 1 :])
+
+
+def declared(func, parameter: str) -> Optional[HandedParameter]:
+    """What *func*'s signature says of its *parameter*, named ``<function>.<parameter>``: the annotation as written,
+    and whether it admits ``None`` (:class:`HandedParameter`).  ``None`` where *func* has no such named parameter (a
+    ``*`` or ``**`` one among them: what it holds is a tuple or a dict)."""
+    arguments = getattr(func, "args", None)
+    if arguments is None:
+        return None
+    base = f"{getattr(func, 'name', '')}.{parameter}"
+    positional = [*arguments.posonlyargs, *arguments.args]
+    defaulted = positional[len(positional) - len(arguments.defaults) :]
+    defaults = {one.arg: default for one, default in zip(defaulted, arguments.defaults, strict=True)}
+    defaults.update(
+        (one.arg, default)
+        for one, default in zip(arguments.kwonlyargs, arguments.kw_defaults, strict=True)
+        if default is not None
+    )
+    argument = next((one for one in [*positional, *arguments.kwonlyargs] if one.arg == parameter), None)
+    if argument is None:
+        return None
+    default = defaults.get(parameter)
+    annotation = _annotation(argument.annotation)
+    if isinstance(default, ast.Constant) and default.value is None:
+        none = NONE_ADMITS
+    elif annotation is None:
+        none = NONE_UNANNOTATED
+    else:
+        none = NONE_ADMITS if _admits_none(annotation) else NONE_EXCLUDES
+    return HandedParameter(
+        name=base,
+        annotation=ast.unparse(argument.annotation) if argument.annotation is not None else "",
+        none=none,
+    )
+
+
+def _annotation(annotation: Optional[ast.expr]) -> Optional[ast.expr]:
+    """*annotation* as an expression, a text one parsed; ``None`` where there is none or the text does not parse."""
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            return ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return None
+    return annotation
+
+
+def _admits_none(annotation: ast.expr) -> bool:
+    """Whether *annotation*, as written, names ``None`` among what it admits: ``None``, ``Optional[...]``, ``X |
+    None``, ``Union[..., None]``, or ``Any`` / ``object``, which admit everything.  Read at the top only:
+    ``list[Optional[int]]`` is a list.  A name is not followed to what it names -- an alias reads as excluding --
+    and a text part that does not parse is not read as excluding."""
+    if isinstance(annotation, ast.Constant):
+        if isinstance(annotation.value, str):
+            parsed = _annotation(annotation)
+            return parsed is None or _admits_none(parsed)
+        return annotation.value is None
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _admits_none(annotation.left) or _admits_none(annotation.right)
+    if isinstance(annotation, ast.Subscript):
+        head = ast.unparse(annotation.value).rsplit(".", 1)[-1]
+        if head == "Optional":
+            return True
+        if head == "Union":
+            members = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+            return any(_admits_none(one) for one in members)
+        return False
+    return ast.unparse(annotation).rsplit(".", 1)[-1] in ("Any", "object")

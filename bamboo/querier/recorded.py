@@ -628,12 +628,14 @@ class RecordedLogs:
         partial = _partial(got, marks, owners, whole)
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
         narrowed = {} if whole else _narrowed(marks, owners)
+        keyed_heads = _keyed_heads(got, narrowed, owners, pattern)
         why = "the records of the key's runs whose mark does not hold the key"
         # a mark the calls share, by the map, only within 2 EDGE of the key's records under it on its machine, the
         # windows of one machine joined where they overlap (KNOWN_ISSUES.md K60)
         share = set() if whole else _calls_share(name, marks)
         own_marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in share})}
-        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners))), window, m), why) for m, t in sorted(own_marks.items())]
+        asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners, keyed_heads, key))), window, m), why)
+                for m, t in sorted(own_marks.items())]
         near: dict[str, list[tuple[datetime.datetime, datetime.datetime, str]]] = {}
         for m, token in sorted(share):
             stamps = sorted(_t(r.stamp) for r in got.records.values()
@@ -648,7 +650,7 @@ class RecordedLogs:
                     joined[-1] = (joined[-1][0], max(joined[-1][1], end), joined[-1][2] | {token})
                 else:
                     joined.append((start, end, {token}))
-            asks += [(Ask(name, tuple(sorted(_strings(m, tokens, narrowed, owners))), (_text(start), _text(end)), m),
+            asks += [(Ask(name, tuple(sorted(_strings(m, tokens, narrowed, owners, keyed_heads, key))), (_text(start), _text(end)), m),
                       why + ", near them: a mark the calls share") for start, end, tokens in joined]
         if share:
             notes.append(f"{len(share)} mark(s) the calls share (the map) asked only within "
@@ -660,7 +662,8 @@ class RecordedLogs:
         def strings_of(machine: str, token: str) -> tuple[str, ...]:
             # the strings that return a run's records: the key's (or what the asker names in its place) for a mark
             # that holds it, the ask of its own mark on its machine for one that does not
-            return asked if not token or pattern.search(token) else tuple(sorted(_strings(machine, {token}, narrowed, owners)))
+            return asked if not token or pattern.search(token) else tuple(
+                sorted(_strings(machine, {token}, narrowed, owners, keyed_heads, key)))
 
         # the ends of what was searched: widened past once, where a part of a run that reaches the window lies near one
         # and its mark holds the key; a shared mark's run is read as cut there (the module's doc)
@@ -694,9 +697,15 @@ class RecordedLogs:
         log.edges = _edges_in(got, strings_of)
         log.partial = partial
         log.narrowed = narrowed
+        log.keyed = keyed_heads
+        if keyed_heads:
+            heads = sorted({h for hs in keyed_heads.values() for h in hs})
+            notes.append(f"{len(keyed_heads)} mark(s) asked for the key's own lines alone of a head whose next hole holds "
+                         f"it: {heads}")
         log.without = frozenset(got.without)
         log.unlisted = unlisted
         log.jedi = frozenset(m for m, service in got.services.items() if service == "jedi")
+        log.machines = frozenset(got.listed)
         if partial:
             kinds = sorted(set(partial.values()))
             notes.append(f"{len(partial)} mark(s) read from the key's records alone, as cut: {'; '.join(kinds)}")
@@ -813,17 +822,43 @@ def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool]]]:
     return out
 
 
-def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str], owners: Owners | None) -> set[str]:
+def _keyed_heads(got: _Gathered, narrowed: dict[tuple[str, str], str], owners: Owners | None,
+                 pattern: re.Pattern[str]) -> dict[tuple[str, str], frozenset[str]]:
+    """``(machine, mark) -> heads``: the heads of a narrowed mark's method asked with the key after them -- the map
+    names the hole right after the head by a column (:class:`rows.Head`), and a record of the key's under the mark there
+    holds the key in that hole.  The head's lines for other rows are not asked: getTasksToBeProcessed_JEDI's
+    ``skipping no pmerge or jumbo jediTaskID=`` prints a line per task it passes over, ~8,400 in a second or two, more
+    than the record's page, which stopped its record at the run's first busy second (the harness, NT-ready-stuck; tmaeno,
+    2026-11-16).  Rule 8 reads no row starting with such a head as missing from a run of the mark (``Run.holds``)."""
+    out: dict[tuple[str, str], frozenset[str]] = {}
+    if owners is None or not narrowed:
+        return out
+    texts: dict[tuple[str, str], list[str]] = {}
+    for r in got.records.values():
+        if (r.machine, r.token) in narrowed:
+            texts.setdefault((r.machine, r.token), []).append(r.message.lstrip())
+    for mark, method in narrowed.items():
+        heads = [h for h in owners.get(method, ()) if getattr(h, "columns", None)]
+        found = frozenset(h for h in heads if any(t.startswith(h) and pattern.match(t, len(h)) for t in texts.get(mark, [])))
+        if found:
+            out[mark] = found
+    return out
+
+
+def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str], owners: Owners | None,
+             keyed: dict[tuple[str, str], frozenset[str]] | None = None, key: str = "") -> set[str]:
     """What the records of *tokens* on *machine* are asked by: a mark, or -- one asked for its method's rows -- the mark
     and a blank before each head, and the level padded to 8 and a blank before the mark at each level from WARNING up
-    (PanDA's ``%(levelname)-8s %(message)s``; LogWrapper and MsgWrapper write the mark, a blank, the message)."""
+    (PanDA's ``%(levelname)-8s %(message)s``; LogWrapper and MsgWrapper write the mark, a blank, the message).  A head
+    *keyed* names for the mark is asked with *key* after it (:func:`_keyed_heads`)."""
     out = set()
     for token in tokens:
         method = narrowed.get((machine, token))
         if method is None or owners is None:
             out.add(token)
             continue
-        out |= {f"{token} {head}" for head in owners[method]}
+        with_key = (keyed or {}).get((machine, token), frozenset())
+        out |= {f"{token} {head}{key}" if head in with_key else f"{token} {head}" for head in owners[method]}
         out |= {f"{level:<8} {token}" for level in ("WARNING", "ERROR", "CRITICAL")}
     return out
 

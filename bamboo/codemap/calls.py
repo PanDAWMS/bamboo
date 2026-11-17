@@ -401,23 +401,54 @@ class CallSite(NamedTuple):
         return f"{self.file}::{MODULE_SCOPE if self.in_module else self.func.name}"  # type: ignore[attr-defined]
 
 
-def own_nodes(scope: ast.AST):
-    """Every node of *scope*'s own body; a nested function or class runs elsewhere."""
+_NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+#: :func:`own_nodes` of each scope, kept while its tree is: read once rather than at each of the build's millions of
+#: asks.  Only a scope's, so every node is in one scope's tuple; a tree is not changed once parsed.
+_OWN: "weakref.WeakKeyDictionary[ast.AST, tuple[ast.AST, ...]]" = weakref.WeakKeyDictionary()
+#: :func:`bound_defs` of each scope it is asked of, kept while its tree is.
+_BOUND: "weakref.WeakKeyDictionary[ast.AST, tuple[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, ...]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node of *scope*'s own body, in source order, each before its own; a nested function or class runs
+    elsewhere."""
+    if isinstance(scope, (*_NESTED, ast.Module)):
+        found = _OWN.get(scope)
+        if found is None:
+            found = _OWN[scope] = tuple(_own_nodes(scope, []))
+        return iter(found)
+    return iter(_own_nodes(scope, []))
+
+
+def _own_nodes(scope: ast.AST, into: list[ast.AST]) -> list[ast.AST]:
     for child in ast.iter_child_nodes(scope):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+        if isinstance(child, _NESTED):
             continue
-        yield child
-        yield from own_nodes(child)
+        into.append(child)
+        _own_nodes(child, into)
+    return into
 
 
 def bound_defs(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
     """The ``def`` and ``class`` statements *scope*'s own body runs -- under an ``if`` or a ``try`` too -- each binding
     its name there; one nested in another function or class binds it in that one."""
+    found = _BOUND.get(scope)
+    if found is None:
+        found = _BOUND[scope] = tuple(_bound_defs(scope, []))
+    return iter(found)
+
+
+def _bound_defs(
+    scope: ast.AST, into: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
     for child in ast.iter_child_nodes(scope):
         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield child
+            into.append(child)
         elif not isinstance(child, ast.Lambda):
-            yield from bound_defs(child)
+            _bound_defs(child, into)
+    return into
 
 
 #: The names each scope binds (:func:`_scope_names`), kept while its tree is.

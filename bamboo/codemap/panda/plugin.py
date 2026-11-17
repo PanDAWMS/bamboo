@@ -50,6 +50,7 @@ from bamboo.codemap.panda import (
     aftermade,
     endpoints,
     entered,
+    exitkeeps,
     flow,
     handlermarks,
     heldfrom,
@@ -573,6 +574,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             row_keys=fragment.row_key_sources,
             key_froms=fragment.key_froms,
             set_froms=writes,
+            write_prints=fragment.write_prints,
         )
         # On the fragment rather than on the plugin, because a gate reads the
         # fragment: "which junctions guard on a value nothing selects on" is a
@@ -744,6 +746,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         if self._calls is not None:
             _attach_called_from(fragment.junctions, self._calls)
             fragment.calls_considered, fragment.call_stops, fragment.open_calls = _call_stops(self._calls, self._modules)
+            # And which of those routes never run an arm, by the constants they hand: a read site's not_run, of a
+            # junction's branches.
+            _attach_not_run_on(fragment.junctions, self._calls)
         lap("callers")
         # Where a row a statement keeps is carried on to: after the reach
         # record, whose holes and database calls it reads, over every junction
@@ -866,8 +871,14 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                 {cls: attributor.declared_attributes(cls) for cls in attributor.declared_classes()},
             ),
         )
+        # Where each write's values print, with the arms its KeyFroms say land there, now that those are all said.
+        printed_writes = sqlwrite.attach_write_arms(fragment.write_prints, fragment.key_froms)
+        logger.info("PandaCodeMapPlugin: %d write statement(s) print their text and bind map", printed_writes)
         # Each message a run sends and the function another run takes it with: beside reach, not in it.
         fragment.message_edges = messages.edges(self._modules, self._calls, values)
+        # And which column each payload key names rows by in the receiver's run, read from the key and parameter
+        # records.
+        messages.attach_received_as(fragment.message_edges, fragment.key_froms, fragment.parameter_froms)
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(
@@ -932,6 +943,9 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # code cannot print.
         fragment.function_prints.extend(self._function_prints())
         fragment.print_calls = _print_calls(self._modules)
+        # Which of those prints every way through a row loop's hand-on passes: what a run's lines name each row
+        # a statement handed on by.
+        sqlwrite.attach_hand_on_prints(fragment.read_sites, fragment.function_prints, self._modules)
         # Which of those prints every path to an arm passes, and which of their
         # holes hold a column of the row the arm writes: what tells the run that
         # wrote a value from the runs that only printed the same lines.
@@ -946,6 +960,18 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         )
         logger.info("PandaCodeMapPlugin: %d branch(es) have a print every path to them passes", self._must_prints)
         lap("prints")
+        # What each exit of a function holding arms or prints keeps a run from: why a pass that ran no arm ran none.
+        kept = exitkeeps.attach(fragment, self._modules, record)
+        logger.info(
+            "PandaCodeMapPlugin: %d exit(s) read, %d keep a run from an arm, %d from a call into arms, %d with a turn "
+            "of a loop around their own; %d print(s) in a loop",
+            len(fragment.exit_keeps),
+            kept,
+            sum(1 for one in fragment.exit_keeps if one.calls),
+            sum(1 for one in fragment.exit_keeps if len(one.turns) > (one.exit.startswith(("continue", "break")))),
+            len(fragment.print_loops),
+        )
+        lap("exits")
         if self._calls is not None:
             # Where each function's runs start, what each call of a history writer
             # can record, and the calls that write a history row in the same pass
@@ -1607,6 +1633,40 @@ def _attach_called_from(junctions, calls) -> None:
                 break
             by_owner[junction.owner] = found
         junction.called_from = by_owner[junction.owner]
+
+
+def _attach_not_run_on(junctions, calls) -> None:
+    """Fill ``Branch.not_run_on`` for every junction's branches (:func:`sqlwrite.routes_ruling_out`), each function's
+    routes read once for all its junctions -- the function holding the junction's anchor, of the owner's name."""
+    named: dict[tuple[str, str], list] = {}
+    held_by: dict[int, tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, list]] = {}
+    for junction in junctions:
+        file, _, name = junction.owner.partition("::")
+        if (file, name) not in named:
+            tree = calls.types.tree(file)
+            named[(file, name)] = [
+                one
+                for one in (walk(tree) if tree is not None else ())
+                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and one.name == name
+            ]
+        candidates = named[(file, name)]
+        anchor = junction.anchor
+        func = next(
+            (
+                one
+                for one in candidates
+                if anchor is None or one.lineno <= anchor.line_start <= (one.end_lineno or one.lineno)
+            ),
+            None,
+        )
+        if func is None or (anchor is None and len(candidates) > 1):
+            continue
+        held_by.setdefault(id(func), (file, func, []))[2].append(junction)
+    for file, func, held in held_by.values():
+        branches = [branch for junction in held for branch in junction.branches if branch.line is not None]
+        arms = [tuple(sorted({branch.line, *branch.other_lines})) for branch in branches]
+        for branch, routes in zip(branches, sqlwrite.routes_ruling_out(calls, file, func, arms), strict=True):
+            branch.not_run_on = sorted(routes)
 
 
 def _stops_read_again(modules, roots, stops) -> list[str]:

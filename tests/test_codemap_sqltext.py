@@ -1593,3 +1593,25 @@ def test_a_set_item_changing_a_column_named_by_a_hole_by_an_amount_is_kept_with_
     assert amounts.column_holes == [(1, "{} + {} * 2 - 1", (2, 3))]
     (other,) = sqltext.writes("UPDATE T SET {}=2+{},{}={} WHERE b=:b")
     assert other.column_holes == []
+
+
+def test_a_column_against_another_tables_column_by_an_order_is_a_joined_term_from_each_side():
+    """``tabT.jediTaskID>=tabA.min_jediTaskID`` from each side, ``>=`` and ``<=``; a self-join's ``t1.PandaID>
+    t2.PandaID`` too.  An equality is a join, two columns of one alias compare a row with itself, and a term under
+    an ``OR`` is not met by every row the statement returns."""
+    picked = sqltext.joined_terms(
+        "SELECT tabT.jediTaskID FROM ATLAS_PANDA.JEDI_Tasks tabT,ATLAS_PANDA.JEDI_AUX_Status_MinTaskID tabA "
+        "WHERE tabT.status=tabA.status AND tabT.jediTaskID>=tabA.min_jediTaskID AND tabT.attemptNr<=tabT.maxAttempt"
+    )
+    assert [(one.table, one.column, one.op, one.other_table, one.other_column, one.every_row) for one in picked] == [
+        ("JEDI_Tasks", "jediTaskID", ">=", "JEDI_AUX_Status_MinTaskID", "min_jediTaskID", True),
+        ("JEDI_AUX_Status_MinTaskID", "min_jediTaskID", "<=", "JEDI_Tasks", "jediTaskID", True),
+    ]
+    paired = sqltext.joined_terms(
+        "SELECT t1.PandaID FROM ATLAS_PANDA.jobsActive4 t1, ATLAS_PANDA.jobsActive4 t2 "
+        "WHERE (t1.PandaID<>t2.PandaID OR t1.jobStatus=:s)"
+    )
+    assert [(one.table, one.op, one.every_row) for one in paired] == [
+        ("jobsActive4", "<>", False),
+        ("jobsActive4", "<>", False),
+    ]

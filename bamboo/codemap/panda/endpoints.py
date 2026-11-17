@@ -44,6 +44,7 @@ from bamboo.codemap.models import (
     HOLE_MAY_CHANGE,
     HOLE_OPEN,
     KEY_CONSTANT,
+    KEY_JOINED,
     KEY_PARAMETER,
     KEY_ROWS,
     KEY_SELF_FIELD,
@@ -201,7 +202,9 @@ def attach(
             sites.setdefault(holder, []).append(site)
     terms: dict[tuple[str, int], list[KeyFrom]] = {}
     for key_from in fragment.key_froms:
-        if key_from.reads:
+        # The terms every returned row meets with a value a bind brings: what a request's values name the answer by.
+        # A way of an OR, or another table's column (no request fills it), is not one.
+        if key_from.reads and not key_from.some_rows and not any(one.kind == KEY_JOINED for one in key_from.sources):
             terms.setdefault((key_from.owner, key_from.statement), []).append(key_from)
     code = _Code(calls)
     read = _Reader(record, code, sites, terms, _Bounds(record, code))
@@ -544,11 +547,9 @@ class _Code:
             found = self._changes[owner] = []
             file, func = self.funcs.get(owner, ("", None))
             for node in C.own_nodes(func) if func is not None else []:
-                got = (
-                    callfacts.change(self.types, file, func, node)
-                    if isinstance(node, ast.Call)
-                    else None
-                )
+                if not isinstance(node, ast.Call):
+                    continue
+                got = callfacts.change(self.types, file, func, node)
                 if got is not None:
                     kind, system, callee = got
                     found.append(

@@ -113,6 +113,8 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "region",
         "rows_handled",
         "exits",
+        "falls",
+        "hand_ons",
         "crosses_to",
         "crosses_open",
         "crossing_selects",
@@ -294,6 +296,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "must_names",
     "must_names_whole",
     "must_hole",
+    "made_before",
+    "after_prints",
     "history",
     "history_hole",
     "off_row",
@@ -304,6 +308,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "rewrites_open",
     "unset_default",
     "amount",
+    "handed",
+    "not_run_on",
     "count_prints",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
@@ -392,6 +398,18 @@ NOT_COMPARED_PARTS: dict[str, str] = {
     "message_edges": (
         "records beside the nodes, not nodes: a message one run sends and the function another run takes it with -- "
         "see MessageEdge; a dump's section compare reads them"
+    ),
+    "exit_keeps": (
+        "records beside the nodes, not nodes: the arms and prints each exit of a function keeps a run from -- see "
+        "ExitKeeps; a dump's section compare reads them"
+    ),
+    "write_prints": (
+        "records beside the nodes, not nodes: where a write statement's text and bind map print, and the column each "
+        "bind writes -- see WritePrint; a dump's section compare reads them"
+    ),
+    "print_loops": (
+        "records beside the nodes, not nodes: the loops holding each print statement of a function exit_keeps reads -- "
+        "see PrintLoops; a dump's section compare reads them"
     ),
     "declaration_yields": _REPORT,
     "annotation_readings": _REPORT,

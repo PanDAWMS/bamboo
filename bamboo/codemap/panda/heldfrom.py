@@ -50,7 +50,7 @@ import ast
 import re
 from typing import Any, Iterable, NamedTuple, Optional
 
-from bamboo.codemap import callfacts, evaluate, pathcond
+from bamboo.codemap import callfacts, evaluate, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import (
     Calls,
@@ -102,6 +102,7 @@ from bamboo.codemap.models import (
     GuardFrom,
     HeldChange,
     HeldKeyed,
+    HeldPrinted,
     HeldSource,
     HeldThrough,
     JunctionNode,
@@ -113,6 +114,7 @@ from bamboo.codemap.models import (
 )
 from bamboo.codemap.panda import changes as changes_mod
 from bamboo.codemap.panda import flow, specwrites, sqltext
+from bamboo.codemap.reaching import reaching
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 #: The classes ``self`` can be in the function a reading is in, where the call entering it says
@@ -176,6 +178,23 @@ class _Way(NamedTuple):
     keyed: tuple[tuple[str, str, str], ...] = ()
     #: Where the end is a statement's rows and the item is one column's ``MAX`` or ``MIN`` (:class:`sqltext.Aggregate`).
     aggregate: Optional[Any] = None
+    #: In the order met going back from the read (:attr:`HeldSource.printed`, :meth:`_Reader._return_printed`).
+    printed: tuple["_Printed", ...] = ()
+
+
+class _Printed(NamedTuple):
+    """One :class:`HeldPrinted` while it is read.  Made where the callee's ``return`` is read, before the call is
+    known; the call fills *at* in as the way leaves the callee (:func:`_called_at`)."""
+
+    statement: str
+    hole: int
+    expression: str
+    steps: tuple[str, ...] = ()
+    #: The hole's calls, in the order run.
+    through: tuple["_Through", ...] = ()
+    at: str = ""
+    #: How many of the way's steps were applied before the call's value, as :attr:`_Through.steps` counts.
+    steps_before: int = 0
 
 
 #: What a way may go through and still be the value it came from: a copy, the same value as another type.
@@ -552,7 +571,8 @@ def _onto(
     (self.SC_FAILED, inputChunk)`` holds the argument at ``[1]``), *route* its route.  Where *outer* sits at parts of
     the argument, :func:`_then` takes the steps, cutting it at the parts and falling back as *fall_back* says, and
     *inner*'s calls follow the steps they come after, the paths they went through with (:attr:`_Through.held`) held
-    as *inner*'s are; a stop takes the steps as they are.  Otherwise each step is
+    as *inner*'s are -- its prints of a call's value (:attr:`_Way.printed`) do not --; a stop takes the steps as they
+    are.  Otherwise each step is
     taken by :func:`_step` with *inner*'s calls before it in place, so a step reads across the call as it reads in
     one function: ``list(rse_set)[0]`` in a callee handed an ``rse_set`` that ``rse_set &= ...`` made is an element
     of the ``&``'s operands, through no ``&``."""
@@ -572,19 +592,34 @@ def _onto(
             )
             for one in _then(outer, steps, fall_back)
         ]
+        # *inner*'s prints of a call's value are left behind: the steps cut at the argument's parts say no more how
+        # far the call's value is from the end.
     elif outer.kind == _STOP:
         through = tuple(call._replace(steps=call.steps + shift) for call in inner.through)
-        ways = [outer._replace(steps=outer.steps + steps, through=through + outer.through)]
+        printed = tuple(one._replace(steps_before=one.steps_before + shift) for one in inner.printed)
+        ways = [
+            outer._replace(
+                steps=outer.steps + steps, through=through + outer.through, printed=printed + outer.printed
+            )
+        ]
     else:
 
         def before(one: _Way, place: int, last: bool = False) -> _Way:
             """*one* with *inner*'s calls that come after *place* of the steps (after them all, *last*), before what
-            it is made by."""
+            it is made by -- and *inner*'s prints of a call's value, placed as its calls are."""
             calls = tuple(
                 call._replace(steps=len(one.steps))
                 for call in inner.through
                 if call.steps + len(fields) == place or (last and call.steps + len(fields) > place)
             )
+            prints = tuple(
+                printed._replace(steps_before=len(one.steps))
+                for printed in inner.printed
+                if printed.steps_before + len(fields) == place
+                or (last and printed.steps_before + len(fields) > place)
+            )
+            if prints:
+                one = one._replace(printed=prints + one.printed)
             return one._replace(through=calls + one.through) if calls else one
 
         ways = [outer]
@@ -860,6 +895,44 @@ def _key_spot(key: ast.expr) -> str:
     return "[*]"
 
 
+def _printed_message(statement: ast.AST) -> Optional[ast.JoinedStr]:
+    """The f-string a print statement spells its message as -- ``tmpLog.debug(f"...")`` --, else ``None``."""
+    if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Call)):
+        return None
+    call = statement.value
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr in callfacts.LOG_METHODS and call.args):
+        return None
+    message = call.args[0]
+    return message if isinstance(message, ast.JoinedStr) else None
+
+
+def _with_printed(ways: list[_Way], prints: tuple[_Printed, ...]) -> list[_Way]:
+    """*ways*, of what a ``return`` gives, with *prints* holding it, after their own steps -- met going back from
+    the read, so the last first --; a stop as it is, and a way whose end sits at parts of the value (*paths*): the
+    value is not its end with its steps, but a container holding it (``return {"a": n}``), which a step after the
+    call cuts rather than takes."""
+    if not prints:
+        return ways
+    return [
+        one
+        if one.kind == _STOP or one.paths
+        else one._replace(
+            printed=tuple(printed._replace(steps_before=len(one.steps)) for printed in reversed(prints)) + one.printed
+        )
+        for one in ways
+    ]
+
+
+def _called_at(ways: list[_Way], here: str) -> list[_Way]:
+    """*ways*, of what the call at *here* gives, with the call filled in on the prints its callee's returns made."""
+    return [
+        one._replace(printed=tuple(printed if printed.at else printed._replace(at=here) for printed in one.printed))
+        if any(not printed.at for printed in one.printed)
+        else one
+        for one in ways
+    ]
+
+
 def owner_of(file: str, func: ast.AST) -> str:
     return f"{file}::{getattr(func, 'name', '<module>')}"
 
@@ -1075,6 +1148,8 @@ class _Reader:
         #: What a callee returns or yields, by the function and the classes ``self`` is there (:data:`_Selves`).
         self._returns: dict[tuple[int, tuple, Optional[str]], list[_Way]] = {}
         self._returns_at: dict[tuple[int, tuple, int, Optional[str]], list[_Way]] = {}
+        #: The prints holding what a ``return`` gives, by the statement, the element and the classes ``self`` is in.
+        self._printed_at: dict[tuple[int, Optional[int], tuple], tuple[_Printed, ...]] = {}
         self._yields: dict[tuple[int, tuple], list[_Way]] = {}
         self._generators: dict[int, bool] = {}
         self._active: set[tuple[int, int]] = set()
@@ -1993,7 +2068,7 @@ class _Reader:
                 found.append(
                     _stop("open", ast.unparse(call.func), what=placed.unplaced, at=here)
                 )
-            return found
+            return _called_at(found, here)
         taken = self._taken(call, placed, file, func, selves=selves)
         if taken is not None:
             return self._of_field(taken, field)
@@ -2157,7 +2232,8 @@ class _Reader:
         ]
         found: list[_Way] = []
         for value in returns(target.func):
-            found += self._safely(_field_of(value, field), value, target.file, target.func, selves=target.bound)
+            ways = self._safely(_field_of(value, field), value, target.file, target.func, selves=target.bound)
+            found += _with_printed(ways, self._return_printed(target, value, None)) if field is None else ways
         self._returns[key] = found
         return found
 
@@ -2192,9 +2268,91 @@ class _Reader:
             if chosen is None:
                 whole = self._safely(value, value, target.file, target.func, selves=target.bound)
                 chosen = self._of_field(self._stepped(whole, f"[{index!r}]"), field)
+            elif field is None:
+                chosen = _with_printed(chosen, self._return_printed(target, value, index))
             found += chosen
         self._returns_at[key] = found
         return found
+
+    def _return_printed(self, target: Target, value: ast.expr, index: Optional[int]) -> tuple[_Printed, ...]:
+        """The prints of *target* holding what its ``return`` of *value* gives -- the element at *index* of a tuple
+        or list it spells, where one is read --, a name: each hole of a print on every way from the function's entry
+        to the ``return``, passed once it printed, with no binding of the name and no change in place of what it
+        holds between the two (:class:`HeldPrinted`).  The call is filled in where the way leaves the callee."""
+        returned = getattr(value, "parent", None)
+        if not isinstance(returned, ast.Return):
+            return ()
+        named: ast.expr = value
+        if index is not None:
+            if (
+                not isinstance(value, (ast.Tuple, ast.List))
+                or any(isinstance(one, ast.Starred) for one in value.elts)
+                or not 0 <= index < len(value.elts)
+            ):
+                return ()
+            named = value.elts[index]
+        if not isinstance(named, ast.Name):
+            return ()
+        key = (id(returned), index, _selves_key(target.bound))
+        held = self._printed_at.get(key)
+        if held is None:
+            held = self._printed_at[key] = self._read_printed(target, returned, named.id)
+        return held
+
+    def _read_printed(self, target: Target, returned: ast.Return, name: str) -> tuple[_Printed, ...]:
+        func, file = target.func, target.file
+        found: list[_Printed] = []
+        sites: Optional[list[ast.AST]] = None
+        for statement in own_nodes(func):
+            if not isinstance(statement, ast.Expr) or (message := _printed_message(statement)) is None:
+                continue
+            holes = [part.value for part in message.values if isinstance(part, ast.FormattedValue)]
+            held = [(number, self._hole_of(hole, name, file, func)) for number, hole in enumerate(holes)]
+            if all(read is None for _number, read in held):
+                continue
+            if sites is None:
+                sites = [
+                    func.args,  # type: ignore[attr-defined]
+                    *(one.site for one in pathcond.bindings(func, name) if not one.nested),
+                ]
+            # On every way to the return, the print printed last of the name's bindings and it.
+            if reaching(returned, [*sites, statement]) != [statement]:
+                continue
+            if changes_mod.object_changes(self.calls, file, func, name, statement, returned, target.bound):
+                continue
+            for number, read in held:
+                if read is not None:
+                    steps, made = read
+                    found.append(
+                        _Printed(f"{file}:{statement.lineno}", number, ast.unparse(holes[number]), steps, made)
+                    )
+        return tuple(found)
+
+    def _hole_of(
+        self, hole: ast.expr, name: str, file: str, func: ast.AST
+    ) -> Optional[tuple[tuple[str, ...], tuple[_Through, ...]]]:
+        """What of *name* a print's *hole* holds: the steps of the part (``x['a']``, ``x.attr``; none for ``x``) and
+        the calls outside the corpus it hands that part to, in the order run (``str(x)``, ``len(x)``) -- ``None``
+        where it holds none of it as such."""
+        made: list[_Through] = []
+        while isinstance(hole, ast.Call):
+            through = self._through(hole, file, func)
+            if through is None:
+                return None
+            made.insert(0, through)
+            hole = hole.args[0]
+        steps: list[str] = []
+        while isinstance(hole, (ast.Subscript, ast.Attribute)):
+            if isinstance(hole, ast.Attribute):
+                steps.insert(0, f".{hole.attr}")
+            elif isinstance(hole.slice, ast.Slice):
+                return None
+            else:
+                steps.insert(0, _key_spot(hole.slice))
+            hole = hole.value
+        if not (isinstance(hole, ast.Name) and hole.id == name):
+            return None
+        return tuple(steps), tuple(one._replace(steps=len(steps)) for one in made)
 
     def _is_generator(self, target: Target) -> bool:
         """Whether *target*'s own body yields: a call to it makes a generator."""
@@ -2835,7 +2993,12 @@ class _Reader:
             ways.append(_stop("missed", owner, what=why, at=f"{owner}:{line}"))
         sources, stops = _said(ways)
         return ParameterFrom(
-            owner=owner, line=line, parameter=name, sources=sources, stops=stops
+            owner=owner,
+            line=line,
+            parameter=name,
+            sources=sources,
+            stops=stops,
+            declared=values.declared(func, name),
         )
 
     def _sent(self, file: str, func: ast.AST, name: str) -> list[_Way]:
@@ -2982,7 +3145,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         # A ``-``'s right side is the record's way as its left side is: one source where both reach it; so are the
         # paths it went through with.
         unmarked = tuple(call._replace(drops=False, held=()) for call in one.through)
-        key = (one._replace(line=None, end_file="", through=unmarked, puts=(), chosen=()), tuple(route))
+        key = (one._replace(line=None, end_file="", through=unmarked, puts=(), chosen=(), printed=()), tuple(route))
         held = sources.setdefault(
             key,
             HeldSource(
@@ -3013,6 +3176,11 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 keyed=[HeldKeyed(at=at, by=by, key=key) for at, by, key in one.keyed],
             ),
         )
+        # A way the same but for the prints of a call's value: the prints of each, once.
+        for printed in reversed(one.printed):
+            said = _printed_said(printed)
+            if said not in held.printed:
+                held.printed.append(said)
         if one.end_file and one.line is not None and f"{one.end_file}:{one.line}" not in held.at:
             held.at.append(f"{one.end_file}:{one.line}")
         held.chosen.extend(place for place in one.chosen if place not in held.chosen)
@@ -3020,6 +3188,21 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         held.at.sort(key=_place_order)
         held.chosen.sort(key=_place_order)
     return list(sources.values()), list(stops.values())
+
+
+def _printed_said(printed: _Printed) -> HeldPrinted:
+    return HeldPrinted(
+        at=printed.at,
+        statement=printed.statement,
+        hole=printed.hole,
+        expression=printed.expression,
+        steps=list(printed.steps),
+        through=[
+            HeldThrough(call=call.call, at=call.at, gives=call.gives, hooks=list(call.hooks), after_steps=call.steps)
+            for call in printed.through
+        ],
+        after_steps=printed.steps_before,
+    )
 
 
 def _place_order(place: str) -> tuple[str, int]:

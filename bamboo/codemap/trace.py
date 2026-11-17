@@ -609,8 +609,9 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     shapes that closing got wrong: ``registerFilesInDatasets {str(dest_id_map)}
     zip=`` prints a dict with spaces in it, so a hole that stopped at the first
     space never reached ``zip=``, and none of the job's lines matched.
-    Read off the syntax only; a name whose value is a dict prints like one too,
-    and is left a token rather than guessed at.
+    Read off the syntax, and off the map reader: a name it reads as a map where
+    the hole prints (:func:`mapentries.entries`) prints a dict's repr too, as
+    ``str()`` of it does -- not a guess at its value, the reader's reading.
     """
     if getattr(part, "appended", False):
         return "text"
@@ -636,6 +637,12 @@ def _hole_prints(part: ast.FormattedValue) -> str:
             return "text"
         if name in _PRINTS_NUMBER:
             return "number"
+    held = mapentries.printed_map(value)
+    if held:
+        site = pathcond.site_of(value)
+        func = pathcond.enclosing_function(site)
+        if isinstance(site, ast.stmt) and func is not None and mapentries.entries(func, held, site) is not None:
+            return "text"
     return ""
 
 
@@ -3325,7 +3332,17 @@ class _Walk:
 
         A name bound nowhere in the function is a module constant, a parameter
         or a value from elsewhere, and only the first is read here.
+
+        A name the map reader reads as a map where it is printed is not
+        written out: it prints the map it holds there, read by its entries
+        (:func:`_holes_of`) -- ``reset_resource_type_task``'s ``var_map``,
+        bound to a literal at 653 and printed at 671, and a map bound to a
+        literal and filled after, whose literal is not even the value printed.
         """
+        if isinstance(expr, ast.Name):
+            statement = pathcond.site_of(at)
+            if isinstance(statement, ast.stmt) and mapentries.entries(frame.func, expr.id, statement) is not None:
+                return [[_hole(expr)]], []
         spelled = _text(expr)
         if spelled in seen:
             return [[_hole(expr)]], []

@@ -1071,7 +1071,7 @@ def _handler_rule(w: Walker, fn: R.Function, sn: R.Seen, paths: list[Path]) -> l
                 continue
         elif cls == "LOG" and handler is not None:
             top = [fn.row_at(st) for st in handler.body]
-            if any(r is not None and r.absence_counts(sn.mode) and r.lands_in(sn.run.log.name) and sn.run.holds(r.func, r.level)
+            if any(r is not None and r.absence_counts(sn.mode) and r.lands_in(sn.run.log.name) and sn.run.holds(r.func, r.level, r)
                    and not sn.present(r) for r in top):
                 w.dropped["E6 handler"] += 1
                 continue

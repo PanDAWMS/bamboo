@@ -44,6 +44,7 @@ from __future__ import annotations
 import ast
 import builtins
 import re
+import weakref
 from typing import Callable, Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
@@ -88,6 +89,16 @@ from bamboo.codemap.panda import changes as changes_mod
 
 _CHANGING = (CHANGE_STORE, CHANGE_DELETE, CHANGE_INNER, CHANGE_METHOD)
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+#: The lines of each tree's ``return`` statements, kept while the tree is (:func:`_return_lines`).
+_RETURNS: "weakref.WeakKeyDictionary[ast.AST, frozenset[int]]" = weakref.WeakKeyDictionary()
+
+
+def _return_lines(tree: ast.AST) -> frozenset[int]:
+    """The lines *tree* has a ``return`` on: read once per tree, not once per call a way goes through."""
+    found = _RETURNS.get(tree)
+    if found is None:
+        found = _RETURNS[tree] = frozenset(node.lineno for node in ast.walk(tree) if isinstance(node, ast.Return))
+    return found
 #: Builtins that change what they are handed, reach outside, or run text as code.
 _BUILTIN_CHANGES = frozenset({"setattr", "delattr"})
 _BUILTIN_OUTSIDE = frozenset({"open", "input"})
@@ -757,8 +768,8 @@ def runnables(
                     add(target, RUN_HOOK, call.at)
             file, _, line = call.at.rpartition(":")
             tree = trees.get(file)
-            if call.gives == "decoded" and tree is not None and any(
-                isinstance(node, ast.Return) and node.lineno == int(line) for node in ast.walk(tree)
+            if call.gives == "decoded" and tree is not None and (returns := _return_lines(tree)) and (
+                int(line) in returns
             ):
                 owner = record.function_at(file, int(line))
                 for target in _defined(trees, owner) if owner is not None else ():

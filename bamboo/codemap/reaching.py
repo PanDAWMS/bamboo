@@ -77,6 +77,7 @@ swallow (:func:`bamboo.codemap.panda.flow.swallowing_managers`), and the
 from __future__ import annotations
 
 import ast
+from collections import OrderedDict
 from typing import Collection, Iterator, Optional, Sequence
 
 from bamboo.codemap import callfacts
@@ -118,6 +119,7 @@ def reaching(
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
     raised: Optional[Sequence[ast.ExceptHandler]] = None,
+    passing: Sequence[ast.stmt] = (),
 ) -> list[ast.AST]:
     """Of *sites*, the writes that can be what *target* reads, in the order given.
 
@@ -156,8 +158,14 @@ def reaching(
     those handlers are entered; a raise out of the scope is not read.  None
     reads every expression but a literal, a name or a display of them as
     able to raise (:func:`may_raise`).
+
+    *passing* are a fourth, for a reader asking where a run would have gone had it not left: ``return``,
+    ``raise``, ``continue`` and ``break`` statements read as a ``pass`` -- the run goes on to the next statement,
+    raising nothing (:func:`bamboo.codemap.panda.flow.kept_from`).
     """
-    return reaching_each([target], sites, killers, rereads, entered=entered, once=once, raised=raised)[0]
+    return reaching_each(
+        [target], sites, killers, rereads, entered=entered, once=once, raised=raised, passing=passing
+    )[0]
 
 
 def reaching_each(
@@ -169,6 +177,7 @@ def reaching_each(
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
     raised: Optional[Sequence[ast.ExceptHandler]] = None,
+    passing: Sequence[ast.stmt] = (),
 ) -> list[list[ast.AST]]:
     """:func:`reaching` for each of *targets*, the writes read once per scope: what a reader asking of many
     statements with the same writes asks."""
@@ -188,7 +197,7 @@ def reaching_each(
             found.append(list(sites))
             continue
         if id(scope) not in read:
-            read[id(scope)] = _writes(scope, sites, killers, rereads, entered, once, raised)
+            read[id(scope)] = _writes(scope, sites, killers, rereads, entered, once, raised, passing)
         held = read[id(scope)]
         if held is None:
             found.append([site for site in sites if _encloses(_scope_of(site), scope)])
@@ -208,6 +217,14 @@ def _placed(node: ast.AST) -> ast.AST:
     return node
 
 
+#: The flows :func:`_writes` read last, by what it was asked: readers ask one scope with the same writes again and
+#: again (a build asks some 1.3 million times for some 90 thousand flows).  Keyed by the nodes themselves, so a
+#: node's id is never taken for another's, and bounded, so a long run does not hold every tree it read.  A flow
+#: is only read once made.
+_FLOWS: OrderedDict[tuple, Optional[tuple[_Flow, dict[int, int]]]] = OrderedDict()
+_FLOWS_KEPT = 8192
+
+
 def _writes(
     scope: ast.AST,
     sites: Sequence[ast.AST],
@@ -216,8 +233,40 @@ def _writes(
     entered: Sequence[ast.AST] = (),
     once: Sequence[ast.AST] = (),
     raised: Optional[Sequence[ast.ExceptHandler]] = None,
+    passing: Sequence[ast.stmt] = (),
 ) -> Optional[tuple[_Flow, dict[int, int]]]:
-    """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own."""
+    """The flow of *scope* for these writes, and each write's bit; None where none is the scope's own.  Read once
+    while kept (:data:`_FLOWS`)."""
+    key = (
+        scope,
+        tuple(sites),
+        tuple(killers),
+        tuple(rereads),
+        tuple(entered),
+        tuple(once),
+        None if raised is None else tuple(raised),
+        tuple(passing),
+    )
+    if key in _FLOWS:
+        _FLOWS.move_to_end(key)
+        return _FLOWS[key]
+    held = _writes_read(scope, sites, killers, rereads, entered, once, raised, passing)
+    _FLOWS[key] = held
+    if len(_FLOWS) > _FLOWS_KEPT:
+        _FLOWS.popitem(last=False)
+    return held
+
+
+def _writes_read(
+    scope: ast.AST,
+    sites: Sequence[ast.AST],
+    killers: Sequence[ast.AST],
+    rereads: Sequence[ast.AST],
+    entered: Sequence[ast.AST],
+    once: Sequence[ast.AST],
+    raised: Optional[Sequence[ast.ExceptHandler]],
+    passing: Sequence[ast.stmt],
+) -> Optional[tuple[_Flow, dict[int, int]]]:
     own = [_placed(node) for node in (*sites, *killers) if _scope_of(node) is scope]
     if not own:
         return None
@@ -236,7 +285,18 @@ def _writes(
         keeps |= bits[key]
     on_entry = frozenset(id(_placed(node)) for node in entered if id(_placed(node)) in bits)
     entered_handlers = None if raised is None else frozenset(id(node) for node in raised)
-    return _flow(scope, bits, keeps, on_entry, frozenset(id(node) for node in once), entered_handlers), bits
+    return (
+        _flow(
+            scope,
+            bits,
+            keeps,
+            on_entry,
+            frozenset(id(node) for node in once),
+            entered_handlers,
+            frozenset(id(node) for node in passing),
+        ),
+        bits,
+    )
 
 
 def reaching_exit(
@@ -318,8 +378,9 @@ def _flow(
     entered: frozenset[int] = frozenset(),
     once: frozenset[int] = frozenset(),
     raised: Optional[frozenset[int]] = None,
+    passing: frozenset[int] = frozenset(),
 ) -> _Flow:
-    """The flow for this set of writes, kept on the scope.
+    """The flow for this set of writes, kept on the scope -- by everything that makes it, *passing* too.
 
     The walk asks about one name from every statement that reads it, the SQL
     slice about one key from every run, so the same writes come back with a
@@ -331,12 +392,12 @@ def _flow(
     if held is None:
         held = {}
         scope._reaching_flows = held  # type: ignore[attr-defined]
-    key = (tuple(bits), keeps, entered, once, raised)
+    key = (tuple(bits), keeps, entered, once, raised, passing)
     flow = held.get(key)
     if flow is None:
         if len(held) >= _KEPT:
             del held[next(iter(held))]
-        flow = held[key] = _Flow(scope, bits, keeps, entered, once, raised)
+        flow = held[key] = _Flow(scope, bits, keeps, entered, once, raised, passing)
     return flow
 
 
@@ -611,6 +672,7 @@ class _Flow:
         entered: frozenset[int] = frozenset(),
         once: frozenset[int] = frozenset(),
         raised: Optional[frozenset[int]] = None,
+        passing: frozenset[int] = frozenset(),
     ) -> None:
         self.bits = bits
         self.keeps = keeps
@@ -618,6 +680,8 @@ class _Flow:
         self.entered = entered
         #: loops a run went round exactly once
         self.once = once
+        #: statements read as a ``pass`` (:func:`reaching`'s *passing*)
+        self.passing = passing
         #: the handlers a run entered (:func:`reaching`'s *raised*), by id; None reads (a)
         self.raised = raised
         self.entry: dict[int, int] = {}
@@ -701,9 +765,11 @@ class _Flow:
         self._record(node, state)
         if id(node) in self.entered:
             state = self._gen(state, node)
-        if self.raised is not None or _raises(node):
+        # A statement read as a ``pass`` raises only as a ``pass`` would, and goes on to the next.
+        passing = id(node) in self.passing
+        if self.raised is not None or (not passing and _raises(node)):
             self._raise(state)
-        method = getattr(self, "_" + type(node).__name__, None)
+        method = None if passing else getattr(self, "_" + type(node).__name__, None)
         if method is None:
             return self._gen(state, node)
         return method(node, state)

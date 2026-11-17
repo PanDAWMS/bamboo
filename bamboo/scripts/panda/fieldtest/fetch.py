@@ -347,9 +347,9 @@ async def _job_history(
 async def _task_history(
     ids: list[int], made: datetime.datetime | None, rec: Record, parts: Parts
 ) -> None:
-    """A task's history is asked whole."""
-    (key,) = ids
-    await rec.call("task_history", parts.task_history(key), {"task_id": key})
+    """A task's history is asked whole, one task per call."""
+    for key in ids:
+        await rec.call("task_history", parts.task_history(key), {"task_id": key})
 
 
 #: the call reading a key's row, by its class: the row (None when there is none) and the response

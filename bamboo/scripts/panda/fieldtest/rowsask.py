@@ -17,7 +17,11 @@ writes the round's answers to ``rows-r<n>.json`` there, ``n`` one past the direc
   Else the ask names the element class: a joined class is read by ``db_read`` on its tables where the
   joins' ``to`` columns hold the row's values; an attribute's, where its tables name a row by the row's key
   among others (a task's datasets: ``JEDI_Datasets`` by ``datasetID`` and ``jediTaskID``), where that
-  column holds the key.
+  column holds the key.  An ask may name the attributes it reads (``"columns"``); the read asks them with
+  the columns it selects by and, where histories follow, the class's key and creation column, and every
+  column without them.  The rows of a class whose status histories a call reads
+  (:data:`~bamboo.scripts.panda.fieldtest.fetch.HISTORY`: a job's, a task's) are followed by their
+  histories, as a statement's are (a job's task, a task's parent; design H).
 - ``statement`` -- the rows a call's statements read, per pass (``{"method", "site", "tables", "binds",
   "at"}``).  The read sites at ``site`` name the columns the statements select by (the dump's
   ``read_sites`` ``keys``: ``JobSpec.jediTaskID``); the call's argument of each one's name gives its values
@@ -96,6 +100,8 @@ class Plan:
     ask: dict
     calls: list[Call] = field(default_factory=list)
     histories: str | None = None
+    #: the role of the calls whose rows the histories follow
+    rows_role: str = ""
     why: str = ""
 
 
@@ -151,9 +157,7 @@ def _collection(ask: dict, tables: Tables) -> Plan:
             ask,
             why=f"{element}'s tables name a row by {list(tables.identity.get(element, ()))}, not by {sorted(key)}",
         )
-    where = [[c, "=", v] for c, v in sorted(key.items())]
-    read = tables.live[element] + tables.archive.get(element, ())
-    return Plan(ask, [Call("db_read", "collection", query(read, where))])
+    return _read(ask, element, key, tables)
 
 
 def _joined(ask: dict, cls: str, element: str, via: list[dict], tables: Tables) -> Plan:
@@ -168,9 +172,26 @@ def _joined(ask: dict, cls: str, element: str, via: list[dict], tables: Tables) 
             ask,
             why=f"the ask's via {via} does not join {cls} to {element} by its where's columns {sorted(where)}",
         )
-    terms = [[c, "=", v] for c, v in sorted(where.items())]
+    return _read(ask, element, where, tables)
+
+
+def _read(ask: dict, element: str, by: dict, tables: Tables) -> Plan:
+    """The rows of *element* where the columns of *by* hold its values, in every table of the class: the ask's
+    ``columns`` with the ones it selects by, or every column; then their histories where a call reads a class's."""
+    terms = [[c, "=", v] for c, v in sorted(by.items())]
     read = tables.live[element] + tables.archive.get(element, ())
-    return Plan(ask, [Call("db_read", "collection", query(read, terms))])
+    histories = element if element in HISTORY else None
+    named = ask.get("columns")
+    if named:
+        follow = [tables.key[element], tables.created[element]] if histories else []
+        named = list(dict.fromkeys([*named, *sorted(by), *follow]))
+    request = query(read, terms, **({"columns": named} if named else {}))
+    return Plan(
+        ask,
+        [Call("db_read", "collection", request)],
+        histories=histories,
+        rows_role="collection" if histories else "",
+    )
 
 
 def _statement(ask: dict, tables: Tables, sites: Sites) -> Plan:
@@ -232,7 +253,7 @@ def _statement(ask: dict, tables: Tables, sites: Sites) -> Plan:
                     ),
                 )
             )
-    return Plan(ask, calls, histories=cls)
+    return Plan(ask, calls, histories=cls, rows_role=rows_role)
 
 
 def _archive_bound(cls: str, found: list[dict], ask: dict, tables: Tables) -> list:
@@ -289,7 +310,7 @@ async def answer(line: dict, p: Plan, parts: Parts, tables: Tables) -> dict:
         if c.part != "db_read":
             await rec.call(c.part, CALLS[c.part](parts, c.request), c.request)
     if p.histories:
-        role, key = COLUMNS[p.histories][2], tables.key[p.histories]
+        role, key = p.rows_role, tables.key[p.histories]
         found = [
             r
             for (r_role, _), a in zip(batch, got, strict=True)

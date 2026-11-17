@@ -1853,7 +1853,8 @@ def with_exits_are_read(fragment: MapFragment) -> GateResult:
 
 
 def _held_ways(fragment: MapFragment):
-    """Every way of the guards', writes' and parameters' records, and of what each change on a way stores."""
+    """Every way of the records holding ways (:class:`GuardFrom`, :class:`WriteFrom`, :class:`ParameterFrom`,
+    :class:`FieldFrom`, :class:`SetFrom`), and of what each change on a way stores."""
 
     def each(where: str, sources):
         for source in sources:
@@ -1872,11 +1873,119 @@ def _held_ways(fragment: MapFragment):
             yield from each(f"{field.owner}.{field.field} {binding.at}", binding.sources)
         for change in field.changes:
             yield from each(f"{field.owner}.{field.field} {change.at}", change.value)
+    for set_ in fragment.set_froms:
+        yield from each(f"{set_.owner}:{set_.statement} {set_.column}", set_.sources)
+
+
+def printed_holes_are_rows(fragment: MapFragment) -> GateResult:
+    """(i) Every print a way through a call's return names (:class:`HeldPrinted`) is a print statement of the map
+    whose every row has the hole, spelt as the print's source spells it where no binding wrote it, its call is on the
+    way's route, and the steps before the call's value are the way's: the reader reads the value off the row its run
+    printed, at that hole."""
+    statements = {
+        f"{node.owner.partition('::')[0]}:{statement.line}": statement
+        for node in fragment.function_prints
+        for statement in node.statements
+    }
+    checked, failures = 0, []
+    for where, source in _held_ways(fragment):
+        for printed in source.printed:
+            checked += 1
+            problem = _printed_problem(printed, source, statements)
+            if problem:
+                failures.append(f"{where} {printed.statement} hole {printed.hole}: {problem}")
+    return GateResult(
+        gate="printed-holes-are-rows",
+        passed=not failures,
+        checked=checked,
+        unit="prints of a call's value",
+        question="does a way name a print of a call's value whose rows do not hold that hole?",
+        finding="a way's print of a call's value is not where the map's rows put it",
+        failures=failures,
+    )
+
+
+def _printed_problem(printed, source, statements) -> str:
+    if printed.at not in source.route:
+        return f"its call {printed.at} is not on the route"
+    if printed.after_steps > len(source.steps):
+        return f"{printed.after_steps} steps before the call, of {len(source.steps)}"
+    statement = statements.get(printed.statement)
+    if statement is None:
+        return "no print statement of the map"
+    line = int(printed.statement.rpartition(":")[2])
+    for row in statement.rows:
+        if len(row.holes) <= printed.hole:
+            return f"a row has {len(row.holes)} hole(s): {row.text[:80]}"
+        hole = row.holes[printed.hole]
+        if hole.line == line and hole.expression != printed.expression:
+            return f"a row spells the hole {hole.expression}"
+    return ""
+
+
+def write_prints_are_rows(fragment: MapFragment) -> GateResult:
+    """(i) Every print a :class:`WritePrint` names is a print statement of the map whose every row prints a map whole
+    (its entries read), every bind a key that map holds -- or, where the record names the map's object, an entry of
+    that object's ``valuesMap`` --, and its statement a :class:`KeyFrom`'s: the reader reads each bind's value off that
+    hole of a run's line.  A map with an entry whose key is made at run time (``setScoutJobData_JEDI``'s
+    ``varMap[tmpScoutKey]``, ``tmpScoutKey = f":{scoutKey}"`` in a loop) may hold any bind: a bind none of its spelled
+    keys is, is inconclusive, not a failure."""
+    statements = {
+        f"{node.owner.partition('::')[0]}:{statement.line}": statement
+        for node in fragment.function_prints
+        for statement in node.statements
+    }
+    keyed = {(one.owner, one.statement) for one in fragment.key_froms}
+    checked, failures, unknown = 0, [], []
+    for record in fragment.write_prints:
+        checked += 1
+        problem, open_binds = _write_print_problem(record, statements, keyed)
+        if problem:
+            failures.append(f"{record.owner}:{record.statement}: {problem}")
+        unknown += [f"{record.owner}:{record.statement}: bind {bind} may be a computed key" for bind in open_binds]
+    return GateResult(
+        gate="write-prints-are-rows",
+        passed=not failures,
+        checked=checked,
+        unit="write statements printed with their map",
+        question="does a record of where a write's values print name a print, or a key, the print's rows do not hold?",
+        finding="a write's values are said to print where the print's rows do not put them",
+        failures=failures,
+        inconclusive=unknown,
+    )
+
+
+def _write_print_problem(record, statements, keyed) -> tuple[str, list[str]]:
+    """The record's first problem, or ``""``; and the binds a key made at run time leaves open."""
+    if (record.owner, record.statement) not in keyed:
+        return "the statement has no KeyFrom", []
+    file = record.owner.partition("::")[0]
+    open_binds: list[str] = []
+    for printed in record.printed_by:
+        statement = statements.get(f"{file}:{printed.line}")
+        if statement is None:
+            return f"print {printed.line} is no print statement of the map", []
+        for row in statement.rows or [None]:
+            held = [hole for hole in row.holes if hole.entries is not None] if row is not None else []
+            if not held:
+                return f"print {printed.line}: a row prints no map", []
+            entries = [entry for hole in held for entry in hole.entries or ()]
+            keys = {entry.key for entry in entries if entry.key and not entry.computed}
+            objects = {entry.row for entry in entries if entry.row}
+            computed = any(entry.computed for entry in entries)
+            for bind in record.binds:
+                if bind.bind in keys or (record.object_map and record.object_map in objects):
+                    continue
+                if not computed:
+                    return f"bind {bind.bind} is no key of the printed map", []
+                if bind.bind not in open_binds:
+                    open_binds.append(bind.bind)
+    return "", open_binds
 
 
 def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a statement's rows names a read
-    site of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at a statement's rows names a read site
+    of the map: the reader looks the rows up there, and a name of none would say a column no record holds."""
     names = {site.name for site in fragment.read_sites}
     checked, failures = 0, []
     for where, source in _held_ways(fragment):
@@ -1896,9 +2005,8 @@ def guard_rows_are_read_sites(fragment: MapFragment) -> GateResult:
 
 
 def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom` or :class:`ParameterFrom` that ends at a parameter has the
-    ParameterFrom of that function and parameter: the reader reads on there, and a missing one would end the way
-    unsaid."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at a parameter has the ParameterFrom of
+    that function and parameter: the reader reads on there, and a missing one would end the way unsaid."""
     read = {(one.owner, one.line, one.parameter) for one in fragment.parameter_froms}
     checked, failures = 0, []
     for where, source in _held_ways(fragment):
@@ -1918,9 +2026,9 @@ def guard_parameters_are_read(fragment: MapFragment) -> GateResult:
 
 
 def guard_fields_are_read(fragment: MapFragment) -> GateResult:
-    """(i) Every way of a :class:`GuardFrom`, :class:`ParameterFrom`, :class:`WriteFrom` or :class:`FieldFrom` that
-    ends at ``self.<field>``, or at ``self`` or an object a corpus class builds with a field as its first step, has
-    the FieldFrom of that class and field: the reader reads on there, and a missing one would end the way unsaid."""
+    """(i) Every way of a record holding ways (:func:`_held_ways`) that ends at ``self.<field>``, or at ``self`` or
+    an object a corpus class builds with a field as its first step, has the FieldFrom of that class and field: the
+    reader reads on there, and a missing one would end the way unsaid."""
     from bamboo.codemap.panda.heldfrom import FIELD_STEP, end_path
 
     read = {(one.owner, one.field) for one in fragment.field_froms}
@@ -3003,6 +3111,10 @@ def run_all(fragment: MapFragment) -> list[GateResult]:
         results.append(guard_rows_are_read_sites(fragment))
         results.append(guard_parameters_are_read(fragment))
         results.append(guard_fields_are_read(fragment))
+        if fragment.function_prints:
+            results.append(printed_holes_are_rows(fragment))
+    if fragment.function_prints and fragment.key_froms:
+        results.append(write_prints_are_rows(fragment))
     if fragment.runnables:
         results.append(runnable_fields_are_read(fragment))
     results.append(map_identities_are_distinct(fragment))

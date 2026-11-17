@@ -434,11 +434,81 @@ class MustName(BaseModel):
             f"Where the print holds the value: {MUST_PART_MESSAGE!r}, a hole of the message (read with "
             f":attr:`PrintRow.capture`); {MUST_PART_MARK!r}, a hole of the logger's mark, taken where the logger is "
             f"made (:attr:`PrintRow.prefix_capture`) -- ``create_tagged_logger(comment, f\"PandaID={{tmp_id}}\")``; "
-            f"{MUST_PART_BIND!r}, the entry *bind* of a printed bind map."
+            f"{MUST_PART_BIND!r}, the entry *bind* of a printed map: the bind map the statement runs with, or "
+            "another map the print's record reads (:attr:`SkeletonHole.entries`)."
         ),
     )
     bind: str = Field(
-        default="", description=f"The bind map's key, ``:jediTaskID``, where *part* is {MUST_PART_BIND!r}."
+        default="",
+        description=(
+            f"The printed map's key, ``:jediTaskID`` of a bind map, where *part* is {MUST_PART_BIND!r}."
+        ),
+    )
+
+
+class MadeBefore(BaseModel):
+    """The object an arm writes, made in the arm's function by a spec's constructor that is the only binding of it
+    reaching the arm (:attr:`Branch.made_before`), with the value the written field holds as the constructor left it.
+
+    ``TaskCommando.runImpl`` makes ``tmpTaskSpec = JediTaskSpec()`` at 154, and its arm at 197 sets ``status``: made,
+    ``status`` is ``None`` (:func:`bamboo.codemap.panda.recognizers.progress.spec_initial_values`).  A reader of
+    ``set task_status=None`` at 200 knows the arm did not set it on that way.  The value in memory, not the row's:
+    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  Nor the
+    value just before the arm: what runs between the construction and the arm is not read here -- ``peekJobLog``
+    makes ``job = JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm
+    at 1618.
+    """
+
+    line: int = Field(description="The construction's line: ``tmpTaskSpec = JediTaskSpec()``.")
+    cls: str = Field(description="The class constructed: ``JediTaskSpec``.")
+    value: str = Field(description="The written field's value as the constructor left it, a literal's ``repr``: ``None``.")
+
+
+class AfterPrint(BaseModel):
+    """A print the owner can run after an arm's write in the same call (:attr:`Branch.after_prints`), with the holes
+    holding the written row's columns.
+
+    ``TaskCommando.runImpl`` prints ``set task_status={tmpTaskSpec.status}`` at 200 after its arm at 197, on every
+    way: the line states the value the arm wrote.  ``reactivatePendingTasks_JEDI`` prints ``jediTaskID={}
+    action=reactivate`` at 4735 after the run its ``sqlTU`` arm fills, under ``if tmpRow > 0:``: the line names the
+    row the run changed.  A print reached after the arm only on a way through the next turn of a loop holding both
+    is not one (it follows the next item's arm), nor one the arm's own way rules out -- a test after it that a
+    literal the way binds decides against the print (:func:`bamboo.codemap.panda.flow.ruled_out_after`).
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    names: list[MustName] = Field(
+        default_factory=list,
+        description=(
+            "Its holes holding a column of the written row, as :attr:`Branch.must_names` reads a must print's, but "
+            "from the write to the print: the object's columns -- the written one with the value written -- and "
+            "the row's key, in the message or the logger's mark (taken where the logger is made).  A hole is said "
+            "to hold the written row (:attr:`MustName.row`) only where nothing between the write and the print "
+            "binds it again, stores to it or hands it to a call that may change it; else with why."
+        ),
+    )
+    rebound: bool = Field(
+        default=False,
+        description=(
+            "Whether the arm's object -- for an SQL arm, a name holding its row's key -- can be bound again between "
+            "the write and the print: then a hole spelling it may print another row."
+        ),
+    )
+    every_way: bool = Field(
+        default=False,
+        description=(
+            "Whether every way on from the write passes the print before the turn of the innermost loop around the "
+            "arm ends (before the call ends where none holds it), read for a run that entered no handler "
+            "(:func:`bamboo.codemap.panda.flow.passes_after`): a run with no handler's mark that wrote and lacks "
+            "the line did not go on past the write as the map reads it.  A print past the loop is never so."
+        ),
+    )
+    rows: str = Field(
+        default="",
+        description=(
+            "For one of the branch's count prints (:attr:`Branch.count_prints`), what its printing says of the rows "
+            "the run changed, as :attr:`CountPrint.rows`; empty for any other print."
+        ),
     )
 
 
@@ -895,6 +965,37 @@ class CountPrint(BaseModel):
     )
 
 
+#: :attr:`HandedParameter.none`: the signature admits ``None``.
+NONE_ADMITS = "admits"
+#: The annotation names no ``None``.
+NONE_EXCLUDES = "excludes"
+#: No annotation.
+NONE_UNANNOTATED = "unannotated"
+
+
+class HandedParameter(BaseModel):
+    """A value a branch writes that is the writing function's parameter as the call hands it, and what the signature
+    says of ``None`` (:attr:`Branch.handed`).
+
+    ``getTasksToBeFinished_JEDI`` writes ``lockedBy`` with its parameter ``pid: str``: the arm writes the caller's
+    ``pid``, a ``str`` as the annotation says.  ``getTaskWithID_JEDI``'s ``pid: str | None = None`` admits ``None``,
+    so its arm may write ``NULL``.  An annotation is not checked when the code runs: ``excludes`` is what the
+    signature says, not what every caller passes.
+    """
+
+    name: str = Field(description="``<function>.<parameter>``, as :attr:`ConditionValue.base` spells a parameter.")
+    annotation: str = Field(default="", description="The annotation as written; ``\"\"`` where there is none.")
+    none: str = Field(
+        description=(
+            f"{NONE_ADMITS!r} where the annotation names ``None`` (``None``, ``Optional[...]``, ``X | None``, "
+            f"``Union[..., None]``), is ``Any`` or ``object``, or the default is ``None``; {NONE_UNANNOTATED!r} "
+            f"where there is no annotation, or a text one does not parse; {NONE_EXCLUDES!r} otherwise.  Read at the "
+            "annotation's top, a text one parsed, and a name not followed to what it names: an alias reads as "
+            "excluding."
+        )
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -1068,10 +1169,31 @@ class Branch(BaseModel):
             "A run-time value as an amount, the way a read site's condition value is one: a base -- a clock, or "
             "``<function>.<parameter>`` -- plus an offset.  ``updateTask_JEDI``'s ``taskSpec.modificationTime = "
             "timeNow - datetime.timedelta(hours=1)`` after ``timeNow = naive_utcnow()`` is kind ``bind``, base "
-            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written_amount`); a statement's own "
+            "``naive_utcnow``, offset -3600 (:func:`bamboo.codemap.values.written`); a statement's own "
             "``modificationTime=CURRENT_DATE-1`` is kind ``clock``, base ``CURRENT_DATE``, offset -86400.  So a "
             "reader holding the time the value was made reads the value.  ``None`` where the value reads as no "
             "base and offset (a constant the outcome states, a value only said), or as a parameter as it stands."
+        ),
+    )
+    handed: Optional[HandedParameter] = Field(
+        default=None,
+        description=(
+            "Where the value written is the writing function's parameter as the call hands it -- "
+            "``getTasksToBeFinished_JEDI``'s ``runtime(pid)`` -- that parameter and what its signature says of "
+            "``None`` (:func:`bamboo.codemap.values.written`), so a reader can tell an arm that writes a value from "
+            "one that may write ``NULL``.  Apart from ``amount``, which is ``None`` there.  ``None`` for any other "
+            "value, a local rebound before the write among them."
+        ),
+    )
+    not_run_on: list[list[str]] = Field(
+        default_factory=list,
+        description=(
+            "The routes of calls into the owner whose constants rule out every line this arm writes on, each as "
+            ":attr:`CallReading.chain` spells one (the call into the owner first): the arm never runs on them "
+            "(:func:`bamboo.codemap.panda.recognizers.sqlwrite.routes_ruling_out`, as :attr:`CallReading.not_run` "
+            "says it of a read site).  ``getTaskWithID_JEDI``'s ``lockedBy`` arm under ``if lockTask:`` is not run "
+            "on the routes handing ``lockTask`` the default ``False``.  A route not listed may run it: one whose "
+            "constants decide nothing, one the routes do not reach.  Sorted."
         ),
     )
     count_prints: list[CountPrint] = Field(
@@ -1080,7 +1202,11 @@ class Branch(BaseModel):
             "The lines the owner prints under a test of the row count of a run of the statement this branch's write "
             "lands at (:attr:`KeyFrom.writes`), each with what it says of the rows changed: a run's ``failed to lock "
             "jediTaskID=...`` after the lock ``UPDATE`` says the write did not land.  Its absence says the row "
-            "changed only where the line's level is in the log and the run is read past it.  Sorted by line."
+            "changed only where the line's level is in the log and the run is read past it.  Only the lines this "
+            "branch's own way can be followed by: a test after it that a literal its way binds decides against a line "
+            "keeps the line from it (:func:`bamboo.codemap.panda.flow.ruled_out_after`) -- "
+            "``reactivatePendingTasks_JEDI``'s ``sqlTU`` arms have ``action=reactivate`` and not ``timeout``, which "
+            "the same run prints after its ``sqlTO`` arms.  Sorted by line."
         ),
     )
     must_prints: Optional[list[int]] = Field(
@@ -1115,15 +1241,38 @@ class Branch(BaseModel):
         default=False,
         description=(
             "Whether ``must_names`` was read over every must print whole: its message (no row refused), its logger's "
-            "mark (made in the function, a mark with no hole, or a logger marking nothing) and, for an SQL arm, the "
-            "bind map its statement runs with.  Then ``[]`` says no must print's hole reads the written row's key; "
-            "``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is not read for the key "
-            "inside it."
+            "mark (made in the function, a mark with no hole, or a logger marking nothing), for an SQL arm the "
+            "bind map its statement runs with, and any other map printed whole by the entries its print's record "
+            "reads -- every key spelled, none a spec's ``valuesMap()``, none the source does not spell "
+            "(:attr:`SkeletonHole.entries`, ``entries_open``).  Then ``[]`` says no must print's hole reads the "
+            "written row's key; ``False`` leaves ``[]`` unknown.  A hole printing a whole object (``str(job)``) is "
+            "not read for the key inside it."
         ),
     )
     must_hole: str = Field(
         default="",
-        description="Why ``must_prints`` or ``must_names`` is ``None``.",
+        description="Why ``must_prints``, ``must_names`` or ``after_prints`` is ``None``.",
+    )
+    made_before: Optional[MadeBefore] = Field(
+        default=None,
+        description=(
+            "Where the object the arm writes is made in its function by a spec's constructor called with nothing, "
+            "the only binding of the name reaching the arm -- on every write of a branch, the same one --: that "
+            "construction and the written field's value as the constructor left it (:class:`MadeBefore`).  None "
+            "where it is not so made, or the constructor's value for the field is not read; read by "
+            ":mod:`bamboo.codemap.panda.mustprints`."
+        ),
+    )
+    after_prints: Optional[list[AfterPrint]] = Field(
+        default=None,
+        description=(
+            "The owner's prints that can run after this branch's write in the same call, by line -- for an SQL arm, "
+            "after a run of its statement the arm reaches -- each with the holes holding the written row's columns "
+            "(:class:`AfterPrint`).  A branch of several writes (``other_lines``) has the prints after every one, "
+            "a print being every way's only where it is so after each.  Read by "
+            ":mod:`bamboo.codemap.panda.mustprints` with the must prints.  ``None`` when not read, with "
+            "``must_hole``; ``[]`` when read and none is."
+        ),
     )
     history: Optional[list[HistoryPair]] = Field(
         default=None,
@@ -2030,8 +2179,12 @@ class ConditionValue(BaseModel):
     scale_seconds: Optional[float] = Field(
         default=None,
         description=(
-            "Seconds per unit of a bind amount the statement adds to a database "
-            "clock: ``CURRENT_DATE-:days`` is ``-86400`` times the bind's value."
+            "Seconds per unit of the one value an amount waits for, where the amount is that value times this "
+            "and nothing settled beside it: a bind amount the statement adds to a database clock -- "
+            "``CURRENT_DATE-:days`` is ``-86400`` times the bind's value -- or Python's clock less a ``timedelta`` "
+            "of a parameter -- ``naive_utcnow() - datetime.timedelta(minutes=timeLimit)`` is ``-60`` times "
+            "``timeLimit`` (``needs``).  ``None`` for any other amount: ``2 * timeLimit`` minutes, or an hour "
+            "beside it."
         ),
     )
     subject: str = Field(default="", description="A ``column`` side's subject, spelled as ``ConditionNode.subject``.")
@@ -2377,6 +2530,73 @@ class Waker(BaseModel):
             "handed rows at the value a reader asks about -- 1830 selects ``JediTaskSpec.status=defined``, so 1844 "
             "wakes the tasks 130 would take at ``defined``.  Not this statement: a write its own rows key is its "
             "mover's, on rows it took."
+        ),
+    )
+
+
+#: :attr:`RowFall.kept`: the way of the ``if`` the hand-on is in.
+FALL_BODY = "body"
+FALL_ELSE = "orelse"
+
+
+class RowFall(BaseModel):
+    """An ``if`` of a statement's row loop on the way to a hand-on -- the row, or a row a later statement of the
+    function names by it (:attr:`KeySource.name` of a ``rows`` source), put into what the function returns -- whose
+    other way puts nothing there: a row taking it ends its turn without being handed on (:attr:`ReadSiteNode.falls`).
+
+    ``getTasksToBeFinished_JEDI`` puts ``taskSpec``, packed from the rows of the statement at 1699 its loop names by
+    the row of 1644, into ``retTasks`` at 1704 and returns ``retTasks``.  ``if nRows == 1:`` at 1695 has no
+    ``else``: a task the lock statement changed no row of goes on to the next row, printing nothing.
+    """
+
+    line: int = Field(description="The ``if``'s line: the exit's ``fall@<line>``.")
+    kept: str = Field(description=f"{FALL_BODY!r} or {FALL_ELSE!r}: the way the hand-on is in.")
+    lines: list[int] = Field(
+        default_factory=list,
+        description="``[first, last]`` of the other way; empty where there is none (no ``else``): nothing runs.",
+    )
+    writes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``<subject>@<line>`` for each junction branch of the owner written on the other way, sorted: the "
+            "scouted task's ``JediTaskSpec.status@1673``.  What the row's turn did instead of handing it on."
+        ),
+    )
+
+
+class HandOnPrint(BaseModel):
+    """A print every way through a hand-on passes in the same turn of the row loop (:attr:`HandOn.sure_prints`)."""
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Its holes holding what the hand-on keys the row by -- the subscript's key of a ``map[key] = value`` put, "
+            "else the value put -- spelled so, with nothing binding it between the two in the turn, as "
+            ":attr:`SkeletonHole.expression` spells them: ``jediTaskID`` of ``got jediTaskID={jediTaskID} ...``."
+        ),
+    )
+
+
+class HandOn(BaseModel):
+    """A put, in a statement's row loop, of a value holding its rows into a name read after the loop or returned
+    (:attr:`ReadSiteNode.hand_ons`): where the loop hands a row on.
+
+    ``prepareTasksToBeFinished_JEDI``'s loop over the rows of the statement at 3741 puts
+    ``jediTaskIDstatusMap[jediTaskID] = taskstatus`` at 3767, the map read after the loop, and prints ``got
+    jediTaskID={jediTaskID} ...`` at 3768 on every way past it: a run's line names each task the statement handed
+    on.  Its loop over the rows of 3696 hands each on at 3702 and prints nothing in the turn.
+    """
+
+    line: int = Field(description="The put's line.")
+    into: str = Field(description="The name put into: ``jediTaskIDstatusMap``, ``retTasks``.")
+    sure_prints: list[HandOnPrint] = Field(
+        default_factory=list,
+        description=(
+            "The owner's prints every way through the put passes in the same turn of the innermost loop around it, "
+            "before or after it, read for a run that entered no handler (:func:`bamboo.codemap.panda.flow."
+            "passes_after`, :func:`~bamboo.codemap.panda.flow.passes_before`).  Empty: a row handed on there may "
+            "leave no line in the turn.  Sorted by line."
         ),
     )
 
@@ -2757,7 +2977,36 @@ class ReadSiteNode(BaseNode):
             "nothing at all. Empty is an answer -- most statements have no "
             "exit of their own -- so there is no coverage gate on this field, "
             "only the invariant that every line named falls inside ``region`` "
-            "or ``rows_handled``."
+            "or ``rows_handled``.\n\n"
+            "The rows are also in a list a loop over them copies each into, "
+            "and a loop over that list is a row loop too "
+            "(``getTasksToBeFinished_JEDI``'s ``taskStatList``).  And "
+            "``\"fall@<line>\"`` is an ``if`` of a row loop on the way to where "
+            "the row, or a row named by it, is put into what the function "
+            "returns, whose other way puts nothing: the row's turn ends "
+            "without it being handed on -- see ``falls``."
+        ),
+    )
+    falls: list[RowFall] = Field(
+        default_factory=list,
+        description=(
+            "Each ``fall@`` exit read whole: the ``if``, which of its ways "
+            "the hand-on is in, the lines of the other way and the arms "
+            "written there.  ``getTasksToBeFinished_JEDI@1644`` hands a task "
+            "on at ``retTasks.append(taskSpec)`` (1704), past ``if taskStatus "
+            "== \"scouted\"`` (its body sets the task running), ``if nRows "
+            "== 1`` and ``if resTS is not None`` (no ``else``: silent).  "
+            "Sorted by line."
+        ),
+    )
+    hand_ons: list[HandOn] = Field(
+        default_factory=list,
+        description=(
+            "Each put of its row loops that hands a row on (:class:`HandOn`) -- into a name the function returns, or "
+            "a container a statement after the loop reads, of a value holding its rows or under a key holding them "
+            "-- with the prints every way through it passes in the turn.  The same hand-ons are what ``falls`` are "
+            "read against.  A statement handing rows on with no sure print anywhere: ``hand_ons`` not empty and "
+            "every ``sure_prints`` empty.  Sorted by line."
         ),
     )
     rows_handled: list[int] = Field(
@@ -3304,7 +3553,20 @@ KEY_SELF_FIELD = "self_field"
 KEY_CONSTANT = "constant"
 KEY_ATTRIBUTE = "attribute"
 KEY_UNKNOWN = "unknown"
-KEY_KINDS = (KEY_ROWS, KEY_SEQUENCE, KEY_PARAMETER, KEY_SELF_FIELD, KEY_CONSTANT, KEY_ATTRIBUTE, KEY_UNKNOWN)
+#: And a read term's other side where it is a column of another table of the statement, compared by an order or
+#: ``<>`` (``tabT.jediTaskID>=tabA.min_jediTaskID``): *name* ``<table>.<column>``, a value no bind brings and no print
+#: of the statement's binds shows.
+KEY_JOINED = "joined"
+KEY_KINDS = (
+    KEY_ROWS,
+    KEY_SEQUENCE,
+    KEY_PARAMETER,
+    KEY_SELF_FIELD,
+    KEY_CONSTANT,
+    KEY_ATTRIBUTE,
+    KEY_UNKNOWN,
+    KEY_JOINED,
+)
 #: And where a way of a :class:`GuardFrom` or :class:`ParameterFrom`, read across calls, can end besides: an object
 #: a call builds of a corpus class (``JobSpec()``) or a handler catches (``except FileRegistrationError as e``), a
 #: module's name, a call neither placed nor gone through, a fetch whose rows no statement of the function reads.
@@ -3489,6 +3751,20 @@ class KeySource(BaseModel):
             "own function only: empty where the rows come through calls (*via*)."
         ),
     )
+    through_hand_ons: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``rows`` filled in the source's own function: the lines of the source statement's hand-ons "
+            "(:attr:`ReadSiteNode.hand_ons`) the key's value is drawn through -- a put into a name the value at the "
+            "fill is read from, back through the bindings reaching each read (an assignment's value, a ``for``'s "
+            "iterable), where a binding of the name live at the put reaches that read.  "
+            "``prepareTasksToBeFinished_JEDI``'s lock at 3888 is run by the ``jediTaskID`` of 3741's rows through "
+            "3767, not 3763: the set put into there is only tested.  Empty where the key is filled in the row loop "
+            "itself, or is drawn through no hand-on the map reads.  Read by data in the function only: a name only "
+            "tested is no way, every argument of a call the value goes through is, and a container's contents put "
+            "into another (``A.extend(B)``) are not followed."
+        ),
+    )
     via: list[str] = Field(
         default_factory=list,
         description=(
@@ -3514,6 +3790,8 @@ class KeySource(BaseModel):
     )
     #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
     _way: Optional[tuple] = PrivateAttr(default=None)
+    #: ``(func, value, statement)`` of the bind this source was read from in its own function, for *through_hand_ons*.
+    _drawn_from: Optional[tuple] = PrivateAttr(default=None)
 
 
 class HeldThrough(BaseModel):
@@ -3563,6 +3841,50 @@ class HeldThrough(BaseModel):
         description=(
             "How many of the way's *steps* are taken before the call: it is handed the end with "
             "``steps[:after_steps]`` -- ``json.loads(text['a'])`` 1, ``json.loads(text)['a']`` 0."
+        ),
+    )
+
+
+class HeldPrinted(BaseModel):
+    """A print of a function a :class:`HeldSource`'s way comes back from through a call of the corpus (one of
+    *route*), whose hole holds the value the call gives: what a reader of the run's records reads that value off.
+
+    The function's ``return`` gives the value as a name, and the print is on every way from the function's entry to
+    the ``return`` -- passed once it has printed --, with no binding of the name and no change in place of what it
+    holds between the two (:func:`bamboo.codemap.panda.changes.object_changes`).  ``getScoutJobData_JEDI`` prints
+    ``succeeded={scoutSucceeded} ... extra={str(extraInfo)}`` at 1140 and returns ``scoutSucceeded, returnMap,
+    extraInfo`` at 1141: the ways of ``setScoutJobData_JEDI``'s ``scoutSucceeded`` and ``extraInfo`` through the call
+    at 1169 have the holes 0 and 2.  A print on one side of an ``if`` only, after the ``return`` or in a loop, is not
+    one; nor is a hole of a message the print does not spell as an f-string of its own.
+    """
+
+    at: str = Field(description="``file:line`` of the call, as *route* spells it.")
+    statement: str = Field(description="``file:line`` of the print statement (:attr:`PrintStatement.line`).")
+    hole: int = Field(
+        description=(
+            "Which hole of the print's message holds it, counted from 0 as each row of the statement lists its "
+            "holes (:attr:`PrintRow.holes`).  A row a binding wrote may spell the hole otherwise -- ``True`` for "
+            "``scoutSucceeded``, the hole's line the binding's -- in the same place."
+        )
+    )
+    expression: str = Field(description="The hole's expression as the print's source spells it: ``str(extraInfo)``.")
+    steps: list[str] = Field(
+        default_factory=list,
+        description="The part of the call's value the hole holds, each step as applied (:attr:`HeldSource.steps`); "
+        "empty for the whole.",
+    )
+    through: list[HeldThrough] = Field(
+        default_factory=list,
+        description=(
+            "Each call outside the corpus the hole hands that part to, in the order run, as *through* says one: "
+            "``str`` for ``str(extraInfo)``, ``len`` (computed) for ``len(retPandaIDs)``."
+        ),
+    )
+    after_steps: int = Field(
+        default=0,
+        description=(
+            "How many of the way's *steps* are taken before the call's value, as :attr:`HeldThrough.after_steps` "
+            "counts: the steps after them are the caller's, from the call's value to the value read."
         ),
     )
 
@@ -3706,6 +4028,13 @@ class HeldSource(KeySource):
             "parameter's default where the request may lack the key -- and the send, the client's call, is the last "
             "of *route*.  ``job_api.kill``'s ``code`` is ``Client.kill_jobs``' ``code`` through ``HttpClient.post``, "
             "and ``None``: both sent.  False on a way a call of the corpus hands in."
+        ),
+    )
+    printed: list[HeldPrinted] = Field(
+        default_factory=list,
+        description=(
+            "On a GuardFrom's or ParameterFrom's way through a call of the corpus's return: each print of the callee "
+            "holding the value the call gives (:class:`HeldPrinted`), in the order the value went, as *route*."
         ),
     )
 
@@ -3863,6 +4192,14 @@ class KeyFrom(BaseModel):
         description=(
             "A term of a statement that reads rows (its read site's run): *writes* empty, no *object* nor *new_row*; "
             "*routes* as a write's.  Its sources say which rows the statement is asked for by."
+        ),
+    )
+    some_rows: bool = Field(
+        default=False,
+        description=(
+            "A read term (*reads*) a row the statement returns need not meet: one way of an ``OR`` -- "
+            "``getTasksToBeFinished_JEDI``'s ``tabT.jediTaskID>=tabA.min_jediTaskID OR tabT.jediTaskID IN (...)`` "
+            "-- under a ``NOT``, or one only some runs append.  False where every row it returns meets the term."
         ),
     )
     attr: str = Field(
@@ -4306,6 +4643,144 @@ class MessageRead(BaseModel):
     name: str = Field(description="The name it binds: ``task_id``.")
 
 
+class WriteBind(BaseModel):
+    """A column a write statement sets to a bind itself, and the bind: the printed map's entry of that key is the value
+    the column was written with."""
+
+    column: str = Field(
+        description="The column, as a junction's subject names it: ``JediTaskSpec.modificationTime``, ``T_TASK.status``."
+    )
+    bind: str = Field(description="The bind, the printed map's key: ``:updateTime``, ``:modificationTime``.")
+
+
+class WritePrint(BaseModel):
+    """Where a write statement's values print: a logging call of its function prints its text and the bind map it runs
+    with (:class:`PrintedBy`, the reading a read statement's prints have), so a run's line of that print holds the
+    values the statement ran with.
+
+    ``updateTask_JEDI`` logs ``sqlU + sql + comment + str(varMap)`` the line before it executes ``sqlU + sql +
+    comment`` with ``varMap``, the map holding the task's changed fields (``taskSpec.valuesMap(useSeq=False,
+    onlyChanged=True)``): a run's line says ``':modificationTime': datetime.datetime(...)``, the value the row's
+    ``modificationTime`` was written with -- the arm at 1441 or the one at 1443, whichever ran.
+    ``updateTaskStatusByContFeeder_JEDI`` sets ``modificationTime=:updateTime``, filled at 1352, 1373 or 1379 by the
+    branch: the printed ``:updateTime`` is the one the run wrote.  Said of the statement, not of an arm: which arm
+    filled an entry is the run's, and a reader needing the value needs only the statement's.
+
+    The map printed is the map executed (:class:`PrintedBy` holds only where nothing rebinds or changes it between),
+    and a bind's name in the text and its key in the map are one bind of that call, so the entry of *bind* is the
+    column's value.  A print ``before`` the execute says the statement was run with these values, not that it changed
+    a row: the row count (:attr:`Branch.count_prints`) and the lines after say that.  Where the map is an object's
+    ``valuesMap(onlyChanged=True)``, an attribute is in it only where it changed on the object, and so is its column in
+    the ``SET`` (``bindUpdateChangesExpression()``): an attribute's key missing from a run's line says the statement
+    did not write that column.
+    """
+
+    owner: str = Field(description="``file::name`` of the function running the write, as :attr:`KeyFrom.owner`.")
+    statement: int = Field(description="The line of the call running it, as :attr:`KeyFrom.statement`.")
+    table: str = Field(description="The table written, as the statement names it.")
+    printed_by: list[PrintedBy] = Field(description="The prints of its text and the map it runs with.")
+    binds: list[WriteBind] = Field(
+        default_factory=list,
+        description=(
+            "Each column the text sets to a bind itself (``status=:status``; not ``attemptNr=attemptNr+:inc``), and, "
+            "where the map is an object's (*object_map*), each attribute of its class the text does not spell, bound "
+            "by the key form its class's ``valuesMap`` stores (:func:`progress.spec_map_keys`).  Empty where neither "
+            "is read: the print is said, no value is."
+        ),
+    )
+    object_map: str = Field(
+        default="",
+        description="Where the map is an object's ``valuesMap(...)`` -- copied or bound -- the object as spelled: ``taskSpec``.",
+    )
+    only_changed: bool = Field(
+        default=False,
+        description="Whether that ``valuesMap`` is ``onlyChanged=True``: only the attributes changed are in the map.",
+    )
+    arms: dict[str, list[int]] = Field(
+        default_factory=dict,
+        description="The arms whose writes land at the statement, as :attr:`KeyFrom.writes` lists them.",
+    )
+
+
+class TurnKeeps(BaseModel):
+    """What an exit keeps a run from over one turn of a loop whose body holds it (:attr:`ExitKeeps.turns`): that loop
+    and every loop around it gone round once, every loop inside it as often as it may, and only the statements of its
+    body or ``else`` counted -- what a reader of a pass that is one turn of the loop needs.  ``TaskCommandoThread.runImpl``'s
+    ``break`` at 211 leaves the inner ``for iLoop``: over its own turn it keeps a run from no arm, over a turn of the
+    ``for`` at 123 around it from the arms another turn of the inner loop reaches (181, 197)."""
+
+    loop: int = Field(description="The line of the loop's header.")
+    arms: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.arms`, over the turn.")
+    prints: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.prints`, over the turn.")
+    calls: list[int] = Field(default_factory=list, description="As :attr:`ExitKeeps.calls`, over the turn.")
+
+
+class ExitKeeps(BaseModel):
+    """What one exit of a function keeps a run from (:mod:`bamboo.codemap.panda.exitkeeps`): the junction arms, the
+    prints and the calls into arms a run leaving there can no longer reach and could have reached had it gone on past
+    it (:func:`bamboo.codemap.panda.flow.kept_from`) -- a ``return`` or a raise over the call's pass, a ``continue`` or
+    a ``break`` over one turn of its loop; and the same over one turn of each loop holding it (*turns*).
+
+    A reader of a pass that ran none of a junction's arms asks why: an exit it may have left by keeps it from them,
+    or none does and a test on the way made the pass go another way.  ``setScoutJobData_JEDI``'s ``continue`` at 1185
+    keeps a run from the arm at 1187 (the turn's bind of a column), and no exit keeps it from the task's status
+    arms under the test at 1226; ``getTasksToBeFinished_JEDI``'s raise at 1666, caught by the ``except`` around the
+    loop that returns, keeps it from the count print at 1717.  A pass that is one turn of a loop -- its entry row's
+    print in the loop's body (:class:`PrintLoops`) -- reads the turn of that loop: an exit with no turn of it is not
+    in the loop's body, no way the pass can leave by (``TaskCommandoThread.runImpl``'s ``return`` at 121, before the
+    ``for`` at 123).
+
+    One per ``return``, ``raise``, ``continue`` and ``break`` of the function's own body, for every function holding a
+    junction's arm or a print -- an exit keeping a run from nothing too, every list empty: an exit not listed is one
+    not read.  The flow is path-insensitive on both sides: a list may leave out what the exit does keep a run from (a
+    way after the exit only an impossible run takes reaches it), and may hold what no run going on past the exit
+    could reach (only an impossible way does: the break at 211 over the ``for`` at 123 reaches 197 by a third turn of
+    ``for iLoop in range(2)``).  A listed line is a way the flow allows, not one the run's values allow.
+    """
+
+    owner: str = Field(description="``module::function``, the spelling a junction's owner and a read site's use.")
+    exit: str = Field(
+        description="``kind@line``, as :attr:`ReadSiteNode.exits` spells an exit: ``continue@1185``, ``raise@1666``."
+    )
+    arms: list[int] = Field(
+        default_factory=list,
+        description="The lines of the junction branches (:attr:`Branch.line`, :attr:`Branch.other_lines`) it keeps a "
+        "run from.",
+    )
+    prints: list[int] = Field(
+        default_factory=list,
+        description="The lines of the function's print statements (:class:`PrintStatement`) it keeps a run from.",
+    )
+    calls: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the function's calls it keeps a run from whose callee holds a junction's arm or reaches one "
+            "through the reach record: each line of a :class:`ReachCall` of the function's row whose *to* does -- "
+            "``AtlasProdTaskBrokerThread.runImpl``'s 633, ``setCloudToTasks_JEDI`` through ``JediTaskBuffer``.  "
+            "Empty where the build has no reach record."
+        ),
+    )
+    turns: list[TurnKeeps] = Field(
+        default_factory=list,
+        description=(
+            "One per loop whose body holds the exit, innermost first: what it keeps a run from over one turn of "
+            "that loop.  A ``continue``'s or ``break``'s first is its own loop's, the same as *arms*, *prints* and "
+            "*calls*; a ``return`` or raise in no loop has none."
+        ),
+    )
+
+
+class PrintLoops(BaseModel):
+    """The loops whose body holds one print statement, innermost first (:mod:`bamboo.codemap.panda.exitkeeps`): a
+    pass whose entry row is the print's line is one turn of the first, and reads each exit's turn of it
+    (:attr:`ExitKeeps.turns`).  One per print statement of a function :attr:`MapFragment.exit_keeps` reads that sits
+    in a loop's body; a print of such a function not listed sits in none."""
+
+    owner: str = Field(description="``module::function``, as :attr:`ExitKeeps.owner`.")
+    line: int = Field(description="The print statement's line (:attr:`PrintStatement.line`).")
+    loops: list[int] = Field(default_factory=list, description="The loops' header lines, innermost first.")
+
+
 class MessageEdge(BaseModel):
     """A message one run sends and the function another run processes it with (:mod:`bamboo.codemap.panda.messages`).
 
@@ -4332,6 +4807,17 @@ class MessageEdge(BaseModel):
     )
     receiver: str = Field(description="The function processing only this type, ``file::name``.")
     reads: list[MessageRead] = Field(default_factory=list, description="Where the receiver binds each key it reads.")
+    received_as: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Each payload key whose value the receiver names rows by, the columns of the terms it fills as the "
+            "tables' classes declare them, read from the records (:func:`bamboo.codemap.panda.messages."
+            "attach_received_as`): ``{\"taskid\": [\"JediTaskSpec.jediTaskID\"]}``, ``getTaskWithID_JEDI``'s "
+            "``jediTaskID=:jediTaskID`` filled with ``int(msg_dict[\"taskid\"])``.  A message carries its values "
+            "unchanged, so the column is the one the sent value names a row of too; *columns* is read on the "
+            "sender's side, on its own.  A key left out where no term is filled with the value itself."
+        ),
+    )
 
 
 class MapFragment(BaseModel):
@@ -4435,6 +4921,27 @@ class MapFragment(BaseModel):
         description=(
             "Each send of a message of a literal type and the function taking only that type "
             "(:func:`bamboo.codemap.panda.messages.edges`): a run's hand-on to another run, beside reach."
+        ),
+    )
+    exit_keeps: list[ExitKeeps] = Field(
+        default_factory=list,
+        description=(
+            "What each exit of a function holding arms or prints keeps a run from (:class:`ExitKeeps`), in the order "
+            "of the files and lines."
+        ),
+    )
+    write_prints: list[WritePrint] = Field(
+        default_factory=list,
+        description=(
+            "Each write statement whose function prints its text and the bind map it runs with, and the column each "
+            "bind writes (:class:`WritePrint`), in the order of the files and lines."
+        ),
+    )
+    print_loops: list[PrintLoops] = Field(
+        default_factory=list,
+        description=(
+            "The loops holding each print statement of a function :attr:`exit_keeps` reads (:class:`PrintLoops`), in "
+            "the order of the files and lines."
         ),
     )
     declaration_yields: dict[str, int] = Field(
@@ -5892,6 +6399,11 @@ class SkeletonHole(BaseModel):
     against its expression -- ``prodSourceLabel`` out of ``{str(e)} :
     {self.job.prodSourceLabel} in {self.job.jobStatus}`` -- which the pattern
     alone cannot tell it.
+
+    *columns*, *stops*, *listed* and *aggregate* are read on the map's own rows
+    only, the holes of :attr:`FunctionPrintsNode.statements`
+    (:func:`bamboo.codemap.panda.runs.attach`): a skeleton ``trace.walk`` makes
+    leaves them empty, and an empty *columns* there says nothing of the value.
     """
 
     expression: str = Field(description="What fills the hole, as the source spells it.")
@@ -6408,6 +6920,16 @@ class ParameterFrom(BaseModel):
     parameter: str
     sources: list[HeldSource] = Field(default_factory=list)
     stops: list[KeyStop] = Field(default_factory=list)
+    declared: Optional[HandedParameter] = Field(
+        default=None,
+        description=(
+            "What the function's own signature says of the parameter -- the annotation as written, and whether it "
+            "admits ``None`` -- read as :attr:`Branch.handed` reads a written parameter's "
+            "(:func:`bamboo.codemap.values.declared`): ``ContentsFeederThread.__init__``'s ``pid: str`` excludes it, "
+            "so a way through it holds no ``None`` as far as the annotation goes.  ``None`` for a ``*`` or ``**`` "
+            "parameter."
+        ),
+    )
 
 
 #: What a :class:`WriteFrom` reads of its arm: the object the arm writes a field of, or the value a passthrough arm
@@ -6773,6 +7295,16 @@ class RunKey(BaseModel):
     """
 
     expression: str = Field(description="What fills the hole, as source; empty for a time stamp.")
+    parameter: str = Field(
+        default="",
+        description=(
+            "``<function>.<parameter>`` where the hole is the function's parameter as the call hands it, bound again "
+            "on no way to the mark (:func:`bamboo.codemap.values.parameter_as_handed`): "
+            "``reactivatePendingTasks_JEDI``'s ``limit={timeLimit}`` is ``reactivatePendingTasks_JEDI.timeLimit``, "
+            "as :attr:`ConditionValue.needs` and :attr:`HandedParameter.name` spell it, so a value a run's mark "
+            "prints fills what an amount waits for.  Empty for any other value."
+        ),
+    )
     columns: list[str] = Field(
         default_factory=list,
         description=(
@@ -7601,8 +8133,17 @@ class StatementExit(BaseModel):
     been asking the map about.
     """
 
-    kind: str = Field(description="``continue`` | ``break`` | ``return`` | ``raise`` | ``except``")
+    kind: str = Field(
+        description=(
+            "``continue`` | ``break`` | ``return`` | ``raise`` | ``except`` | ``fall`` -- the last an ``if`` whose "
+            "other way does not hand the row on (:class:`RowFall`); its *line* is the ``if``'s."
+        )
+    )
     line: int = Field(default=0, description="Where the exit is taken.")
+    writes: list[str] = Field(
+        default_factory=list,
+        description="A ``fall``'s :attr:`RowFall.writes`: the arms written on the way that does not hand the row on.",
+    )
     no_rows: bool = Field(
         default=False,
         description=(
@@ -7896,6 +8437,10 @@ class StatementReading(BaseModel):
             "what the code says on the way out.  Empty for most statements, "
             "which is an answer."
         ),
+    )
+    falls: list[RowFall] = Field(
+        default_factory=list,
+        description=":attr:`ReadSiteNode.falls`: the ``fall`` exits read whole, which the walk reads the blocks of.",
     )
     crosses_to: list[str] = Field(
         default_factory=list,

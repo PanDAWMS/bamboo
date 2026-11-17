@@ -1638,6 +1638,7 @@ def with_schema(
     _terms_read.cache_clear()
     select_items.cache_clear()
     equalities.cache_clear()
+    joined_terms.cache_clear()
     try:
         yield
     finally:
@@ -1656,9 +1657,10 @@ def with_schema(
         _terms_read.cache_clear()
         select_items.cache_clear()
         equalities.cache_clear()
+        joined_terms.cache_clear()
 
 
-_CREATE_TABLE = re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
+_CREATE_TABLE =re.compile(r'CREATE\s+(?:GLOBAL\s+TEMPORARY\s+)?TABLE\s+"(\w+)"\."(\w+)"\s*\(', re.IGNORECASE)
 _COLUMN_DEFINITION = re.compile(r'^\s*"(\w+)"\s+[A-Za-z]')
 _COLUMN_TYPE = re.compile(r'^\s*"(\w+)"\s+([A-Za-z]\w*)')
 
@@ -2122,6 +2124,79 @@ def _filtering(column: exp.Column) -> Optional[exp.Expression]:
         # join cannot match; an outer join keeps them.
         return holder.args.get("on")
     return None
+
+
+class JoinedTerm(NamedTuple):
+    """A column of a table a statement reads compared, by an order or ``<>``, with a column of another of its tables
+    -- ``tabT.jediTaskID>=tabA.min_jediTaskID`` -- read from the column's side (:func:`joined_terms`)."""
+
+    table: str
+    column: str
+    #: The comparison read from *column*'s side: ``>=`` from ``tabT.jediTaskID`` is ``<=`` from the other.
+    op: str
+    other_table: str
+    other_column: str
+    #: Under no ``OR`` nor ``NOT`` of its clause: every row the statement returns meets it.
+    every_row: bool
+
+
+#: The comparisons :func:`joined_terms` reads, each as written and as read from the other side.
+_JOINED_OPS: dict[type, tuple[str, str]] = {
+    exp.GT: (">", "<"),
+    exp.GTE: (">=", "<="),
+    exp.LT: ("<", ">"),
+    exp.LTE: ("<=", ">="),
+    exp.NEQ: ("<>", "<>"),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def joined_terms(sql: str) -> tuple[JoinedTerm, ...]:
+    """Each term on *sql*'s own rows (:data:`ROW`, read) comparing a column of one table with a column of another --
+    or of the same table under another alias -- by an order or ``<>``, once from each side.
+
+    Not a :func:`terms` term, which a value the statement is given decides: no bind brings this one's other side,
+    and no print of the statement's binds shows it -- ``getTasksToBeFinished_JEDI``'s ``tabT.jediTaskID>=
+    tabA.min_jediTaskID``.  An equality is left out: it is a join, how two tables meet, read as one
+    (:func:`equalities`).
+    """
+    tree = parsed(sql).tree
+    if tree is None:
+        return ()
+    found: list[JoinedTerm] = []
+    scopes, root = _scopes(tree)
+    for scope, verb, kind in scopes:
+        if verb != "read" or kind != ROW:
+            continue
+        for column in _own_columns(scope):
+            comparison = column.parent
+            ops = _JOINED_OPS.get(type(comparison))
+            # Read from the left side, once; the right side's reading is the mirror.
+            if comparison is None or ops is None or comparison.this is not column or _filtering(column) is None:
+                continue
+            other = comparison.expression
+            if not isinstance(other, exp.Column) or column.table == other.table:
+                continue
+            if any(_NAMED_HOLE.search(one.name) or one.name.lower() in _PSEUDO_COLUMNS for one in (column, other)):
+                continue
+            mine, why = _owner(column, scope, root)
+            theirs, why_other = _owner(other, scope, root)
+            if why or why_other:
+                continue
+            every = _every_row(comparison)
+            found.append(JoinedTerm(mine[0], column.name, ops[0], theirs[0], other.name, every))
+            found.append(JoinedTerm(theirs[0], other.name, ops[1], mine[0], column.name, every))
+    return tuple(found)
+
+
+def _every_row(node: exp.Expr) -> bool:
+    """Whether no ``OR`` nor ``NOT`` stands between *node* and the clause it is a term of."""
+    walk = node.parent
+    while walk is not None and not isinstance(walk, (exp.Where, exp.Join, exp.Select)):
+        if isinstance(walk, (exp.Or, exp.Not)):
+            return False
+        walk = walk.parent
+    return True
 
 
 @functools.lru_cache(maxsize=None)

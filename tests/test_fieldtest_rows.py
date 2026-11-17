@@ -822,9 +822,11 @@ async def test_a_jobs_rows_file_says_its_files_again_by_the_link_that_named_them
     assert (files["as_of"], files["clock"]) == ("2026-10-13 10:00:05", "client")
     assert "table" not in files
     log = out["statuslogs"]["JobSpec"]
-    assert log["key"] == "JobSpec.PandaID"
-    assert log["by_key"] == {str(PID): out["statuslog"]["states"]}
-    assert (log["as_of"], log["retained_from"]) == (
+    assert log["key"] == "JobSpec.PandaID" and list(log["by_key"]) == [str(PID)]
+    mine = log["by_key"][str(PID)]
+    assert mine["states"] == out["statuslog"]["states"]
+    assert (mine["source"], mine["as_of"], mine["retained_from"]) == (
+        out["statuslog"]["source"],
         out["statuslog"]["as_of"],
         out["statuslog"]["retained_from"],
     )
@@ -850,12 +852,11 @@ async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_
     assert jobs[0]["rows"][0]["jobStatus"] == "finished"
     logs = out["statuslogs"]
     assert logs["JediTaskSpec"]["key"] == "JediTaskSpec.jediTaskID"
-    assert [s["status"] for s in logs["JediTaskSpec"]["by_key"][str(TID)]] == [
-        "running",
-        "finished",
-    ]
+    task = logs["JediTaskSpec"]["by_key"][str(TID)]
+    assert [s["status"] for s in task["states"]] == ["running", "finished"]
     assert {
-        k: [s["status"] for s in v] for k, v in logs["JobSpec"]["by_key"].items()
+        k: [s["status"] for s in v["states"]]
+        for k, v in logs["JobSpec"]["by_key"].items()
     } == {
         "11": ["running", "finished"],
         "12": ["running", "failed"],

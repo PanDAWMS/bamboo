@@ -2010,7 +2010,7 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     """The time a bind holds, read through the write that reaches it, and the logging calls a record can be cut by.
 
     ``timeLimit`` is written twice and the bind reads the second; the locked
-    time waits for the caller's ``time_limit``.  Of the three prints, two
+    time waits for the caller's ``time_limit``, 60 seconds back a unit of it.  Of the three prints, two
     hold the executed text and map -- one whole, one less its comment and
     after the ``execute`` -- and the third prints another map.
     """
@@ -2049,11 +2049,22 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     assert set(trees) == {"modificationTime<:t", "lockedTime IS NULL OR lockedTime<:l"}
     (limit,) = trees["modificationTime<:t"].items[0].items
     (value,) = limit.values
-    assert (limit.node, limit.op, value.base, value.offset_seconds) == ("compare", "<", "naive_utcnow", -604800.0)
+    assert (limit.node, limit.op, value.base, value.offset_seconds, value.scale_seconds) == (
+        "compare",
+        "<",
+        "naive_utcnow",
+        -604800.0,
+        None,
+    )
     locked = trees["lockedTime IS NULL OR lockedTime<:l"]
     assert [branch.items[0].node for branch in locked.items] == ["null", "compare"]
     (waits,) = locked.items[1].items[0].values
-    assert (waits.base, waits.offset_seconds, waits.needs) == ("naive_utcnow", None, ["pick.time_limit"])
+    assert (waits.base, waits.offset_seconds, waits.needs, waits.scale_seconds) == (
+        "naive_utcnow",
+        None,
+        ["pick.time_limit"],
+        -60.0,
+    )
     assert [(one.line, one.where, one.text, one.lead, one.gap) for one in statement.printed_by] == [
         (12, "before", "whole", "", ""),
         (14, "after", "without comment", "running sql: ", " "),
@@ -3909,3 +3920,106 @@ def test_none_is_left_out_of_a_containers_union_for_its_element(tmp_path):
     calls = _calls(_tree(tmp_path, m=_OPTIONAL_CONTAINERS))
     for text in ("spec.check", "other.check", "others[0].check", "by_name['x'].check"):
         assert _where(_placed(calls, "m", "run", text)) == [("Spec", "check")], text
+
+
+def test_an_arm_the_constants_of_a_route_rule_out_names_the_route(tmp_path):
+    """``getTaskWithID_JEDI``'s shape: ``lockedBy`` is written under ``if lock:``, so a route handing ``lock`` the
+    default ``False`` -- the facade's own default, or a literal -- never runs that arm, and says so
+    (:func:`sqlwrite.routes_ruling_out`, read into ``Branch.not_run_on``); one handing a caller's parameter may run it.
+    The arm outside the test runs on every route."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    roots = _tree(
+        tmp_path,
+        db=(
+            "def get_task(task, task_id, lock=False, pid=None):\n"
+            "    if lock:\n"
+            "        task.lockedBy = pid\n"
+            "    task.status = 'x'\n"
+        ),
+        tb=("from pkg.db import get_task\n\ndef forward(task, task_id, lock=False, pid=None):\n"
+            "    return get_task(task, task_id, lock, pid)\n"),
+        main=(
+            "from pkg.db import get_task\n"
+            "from pkg.tb import forward\n"
+            "\n"
+            "def feed(task, real_run, pid):\n    forward(task, 1, real_run, pid)\n"
+            "\n"
+            "def peek(task):\n    forward(task, 1)\n"
+            "\n"
+            "def direct(task):\n    get_task(task, 2, False, None)\n"
+        ),
+    )
+    calls = _calls(roots)
+    func = _function(calls, "db", "get_task")
+    locked, status = sqlwrite.routes_ruling_out(calls, "pkg/db.py", func, [(3,), (4,)])
+
+    assert sorted(locked) == [["pkg/main.py:11"], ["pkg/tb.py:4", "pkg/main.py:8"]]
+    assert status == []
+
+
+_NESTED_SCOPES = '''
+import os
+
+
+def outer(a, b=lambda x: x + 1):
+    if a:
+        def inner(c):
+            return [c for c in range(3)]
+    else:
+        class Inner:
+            def method(self):
+                return self
+    try:
+        def inner(c):
+            return c
+    except ValueError:
+        pass
+    key = sorted([a, b], key=lambda one: one)
+    return inner, key
+
+
+class Top:
+    attr = 1
+
+    def run(self):
+        return outer(self.attr)
+'''
+
+
+def _own_nodes_walked(scope):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        yield child
+        yield from _own_nodes_walked(child)
+
+
+def _bound_defs_walked(scope):
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            yield child
+        elif not isinstance(child, ast.Lambda):
+            yield from _bound_defs_walked(child)
+
+
+_ASKED = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.If, ast.Try, ast.For)
+
+
+@pytest.mark.parametrize(
+    "source", [_NESTED_SCOPES, Path(calls_mod.__file__).read_text()], ids=["nested", "calls-module"]
+)
+def test_a_scopes_own_nodes_and_defs_read_once_are_what_walking_it_gives_in_its_order(source):
+    """:func:`own_nodes` and :func:`bound_defs` keep what they read of a scope: the same nodes, in the same order, as
+    walking the scope gives -- on the first ask, and on the next, from what was kept.  A statement that is no scope is
+    read each time."""
+    tree = ast.parse(source)
+    asked = [node for node in ast.walk(tree) if isinstance(node, _ASKED)]
+    assert len(asked) > 5
+    for _ in range(2):
+        for node in asked:
+            assert [id(one) for one in calls_mod.own_nodes(node)] == [id(one) for one in _own_nodes_walked(node)]
+            assert [id(one) for one in calls_mod.bound_defs(node)] == [id(one) for one in _bound_defs_walked(node)]
+    if source == _NESTED_SCOPES:
+        (outer,) = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"]
+        assert [one.name for one in calls_mod.bound_defs(outer)] == ["inner", "Inner", "inner"]

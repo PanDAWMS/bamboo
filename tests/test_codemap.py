@@ -27,6 +27,7 @@ from bamboo.codemap.models import (
     KEY_HANDED,
     KEY_KEPT,
     KEY_NO_USE,
+    KEY_PARAMETER,
     KEY_RETURNED,
     REPORTS_ROWS_CHANGED,
     RESULT_AGGREGATE,
@@ -40,11 +41,17 @@ from bamboo.codemap.models import (
     EntryPoint,
     EnumerationWrite,
     FilterStageNode,
+    FunctionPrintsNode,
+    HeldSource,
+    HeldThrough,
     JunctionNode,
     KeyFrom,
+    KeySource,
     LogSiteNode,
     LoopCutNode,
     MapFragment,
+    MessageEdge,
+    ParameterFrom,
     ReadingStop,
     ReadSiteNode,
     RowKeySource,
@@ -4836,6 +4843,34 @@ def test_a_time_a_statement_writes_is_a_clock_plus_an_offset():
     assert amounts["frozenTime"] == [("bind", "naive_utcnow", -21600.0)]
     assert amounts["startTime"] == [None]
     assert amounts["nFiles"] == [None]
+
+
+def test_a_bind_filled_with_a_parameter_as_handed_says_what_its_signature_says_of_none():
+    """``varMap[':lockedBy'] = pid`` under ``pid: str | None = None`` writes the caller's ``pid``, which the signature
+    says may be ``None`` (:attr:`Branch.handed`), so the arm may write ``NULL``; ``newStatus: str`` says it is a
+    text.  The database's clock is no parameter."""
+    source = (
+        "class M:\n"
+        "    def f(self, jediTaskID: int, newStatus: str, pid: str | None = None):\n"
+        "        sqlU = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status,lockedBy=:lockedBy,'\n"
+        "        sqlU += 'lockedTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID '\n"
+        "        varMap = {}\n"
+        "        varMap[':jediTaskID'] = jediTaskID\n"
+        "        varMap[':status'] = newStatus\n"
+        "        varMap[':lockedBy'] = pid\n"
+        "        self.cur.execute(sqlU + comment, varMap)\n"
+    )
+    _s, junctions, _c, _u, _conf, _a = _sql_extract(source)
+    handed = {
+        j.subject.split(".")[-1]: [
+            None if b.handed is None else (b.handed.name, b.handed.annotation, b.handed.none) for b in j.branches
+        ]
+        for j in junctions
+    }
+
+    assert handed["status"] == [("f.newStatus", "str", "excludes")]
+    assert handed["lockedBy"] == [("f.pid", "str | None", "admits")]
+    assert handed["lockedTime"] == [None]
 
 
 def test_a_bind_filled_with_a_non_string_constant_is_settled():
@@ -10666,6 +10701,35 @@ def test_the_branch_where_the_rows_did_come_back_is_not_a_no_rows_exit():
     # Neither exit: the ``break`` is in the branch where the rows arrived, and
     # the loop over them holds nothing that leaves it.
     assert node.exits == []
+
+
+def test_a_test_of_what_a_row_loop_puts_aside_is_not_a_no_rows_exit():
+    """``if taskID in checked: continue`` asks whether this row was seen before, not whether rows came.
+
+    ``checkAllEventsDone`` and five other statements put each row's ID into a set as they go, to skip repeats.  The
+    set holds rows, and a loop over it would be over them; a test of it inside the loop filling it is about this row.
+    """
+    source = (
+        "class TaskModule:\n"
+        "    def sweep(self):\n"
+        "        varMap = {}\n"
+        "        varMap[':status'] = 'pending'\n"
+        "        sqlA = f'SELECT jediTaskID FROM {schema}.JEDI_Tasks '\n"
+        "        sqlA += 'WHERE status=:status '\n"
+        "        self.cur.execute(sqlA + comment, varMap)\n"
+        "        resT = self.cur.fetchall()\n"
+        "        checked = set()\n"
+        "        for (taskID,) in resT:\n"
+        "            if taskID in checked:\n"
+        "                continue\n"
+        "            checked.add(taskID)\n"
+        "            self.doIt(taskID)\n"
+    ) + _EXIT_TAIL
+    _modules, nodes = _read_nodes(source)
+
+    (node,) = [n for n in nodes if n.anchor.line_start == 7]
+    assert node.exits == ["continue@12"]
+    assert node.rows_handled == [10, 14]
 
 
 def test_the_rows_are_followed_to_the_fetch_that_binds_them():
@@ -20412,6 +20476,7 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
             "column_unread": "",
             "same_rows": False,
             "never_at": [],
+            "through_hand_ons": [],
             "via": [],
             "reaches": [],
             "reaches_open": [],
@@ -20495,6 +20560,359 @@ def test_a_text_run_from_two_places_with_its_map_built_anew_is_a_key_record_for_
             [("rows", site[at("execute(sqlR")], at("# KEY R"))],
         ),
     ]
+
+
+#: ``getTasksToBeFinished_JEDI``'s pick: a term against another table's column, ``OR``-ed with an ``IN`` list only
+#: some runs append, beside terms every row meets.
+_PICKED = '''
+class TaskModule:
+    def getTasksToBeFinished_JEDI(self, vo, target_tasks=None):
+        varMap = {}
+        varMap[":status1"] = "prepared"
+        sqlRT = "SELECT tabT.jediTaskID,tabT.status "
+        sqlRT += "FROM ATLAS_PANDA.JEDI_Tasks tabT,ATLAS_PANDA.JEDI_AUX_Status_MinTaskID tabA "
+        sqlRT += "WHERE tabT.status=tabA.status "
+        or_taskids_sql = ""
+        if target_tasks:
+            or_taskids_sql = "OR tabT.jediTaskID IN (:jediTaskID1) "
+            varMap[":jediTaskID1"] = target_tasks
+        sqlRT += f"AND (tabT.jediTaskID>=tabA.min_jediTaskID {or_taskids_sql}) "
+        sqlRT += "AND tabT.status IN (:status1) AND tabT.vo=:vo "
+        varMap[":vo"] = vo
+        self.cur.execute(sqlRT + comment, varMap)
+'''
+
+
+def test_a_read_term_a_row_need_not_meet_or_against_another_table_says_so(tmp_path):
+    """The pick's ``tabT.jediTaskID IN (...)`` is a way of an ``OR``: a record whose rows need not meet it
+    (:attr:`KeyFrom.some_rows`), its bind read as any other.  ``tabT.jediTaskID>=tabA.min_jediTaskID`` is compared
+    with another table's column, which no bind brings: a record from each side, the other column its source
+    (:data:`KEY_JOINED`).  ``tabT.status=tabA.status`` is a join and gets none; ``vo=:vo`` every row meets."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _PICKED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    found = sorted(
+        (one.table, one.term, one.some_rows, sorted((s.kind, s.name) for s in one.sources))
+        for one in froms
+        if one.reads
+    )
+
+    assert found == [
+        (
+            "JEDI_AUX_Status_MinTaskID",
+            "min_jediTaskID<=JEDI_Tasks.jediTaskID",
+            True,
+            [("joined", "JEDI_Tasks.jediTaskID")],
+        ),
+        ("JEDI_Tasks", "jediTaskID=:jediTaskID1", True, [("parameter", "target_tasks")]),
+        (
+            "JEDI_Tasks",
+            "jediTaskID>=JEDI_AUX_Status_MinTaskID.min_jediTaskID",
+            True,
+            [("joined", "JEDI_AUX_Status_MinTaskID.min_jediTaskID")],
+        ),
+        ("JEDI_Tasks", "status=:status1", False, [("constant", "'prepared'")]),
+        ("JEDI_Tasks", "vo=:vo", False, [("parameter", "vo")]),
+    ]
+
+
+#: ``getTasksToBeFinished_JEDI``'s shape: the rows copied into a list, committed, and worked through in a loop over
+#: the copy, which hands a task on only past three tests.
+_HANDED_ON = '''
+class TaskModule:
+    def getTasksToBeFinished_JEDI(self, vo, pid):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRT = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=:lockedBy WHERE jediTaskID=:jediTaskID "
+        sqlTS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE jediTaskID=:jediTaskID "
+        sqlSC = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlRT + comment, varMap)  # PICK
+        resList = self.cur.fetchall()
+        retTasks = []
+        taskStatList = []
+        for jediTaskID, taskStatus in resList:  # COPY
+            taskStatList.append((jediTaskID, taskStatus))
+        for jediTaskID, taskStatus in taskStatList:
+            if taskStatus == "skip":
+                continue  # SKIP
+            if taskStatus == "scouted":  # SCOUTED
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "running"  # RUNNING
+                self.cur.execute(sqlSC + comment, varMap)
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":lockedBy"] = pid
+                self.cur.execute(sqlLK + comment, varMap)
+                nRows = self.cur.rowcount
+                if nRows == 1:  # LOCKED
+                    varMap = {}
+                    varMap[":jediTaskID"] = jediTaskID
+                    self.cur.execute(sqlTS + comment, varMap)
+                    resTS = self.cur.fetchone()
+                    if resTS is not None:  # FOUND
+                        taskSpec = JediTaskSpec()
+                        taskSpec.pack(resTS)
+                        retTasks.append(taskSpec)  # HAND
+        return retTasks  # END
+'''
+
+
+def test_a_row_worked_through_in_a_copy_and_not_handed_on_past_a_test_exits_there(tmp_path):
+    """The rows are copied into ``taskStatList`` and worked through in the loop over it: its ``continue`` is an exit,
+    and the loop is where they are handled.  A task is handed on where ``retTasks``, which the function returns, is
+    given ``taskSpec``, packed from the rows of the statement the row names; each test on the way whose other way
+    hands nothing on is a fall (:attr:`ReadSiteNode.falls`): the scouted task is set running instead, a lock that
+    changed no row and a task no longer there go on in silence."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_ON})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _HANDED_ON.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (picked,) = [site for site in sites if site.anchor.line_start == at("# PICK")]
+    assert picked.rows_handled == [at("# COPY"), at("# HAND")]
+    assert picked.exits == sorted(
+        [f"continue@{at('# SKIP')}", f"fall@{at('# SCOUTED')}", f"fall@{at('# LOCKED')}", f"fall@{at('# FOUND')}"]
+    )
+    assert [(one.line, one.kept, one.lines, one.writes) for one in picked.falls] == [
+        # ``status`` is the column of more than one spec here: the subject is spelled by its table.
+        (
+            at("# SCOUTED"),
+            "orelse",
+            [at("# SCOUTED") + 1, at("# RUNNING") + 1],
+            [f"JEDI_Tasks.status@{at('# RUNNING')}"],
+        ),
+        (at("# LOCKED"), "body", [], []),
+        (at("# FOUND"), "body", [], []),
+    ]
+    # The copy into ``taskStatList`` is worked through again by a row loop: no hand-on.
+    assert [(one.line, one.into) for one in picked.hand_ons] == [(at("# HAND"), "retTasks")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s shape: two statements' rows put into one map read after the loops, the second's
+#: past a test and with a print after the put; a bind map filled in the loop and bound again before it is read; a
+#: nested function reading the map, which runs elsewhere.
+_HANDED_INTO = '''
+class TaskModule:
+    def prepare(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND walltimeUnit IS NULL "
+        sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET assessmentTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID "
+        self.cur.execute(sqlRS + comment, varMap)  # RS
+        resList = self.cur.fetchall()
+        statusMap = {}
+        for jediTaskID, taskStatus in resList:
+            statusMap[jediTaskID] = taskStatus  # PUT1
+
+        def seen(task):
+            return task in statusMap
+
+        varMap = {}
+        varMap[":vo"] = vo
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        for jediTaskID, taskstatus in resList:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID  # BIND
+            self.cur.execute(sqlLK + comment, varMap)
+            if jediTaskID not in statusMap:  # NEW
+                statusMap[jediTaskID] = taskstatus  # PUT2
+                tmpLog.debug(f"got jediTaskID={jediTaskID} for avalanche")  # GOT
+        varMap = {}
+        tmpLog.debug(str(varMap))
+        return list(statusMap.keys())
+'''
+
+
+def test_a_row_put_into_a_map_read_after_the_loop_is_handed_on_with_the_prints_every_way_through_it_passes(tmp_path):
+    """A row loop hands a row on where it puts it, or puts under its key, into a name the function returns or a
+    statement after the loop reads (:attr:`ReadSiteNode.hand_ons`): ``statusMap`` at PUT1 and PUT2, not the bind map
+    ``varMap``, bound again before the read after the loop.  ``got jediTaskID=...`` follows PUT2 on every way and
+    names the key it puts under (:attr:`HandOn.sure_prints`); PUT1 has no print in its turn.  The test before PUT2,
+    whose other way hands nothing on, is a fall."""
+    from bamboo.codemap import trace
+
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_INTO})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    prints = [
+        FunctionPrintsNode(
+            name=f"m:{found.owner}",
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            owner=found.owner,
+            cls=found.cls,
+            function=found.func.name,
+            count=len(found.statements),
+            statements=found.statements,
+            anchor=Anchor(package="pandaserver", file=found.file, line_start=found.func.lineno),
+        )
+        for found in trace.function_prints({"pandaserver": tmp_path / "pandaserver"}, [rel])
+    ]
+    assert sqlwrite.attach_hand_on_prints(sites, prints, modules) == 1
+    lines = _HANDED_INTO.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    by_line = {site.anchor.line_start: site for site in sites}
+    first, second = by_line[at("# RS")], by_line[at("# EA")]
+    assert [(one.line, one.into, one.sure_prints) for one in first.hand_ons] == [(at("# PUT1"), "statusMap", [])]
+    assert [
+        (one.line, one.into, [(sure.line, sure.holes) for sure in one.sure_prints]) for one in second.hand_ons
+    ] == [(at("# PUT2"), "statusMap", [(at("# GOT"), ["jediTaskID"])])]
+    assert [(one.line, one.kept) for one in second.falls] == [(at("# NEW"), "body")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s turn at 3757-3768: one way sets a flag the row is handed on under after the
+#: ``if``s, another hands it on to a second name and sets the flag too.
+_HANDED_LATER = '''
+class TaskModule:
+    def trigger(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        statusMap = {}
+        started = set()
+        for jediTaskID, taskstatus in resList:
+            to_trigger = False
+            if taskstatus == "scouting":  # SCOUT
+                to_trigger = True
+            elif taskstatus == "running":  # RUN
+                started.add(jediTaskID)
+                to_trigger = True
+            if to_trigger:  # TRIGGER
+                statusMap[jediTaskID] = taskstatus
+        return statusMap, started
+'''
+
+
+def test_an_if_whose_other_way_leads_on_to_a_later_hand_on_is_no_fall(tmp_path):
+    """The scouting way holds no hand-on, but sets ``to_trigger`` and goes on to the put under ``if to_trigger:``: a
+    row taking it is handed on, so ``if taskstatus == "scouting"`` is no fall; nor is the ``elif``, whose way past it
+    goes on to the same put as the flow reads it.  ``if to_trigger:`` is: past it the turn ends with nothing put."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _HANDED_LATER})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _HANDED_LATER.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (site,) = [one for one in sites if one.anchor.line_start == at("# EA")]
+    assert [one.into for one in site.hand_ons] == ["started", "statusMap"]
+    assert [(one.line, one.kept) for one in site.falls] == [(at("# TRIGGER"), "body")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s three selections at 3696-3794: two put their tasks into one map, whose keys the
+#: lock after them is run by; the second also puts some into a set the later loop only tests; the second's own loop
+#: locks each row by its key.
+_KEY_THROUGH = '''
+class TaskModule:
+    def prepare(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlRS + comment, varMap)  # RS
+        resList = self.cur.fetchall()
+        statusMap = {}
+        scoutOnly = set()
+        for jediTaskID, taskStatus in resList:
+            statusMap[jediTaskID] = taskStatus  # PUT1
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND walltimeUnit IS NULL "
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        for jediTaskID, taskstatus in resList:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            sqlAT = "UPDATE ATLAS_PANDA.JEDI_Tasks SET assessmentTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlAT + comment, varMap)  # AT
+            if taskstatus == "running":
+                scoutOnly.add(jediTaskID)  # ONLY
+            statusMap[jediTaskID] = taskstatus  # PUT2
+        idList = list(statusMap.keys())
+        for jediTaskID in idList:
+            if jediTaskID in scoutOnly:
+                continue
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=NULL WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlLK + comment, varMap)  # LK
+'''
+
+
+def test_a_key_from_a_statement_s_rows_says_which_of_its_hand_ons_the_value_is_drawn_through(tmp_path):
+    """The lock at LK is run by ``jediTaskID`` from the keys of ``statusMap``: RS's rows come through PUT1, EA's
+    through PUT2 and not ONLY, whose set the later loop only tests (:attr:`KeySource.through_hand_ons`).  AT, in EA's
+    own row loop, is keyed by the row itself: through none."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEY_THROUGH})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _KEY_THROUGH.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (early,) = [one for one in sites if one.anchor.line_start == at("# EA")]
+    assert [one.line for one in early.hand_ons] == [at("# ONLY"), at("# PUT2")]
+
+    def through(line: int) -> list[tuple[int, list[int]]]:
+        (key_from,) = [one for one in froms if one.statement == line and one.term == "jediTaskID=:jediTaskID"]
+        return sorted((one.site_line, one.through_hand_ons) for one in key_from.sources if one.kind == "rows")
+
+    assert through(at("# LK")) == [(at("# RS"), [at("# PUT1")]), (at("# EA"), [at("# PUT2")])]
+    assert through(at("# AT")) == [(at("# EA"), [])]
 
 
 #: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,
@@ -20838,6 +21256,54 @@ def test_an_insert_making_a_row_of_an_object_written_whole_writes_its_classs_val
     assert arms == [("insertNewJob", line, "0", 1, "JobSpec.taskBufferErrorCode")]
     (born,) = [one for one in froms if one.owner.endswith("::insertNewJob") and one.table == "jobsDefined4"]
     assert born.writes["JobSpec.taskBufferErrorCode"] == [line]
+
+
+#: PanDA's two constructors: JobSpec leaves every field None (valuesMap gives the row 0 for _zeroAttrs); JediFileSpec
+#: leaves a field of _zeroAttrs 0 in memory already; DatasetSpec stores by setattr.
+_CONSTRUCTED = """
+class JobSpec(object):
+    _attributes = ("PandaID", "taskBufferErrorCode")
+    _zeroAttrs = ("taskBufferErrorCode",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            object.__setattr__(self, attr, None)
+        object.__setattr__(self, "Files", [])
+
+
+class JediFileSpec(object):
+    _attributes = ("fileID", "attemptNr")
+    _zeroAttrs = ("attemptNr",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            if attr in self._zeroAttrs:
+                object.__setattr__(self, attr, 0)
+            else:
+                object.__setattr__(self, attr, None)
+
+
+class DatasetSpec(object):
+    _attributes = ("vuid",)
+
+    def __init__(self):
+        for attr in self._attributes:
+            setattr(self, attr, None)
+"""
+
+
+def test_a_spec_s_constructor_says_what_each_field_holds_in_memory_not_what_its_row_is_given():
+    """``progress.spec_initial_values`` reads ``__init__``'s stores: a JobSpec's ``taskBufferErrorCode`` is ``None``
+    as made, though its ``valuesMap`` gives a row ``0`` for it (``spec_unset_values``); a JediFileSpec's
+    ``attemptNr`` is ``0`` already; ``setattr`` stores as ``object.__setattr__`` does."""
+    modules = [_module(_CONSTRUCTED, "pandaserver/taskbuffer/Specs.py")]
+    assert progress.spec_initial_values(modules) == {
+        ("JobSpec", "PandaID"): "None",
+        ("JobSpec", "taskBufferErrorCode"): "None",
+        ("JediFileSpec", "fileID"): "None",
+        ("JediFileSpec", "attemptNr"): "0",
+        ("DatasetSpec", "vuid"): "None",
+    }
 
 
 _READ_TWICE = '''
@@ -22289,6 +22755,71 @@ def test_a_print_under_a_test_of_a_statements_row_count_says_whether_its_writes_
     assert arms["errorDialog"] == [([(unmarked, "no task to mark jediTaskID={}", "none")], [])]
 
 
+#: ``reactivatePendingTasks_JEDI``: two statements share one run, and a flag each arm's way binds to a literal
+#: chooses the count print after it.
+_COUNTED_ARMS = '''
+class TaskModule:
+    def reactivate(self, resTL, timeoutDate):
+        sqlTU = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=oldStatus,oldStatus=NULL "
+        sqlTU += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        sqlTO = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:newStatus,errorDialog=:errorDialog "
+        sqlTO += "WHERE jediTaskID=:jediTaskID AND status=:oldStatus "
+        for jediTaskID, frozenTime in resTL:
+            timeoutFlag = False
+            if frozenTime < timeoutDate:
+                timeoutFlag = True
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":newStatus"] = "exhausted"
+                varMap[":oldStatus"] = "pending"
+                varMap[":errorDialog"] = "timeout"
+                sql = sqlTO
+            else:
+                varMap = {}
+                varMap[":jediTaskID"] = jediTaskID
+                varMap[":oldStatus"] = "pending"
+                sql = sqlTU
+            self.cur.execute(sql, varMap)
+            tmpRow = self.cur.rowcount
+            if tmpRow > 0:
+                if timeoutFlag:
+                    tmpLog.info(f"jediTaskID={jediTaskID} timeout")
+                else:
+                    tmpLog.info(f"jediTaskID={jediTaskID} action=reactivate")
+'''
+
+
+def test_a_count_print_the_arm_s_own_way_rules_out_is_not_the_arm_s(tmp_path):
+    """Both statements run at one ``execute``, and ``if tmpRow > 0`` holds both prints; but on the ``sqlTU`` arm's way
+    ``timeoutFlag`` holds the ``False`` the turn starts with, and on ``sqlTO``'s the ``True`` bound beside it, and
+    nothing binds it again before ``if timeoutFlag:``.  So each arm's count prints are only those its way can reach
+    (:func:`flow.ruled_out_after`): ``timeout`` for ``sqlTO``'s columns, ``action=reactivate`` for ``sqlTU``'s."""
+    module = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {module: _COUNTED_ARMS})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    froms: list[KeyFrom] = []
+    with (
+        sql.across_calls(calls),
+        sqltext.with_schema(None, {"jedi_tasks": frozenset({"jeditaskid"})}, {}),
+        _records_held(modules, calls, record),
+    ):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+    sqlwrite.attach_count_prints(froms, junctions, {})
+    timeout, reactivate = _at("} timeout", _COUNTED_ARMS), _at("action=reactivate", _COUNTED_ARMS)
+    by_arm = {
+        (j.subject.split(".")[-1], b.line): [p.line for p in b.count_prints] for j in junctions for b in j.branches
+    }
+    new_status, error, tu = (
+        _at(spelled, _COUNTED_ARMS) for spelled in ('":newStatus"] =', '":errorDialog"] =', "sql = sqlTU")
+    )
+    assert {key: lines for key, lines in by_arm.items() if lines} == {
+        ("status", new_status): [timeout],
+        ("errorDialog", error): [timeout],
+        ("status", tu): [reactivate],
+        ("oldStatus", tu): [reactivate],
+    }
+
+
 #: The proxy puts the type and the task into a message; the buffer hands its own on to it; the feeder sends.
 _MESSAGE_BUFFER = '''
 import json
@@ -22372,3 +22903,84 @@ def test_a_message_sent_with_a_literal_type_is_joined_to_the_function_taking_onl
             [("taskid", _at('int(msg_dict["taskid"])', _MESSAGE_PROCS), "task_id")],
         )
     ]
+
+
+def test_a_received_key_is_the_column_of_the_terms_the_receiver_names_rows_by_with_it():
+    """``JediJobGeneratorMsgProcPlugin.process`` hands ``int(msg_dict["taskid"])`` to the buffer's
+    ``getTaskWithID_JEDI``, which hands it whole to the proxy's, whose ``jediTaskID=:jediTaskID`` reads
+    ``JEDI_Tasks``: the edge's ``taskid`` is received as ``JediTaskSpec.jediTaskID``, read from the KeyFrom and the
+    ParameterFroms alone.  A term with no class's column, a value handed on at a part of a list
+    (``target_tasks=[task_id]``), one made text, a field of the value, and an edge to another receiver name no row
+    by the key."""
+    receiver = "procs.py::process"
+    taskid = [".data", "['taskid']"]
+    decoded = [("json.loads", "decoded"), ("int", "converted")]
+
+    def received(through, paths=()):
+        return HeldSource(
+            kind=KEY_PARAMETER,
+            name="msg_obj",
+            site_owner=receiver,
+            site_line=3,
+            steps=taskid,
+            through=[HeldThrough(call=call, at="procs.py:5", gives=gives) for call, gives in through],
+            paths=list(paths),
+        )
+
+    def handed(owner, line, name):
+        return HeldSource(kind=KEY_PARAMETER, name=name, site_owner=owner, site_line=line)
+
+    def parameter(owner, line, name, source):
+        return ParameterFrom(owner=owner, line=line, parameter=name, sources=[source])
+
+    def key(owner, line, name, table, term, attr, source_attr=""):
+        source = KeySource(
+            kind=KEY_PARAMETER, name=name, site_owner=owner, site_line=line, paths=["()"], attr=source_attr
+        )
+        return KeyFrom(owner=owner, table=table, term=term, attr=attr, sources=[source])
+
+    buffer, proxy = "buffer.py::getTaskWithID_JEDI", "proxy.py::getTaskWithID_JEDI"
+    parameter_froms = [
+        parameter(buffer, 10, "jediTaskID", received(decoded)),
+        parameter(proxy, 20, "jediTaskID", handed(buffer, 10, "jediTaskID")),
+        parameter("buffer.py::getTasksToBeProcessed_JEDI", 30, "target_tasks", received(decoded, paths=["[0]"])),
+        parameter("buffer.py::getTaskName", 40, "name", received([("json.loads", "decoded"), ("f''", "text")])),
+        parameter("buffer.py::getTask", 50, "task", received(decoded)),
+    ]
+    key_froms = [
+        key(proxy, 20, "jediTaskID", "JEDI_Tasks", "jediTaskID=:jediTaskID", "JediTaskSpec.jediTaskID"),
+        key(proxy, 20, "jediTaskID", "JEDI_JobParams_Template", "jediTaskID=:jediTaskID", ""),
+        key(
+            "buffer.py::getTasksToBeProcessed_JEDI",
+            30,
+            "target_tasks",
+            "JEDI_Datasets",
+            "jediTaskID IN (:jediTaskID__in)",
+            "JediDatasetSpec.jediTaskID",
+        ),
+        key("buffer.py::getTaskName", 40, "name", "JEDI_Tasks", "taskName=:name", "JediTaskSpec.taskName"),
+        key(
+            "buffer.py::getTask",
+            50,
+            "task",
+            "JEDI_Tasks",
+            "status=:status",
+            "JediTaskSpec.status",
+            source_attr="JediTaskSpec.status",
+        ),
+    ]
+    edge = MessageEdge(
+        sender="feeder.py::run", line=7, msg_type="job_generator", sent={"taskid": "jediTaskID"}, receiver=receiver
+    )
+    elsewhere = MessageEdge(
+        sender="feeder.py::run",
+        line=9,
+        msg_type="contents_feeder",
+        sent={"taskid": "jediTaskID"},
+        receiver="other_procs.py::process",
+    )
+
+    messages.attach_received_as([edge, elsewhere], key_froms, parameter_froms)
+
+    assert edge.received_as == {"taskid": ["JediTaskSpec.jediTaskID"]}
+    assert elsewhere.received_as == {}

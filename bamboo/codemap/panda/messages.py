@@ -15,6 +15,11 @@ binds them (``JediTaskBuffer.push_task_trigger_message`` to the proxy's).  **A s
 (:meth:`Calls.callees`) handing its type a literal.  **A receiver** is a function that reads ``X["msg_type"]`` of a
 dict into a name and leaves -- raises or returns -- under ``if name != "<type>":``: it processes that type only.
 Which receiver listens to which queue is the deployment's; the edge says only that this receiver takes no other type.
+
+**What a key is received as** (:func:`attach_received_as`) is read from the records the build has made, not from
+the code again: a :class:`~bamboo.codemap.models.KeyFrom`'s parameter source is followed back through the
+:class:`~bamboo.codemap.models.ParameterFrom` of each function handed the whole value on, to the receiver's
+parameter with the payload key as the last of the way's steps.
 """
 
 from __future__ import annotations
@@ -24,7 +29,19 @@ from typing import Iterable, Optional
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import pathcond
-from bamboo.codemap.models import KEY_ROWS, MessageEdge, MessageRead, SourceModule
+from bamboo.codemap.models import (
+    KEY_PARAMETER,
+    KEY_ROWS,
+    THROUGH_CONVERTED,
+    THROUGH_COPY,
+    THROUGH_DECODED,
+    HeldSource,
+    KeyFrom,
+    MessageEdge,
+    MessageRead,
+    ParameterFrom,
+    SourceModule,
+)
 
 #: The key a message's type is put under.
 TYPE_KEY = "msg_type"
@@ -245,3 +262,89 @@ def _columns(reader, value: ast.expr, call: ast.Call, file: str, func: ast.AST) 
     except Exception:  # noqa: BLE001 -- a value the reader cannot follow names no column
         return []
     return sorted({way.attr for way in ways if way.kind == KEY_ROWS and way.attr})
+
+
+#: What a call outside the corpus may do to a received value on its way to a term and leave it the value sent: read
+#: it out of the message's text, convert it (``int``), copy it.
+_UNCHANGED = frozenset({THROUGH_DECODED, THROUGH_CONVERTED, THROUGH_COPY})
+
+
+def _payload_key(step: str) -> Optional[str]:
+    """The key of an item step spelled ``['taskid']``; ``None`` for any other step."""
+    if not (step.startswith("[") and step.endswith("]")):
+        return None
+    try:
+        key = ast.literal_eval(step[1:-1])
+    except (ValueError, SyntaxError):
+        return None
+    return key if isinstance(key, str) else None
+
+
+def _unchanged(source: HeldSource) -> bool:
+    """Whether *source*'s way hands on the value it ends at, whole and as it was: a parameter's, sitting at no part of
+    the value, no field of it, changed in place nowhere, through nothing but :data:`_UNCHANGED`."""
+    return (
+        source.kind == KEY_PARAMETER
+        and not source.paths
+        and not source.attr
+        and not source.changes
+        and all(one.gives in _UNCHANGED for one in source.through)
+    )
+
+
+def attach_received_as(
+    edges: Iterable[MessageEdge], key_froms: Iterable[KeyFrom], parameter_froms: Iterable[ParameterFrom]
+) -> None:
+    """Fill each edge's :attr:`~MessageEdge.received_as` from the records: the columns of the terms each payload key
+    names rows by in the receiver's run.
+
+    A :class:`KeyFrom` whose term has a column of a class (*attr*) and whose source is a parameter, the bind's value
+    itself, points at that parameter's :class:`ParameterFrom` (*site_owner*, *site_line*); each source there that
+    is a caller's parameter, the whole value handed on, points at the caller's -- a chain read to its end.  Where a
+    source's way ends at a receiver's parameter, the last of its steps the item of a payload key and every call it
+    went through one that leaves the value as sent (:data:`_UNCHANGED`), the term names rows by that key:
+    ``JediTaskBuffer.getTaskWithID_JEDI``'s ``jediTaskID`` is ``msg_obj.data['taskid']`` of
+    ``JediJobGeneratorMsgProcPlugin.process`` through ``json.loads`` and ``int``, handed whole to the proxy's,
+    whose ``jediTaskID=:jediTaskID`` reads ``JEDI_Tasks``.  A value sitting at a part of what is handed on
+    (``target_tasks=[task_id]``), a field of it, one changed in place, or one through text or a computation names
+    no row by the key."""
+    edges = list(edges)
+    receivers = {edge.receiver for edge in edges}
+    if not receivers:
+        return
+    parameter_froms = list(parameter_froms)
+    # Each ParameterFrom, the (receiver, payload key) pairs its parameter is the received value of.
+    received: dict[tuple[str, Optional[int], str], set[tuple[str, str]]] = {}
+    for one in parameter_froms:
+        here = received.setdefault((one.owner, one.line, one.parameter), set())
+        for source in one.sources:
+            if source.site_owner in receivers and source.steps and _unchanged(source):
+                key = _payload_key(source.steps[-1])
+                if key is not None:
+                    here.add((source.site_owner, key))
+    grown = True
+    while grown:
+        grown = False
+        for one in parameter_froms:
+            here = received[(one.owner, one.line, one.parameter)]
+            for source in one.sources:
+                if source.steps or source.site_owner in receivers or not _unchanged(source):
+                    continue
+                further = received.get((source.site_owner, source.site_line, source.name))
+                if further and not further <= here:
+                    here |= further
+                    grown = True
+    columns: dict[tuple[str, str], set[str]] = {}
+    for key_from in key_froms:
+        if not key_from.attr:
+            continue
+        for bound in key_from.sources:
+            parts = [path for path in bound.paths if path != "()"]
+            if bound.kind != KEY_PARAMETER or bound.attr or ("()" not in bound.paths and parts):
+                continue
+            for pair in received.get((bound.site_owner, bound.site_line, bound.name), ()):
+                columns.setdefault(pair, set()).add(key_from.attr)
+    for edge in edges:
+        edge.received_as = {
+            key: sorted(columns[(edge.receiver, key)]) for key in sorted(edge.sent) if (edge.receiver, key) in columns
+        }

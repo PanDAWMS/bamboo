@@ -172,6 +172,55 @@ def scanned(log, c, items):
         log.info("start")  # U2
         if c:
             return  # U3
+
+
+def finished(proxy, log, tasks):
+    try:
+        if not proxy.commit():
+            raise RuntimeError("commit")  # K1
+        for task in tasks:
+            try:
+                proxy.lock(task)
+            except Exception:
+                log.debug("skip")  # K2
+                if not proxy.commit():
+                    raise RuntimeError("commit")  # K3
+                continue  # K4
+            if task.scouted:
+                task.status = "running"  # K5
+            else:
+                task.locked = True  # K6
+            for chunk in task.chunks:
+                if chunk:
+                    break  # K7
+                chunk.read = True  # K8
+            else:
+                task.read = True  # K9
+        log.debug("got")  # K10
+        return tasks  # K11
+    except Exception:
+        log.error("failed")  # K12
+        return None  # K13
+
+
+def tolerant(log, task):
+    try:
+        if task.bad:
+            raise ValueError("bad")  # T1
+        task.checked = True  # T2
+    except ValueError:
+        log.debug("bad")  # T3
+    task.done = True  # T4
+
+
+def tolerant_each(log, tasks):
+    for task in tasks:
+        try:
+            if task.bad:
+                raise ValueError("bad")  # T5
+            task.checked = True  # T6
+        except ValueError:
+            log.debug("bad")  # T7
 """
 
 
@@ -401,6 +450,40 @@ def test_the_end_is_asked_of_one_function_s_pass() -> None:
         flow.ends_after(module.body[0])
 
 
+def test_a_raise_or_return_keeps_a_run_from_what_its_pass_would_have_reached_and_no_handler_reaches() -> None:
+    """A ``raise`` before the loop that the outer ``except`` catches keeps the run from the loop's writes and the
+    print after it, not from the handler's print; the ``raise`` in the loop's handler from the rest of the loop; the
+    last ``return`` from nothing."""
+    asked = _prints("K5", "K6", "K8", "K9", "K10", "K12")
+    assert flow.kept_from(S["K1"], asked) == _prints("K5", "K6", "K8", "K9", "K10")
+    assert flow.kept_from(S["K3"], asked) == _prints("K5", "K6", "K8", "K9", "K10")
+    assert flow.kept_from(S["K11"], asked) == []
+    assert flow.kept_from(S["K13"], asked) == []
+
+
+def test_a_continue_or_break_keeps_a_run_from_the_rest_of_its_loop_s_turn_only() -> None:
+    """``continue`` keeps the run from the turn's writes after it, not from the print after the loop nor the
+    handler's print before it; ``break`` from the rest of its loop's turn and the loop's ``else``."""
+    assert flow.kept_from(S["K4"], _prints("K2", "K5", "K6", "K8", "K9", "K10")) == _prints("K5", "K6", "K8", "K9")
+    assert flow.kept_from(S["K7"], _prints("K5", "K8", "K9", "K10")) == _prints("K8", "K9")
+
+
+def test_a_raise_a_handler_catches_keeps_the_run_only_from_what_the_handler_skips() -> None:
+    """``raise ValueError`` caught in the function skips ``task.checked``; the handler's print and the write after
+    the ``try`` are reached either way.  Caught inside a loop, the run goes on to the next turn, which reaches
+    ``task.checked`` again: a raise is read over the call's pass, not the turn."""
+    assert flow.kept_from(S["T1"], _prints("T2", "T3", "T4")) == _prints("T2")
+    assert flow.kept_from(S["T5"], _prints("T6", "T7")) == []
+
+
+def test_an_exit_read_as_a_pass_goes_on_and_its_flow_is_kept_apart_from_the_exit_s() -> None:
+    """reaching's *passing*: the ``raise`` read as a ``pass`` reaches ``task.checked``; asked again without it, the
+    flow kept for the first question is not the answer."""
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]]) == []
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]], passing=[S["T1"]]) == [S["T1"]]
+    assert reaching.reaching(S["T2"], [S["T1"]], entered=[S["T1"]]) == []
+
+
 MANAGERS = """\
 from contextlib import contextmanager, suppress
 
@@ -470,3 +553,208 @@ def test_a_context_manager_that_may_swallow_its_with_body_s_raise_is_listed_and_
     assert with_exits_are_read(
         fragment.model_copy(update={"swallowing_managers": []})
     ).passed
+
+
+ARMS = """\
+def reactivate(rows, cur, log, limit):
+    for row, frozen in rows:
+        flag = False
+        if frozen < limit:
+            flag = True
+            sql = "TO"  # A1
+        else:
+            sql = "TU"  # A2
+        cur.execute(sql)
+        if cur.rowcount > 0:
+            if flag:
+                log.info("timeout")  # A3
+            else:
+                log.info("reactivate")  # A4
+
+
+def rebound(rows, cur, log):
+    for row in rows:
+        flag = False
+        sql = "TU"  # B1
+        flag = cur.check(row)
+        if flag:
+            log.info("checked")  # B2
+
+
+def either(rows, cur, log):
+    flag = False
+    for row in rows:
+        sql = "TU"  # C1
+        if flag:
+            log.info("again")  # C2
+        flag = True
+
+
+def finish(tasks, spec, log, update):
+    for task in tasks:
+        if update:
+            spec.status = "done"  # D1
+        spec.save()
+        msg = f"set task_status={spec.status}"
+        log.info(msg)  # D2
+        if task.bad:
+            raise ValueError(task)
+        log.info("checked")  # D3
+        if task.skip:
+            continue
+        log.info("kept")  # D4
+    log.info("all")  # D5
+
+
+def after_loop(rows, log):
+    for row in rows:
+        flag = False
+        if row:
+            flag = True
+        else:
+            sql = "TU"  # E1
+    if flag:
+        log.info("last flagged")  # E2
+"""
+
+
+def _marked(source: str) -> dict[str, ast.stmt]:
+    tree = ast.parse(source)
+    pathcond.attach_parents(tree)
+    lines = {text.rsplit("# ", 1)[1]: number for number, text in enumerate(source.splitlines(), 1) if "  # " in text}
+    by_line = {
+        node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.stmt) and not isinstance(node, ast.FunctionDef)
+    }
+    return {marker: by_line[line] for marker, line in lines.items()}
+
+
+def test_a_literal_an_arm_s_way_binds_keeps_it_from_a_print_the_literal_decides_against() -> None:
+    """The ``sql = "TO"`` arm runs beside ``flag = True``, the other with the turn's ``flag = False``: each is
+    followed only by the print ``if flag:`` lets through for it."""
+    arms = _marked(ARMS)
+    assert flow.ruled_out_after(arms["A1"], arms["A4"])
+    assert not flow.ruled_out_after(arms["A1"], arms["A3"])
+    assert flow.ruled_out_after(arms["A2"], arms["A3"])
+    assert not flow.ruled_out_after(arms["A2"], arms["A4"])
+
+
+def test_a_name_bound_again_after_the_arm_or_held_two_ways_rules_on_nothing() -> None:
+    """``flag = cur.check(row)`` between the arm and the test, and a ``flag`` the arm is reached with as ``False``
+    from before the loop or ``True`` from the last turn: neither test is decided."""
+    arms = _marked(ARMS)
+    assert not flow.ruled_out_after(arms["B1"], arms["B2"])
+    assert not flow.ruled_out_after(arms["C1"], arms["C2"])
+
+
+def test_a_print_past_the_loop_reads_the_last_turn_s_binding_not_the_arm_s() -> None:
+    """``if flag:`` past the loop reads what the last turn bound: the arm's turn binds ``flag = False``, a later
+    turn may bind ``True``, so the arm does not rule the print out."""
+    arms = _marked(ARMS)
+    assert flow.turn_loops(arms["E1"], arms["E2"]) == []
+    assert not flow.ruled_out_after(arms["E1"], arms["E2"])
+
+
+def test_a_print_every_way_after_a_statement_passes_in_its_turn_follows_it() -> None:
+    """``set task_status=...`` follows the arm on every way of a run that entered no handler -- ``spec.save()``
+    raises only into a handler the run shows; a ``raise``, a ``continue`` and the end of the turn leave before the
+    others, and a print past the loop is in no turn of it."""
+    arms = _marked(ARMS)
+    assert flow.passes_after(arms["D1"], arms["D2"])
+    assert not flow.passes_after(arms["D1"], arms["D3"])
+    assert not flow.passes_after(arms["D3"], arms["D4"])
+    assert not flow.passes_after(arms["D1"], arms["D5"])
+    assert not flow.passes_after(arms["A1"], arms["A3"])
+
+
+LOGGERS = """\
+def pre_staging(self):
+    try:
+        tmpLog = MsgWrapper(logger, "label")  # G1
+        tmpLog.debug("start")  # G2
+        got = self.lock()
+        if not got:
+            tmpLog.debug("skip")  # G3
+            return
+        tmpLog.debug("done")  # G4
+    except Exception:
+        tmpLog.error("failed")  # G5
+
+
+def bound_late(self):
+    try:
+        self.prepare()
+        tmpLog = make_logger()  # L1
+    except Exception:
+        tmpLog.error("failed")  # L3
+    tmpLog.debug("start")  # L2
+
+
+def attribute_late(self):
+    try:
+        self.prepare()
+        self.ready = True  # A1
+    except Exception:
+        self.logger.error("failed")  # A3
+    self.logger.debug("start")  # A2
+
+
+def two_loggers(self):
+    tmpLog = MsgWrapper(logger, "first")  # K1
+    tmpLog.debug("start")  # K2
+    tmpLog = MsgWrapper(logger, "second")  # K3
+    tmpLog.debug("begin")  # K4
+    tmpLog.debug("end")  # K5
+"""
+
+
+def test_the_entry_print_is_read_for_a_run_by_the_handlers_its_marks_show() -> None:
+    """``doForPreStaging``'s shape: ``start`` is before every other print of a run that shows no handler's mark; where
+    the run shows the handler, or every statement may raise, ``start`` may itself raise into it, so it is no entry
+    print -- and it still comes before ``skip``, which only a way past it reaches."""
+    marked = _marked(LOGGERS)
+    prints = [marked[one] for one in ("G2", "G3", "G4", "G5")]
+    handler = marked["G5"].parent
+    assert isinstance(handler, ast.ExceptHandler)
+    assert flow.entry_print(prints, raised=[]) is marked["G2"]
+    assert flow.entry_print(prints) is None
+    assert flow.entry_print(prints, raised=[handler]) is None
+    assert flow.printed_before(marked["G2"], marked["G3"], raised=[handler])
+    assert not flow.printed_before(marked["G2"], marked["G5"], raised=[handler])
+
+
+def test_a_print_through_a_logger_the_function_binds_is_counted_only_on_ways_through_a_binding() -> None:
+    """The handler's print reads ``tmpLog`` before the ``try`` ever bound it on every way into the handler: it prints
+    nothing there, so ``start`` after the ``try`` is before it on every way that prints it.  The same shape through
+    ``self.logger``, bound from the entry, is no such print: ``self.prepare()`` raising reaches it."""
+    marked = _marked(LOGGERS)
+    assert flow.printed_before(marked["L2"], marked["L3"])
+    assert not flow.printed_before(marked["A2"], marked["A3"])
+
+
+def test_prints_through_a_name_bound_again_for_another_mark_are_another_logger_s() -> None:
+    """``tmpLog`` bound twice in one call: the prints after the second binding go through a logger of their own,
+    whose entry print is ``begin``; spelt alike, ``start`` would read as the entry print of all three."""
+    marked = _marked(LOGGERS)
+    prints = [marked[one] for one in ("K2", "K4", "K5")]
+    groups = flow.logger_groups(prints)
+    assert [[one.lineno for one in group] for group in groups] == [
+        [marked["K2"].lineno],
+        [marked["K4"].lineno, marked["K5"].lineno],
+    ]
+    assert flow.entry_print(groups[1]) is marked["K4"]
+
+
+def test_a_logger_name_bound_again_to_the_same_making_is_one_logger() -> None:
+    """``master.main`` binds ``main_log = get_logger()`` at its start and again before its last line: one logger."""
+    source = """\
+def main():
+    main_log = get_logger()
+    main_log.info("main start")  # M1
+    run()
+    main_log = get_logger()
+    main_log.info("main end")  # M2
+"""
+    marked = _marked(source)
+    group = [marked["M1"], marked["M2"]]
+    assert flow.logger_groups(group) == [group]
+    assert flow.entry_print(group, raised=[]) is marked["M1"]

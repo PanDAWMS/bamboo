@@ -454,3 +454,38 @@ def test_a_plugin_factory_builds_only_a_subclass_of_what_it_says_its_type_parame
     ]
     assert other.open == []
     assert [site.conditions for site in other.sites] == [["go"]]
+
+
+def test_the_def_a_reach_row_is_comes_from_the_trees_functions_by_name_as_from_walking_the_tree():
+    """:func:`entered._definition` reads a tree's functions by name once: for every function of a real module and
+    every line of it, the ``def`` it gives is the one walking the whole tree gives -- the innermost of the name."""
+    import ast
+    from types import SimpleNamespace
+
+    from bamboo.codemap.panda import entered
+
+    tree = ast.parse(Path(entered.__file__).read_text())
+    trees = {"m.py": tree}
+
+    def walked(name: str, line: int):
+        best = None
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == name
+                and min([node.lineno, *(one.lineno for one in node.decorator_list)])
+                <= line
+                <= (node.end_lineno or node.lineno)
+            ):
+                if best is None or node.lineno > best.lineno:
+                    best = node
+        return best
+
+    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    assert len(functions) > 10
+    for func in functions:
+        for line in range(func.lineno, (func.end_lineno or func.lineno) + 1, 3):
+            row = SimpleNamespace(anchor=SimpleNamespace(file="m.py", line_start=line), function=func.name)
+            assert entered._definition(trees, row) is walked(func.name, line)
+    nowhere = SimpleNamespace(anchor=SimpleNamespace(file="m.py", line_start=1), function="no_such_function")
+    assert entered._definition(trees, nowhere) is None
