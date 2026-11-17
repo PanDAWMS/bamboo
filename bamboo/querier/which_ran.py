@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import functools
 import itertools
 import re
 from collections.abc import Callable
@@ -77,7 +78,7 @@ from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier import windows as W  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
-from bamboo.querier.records import Run  # noqa: E402
+from bamboo.querier.records import LEADING_HOLE, Run  # noqa: E402
 
 
 def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
@@ -1940,6 +1941,85 @@ def callee_values(fn: R.Function, run: Run, mode: str) -> dict[str, tuple[str, s
     return out
 
 
+@functools.cache
+def _handed_in(fragment_id: int) -> dict[tuple[str, int], list]:
+    """``(file, line) -> [HeldSource]``: the ways the map reads into a callee's parameter (``ParameterFrom.sources``)
+    by the call they end at, the last of each ``route`` (*fragment_id* keys the cache to the dump)."""
+    out: dict[tuple[str, int], list] = {}
+    for p in getattr(mapdump.fragment(), "parameter_froms", None) or []:
+        for s in p.sources:
+            file, _, at = (s.route[-1] if s.route else "").rpartition(":")
+            if at.isdigit():
+                out.setdefault((file, int(at)), []).append(s)
+    return out
+
+
+def appended_turns(fn: R.Function, line: int) -> list[tuple[ast.For | ast.AsyncFor, int, str]]:
+    """``(loop, append line, element)`` for each list the call at *line* hands its callee that *fn* makes empty and
+    fills only by appending the element of one of its loops the call is not in, each turn its own -- the map's
+    ``HeldSource`` of the callee's parameter: its ``route`` the call alone, ``made_empty``, each of its ``changes`` a
+    ``method`` ``append`` *fn* runs itself, its ``value_text`` the loop's target.  ActivatorWithRuleThr.run makes
+    ``actJobs = []`` at 929, appends ``tmpJob`` at 969 in its loop over the jobs at 931, and hands the list to
+    ``activateJobs`` at 973 (D-4).  Empty where the map reads no such way."""
+    fragment = mapdump.fragment()
+    call = R.statement_at(fn.node, line)
+    if fragment is None or call is None:
+        return []
+    lo, hi = fn.node.lineno, getattr(fn.node, "end_lineno", None) or fn.node.lineno
+    out: list[tuple[ast.For | ast.AsyncFor, int, str]] = []
+    for s in _handed_in(id(fragment)).get((fn.rel, line), []):
+        if not getattr(s, "made_empty", "") or len(s.route) != 1 or not lo <= (s.line or 0) <= hi or not s.changes:
+            continue
+        sites: list[tuple[ast.For | ast.AsyncFor, int, str]] = []
+        for ch in s.changes:
+            file, _, at = ch.at.rpartition(":")
+            stmt = R.statement_at(fn.node, int(at)) if file == fn.rel and at.isdigit() else None
+            loop = next((a for a in pathcond.ancestors(stmt) if isinstance(a, (ast.For, ast.AsyncFor))), None) if stmt else None
+            if (loop is None or ch.kind != "method" or ch.what != "append" or ch.via or not lo <= loop.lineno <= hi
+                    or not isinstance(loop.target, ast.Name) or loop.target.id != ch.value_text
+                    or any(a is loop for a in pathcond.ancestors(call))):
+                break
+            sites.append((loop, int(at), ch.value_text))
+        else:
+            if len({id(loop) for loop, _, _ in sites}) == 1:
+                out.extend(sites)
+    return out
+
+
+def _turn_hole(row: R.Row, element: str) -> str:
+    """The hole a print of *row* begins with, where it is an attribute of the loop's *element* (``tmpJob.PandaID``):
+    a logger with no mark writes its value first, the line's mark (:data:`records.LEADING_HOLE`); empty otherwise."""
+    m = LEADING_HOLE.match(row.text or "")
+    hole = m["hole"].strip() if m else ""
+    return hole if hole.partition(".")[0] == element and not row.map_prefixes else ""
+
+
+def turn_left_before_append(sn: R.Seen, line: int, mode: str) -> str:
+    """D-4 (I-1, out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x): why the call at *line*
+    hands no element of the key's turn, or empty.  Its list is filled only by appending each turn's element
+    (:func:`appended_turns`); a row of the loop the pass printed begins with a hole of the element (963's
+    ``{tmpJob.PandaID} skip since ...``), so the pass's run, marked by that value, is the key's turn; another row of
+    the loop beginning with the same hole that every way to the append prints (968's ``{tmpJob.PandaID} to activate
+    with rule``) is missing from the run where its absence counts: the key's turn did not reach the append, and the
+    list the call hands holds no element of it.  Not where the turn's rows are read in no such run."""
+    fn, run = sn.fn, sn.run
+    for loop, at, element in appended_turns(fn, line):
+        append = R.statement_at(fn.node, at)
+        if append is None:
+            continue
+        inside = {id(n) for n in ast.walk(loop)}
+        before, _ = R.must_rows(fn.node, append, set())
+        for s in before:
+            row = fn.row_at(s)
+            if row is None or id(s) not in inside or sn.present(row) or not (hole := _turn_hole(row, element)):
+                continue
+            shown = [r for r in fn.rows if id(r.stmt) in inside and sn.present(r) and _turn_hole(r, element) == hole]
+            if shown and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func, row):
+                return (f"the key's turn of the loop at {loop.lineno} printed {shown[0].line} and not {row.line}, which every "
+                        f"way to the append at {at} prints: the call at {line} hands no {element} of the key's turn (D-4)")
+    return ""
+
+
 def empty_loops(fn: R.Function, stmt: ast.stmt, callee: dict[str, tuple[str, str]]) -> str:
     for it in R.iterables_over(fn.node, stmt):
         base = it
@@ -2445,6 +2525,15 @@ def judge(
             elif proof.kind == "inconsistent":
                 p_notes.append(f"P inconsistent: {where}: {proof.reason}")
             verdicts.append(v)
+
+    # D-4 on each kept call arm: the list it hands holds no element of the key's turn where that turn did not reach
+    # the append filling it (turn_left_before_append)
+    for v in verdicts:
+        if v.kind == "kept" and v.candidate.owner in seens:
+            if unhanded := turn_left_before_append(arm_seen.get((v.candidate.owner, v.line), seens[v.candidate.owner]),
+                                                   v.line, mode):
+                v.kind = "excluded"
+                v.reasons.append(unhanded)
 
     # P again on each kept candidate, with the other verdicts: a call changes the subject to the observed value only
     # where the map reaches, from it, a writer of that value not excluded (printed.Reaching)

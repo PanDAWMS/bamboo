@@ -63,6 +63,9 @@ PREFIX = re.compile(
     r"(?P<token>[A-Za-z_]\w* < <[^<>\n]* >|[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>"
     r"|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
+#: a print whose text begins with a hole and a space (``f"{job.PandaID} Finisher : Kill"``): a logger with no mark
+#: writes that hole's value first, and :data:`PREFIX` takes it for the token (``rows.Row.texts``, :meth:`Run.holds`)
+LEADING_HOLE = re.compile(r"f?[\"']\{(?P<hole>[^}]+)\}[ ]")
 #: the builders whose mark a line carries as the logger was handed it, blanks and all (``callfacts.LOGGER_MAKERS``):
 #: LogWrapper's prefix and MsgWrapper's token.  make_logger and create_tagged_logger write ``method <token>`` and
 #: ``method < tag >``, which :data:`PREFIX` reads whole.
@@ -565,6 +568,16 @@ def keyed(key: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![0-9A-Za-z_]){re.escape(key)}(?![0-9A-Za-z_])")
 
 
+def _marks_take(prefixes: list[str], token: str) -> bool:
+    """Whether a logger writing one of the map's *prefixes* (a row's ``map_prefixes``) can write the mark *token*, the
+    blank after it or not; the leading blanks are not asked for (``rows._prefix_regex``)."""
+    for p in prefixes:
+        bare = re.sub(r"^(?:\\?\s)+", "", p)
+        if re.fullmatch(bare, f"{token} ", re.S) or re.fullmatch(bare, token, re.S):
+            return True
+    return False
+
+
 @dataclass
 class Run:
     log: Log
@@ -594,7 +607,20 @@ class Run:
         """Whether the run's records hold every line *func* prints through its mark at *level*: not where the door
         asked the mark for another method's rows (``Log.narrowed``) and the level is below WARNING; *func* None for a
         reader that does not say whose row it reads.  Nor for a *row* starting with a head the door asked with the key
-        after it (``Log.keyed``): its lines for other rows were not asked."""
+        after it (``Log.keyed``): its lines for other rows were not asked.
+
+        Nor, in a run whose mark is a number, for a *row* that cannot print under it: one through a logger with no
+        mark whose print begins with a word -- its lines are under that word (:data:`PREFIX`), not under the number a
+        print beginning with a hole's value wrote first, ``f"{tmpJob.PandaID} to activate with rule"``
+        (datasetManager's ``activating ...`` at 971, read as missing from the key's run and the call at 973 excluded
+        for it) -- or one through a logger whose marks, as the map writes them, take no such number
+        (``< jediTaskID=... >``).  A logger writing the number as its mark prints every line of its own under it: the
+        adder's ``LogWrapper(_logger, str(self.job_id))``, ``.*?\\ ``.  I-1, out/gm/qk-design.md's bundle I second
+        half, tmaeno's OK 2026-11-17 20:3x."""
+        if row is not None and self.token.isdigit():
+            prefixes = getattr(row, "map_prefixes", None)
+            if not (_marks_take(prefixes, self.token) if prefixes else LEADING_HOLE.match(getattr(row, "text", "") or "")):
+                return False
         heads = self.log.keyed.get((self.machine, self.token))
         if heads and row is not None and any(shape and shape[0][0] == "lit" and shape[0][1].startswith(tuple(heads))
                                              for shape in getattr(row, "shapes", None) or []):

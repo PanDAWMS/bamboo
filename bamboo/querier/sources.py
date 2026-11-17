@@ -431,6 +431,10 @@ class Way:
     #: nearest the way's end where it came across more than one (:func:`param_ways`)
     sent: str = ""
     sent_into: str = ""
+    #: a way read through an object's elements (the map's M5, ``HeldSource.elements``; I-3): where the object was
+    #: built (``file:line``) -- the premise its reader says, that the field its ``get`` hands out holds what that
+    #: construction handed its ``__init__``; empty for any other way
+    elements_of: str = ""
 
 
 def _made_of(s: Any) -> str:
@@ -1175,6 +1179,14 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
     here = next(iter(getattr(s, "at", None) or ()), "")
     if truth and (put := _truth_ways(s, route)) is not None:
         return put
+    if (built := getattr(s, "elements", None)) and len(rest) > 1 and rest[0].startswith(".") and rest[1].startswith("["):
+        # I-3 (Q6's (a), out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x): an object whose
+        # class hands out what a field holds, bound in its __init__ to what the construction hands (the map's M5,
+        # ListWithLock(tmpList) at TaskRefiner.py:72): an element of the field is an element of that value.  The map
+        # does not name the field, so the attribute step the read takes to it (``.dataList``) is taken for it -- the
+        # premise the way carries (elements_of)
+        return [replace(w, route=w.route + route, elements_of=w.elements_of or here or (route[-1] if route else ""))
+                for e in built for w in _param_source_ways(e, rest[1:], seen)]
     elements = _elements(s, rest)
     if elements is not None:
         values, stays = elements

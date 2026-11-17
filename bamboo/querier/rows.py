@@ -43,7 +43,15 @@ from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
 
 from . import TREE, mapdump
-from .records import CORPUS, LEVEL_OF_METHOD, LEVEL_RANK, Record, Run, head_word
+from .records import (
+    CORPUS,
+    LEADING_HOLE,
+    LEVEL_OF_METHOD,
+    LEVEL_RANK,
+    Record,
+    Run,
+    head_word,
+)
 
 #: the bamboo tree the map's code is imported from (the package's own; see :mod:`bamboo.querier`)
 BAMBOO_TREE = str(TREE)
@@ -613,8 +621,6 @@ _MAP_HOLE = re.compile(
     re.S,
 )
 _UNESCAPED_META = re.compile(r"(?<!\\)[][(){}?*+|^$.]")
-#: a print whose text begins with a hole and a space (``f"{job.PandaID} Finisher : Kill"``): ``Row.texts``
-LEADING_HOLE = re.compile(r"f?[\"']\{[^}]+\}[ ]")
 
 
 def _map_literal(pattern: str) -> int:

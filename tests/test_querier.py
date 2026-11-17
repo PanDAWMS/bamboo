@@ -18749,3 +18749,153 @@ def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unse
         "(E-5)"), got
     # another op, a settled offset, a parameter's scale, an open arm whose least is not read: nothing said
     assert got["e5"][1:] == [None, None, None, None], got
+
+
+_APPENDED = textwrap.dedent("""\
+    import logging
+    _logger = logging.getLogger("x")
+
+
+    def activate(taskBuffer, jobs):
+        actJobs = []
+        for tmpJob in jobs:
+            allOK = True
+            for tmpFile in tmpJob.Files:
+                if tmpFile.status != "ready":
+                    allOK = False
+                    _logger.debug(f"{tmpJob.PandaID} skip since {tmpFile.lfn} is missing")
+                    break
+            if not allOK:
+                continue
+            _logger.debug(f"{tmpJob.PandaID} to activate")
+            actJobs.append(tmpJob)
+        _logger.debug("activating ...")
+        taskBuffer.activateJobs(actJobs)
+        _logger.debug("done")
+""")
+
+
+def test_i_a_number_marked_run_holds_no_word_led_row_and_a_list_filled_by_turns_holds_none_of_a_turn_left_before_its_append(tmp_path):
+    """I-1 (D-4a, bundle I's second half): a run marked by a number -- a logger with no mark writing a hole's value
+    first -- holds no row beginning with a word, so its absence there says nothing (971's ``activating ...``); a call
+    handing a list made empty and filled only by appending each turn's element hands none of the key's turn where
+    that turn printed a row beginning with the element's hole and not the row every way to the append prints."""
+    (_corpus(tmp_path) / "pandaserver" / "dm2.py").write_text(_APPENDED)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rows as R, which_ran as WR
+            from bamboo.querier.records import Run
+
+            R.ROWS_FROM = "walk"
+            rel = "pandaserver/dm2.py"
+            fn = R.function(rel, "activate")
+            by = {r.line: r for r in fn.rows}
+            got = {}
+            log = N(keyed={}, narrowed={})
+            one = [N(machine="m1")]
+            got["holds"] = [Run(log, "7425194334", one, []).holds("activate", "DEBUG", by[line]) for line in (12, 16, 18)] + [
+                Run(log, "getX < a >", one, []).holds("activate", "DEBUG", by[18])]
+            # through a logger whose mark the map writes: the adder's LogWrapper(_logger, str(self.job_id)) takes the
+            # number, "< jediTaskID=... >" does not
+            got["marked"] = [Run(log, "7425194334", one, []).holds("f", "DEBUG", N(map_prefixes=[p], text='"job not found"'))
+                             for p in (".*?\\\\ ", "\\\\ <\\\\ jediTaskID=.*?\\\\ >\\\\ ")]
+
+            def change(**kw):
+                return N(**{"at": f"{rel}:17", "kind": "method", "what": "append", "via": [], "value_text": "tmpJob", **kw})
+
+            def way(**kw):
+                return N(**{"route": [f"{rel}:19"], "made_empty": "collection", "line": 6, "changes": [change()], **kw})
+
+            kept = []
+
+            def turns(*ways):
+                kept.append(frag := N(parameter_froms=[N(owner="pandaserver/tb.py::activateJobs", parameter="jobs",
+                                                         sources=list(ways))]))
+                mapdump._FRAGMENT[:] = [frag]
+                return [(loop.lineno, at, element) for loop, at, element in WR.appended_turns(fn, 19)]
+
+            got["turns"] = {
+                "one": turns(way()),
+                "stored": turns(way(changes=[change(kind="store", what="")])),
+                "another_value": turns(way(changes=[change(value_text="tmpFile")])),
+                "not_made_empty": turns(way(made_empty="")),
+                "through_a_call": turns(way(route=[f"{rel}:3", f"{rel}:19"])),
+            }
+            mapdump._FRAGMENT[:] = [kept[0]]
+            R.absence_trusted = lambda row, log, mode: (True, "")
+
+            def seen(printed):
+                return N(fn=fn, run=N(log=None, would_print=lambda level, func, row: True), present=lambda r: r.line in printed)
+
+            got["left"] = {
+                "skipped": WR.turn_left_before_append(seen({12}), 19, "outside"),
+                "appended": WR.turn_left_before_append(seen({12, 16}), 19, "outside"),
+                "no_row_of_the_turn": WR.turn_left_before_append(seen(set()), 19, "outside"),
+            }
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the number-marked run holds the rows beginning with the element's hole, not "activating ..."; a marked run does
+    assert got["holds"] == [True, True, False, True], got
+    # a word-led row through a logger whose mark can be the number is in the run; through one whose mark cannot, not
+    assert got["marked"] == [True, False], got
+    # the list made empty, filled only by appending the loop's element there, handed at 19; not a store, another
+    # value, a list not made empty, or a way through another call
+    assert got["turns"] == {"one": [[7, 17, "tmpJob"]], "stored": [], "another_value": [], "not_made_empty": [],
+                            "through_a_call": []}, got
+    assert got["left"]["skipped"] == (
+        "the key's turn of the loop at 7 printed 12 and not 16, which every way to the append at 17 prints: the call "
+        "at 19 hands no tmpJob of the key's turn (D-4)"), got
+    # the turn printed the row before the append, or no row of the turn is in the run: nothing said
+    assert got["left"]["appended"] == "" and got["left"]["no_row_of_the_turn"] == "", got
+
+
+def test_i_an_element_of_an_objects_field_is_read_in_what_its_construction_handed_its_init(tmp_path):
+    """I-3 (Q6's (a), the map's M5): extractCommon's jediTaskID is ``self.taskList``'s ``.dataList[*][0]``, the field
+    bound from a ListWithLock(tmpList) built at TaskRefiner.py:72; its elements are tmpList's: getTasksToRefine_JEDI's
+    list made empty and filled by appending rows, or None.  The attribute step to the field is taken for the field
+    its get hands out: the premise each such way carries (elements_of)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap import models as M
+        from bamboo.querier import mapdump
+        from bamboo.querier import sources as SR
+
+        rows = M.HeldSource(kind="rows", name="panda:p/t.py::getTasksToRefine_JEDI@1200", line=1290,
+                            route=["p/t.py:1400"], at=["p/t.py:1290"])
+        listed = M.HeldSource(kind="unknown", name="[]", line=1129, made_empty="collection", route=["p/t.py:1400"],
+                              at=["p/t.py:1129"], changes=[M.HeldChange(at="p/t.py:1300", kind="method", key="*",
+                                                                        what="append", value=[rows])])
+        none = M.HeldSource(kind="constant", name="None", line=1394, route=["p/t.py:1400"], at=["p/t.py:1394"])
+        made = M.HeldSource(kind="object", name="ListWithLock", line=72, site_owner="p/u.py::ListWithLock",
+                            route=["p/r.py:73"], at=["p/r.py:72"])
+        # the map's M5 field (codemap-xli on): a stand-in, as this branch's models may predate it
+        fields = {k: getattr(made, k) for k in type(made).model_fields}
+        built, bare = N(**{**fields, "elements": [listed, none]}), N(**{**fields, "elements": []})
+        pf = lambda owner, name, *sources: N(owner=owner, parameter=name, line=1, stops=[], sources=list(sources))
+        mapdump._FRAGMENT[:] = [N(parameter_froms=[pf("p/r.py::__init__", "taskList", built),
+                                                   pf("p/r.py::other", "taskList", bare)],
+                                  field_froms=[], entered_froms=[])]
+        SR._calls_in.cache_clear()
+        SR._field_index.cache_clear()
+        way = lambda w: [w.end, w.why, w.end_at, w.elements_of]
+        steps = (".dataList", "[*]", "[0]")
+        print(json.dumps({"elements": [way(w) for w in SR.param_ways("p/r.py::__init__", "taskList", steps=steps)],
+                          "none_said": [way(w) for w in SR.param_ways("p/r.py::other", "taskList", steps=steps)],
+                          "no_element_step": [way(w) for w in SR.param_ways("p/r.py::__init__", "taskList",
+                                                                              steps=(".lock",))]}))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # the appended rows: the database; the None: a part of the literal; each by the construction at 72
+    assert got["elements"] == [["database", "rows", "p/t.py:1290", "p/r.py:72"],
+                               ["constant", "constant-through", "p/t.py:1394", "p/r.py:72"]], got
+    # an object the map reads no elements of, or a read that takes no element of the field: the object, as before
+    assert [w[0] for w in got["none_said"]] == ["stop"] and got["none_said"][0][3] == "", got
+    assert [w[0] for w in got["no_element_step"]] == ["stop"] and got["no_element_step"][0][3] == "", got
