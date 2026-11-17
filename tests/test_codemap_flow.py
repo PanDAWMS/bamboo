@@ -664,3 +664,97 @@ def test_a_print_every_way_after_a_statement_passes_in_its_turn_follows_it() -> 
     assert not flow.passes_after(arms["D3"], arms["D4"])
     assert not flow.passes_after(arms["D1"], arms["D5"])
     assert not flow.passes_after(arms["A1"], arms["A3"])
+
+
+LOGGERS = """\
+def pre_staging(self):
+    try:
+        tmpLog = MsgWrapper(logger, "label")  # G1
+        tmpLog.debug("start")  # G2
+        got = self.lock()
+        if not got:
+            tmpLog.debug("skip")  # G3
+            return
+        tmpLog.debug("done")  # G4
+    except Exception:
+        tmpLog.error("failed")  # G5
+
+
+def bound_late(self):
+    try:
+        self.prepare()
+        tmpLog = make_logger()  # L1
+    except Exception:
+        tmpLog.error("failed")  # L3
+    tmpLog.debug("start")  # L2
+
+
+def attribute_late(self):
+    try:
+        self.prepare()
+        self.ready = True  # A1
+    except Exception:
+        self.logger.error("failed")  # A3
+    self.logger.debug("start")  # A2
+
+
+def two_loggers(self):
+    tmpLog = MsgWrapper(logger, "first")  # K1
+    tmpLog.debug("start")  # K2
+    tmpLog = MsgWrapper(logger, "second")  # K3
+    tmpLog.debug("begin")  # K4
+    tmpLog.debug("end")  # K5
+"""
+
+
+def test_the_entry_print_is_read_for_a_run_by_the_handlers_its_marks_show() -> None:
+    """``doForPreStaging``'s shape: ``start`` is before every other print of a run that shows no handler's mark; where
+    the run shows the handler, or every statement may raise, ``start`` may itself raise into it, so it is no entry
+    print -- and it still comes before ``skip``, which only a way past it reaches."""
+    marked = _marked(LOGGERS)
+    prints = [marked[one] for one in ("G2", "G3", "G4", "G5")]
+    handler = marked["G5"].parent
+    assert isinstance(handler, ast.ExceptHandler)
+    assert flow.entry_print(prints, raised=[]) is marked["G2"]
+    assert flow.entry_print(prints) is None
+    assert flow.entry_print(prints, raised=[handler]) is None
+    assert flow.printed_before(marked["G2"], marked["G3"], raised=[handler])
+    assert not flow.printed_before(marked["G2"], marked["G5"], raised=[handler])
+
+
+def test_a_print_through_a_logger_the_function_binds_is_counted_only_on_ways_through_a_binding() -> None:
+    """The handler's print reads ``tmpLog`` before the ``try`` ever bound it on every way into the handler: it prints
+    nothing there, so ``start`` after the ``try`` is before it on every way that prints it.  The same shape through
+    ``self.logger``, bound from the entry, is no such print: ``self.prepare()`` raising reaches it."""
+    marked = _marked(LOGGERS)
+    assert flow.printed_before(marked["L2"], marked["L3"])
+    assert not flow.printed_before(marked["A2"], marked["A3"])
+
+
+def test_prints_through_a_name_bound_again_for_another_mark_are_another_logger_s() -> None:
+    """``tmpLog`` bound twice in one call: the prints after the second binding go through a logger of their own,
+    whose entry print is ``begin``; spelt alike, ``start`` would read as the entry print of all three."""
+    marked = _marked(LOGGERS)
+    prints = [marked[one] for one in ("K2", "K4", "K5")]
+    groups = flow.logger_groups(prints)
+    assert [[one.lineno for one in group] for group in groups] == [
+        [marked["K2"].lineno],
+        [marked["K4"].lineno, marked["K5"].lineno],
+    ]
+    assert flow.entry_print(groups[1]) is marked["K4"]
+
+
+def test_a_logger_name_bound_again_to_the_same_making_is_one_logger() -> None:
+    """``master.main`` binds ``main_log = get_logger()`` at its start and again before its last line: one logger."""
+    source = """\
+def main():
+    main_log = get_logger()
+    main_log.info("main start")  # M1
+    run()
+    main_log = get_logger()
+    main_log.info("main end")  # M2
+"""
+    marked = _marked(source)
+    group = [marked["M1"], marked["M2"]]
+    assert flow.logger_groups(group) == [group]
+    assert flow.entry_print(group, raised=[]) is marked["M1"]
