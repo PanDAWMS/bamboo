@@ -330,10 +330,13 @@ def build_rows(
     if rounds:
         q = record["question"]
         sections, left_out = rows.answered(
-            docs, record["key_class"], q["key"], spellings
+            docs, record["key_class"], q["key"], spellings, tables
         )
         built["linked"] = rows.lay_linked(
             built.get("linked", []), sections.pop("linked", [])
+        )
+        built["statuslogs"] = rows.lay_statuslogs(
+            built.get("statuslogs", {}), sections.pop("statuslogs", {})
         )
         built.update(sections)
         built["about"] += (
