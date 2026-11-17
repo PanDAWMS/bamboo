@@ -16,8 +16,11 @@ out/gm/qk-design.md "M3(a)-1 v2", tmaeno's OK 2026-11-14), where the rows file h
   writes it only at transferring).  The map leaves an arm out where:
   - it is a birth, written as the row is made;
   - every statement the map has writing it there runs from no placed caller (``never_runs``);
-  - a statement writing it there writes the status too: it writes only as the status moves, and the history keeps
-    every move;
+  - every statement writing it there writes the status too, each of its arms of the status a literal: it writes only
+    as the status moves, and the history keeps every move.  Not where one of them writes the status from a value known
+    only at run time, or writes no status (bundle E, E-3): updateJobStatus's UPDATE at 241 writes ``jobStatus=
+    :jobStatus`` and ``modificationTime=CURRENT_DATE`` at every heartbeat, the status unchanged, and records the
+    history only where it changed;
   - its row precondition asks the status another value;
   - every statement writing it there has a row-naming term that takes no row at the value (``_term_off``): a term on
     the status filled only by other literals, or one every source of which is a selecting statement's rows restricting
@@ -62,6 +65,11 @@ class Before:
     offsets: tuple[tuple[str, float], ...] = ()
     #: arms writing the value that make the row, left out where the row was there before the stay (A-3): "func:line"
     births: tuple[str, ...] = ()
+    #: each of *runtime* with the column's arm the map ties to it as *starts* are tied (bundle E, E-2), "func:line with
+    #: line": where the records show it began the stay (A-3), its pass wrote the column then
+    runtime_starts: tuple[str, ...] = ()
+    #: each of *runtime_starts* whose column arm writes the clock with an offset, and the offset in seconds
+    runtime_offsets: tuple[tuple[str, float], ...] = ()
 
 
 def _name(owner: str, line) -> str:
@@ -161,13 +169,29 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 now_arms.setdefault(j.owner, []).append(b)
     starts, lacking, runtime, births = [], [], [], []
     offsets: list[tuple[str, float]] = []
+    runtime_starts: list[str] = []
+    runtime_offsets: list[tuple[str, float]] = []
+    status_outcomes: dict[tuple[str, int], str] = {}
     for j in status_junctions:
         if j.subject != subject:
             continue
         for b in j.branches:
             outcome = b.outcome or ""
+            for line in _lines(b):
+                status_outcomes[(j.owner, line)] = outcome
             if outcome.startswith(RUN_TIME):
                 runtime.append(_name(j.owner, b.line))
+                # E-2: its pass's column arm, tied as a start's is, with the clock
+                if not nulls:
+                    rt_ties = [c for c in tied(b, j.owner, subject, column, column_arms.get(j.owner, []), key_froms)
+                               if offset_of(c) is not None]
+                    if rt_ties:
+                        mate = min(c.line for c in rt_ties)
+                        said = f"{_name(j.owner, b.line)} with {mate}"
+                        runtime_starts.append(said)
+                        shift = {offset_of(c) for c in rt_ties if c.line == mate} - {0.0, None}
+                        if shift:
+                            runtime_offsets.append((said, min(s for s in shift if s is not None)))
                 continue
             if outcome.strip("'\"") != value:
                 continue
@@ -203,8 +227,8 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 out.append((name, "a birth: written as the row is made"))
             elif every and not statements:
                 out.append((name, f"its statement(s) {sorted({kf.statement for kf in every})} run from no placed caller"))
-            elif with_status := next((kf for kf in statements if subject in kf.writes), None):
-                out.append((name, f"its statement at {with_status.statement} writes {attr} too"))
+            elif moves := _moves_only(statements, subject, status_outcomes):
+                out.append((name, f"its statement at {moves[0]} writes {attr} too, to {moves[1]}"))
             elif asked is not None and value not in asked:
                 out.append((name, f"its row precondition asks {attr} in {sorted(asked)}"))
             elif statements and all(offs := [_statement_off(terms, subject, value, read_at)
@@ -218,7 +242,28 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
     # a start whose column arm writes the clock with an offset leaves the value to the timeline (``offsets``)
     known = bool(starts) and not lacking and not left and not nulls and not offsets
     return Before(known, tuple(starts), tuple(lacking), tuple(runtime), tuple(left), tuple(out), tuple(offsets),
-                  tuple(births))
+                  tuple(births), tuple(runtime_starts), tuple(runtime_offsets))
+
+
+def _moves_only(statements: list, subject: str, status_outcomes: dict[tuple[str, int], str]) -> tuple[int, list[str]] | None:
+    """Where every statement of *statements* (KeyFroms of the statements writing a column at an arm) writes *subject*
+    too, each of its arms of it a literal (*status_outcomes*, by owner and line): the first statement's line and the
+    literals, sorted.  None where one writes no *subject*, or writes it from a value known only at run time or by a line
+    the map has no arm of (bundle E, E-3)."""
+    by = _by_statement(statements)
+    if not by:
+        return None
+    literals: set[str] = set()
+    for (owner, _), group in by.items():
+        lines = {line for kf in group for line in kf.writes.get(subject, [])}
+        if not lines:
+            return None
+        for line in lines:
+            outcome = status_outcomes.get((owner, line))
+            if outcome is None or outcome.startswith(RUN_TIME):
+                return None
+            literals.add(outcome.strip("'\""))
+    return min(statement for _, statement in by), sorted(literals)
 
 
 def _by_statement(key_froms: list) -> dict[tuple[str, int], list]:

@@ -15214,6 +15214,16 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
             got["lacking"] = run(column[1:], kfs)
             got["asked"] = [sorted(SV.asked_values(["jobStatus IN (assigned, defined)"], "jobStatus")),
                             SV.asked_values(["prodSourceLabel=managed"], "jobStatus")]
+            # E-3: a statement writing the status from a run-time value writes the column at a heartbeat, the status
+            # unchanged; an arm one of whose statements writes no status writes it there alike
+            beat = [*column, N(owner="m.py::updateJobStatus", subject=C, branches=[br(238, "runtime(CURRENT_DATE)")]),
+                    N(owner="m.py::getJobs", subject=C, branches=[br(2600, "runtime(CURRENT_DATE)")])]
+            beat_kfs = [*kfs, kf("m.py::updateJobStatus", 241, "jobsActive4", "PandaID=:PandaID", {S: [242], C: [238]}, [src("parameter")]),
+                        kf("m.py::getJobs", 2498, "jobsActive4", "PandaID=:PandaID", {S: [2455], C: [2600]}, [src("parameter")]),
+                        kf("m.py::getJobs", 2610, "jobsActive4", "PandaID=:PandaID", {C: [2600]}, [src("parameter")])]
+            b = SV.before(status, beat, S, "sent", C, beat_kfs, lambda k: True, lambda o, line: reads.get((o, line)),
+                          {"jobsactive4", "jobsdefined4"}, lambda o, b: False)
+            got["beat"] = [list(b.left), list(b.runtime_starts), [list(x) for x in b.out]]
             print(json.dumps(got))
             """,
         )
@@ -15226,7 +15236,7 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
     # the map does not all place: it may write the column while the value holds, and the value is not known
     assert known is False and left == ["kill:1094"], got
     assert dict(map(tuple, out_)) == {
-        "getJobs:2452": "its statement at 2498 writes jobStatus too",
+        "getJobs:2452": "its statement at 2498 writes jobStatus too, to ['sent']",
         "lockForFinisher:895": "its statement at 906 takes the rows of lockForFinisher@900 (jobStatus in ['transferring'])",
         "forWaiting:287": "its statement at 297 asks jobStatus in ['waiting']",
         "copyMeta:1710": "it writes ['metaTable'], which hold no row of JobSpec",
@@ -15240,6 +15250,12 @@ def test_stay_value_reads_a_time_column_held_all_the_stay(tmp_path):
     # the value's arm without the column's time in its pass: not known, said
     assert got["lacking"][0] is False and got["lacking"][1] == [] and got["lacking"][2] == ["getJobs:2455"], got
     assert got["asked"] == [["assigned", "defined"], None], got
+    # E-3: the heartbeat's column arm and the arm with a statement writing no status may write it while the value
+    # holds; E-2: the run-time arm's pass writes the column at 238, tied by its statement's one arm of it
+    beat_left, beat_rt, beat_out = got["beat"]
+    assert "updateJobStatus:238" in beat_left and "getJobs:2600" in beat_left, got
+    assert beat_rt == ["updateJobStatus:242 with 238"], got
+    assert ["getJobs:2452", "its statement at 2498 writes jobStatus too, to ['sent']"] in beat_out, got
 
 
 def test_timeline_bounds_say_where_a_time_term_surely_held(tmp_path):
@@ -15562,6 +15578,18 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
             got["holes"] = [RR._hole_holds(row, started, mark, "53641080"), RR._hole_holds(row, started, mark, "53641081"),
                             RR._hole_holds(N(map_rows=[]), locked, bind, "53641080"),
                             RR._hole_holds(N(map_rows=[]), locked, bind, "53641081")]
+            # E-2: a run-time arm read as having begun the stay (A-3) whose pass's column arm M3(a)-1 ties to it wrote the
+            # column then, as a start does; one with no tie is read as writing the value alone, as before
+            r = rerun(hits)
+            r._before = lambda subject, q, nulls=False: (SV.Before(False, (), (), ("beat:240",), ("lock:2099",), (),
+                                                                   runtime_starts=("beat:240 with 238",)), "2026-11-13 20:29:16")
+            r._runtime_began = lambda q, before, begun: ["beat:240"]
+            tl5 = RR.Rerun._timeline(r, C, q)
+            r = rerun(hits)
+            r._before = lambda subject, q, nulls=False: (SV.Before(False, (), (), ("beat:240",), ("lock:2099",), ()), "2026-11-13 20:29:16")
+            r._runtime_began = lambda q, before, begun: ["beat:240"]
+            tl6 = RR.Rerun._timeline(r, C, q)
+            got["e2"] = [[str(x) for x in tl5.first], [str(x) for x in tl6.first], list(tl5.begun_runtime)]
             print(json.dumps(got))
             """,
         )
@@ -15602,6 +15630,9 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
     assert got["w"] == [["2026-11-13 20:34:16.423630", "2026-11-13 20:34:45.105988"]], got
     assert got["w_offsets"] == ["0:00:00", "-1 day, 23:00:00", "None", "None", "None"], got
     assert got["holes"] == [True, False, True, False], got
+    # E-2: tied, the column held the stay's start; untied, what the writes before it leave (lock's at 20:22:05.542)
+    assert got["e2"] == [["2026-11-13 20:29:16.423630", "2026-11-13 20:29:16.423630"],
+                         ["2026-11-13 20:22:05.542000", "2026-11-13 20:22:05.542000"], ["beat:240"]], got
 
 
 def test_an_amount_waiting_for_a_parameter_is_filled_from_what_the_runs_marks_print(tmp_path):

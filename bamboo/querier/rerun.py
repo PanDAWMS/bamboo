@@ -10374,7 +10374,7 @@ class Rerun:
             "known": found.known, "value": start if found.known else None, "starts": list(found.starts),
             "lacking": list(found.lacking), "runtime": list(found.runtime), "left": list(found.left),
             "out": [list(x) for x in found.out], "births": list(found.births),
-            "offsets": [list(x) for x in found.offsets]}
+            "offsets": [list(x) for x in found.offsets], "runtime_starts": list(found.runtime_starts)}
         return cache[key]
 
     def _timeline(self, subject: str, q: Missed, nulls: bool = False) -> TL.Timeline | None:
@@ -10455,7 +10455,7 @@ class Rerun:
             if not kept:
                 return None
             if not nulls:
-                shifts = [dict(before.offsets).get(s, 0.0) for s in kept]
+                shifts = [{**dict(before.offsets), **dict(before.runtime_offsets)}.get(s, 0.0) for s in kept]
                 if not any(shifts):
                     return None
                 return (begun + datetime.timedelta(seconds=min(shifts)), begun + datetime.timedelta(seconds=max(shifts)))
@@ -10468,10 +10468,16 @@ class Rerun:
         # A-3: an arm writing the status from a value known only at run time whose write the records show as the stay
         # began may have begun it, as one writing the value alone, read as writing the observed value (said)
         began_rt = self._runtime_began(q, before, begun) if before.runtime else []
-        lacking_all = [*before.lacking, *began_rt]
-        starts, lacking = bool(before.starts), bool(lacking_all)
+        # E-2 (bundle E, out/gm/qk-design.md, tmaeno's OK 2026-11-17 13:42): such an arm whose pass's column arm the map
+        # ties to it (M3(a)-1's ``runtime_starts``, A-2's tie) wrote the column as it began the stay, as a start does --
+        # updateJobStatus:240 'starting' with 238 ``modificationTime=CURRENT_DATE`` in its UPDATE at 241
+        rt_starts = [s for s in before.runtime_starts if s.partition(" with ")[0] in began_rt]
+        tied_rt = {s.partition(" with ")[0] for s in rt_starts}
+        all_starts = [*before.starts, *rt_starts]
+        lacking_all = [*before.lacking, *(r for r in began_rt if r not in tied_rt)]
+        starts, lacking = bool(all_starts), bool(lacking_all)
         a_starts, a_lacking = starts, lacking
-        kept_s = a_kept_s = list(before.starts)
+        kept_s = a_kept_s = list(all_starts)
         begun_by: tuple[str, ...] = ()
         begun_assumed: tuple[str, ...] = ()
         # P3: which kind of arm began the stay matters only where both may have
@@ -10479,7 +10485,7 @@ class Rerun:
             absent_b, unread_b = self._stay_begun_by(q, before, begun, began_rt)
 
             def left(out: set[str]) -> tuple[list[str], list[str]]:
-                return ([s for s in before.starts if s.partition(" with ")[0] not in out],
+                return ([s for s in all_starts if s.partition(" with ")[0] not in out],
                         [s for s in lacking_all if s not in out])
 
             if absent_b:
