@@ -978,6 +978,40 @@ class Adder:
     assert not row.keyed
 
 
+def test_a_local_text_the_function_builds_with_spaces_is_no_token(tmp_path):
+    """``updateTask_JEDI`` prints ``sqlU + sql + comment`` with ``sql`` built of ``"WHERE "``, an f-string added in
+    a loop and a slice, inside a ``try`` as there: closed at the first space, the hole stopped inside the ``WHERE``
+    and no line of the run matched.  Every binding of ``sql`` builds a text holding a space, so it prints as text; ``table``, a parameter,
+    is the caller's to say and stays a token."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def update(self, criteria, status, old_status, table):
+        comment = " /* Proxy.update */"
+        try:
+            sql = "WHERE "
+            for key in criteria:
+                sql += f"{key}=:cr_{key} AND "
+            if old_status is not None:
+                sql += "status=:old_status AND "
+            sql = sql[:-4]
+            self.status = status
+            sqlU = f"UPDATE {table}.JEDI_Tasks SET status=:status "
+            tmpLog.debug(sqlU + sql + comment)
+        except Exception:
+            pass
+''',
+    )
+
+    (found,) = trace_mod.function_prints(roots, [f"{PACKAGE}/proxy"])
+    ((row,),) = [statement.rows for statement in found.statements]
+
+    line = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE a=:cr_a AND b=:cr_b  /* Proxy.update */"
+    assert {hole.expression: hole.prints for hole in row.holes} == {"sql": "text", "table": "token"}
+    assert re.search(row.pattern, line)
+
+
 def test_a_number_and_a_fragment_the_function_wrote_out_are_matched(tmp_path):
     """``reg_msg_str`` is one of two f-strings and the line prints either.
     Written out, each is a variant; the ``:03d`` hole is a number."""

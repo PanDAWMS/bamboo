@@ -599,6 +599,55 @@ _PRINTS_NUMBER = frozenset(
 ) | callfacts.text_methods(callfacts.NUMBER)
 #: The type letter a format spec ends with when it prints a number.
 _NUMBER_SPEC = frozenset("bcdeEfFgGnoxX%")
+#: The ``str`` methods whose value is a text made of the receiver's, and joining, of the arguments': what a text a
+#: function builds may pass through on its way to a hole -- ``sql.strip()``, ``" ".join(parts)``.
+_TEXT_MADE = callfacts.text_methods(callfacts.TEXT, callfacts.JOINED)
+
+
+def _built_text(value: ast.expr, func: ast.AST, name: str, depth: int) -> Optional[str]:
+    """The literal text *value*, bound to *name* in *func*, is built of where it is surely a ``str``, else ``None``:
+    a ``str`` constant, an f-string's literal parts, ``+`` and ``%`` of such texts, a slice of one, a ``str`` method
+    making a text of one (:data:`_TEXT_MADE`), *name* itself (its other bindings say what it holds), or another name
+    of *func* every binding of which is such a text, one name deep."""
+    if isinstance(value, ast.Constant):
+        return value.value if isinstance(value.value, str) else None
+    if isinstance(value, ast.JoinedStr):
+        return "".join(str(part.value) for part in value.values if isinstance(part, ast.Constant))
+    if isinstance(value, ast.BinOp) and isinstance(value.op, (ast.Add, ast.Mod)):
+        left = _built_text(value.left, func, name, depth)
+        if left is None or isinstance(value.op, ast.Mod):
+            return left
+        right = _built_text(value.right, func, name, depth)
+        return None if right is None else left + right
+    if isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Slice):
+        return _built_text(value.value, func, name, depth)
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr in _TEXT_MADE:
+        held = _built_text(value.func.value, func, name, depth)
+        if held is None:
+            return None
+        return held + "".join(text for one in value.args if (text := _built_text(one, func, name, depth)))
+    if isinstance(value, ast.Name):
+        if value.id == name:
+            return ""
+        return _named_text(func, value.id, depth + 1) if depth < 1 else None
+    return None
+
+
+def _named_text(func: ast.AST, name: str, depth: int = 0) -> Optional[str]:
+    """The literal text every binding of *name* in *func* builds it of, joined (:func:`_built_text`); ``None`` where
+    one may not be a ``str`` -- a parameter, a loop's target, a call's value -- or *func* binds no *name*."""
+    texts = []
+    for binding in pathcond.bindings(func, name):  # type: ignore[arg-type]
+        if binding.nested:
+            continue
+        site = pathcond.site_of(binding.site)
+        if not isinstance(site, (ast.Assign, ast.AnnAssign, ast.AugAssign)) or site.value is None:
+            return None
+        text = _built_text(site.value, func, name, depth)
+        if text is None:
+            return None
+        texts.append(text)
+    return "".join(texts) if texts else None
 
 
 def _hole_prints(part: ast.FormattedValue) -> str:
@@ -612,6 +661,14 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     Read off the syntax, and off the map reader: a name it reads as a map where
     the hole prints (:func:`mapentries.entries`) prints a dict's repr too, as
     ``str()`` of it does -- not a guess at its value, the reader's reading.
+
+    And off the function's own bindings of a name: one every binding of which
+    builds a ``str`` whose literal text holds a space is no token
+    (:func:`_named_text`).  ``updateTask_JEDI`` prints ``sqlU + sql + comment``
+    with ``sql = "WHERE "``, ``sql += f"{tmpKey}={crKey} AND "`` and ``sql =
+    sql[:-4]``: closed at the first space, the hole stopped inside the ``WHERE``
+    and no line of the run matched.  A parameter's or a global's value is not
+    the function's to say, and stays a token.
     """
     if getattr(part, "appended", False):
         return "text"
@@ -642,6 +699,11 @@ def _hole_prints(part: ast.FormattedValue) -> str:
         site = pathcond.site_of(value)
         func = pathcond.enclosing_function(site)
         if isinstance(site, ast.stmt) and func is not None and mapentries.entries(func, held, site) is not None:
+            return "text"
+    if isinstance(value, ast.Name):
+        func = pathcond.enclosing_function(pathcond.site_of(value))
+        text = _named_text(func, value.id) if func is not None else None
+        if text is not None and " " in text:
             return "text"
     return ""
 
