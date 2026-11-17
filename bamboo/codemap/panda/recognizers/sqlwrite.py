@@ -7788,11 +7788,7 @@ def _read_after(func: ast.FunctionDef | ast.AsyncFunctionDef, loop: ast.AST, nam
     no way of *func*'s: none."""
     if enclosing_function(loop) is not func:
         return False
-    sites: list[ast.AST] = [func.args]
-    for binding in bindings(func, name):
-        if binding.nested or isinstance(binding.site, ast.arg):
-            continue
-        sites.append(binding.site if isinstance(binding.site, (ast.stmt, ast.ExceptHandler)) else site_of(binding.site))
+    sites = _name_sites(func, name)
     live = {id(one) for one in reaching(put, sites)}
     if not live:
         return False
@@ -7806,6 +7802,89 @@ def _read_after(func: ast.FunctionDef | ast.AsyncFunctionDef, loop: ast.AST, nam
         if flow.runs_after(loop, statement) and any(id(one) in live for one in reaching(statement, sites)):  # type: ignore[arg-type]
             return True
     return False
+
+
+def _name_sites(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> list[ast.AST]:
+    """The places *name* is bound in *func* itself, as :func:`reaching` takes them: the parameters, then each
+    statement binding it."""
+    sites: list[ast.AST] = [func.args]
+    for binding in bindings(func, name):
+        if binding.nested or isinstance(binding.site, ast.arg):
+            continue
+        sites.append(binding.site if isinstance(binding.site, (ast.stmt, ast.ExceptHandler)) else site_of(binding.site))
+    return sites
+
+
+def _drawn_reads(func: ast.FunctionDef | ast.AsyncFunctionDef, value: ast.expr, at: ast.AST) -> list[tuple[str, ast.AST]]:
+    """The names *value*, read at *at*, is drawn from in *func*, each with the statement reading it: the value's own,
+    then back through each binding reaching a read -- an assignment's value, an augmented one's name too, a ``for``'s
+    iterable.  Data only: a name a test reads on the way is none."""
+    found: list[tuple[str, ast.AST]] = []
+    todo = [(one.id, at) for one in walk(value) if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)]
+    seen: set[tuple[str, int]] = set()
+    while todo:
+        name, here = todo.pop()
+        if (name, id(here)) in seen:
+            continue
+        seen.add((name, id(here)))
+        found.append((name, here))
+        for site in reaching(here, _name_sites(func, name)):  # type: ignore[arg-type]
+            if isinstance(site, (ast.For, ast.AsyncFor)):
+                source: Optional[ast.expr] = site.iter
+            elif isinstance(site, (ast.Assign, ast.AnnAssign)):
+                source = site.value
+            elif isinstance(site, ast.AugAssign):
+                source = site.value
+                todo.append((name, site))
+            else:
+                continue
+            if source is not None:
+                todo.extend(
+                    (one.id, site) for one in walk(source) if isinstance(one, ast.Name) and isinstance(one.ctx, ast.Load)
+                )
+    return found
+
+
+def _attach_through(froms: list[KeyFrom], sites: dict[str, ReadSiteNode]) -> None:
+    """Give each ``rows`` source of a key filled in its statement's own function the hand-ons of that statement the
+    key's value is drawn through (:attr:`KeySource.through_hand_ons`): a put into a name the value is drawn from
+    (:func:`_drawn_reads`) where a binding of the name live at the put reaches that read, as :func:`_read_after`
+    reads the put's way on."""
+    puts: dict[int, dict[int, ast.stmt]] = {}
+    for key_from in froms:
+        for source in key_from.sources:
+            site = sites.get(source.name)
+            if (
+                source.kind != KEY_ROWS
+                or source.via
+                or source._drawn_from is None
+                or site is None
+                or not site.hand_ons
+                or source.site_owner != key_from.owner
+            ):
+                continue
+            func, value, at = source._drawn_from
+            by_line = puts.get(id(func))
+            if by_line is None:
+                by_line = puts[id(func)] = {
+                    statement.lineno: statement
+                    for statement, _value, _key, _into in _puts_into(func)
+                    if enclosing_function(statement) is func
+                }
+            reads = _drawn_reads(func, value, at)
+            through = []
+            for hand_on in site.hand_ons:
+                put = by_line.get(hand_on.line)
+                if put is None:
+                    continue
+                named = _name_sites(func, hand_on.into)
+                live = {id(one) for one in reaching(put, named)}
+                if any(
+                    name == hand_on.into and any(id(one) in live for one in reaching(here, named))  # type: ignore[arg-type]
+                    for name, here in reads
+                ):
+                    through.append(hand_on.line)
+            source.through_hand_ons = through
 
 
 def attach_hand_on_prints(
@@ -8173,6 +8252,7 @@ def attach_key_sources(
         for bind in unique:
             for source in reader.sources(bind.value, bind.site):
                 handed[id(source)] = bind.value
+                source._drawn_from = (func, bind.value, bind.site)
                 key_from.sources.append(source)
         read += 1
     for key_from in froms:
@@ -8191,6 +8271,8 @@ def attach_key_sources(
     if key_froms is not None and modules:
         # Where a row loop's row is not handed on: read once the KeyFroms say which later statements its rows name.
         _attach_falls(sites, froms, junctions, {module.rel_path: module.tree for module in modules}, of)
+        # Which of those hand-ons a key drawn from the rows comes through.
+        _attach_through(froms, sites)
     _same_rows(froms, sites)
     if landings:
         _attach_reaches(froms, sites, _Reading(calls, {junction.owner for junction in junctions}, record, True))

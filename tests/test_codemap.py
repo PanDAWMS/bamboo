@@ -20476,6 +20476,7 @@ def test_a_writes_row_naming_terms_say_where_their_binds_were_filled_from(tmp_pa
             "column_unread": "",
             "same_rows": False,
             "never_at": [],
+            "through_hand_ons": [],
             "via": [],
             "reaches": [],
             "reaches_open": [],
@@ -20842,6 +20843,76 @@ def test_an_if_whose_other_way_leads_on_to_a_later_hand_on_is_no_fall(tmp_path):
     (site,) = [one for one in sites if one.anchor.line_start == at("# EA")]
     assert [one.into for one in site.hand_ons] == ["started", "statusMap"]
     assert [(one.line, one.kept) for one in site.falls] == [(at("# TRIGGER"), "body")]
+
+
+#: ``prepareTasksToBeFinished_JEDI``'s three selections at 3696-3794: two put their tasks into one map, whose keys the
+#: lock after them is run by; the second also puts some into a set the later loop only tests; the second's own loop
+#: locks each row by its key.
+_KEY_THROUGH = '''
+class TaskModule:
+    def prepare(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlRS = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlRS + comment, varMap)  # RS
+        resList = self.cur.fetchall()
+        statusMap = {}
+        scoutOnly = set()
+        for jediTaskID, taskStatus in resList:
+            statusMap[jediTaskID] = taskStatus  # PUT1
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlEA = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo AND walltimeUnit IS NULL "
+        self.cur.execute(sqlEA + comment, varMap)  # EA
+        resList = self.cur.fetchall()
+        for jediTaskID, taskstatus in resList:
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            sqlAT = "UPDATE ATLAS_PANDA.JEDI_Tasks SET assessmentTime=CURRENT_DATE WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlAT + comment, varMap)  # AT
+            if taskstatus == "running":
+                scoutOnly.add(jediTaskID)  # ONLY
+            statusMap[jediTaskID] = taskstatus  # PUT2
+        idList = list(statusMap.keys())
+        for jediTaskID in idList:
+            if jediTaskID in scoutOnly:
+                continue
+            varMap = {}
+            varMap[":jediTaskID"] = jediTaskID
+            sqlLK = "UPDATE ATLAS_PANDA.JEDI_Tasks SET lockedBy=NULL WHERE jediTaskID=:jediTaskID "
+            self.cur.execute(sqlLK + comment, varMap)  # LK
+'''
+
+
+def test_a_key_from_a_statement_s_rows_says_which_of_its_hand_ons_the_value_is_drawn_through(tmp_path):
+    """The lock at LK is run by ``jediTaskID`` from the keys of ``statusMap``: RS's rows come through PUT1, EA's
+    through PUT2 and not ONLY, whose set the later loop only tests (:attr:`KeySource.through_hand_ons`).  AT, in EA's
+    own row loop, is keyed by the row itself: through none."""
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _KEY_THROUGH})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    lines = _KEY_THROUGH.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    (early,) = [one for one in sites if one.anchor.line_start == at("# EA")]
+    assert [one.line for one in early.hand_ons] == [at("# ONLY"), at("# PUT2")]
+
+    def through(line: int) -> list[tuple[int, list[int]]]:
+        (key_from,) = [one for one in froms if one.statement == line and one.term == "jediTaskID=:jediTaskID"]
+        return sorted((one.site_line, one.through_hand_ons) for one in key_from.sources if one.kind == "rows")
+
+    assert through(at("# LK")) == [(at("# RS"), [at("# PUT1")]), (at("# EA"), [at("# PUT2")])]
+    assert through(at("# AT")) == [(at("# EA"), [])]
 
 
 #: ``updateTask_JEDI``'s ``WHERE``, built from the keys of the criteria its callers hand it; ``queryDatasetWithMap``'s,

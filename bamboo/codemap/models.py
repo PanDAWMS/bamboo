@@ -3751,6 +3751,20 @@ class KeySource(BaseModel):
             "own function only: empty where the rows come through calls (*via*)."
         ),
     )
+    through_hand_ons: list[int] = Field(
+        default_factory=list,
+        description=(
+            "``rows`` filled in the source's own function: the lines of the source statement's hand-ons "
+            "(:attr:`ReadSiteNode.hand_ons`) the key's value is drawn through -- a put into a name the value at the "
+            "fill is read from, back through the bindings reaching each read (an assignment's value, a ``for``'s "
+            "iterable), where a binding of the name live at the put reaches that read.  "
+            "``prepareTasksToBeFinished_JEDI``'s lock at 3888 is run by the ``jediTaskID`` of 3741's rows through "
+            "3767, not 3763: the set put into there is only tested.  Empty where the key is filled in the row loop "
+            "itself, or is drawn through no hand-on the map reads.  Read by data in the function only: a name only "
+            "tested is no way, every argument of a call the value goes through is, and a container's contents put "
+            "into another (``A.extend(B)``) are not followed."
+        ),
+    )
     via: list[str] = Field(
         default_factory=list,
         description=(
@@ -3776,6 +3790,8 @@ class KeySource(BaseModel):
     )
     #: The walk's way to the bind, ``(kind, file, func, call)`` per step, for *reaches* (``sqlwrite._Landing``).
     _way: Optional[tuple] = PrivateAttr(default=None)
+    #: ``(func, value, statement)`` of the bind this source was read from in its own function, for *through_hand_ons*.
+    _drawn_from: Optional[tuple] = PrivateAttr(default=None)
 
 
 class HeldThrough(BaseModel):
