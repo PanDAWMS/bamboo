@@ -152,25 +152,25 @@ ARMS = [
 ]
 
 
-def _line(marker: str) -> int:
+def _line(marker: str, proxy: str = PROXY) -> int:
     (found,) = [
         number
-        for number, held in enumerate(PROXY.splitlines(), 1)
+        for number, held in enumerate(proxy.splitlines(), 1)
         if held.rstrip().endswith(f"# {marker}")
     ]
     return found
 
 
 def _build(
-    tmp_path: Path, arms: list[tuple[str, str, str]], key_froms: list[KeyFrom]
+    tmp_path: Path, arms: list[tuple[str, str, str]], key_froms: list[KeyFrom], proxy: str = PROXY
 ) -> MapFragment:
-    """Read SPEC and PROXY as the build does, one junction per (owner, marker, subject) of *arms*, with the table's key
-    and *key_froms* as the build learns them before this step."""
+    """Read SPEC and *proxy* as the build does, one junction per (owner, marker, subject) of *arms*, with the table's
+    key and *key_froms* as the build learns them before this step."""
     root = tmp_path / PACKAGE
     root.mkdir(parents=True, exist_ok=True)
     (root / "__init__.py").write_text("")
     modules = []
-    for name, text in {"spec": SPEC, "proxy": PROXY}.items():
+    for name, text in {"spec": SPEC, "proxy": proxy}.items():
         (root / f"{name}.py").write_text(text)
         tree = ast.parse(text)
         pathcond.attach_parents(tree)
@@ -341,3 +341,40 @@ def test_an_insert_making_its_row_takes_an_sql_arm_out(tmp_path: Path) -> None:
     assert _made(fragment, "S_INSERT") == AfterMade(
         counted=False, by=AFTER_MADE_NEW_ROW
     )
+
+
+#: A method of ``DBProxy.rekey``'s name in another class, inserting the object whose key it sets.
+_MOVER = """
+
+class Mover:
+    def rekey(self, job, panda_id):
+        job.PandaID = panda_id
+        self.cur.execute("INSERT INTO ATLAS_PANDA.jobsDefined4 (PandaID,jobName,jobStatus) VALUES (:PandaID,:jobName,:jobStatus)", job.valuesMap())  # M_INSERT
+"""
+
+
+def test_a_key_is_new_by_the_inserts_of_its_own_function_not_of_another_of_its_name(tmp_path: Path) -> None:
+    """``DBProxy.rekey`` gives a handed object an old key, and ``Mover.rekey`` -- another class's method of its name --
+    inserts the object it keys.  That insert says nothing of ``DBProxy.rekey``'s key: a function's KeyFroms are the
+    ones naming it (:attr:`ReachNode.named_as`), so no row yet stays broken for the class."""
+    proxy = PROXY + _MOVER
+    inserted = KeyFrom(
+        owner=f"{PACKAGE}/proxy.py::Mover.rekey",
+        file=f"{PACKAGE}/proxy.py",
+        statement=_line("M_INSERT", proxy),
+        table="jobsDefined4",
+        term="PandaID=:PandaID",
+        object="job",
+        attr="JobSpec.PandaID",
+        new_row=True,
+    )
+    fragment = _build(
+        tmp_path,
+        [*ARMS, ("DBProxy.rekey", "K_OLD", "JobSpec.PandaID")],
+        [_update_key("update_status", "A_ROW"), inserted],
+        proxy,
+    )
+
+    broken = _made(fragment, "A_NEW")
+    assert broken is not None and broken.why == [AFTER_MADE_KEY_ELSEWHERE]
+    assert broken.elsewhere == [f"{PACKAGE}/proxy.py::DBProxy.rekey:{_line('K_OLD')}"]
