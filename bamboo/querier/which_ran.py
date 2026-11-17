@@ -657,6 +657,59 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
     return put
 
 
+def constant_on_way(fn: R.Function, printed: list[int], test_line: int,
+                    bindings: dict[int, Any]) -> tuple[Any, int, int] | None:
+    """Bundle F, F-2 (out/gm/qk-design.md, tmaeno's OK 2026-11-17 15:2x): what a name the test at *test_line* of *fn*
+    reads holds there in one turn of a pass, where the map's GuardFrom reads it back to more than one literal -- its
+    *bindings*, by line -- prepareTasksToBeFinished_JEDI's ``toSkip``, False at 3861 and True at 3939, which 4068's
+    ``not toSkip`` reads.  A row the pass printed in that turn (*printed*: the lines whose records there hold the key)
+    that every way reaches through one binding (``flow.passes_before``) with no other binding between them, and from
+    which the test is reached with no other binding between (``flow.runs_between``), says that binding's value is what
+    the test read: 3940's ``done set only scout data for jediTaskID=...`` comes only past 3939, and no binding of
+    ``toSkip`` runs from it to 4068.  The turn is the innermost loop holding the print and the test, gone round once.
+    ``(value, binding line, print line)``; None where no printed row says, or two say different bindings."""
+    node = fn.node
+    test = R.statement_at(node, test_line)
+    sites: dict[int, ast.stmt] = {}
+    for line in bindings:
+        if (site := R.statement_at(node, line)) is None:
+            return None
+        sites[line] = site
+    if test is None:
+        return None
+    holding_test = {id(a) for a in pathcond.ancestors(test)}
+    by_value: dict[str, list[int]] = {}
+    for b, v in bindings.items():
+        by_value.setdefault(repr(v), []).append(b)
+    found: dict[str, list[tuple[int, int]]] = {}
+    for line in sorted(set(printed)):
+        p = R.statement_at(node, line)
+        if p is None or p is test or any(p is s for s in sites.values()):
+            continue
+        once = [a for a in pathcond.ancestors(p) if isinstance(a, R.LOOPS) and id(a) in holding_test][:1]
+        try:
+            if not flow.runs_after(p, test, once=once, printed=True) or not flow.passes_before(p, list(sites.values()), once=once):
+                continue
+            for value, lines in by_value.items():
+                same = [sites[b] for b in lines]
+                other = [s for b, s in sites.items() if b not in lines]
+                # every way to the print passed a binding of this value last, and none of another runs on to the test
+                if (flow.passes_before(p, same, once=once)
+                        and not any(flow.runs_after(o, p, same, once=once) for o in other)
+                        and not any(flow.runs_between(p, test, o, [], once=once) for o in other)):
+                    found.setdefault(value, []).extend((b, line) for b in lines
+                                                       if flow.runs_after(sites[b], p, [], once=once))
+        except ValueError:
+            continue
+    if len(found) != 1:
+        return None
+    pairs = next(iter(found.values()))
+    if not pairs:
+        return None
+    b = min(b for b, _ in pairs)
+    return bindings[b], b, min(line for _, line in pairs)
+
+
 def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env,
                    several: dict[str, list[Any]] | None = None) -> dict[str, str]:
     """Put in *env* each bare local (``{N}`` or ``{str(N)}``) that a row of *fn* printed before *stmt* on every path to

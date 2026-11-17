@@ -17980,3 +17980,271 @@ def test_p35_the_arms_of_a_write_statement_are_read_off_its_printed_bind_map_in_
     # the inner loop binds no key: the turn is the outer loop's, from task 2's begin to task 3's; a key begun twice is none
     assert got["turns"] == {"nested": [3, 6, a["begin"], f"in the turn of jediTaskID=2 (row {a['begin']} at nested.log:4)"],
                             "nested_twice": None}, got["turns"]
+
+
+def test_f2_a_name_bound_to_two_literals_reads_the_one_the_printed_way_passed_last_in_the_turn(tmp_path):
+    """Bundle F, F-2: prepareTasksToBeFinished_JEDI's ``toSkip`` is False at the turn's start and True under the
+    scout-data-only arm, whose print says the way.  A record of that print in the key's turn says the test after it
+    read True: every way to it passes the True binding, and no binding runs from it to the test in the turn (the loop
+    gone round once).  A print on the other arm says False; a print before the arms says nothing (a binding may run
+    after it); two prints saying different bindings say nothing.  ``_held_printed`` puts the value read so, and says
+    where."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap import pathcond
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import which_ran as WR
+
+            src = (
+                "def prepare(tasks):\\n"
+                "    for t in tasks:\\n"
+                "        toSkip = False\\n"
+                "        log(f'start {t}')\\n"
+                "        if t in only:\\n"
+                "            toSkip = True\\n"
+                "            log(f'done set only scout data for {t}')\\n"
+                "        else:\\n"
+                "            log(f'go {t}')\\n"
+                "        if not toSkip:\\n"
+                "            write(t)\\n"
+            )
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            fn = N(owner="t.py::prepare", node=module.body[0])
+            binds = {3: False, 6: True}
+            got = {"scout only": WR.constant_on_way(fn, [7], 10, binds), "other arm": WR.constant_on_way(fn, [9], 10, binds),
+                   "before the arms": WR.constant_on_way(fn, [4], 10, binds),
+                   "both": WR.constant_on_way(fn, [7, 9], 10, binds), "none": WR.constant_on_way(fn, [], 10, binds)}
+
+            def src_(value, line, changes=()):
+                return N(kind="constant", name=value, line=line, printed=[], changes=list(changes), steps=[])
+
+            g = N(owner="t.py::prepare", test_line=10, name="toSkip", arms=[11], sources=[src_("False", 3), src_("True", 6)])
+            RR.guard_froms = lambda owner: [g]
+            r = RR.Rerun.__new__(RR.Rerun)
+            r._key_rows = lambda fn, run, subject=None: [7]
+            env = E.Env()
+            got["said"] = r._held_printed(fn, N(), env, [RR.Arm(11, ["done"], [])], ["not toSkip"])
+            got["truth"] = E.truth(ast.parse("not toSkip", mode="eval").body, {}, env)
+            g.sources = [src_("False", 3), src_("True", 6, [N(at="t.py:5")])]
+            got["changed"] = r._held_printed(fn, N(), E.Env(), [RR.Arm(11, ["done"], [])], ["not toSkip"])
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["scout only"] == [True, 6, 7] and got["other arm"] == [False, 3, 9], got
+    assert got["before the arms"] is None and got["both"] is None and got["none"] is None, got
+    assert got["said"] == ["toSkip = True (the constant at 6, which the way to 7's record passed last)"], got
+    assert got["truth"] is False and got["changed"] == [], got
+
+
+def test_f1_a_selecting_mover_s_passes_before_the_moving_one_whose_selection_printed_the_key_go_to_s2(tmp_path):
+    """Bundle F, F-1: where the mover's selections are read as holding for the row at no time, its passes before the
+    one that moved it whose selection's loop printed the key -- read from the key's records alone, no marks -- are said
+    as having taken the row before, and go to S2 as judgement 4's do, from the stay's start to the moving pass.  A pass
+    printing the key by another row of it is not a take; a log not in the records keeps its asks and reads none."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+
+            def t(s):
+                return datetime.datetime.fromisoformat(s)
+
+            def P(stamp, machine="h1.cern.ch"):
+                return N(records=[N(stamp=stamp)], machine=machine)
+
+            moving, early, other = P("2026-01-01 12:00:00,100"), P("2026-01-01 09:00:00,300", "h2.cern.ch"), P("2026-01-01 10:00:00,000")
+            RR.R.function = lambda rel, func, lines: N(node="node")
+            RR.R._prints_of = lambda owner, lines: N(statements=[N(line=3768, log_files=["jedi.log"])])
+            RR.cut_passes = lambda fn, run, mode: (run.passes, "")
+            RR.of_mover = lambda run, owner: True
+            RR.arms_of = lambda writers, owner, subject, observed: {4074: RR.Arm(4074, ["scouted"], [])}
+            RR._entries_of = lambda writers, owner: ["main"]
+
+            spanning = N(records=[N(stamp="2026-01-01 09:30:00,500"), N(stamp="2026-01-01 13:00:00,000")], machine="h2.cern.ch")
+            RR.R.seen = lambda fn, p, mode: N(hits={3768: [(0, None, None)], 3880: [(1, None, None)]})
+
+            def take(missed=(), runs=None):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args, r.mode, r.result, r.lines, r.unanswered, r.hop = N(key="7"), None, {}, [], [], "L2"
+                r.logs = N(needs_window=True, names=lambda files: files)
+                r._row_key_print = lambda owner, st, subject, under_ifs=False: {3739: 3768}.get(st.line)
+                r._key_rows = lambda fn, p, subject=None: [3768, 3880] if p is spanning else [3768] if p is early else [3880]
+                asked = []
+                r._ask = lambda key, names, asking, owners, quiet=False: (asked.append((names, asking.window, owners)) or
+                                                                         ({"jedi.log": [N(passes=runs or [early, other, moving], machine="h2.cern.ch")]}, list(missed), {}))
+                q = N(statements=[N(owner="m.py::prepare", line=3739), N(owner="m.py::prepare", line=3694)],
+                      mover="m.py::prepare", run=N(passes=[moving]), moved=t("2026-01-01 12:00:01"),
+                      since=t("2026-01-01 08:00:00"), subject="JediTaskSpec.status", observed="scouting", writers=[])
+                said, passes = r._earlier_takes(q)
+                return {"said": [T.text(s) for s in said], "asked": asked and [asked[0][0], list(asked[0][1]), asked[0][2]],
+                        "passes": passes and [passes.owner, passes.before, list(passes.stay), passes.owners, [a.line for a in passes.arms]],
+                        "result": r.result.get("earlier_takes"), "kept": len(r.unanswered)}
+            got = {"read": take(), "missed": take(missed=[(N(key="k1"), "why")]), "uncut": take(runs=[spanning, moving])}
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    read = got["read"]
+    assert read["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:00:00,300 on h2"], read
+    assert read["asked"] == [["jedi.log"], ["2026-01-01 08:00:00", "2026-01-01 12:00:00"], {}], read
+    assert read["passes"] == ["m.py::prepare", "2026-01-01 12:00:00", ["2026-01-01 08:00:00", "2026-01-01 12:00:00"], {}, [4074]], read
+    assert read["result"] == [{"at": "2026-01-01 09:00:00,300", "machine": "h2.cern.ch", "statements": [3739], "cut": True}], read
+    assert got["missed"]["said"] == [] and got["missed"]["passes"] is None and got["missed"]["kept"] == 1, got
+    # a run of the key's records spanning the moving pass, not cut: the take is its print's record before the moving
+    # pass (3880's after it is none), said as not read, and no passes go to S2
+    uncut = got["uncut"]
+    assert uncut["said"] == ["prepare@3739 (printing the row at 3768) took it before, at 2026-01-01 09:30:00,500 on h2, in a run of "
+                             "the key's records with no record of its entry row, not cut into passes: which way that pass went is not read"], uncut
+    assert uncut["passes"] is None and uncut["result"] == [{"at": "2026-01-01 09:30:00,500", "machine": "h2.cern.ch",
+                                                            "statements": [3739], "cut": False}], uncut
+
+
+def test_f3_f5_a_row_value_written_in_the_stay_is_its_left_writers_and_a_birth_in_the_window_is_a_write(tmp_path):
+    """Bundle F, F-3: the row value's writers, its write inside the stay, are those M3(a)-1 leaves as writing it while
+    the value holds; the others are put apart with why, and said.  A write at the start, no left arm among them, or
+    no left at all: as it was.  F-5: the row made in the window before the stay, its birth arm writing the creation
+    column (or the clock), is a ran write at the creation column's value; a birth before the window, a birth arm
+    writing another value, or no creation column: none."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T, stay_value as SV, timeline as TL
+
+            def t(s):
+                return datetime.datetime.fromisoformat(s)
+
+            begun = t("2026-11-14 18:00:00")
+            before = SV.Before(False, left=("prep:3744",), out=(("ach:3283", "its statement takes running, pending rows"),))
+            rv = (t("2026-11-14 19:53:41"), t("2026-11-14 19:53:41"), ("ach:3283", "prep:3744"), "2026-11-15 09:49:33")
+            got = {"in": RR._left_writers(rv, before, begun),
+                   "at the start": RR._left_writers((begun, begun, rv[2], rv[3]), before, begun),
+                   "none left": RR._left_writers(rv, SV.Before(False, left=("other:1",)), begun),
+                   "no left": RR._left_writers(rv, SV.Before(False), begun)}
+            got = {k: [str(v[0]), list(v[2]), [list(x) for x in v[4]]] for k, v in got.items()}
+            tl = TL.Timeline(begun, t("2026-11-14 21:00:00"), (TL.LOW, TL.HIGH), (TL.LOW, TL.HIGH), (), (), (), (), (), (), (), (), (),
+                             RR._left_writers(rv, before, begun))
+            got["said"] = T.text(RR._timeline_said("JediTaskSpec.assessmentTime", tl))
+            # F-5
+            RR.AT.creation_of = lambda fragment, cls: "creationTime"
+            RR.mapdump.fragment = lambda: None
+            born = SV.Before(False, lacking=("upd:174",), left=("lock:941",), out=(("ins:3053", "a birth: written as the row is made"),))
+
+            def birth(created="2026-10-29 09:05:55", outcome="passthrough(JobSpec.creationTime)", b=born):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r._row_value = lambda subject, q=None: created if subject == "JobSpec.creationTime" else None
+                arms = {"ins:3053": N(outcome=outcome, line=3053)}
+                w = r._birth_write("JobSpec.prodDBUpdateTime", N(), b, arms, t("2026-10-29 08:56:09"), t("2026-10-29 09:06:09"))
+                return None if w is None else [str(w.at), str(w.lo), w.how, list(w.arms), w.where, w.machine]
+            got["birth"] = {"made": birth(), "clock": birth(outcome="runtime(naive_utcnow())"),
+                            "before the window": birth(created="2026-10-29 08:00:00"), "another value": birth(outcome="passthrough(x)"),
+                            "no birth arm": birth(b=SV.Before(False, lacking=("upd:174",)))}
+            w = RR.Rerun.__new__(RR.Rerun)
+            w._row_value = lambda subject, q=None: "2026-10-29 09:05:55"
+            ws = w._birth_write("JobSpec.prodDBUpdateTime", N(), born, {"ins:3053": N(outcome="passthrough(JobSpec.creationTime)")},
+                                t("2026-10-29 08:56:09"), t("2026-10-29 09:06:09"))
+            tl2 = TL.Timeline(t("2026-10-29 09:06:09"), t("2026-10-29 13:00:00"), (TL.LOW, TL.HIGH), (TL.LOW, TL.HIGH), (ws,))
+            got["birth said"] = T.text(RR._timeline_said("JobSpec.prodDBUpdateTime", tl2))
+            got["folded"] = [str(x) for x in TL.first_bounds(t("2026-10-29 09:06:09"), t("2026-10-29 08:56:09"), False, True, [ws], [])]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["in"] == ["2026-11-14 19:53:41", ["prep:3744"], [["ach:3283", "its statement takes running, pending rows"]]], got
+    assert got["at the start"][1] == ["ach:3283", "prep:3744"] and got["at the start"][2] == [], got
+    assert got["none left"][1] == ["ach:3283", "prep:3744"] and got["no left"][2] == [], got
+    assert ("last written at 2026-11-14 19:53:41 by prep:3744 (each writes the clock with one offset); not ach:3283 "
+            "(its statement takes running, pending rows), left out of the stay, none writing it since") in got["said"], got
+    b = got["birth"]
+    assert b["made"] == ["2026-10-29 09:05:55", "2026-10-29 09:05:55", "ran", ["ins:3053"], "its creationTime", ""], b
+    assert b["clock"][0] == "2026-10-29 09:05:55" and b["before the window"] is None, b
+    assert b["another value"] is None and b["no birth arm"] is None, b
+    assert "09:05:55.000 by ins:3053 (ran: the row's birth, at its creationTime, before the stay)" in got["birth said"], got
+    assert got["folded"] == ["2026-10-29 09:05:55", "2026-10-29 09:05:55"], got
+
+
+
+def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_by_its_marks_heads(tmp_path):
+    """Bundle F, F-4: a timeline built for the question whose row value only the mover's own arms wrote, inside the
+    stay before the moving pass, is a take then.  Where the key's records hold none at that second, its passes around
+    the write are asked by its marks' heads on every machine its log is on; a log not in the records keeps its asks;
+    a pass read there is said.  Another mover's arm among the writers, a write outside the stay, or a take F-1 read
+    already: nothing."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+
+            def t(s):
+                return datetime.datetime.fromisoformat(s)
+
+            class Unrec(RR.Unrecorded):
+                def __init__(self):
+                    self.asks = [(N(key="k1"), "w"), (N(key="k2"), "w")]
+
+            q = N(mover="m.py::prepareTasksToBeFinished_JEDI", subject="JediTaskSpec.status", observed="scouting",
+                  since=t("2026-11-14 18:00:00"), moved=t("2026-11-14 21:00:00"))
+            start = t("2026-11-14 20:59:59.500")
+            at = t("2026-11-14 19:53:41")
+            RR.of_mover = lambda run, owner: True
+            RR.passes_of = lambda fn, run, mode: (run.passes, "")
+            RR.owners_of = lambda ids: {}
+
+            def go(arms=("prepareTasksToBeFinished_JEDI:3744",), when=at, read=(), recorded=True):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.args, r.mode, r.unanswered, r.hop = N(key="7"), None, [], "L2"
+                r._timelines = {("JediTaskSpec.assessmentTime", q.subject, q.observed, q.since, q.moved, False):
+                                N(row_value=(when, when, arms, "x"))}
+                r._row_mark_heads = lambda owner, lines: (("prepareTasksToBeFinished_JEDI < vo=None label=user >",), {})
+                r.files_of = lambda owner, files, lines: ["jedi.log"]
+                p = N(first="2026-11-14 19:53:40,900", last="2026-11-14 19:53:42,000", machine="aipanda084.cern.ch")
+
+                class Logs:
+                    def names(self, files):
+                        return files
+
+                    def log(self, name, key, window, machine=None, owners=None, strings=None):
+                        if not recorded and machine is not None:
+                            raise Unrec()
+                        return N(machines={"aipanda084.cern.ch"}, without=set(), passes=[p])
+                r.logs = Logs()
+                RR.runs_for = lambda log, func: [N(passes=log.passes)]
+                said = r._row_value_takes(q, N(), start, list(read))
+                return {"said": [T.text(s) for s in said], "kept": len(r.unanswered)}
+            got = {"read": go(), "asked": go(recorded=False), "another": go(arms=("prepareTasksToBeFinished_JEDI:3744", "getAchievedTasks_JEDI:3283")),
+                   "outside": go(when=t("2026-11-14 17:00:00")), "already": go(read=[at]),
+                   "its_second": go(when=t("2026-11-14 20:59:59"))}
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["read"]["said"] == [
+        "prepareTasksToBeFinished_JEDI took it before, at 2026-11-14 19:53:41, writing assessmentTime by "
+        "prepareTasksToBeFinished_JEDI:3744 (the row's value): its pass on aipanda084 from 2026-11-14 19:53:40,900 to "
+        "2026-11-14 19:53:42,000"], got
+    assert got["asked"]["kept"] == 2 and "asked by its marks' heads on every machine" in got["asked"]["said"][0], got
+    assert got["another"]["said"] == [] and got["outside"]["said"] == [] and got["already"]["said"] == [], got
+    # the row value's second is the moving pass's own (its write fell in [20:59:59, 21:00:00), the pass began 20:59:59.x)
+    assert got["its_second"]["said"] == [], got

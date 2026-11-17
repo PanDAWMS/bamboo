@@ -723,9 +723,13 @@ TEMPLATES: dict[str, str] = {
     "timeline-writes": "written at {writes:join=; }",
     "timeline-no-write": "no write of it read",
     "timeline-write": "{at} by {arms:join=/} ({how}: {where} on {machine}{before})",
+    # bundle F, F-5: the row's birth, at its creation column's value
+    "timeline-birth-write": "{at} by {arms:join=/} ({how}: the row's birth, at {where}{before})",
     "timeline-before-the-stay": ", before the stay",
     "timeline-absent": "; shown not written by {arms:join=, } (judgement 3)",
-    "timeline-row-value": "; the row's value {value}, read at {as_of}, was last written at {at} by {arms:join= or } (each writes the clock with one offset), none writing it since",
+    "timeline-row-value": "; the row's value {value}, read at {as_of}, was last written at {at} by {arms:join= or } (each writes the clock with one offset){apart}, none writing it since",
+    # bundle F, F-3: a writer M3(a)-1 left out of the stay is not the row value's
+    "timeline-row-value-apart": "; not {apart:join=, or }, left out of the stay",
     "timeline-not-run": "; read as not run in their pass: {writes:join=; }",
     "timeline-not-run-write": "{at} by {arm} on {machine} ({guards:join=, })",
     "timeline-opens": "; not all read, so they may write it: {arms:join=, }",
@@ -749,5 +753,16 @@ TEMPLATES: dict[str, str] = {
     "ran-followed-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: followed on its own, which way its passes in the stay went (KNOWN_ISSUES.md K15)",
     "no-pass-of-in-the-stay": "no pass of {func} with the key in the stay ({since} .. {moved}): its runs fall outside it, so it did not take the row there (KNOWN_ISSUES.md K15)",
     "mover-that-moved-it-label": "mover {owner}, which moved it on",
+    # bundle F, F-1: the mover's own passes before the one that moved it, whose selection took the row
+    "mover-earlier-takes-label": "mover {owner}, its passes before the one that moved it on, whose selection took the row",
+    "held-at-times-not-known-taken-before": "held for the row at times not known; {takes:join=; }: which way each pass cut from the key's records went is read on its own (S2)",
+    "held-at-times-not-known-taken-before-unread": "held for the row at times not known; {takes:join=; }",
+    "took-it-before": "{func}{lines:join=, } took it before, at {at} on {machine}",
+    "took-it-before-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}, in a run of the key's records with no record of its entry row, not cut into passes: which way that pass went is not read",
+    # bundle F, F-4: a take the row's value of a time column the mover's own arms alone wrote shows
+    "took-it-by-the-row-value": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass on {machine} from {first} to {last}",
+    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its marks' heads on every machine from {first} to {last} ({n} ask(s))",
+    "took-it-by-the-row-value-unread": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is not read",
+    "for-the-key-before-the-moving-pass": "for the key alone in {func}'s prints' logs, from the stay's start {since} to its moving pass at {before}",
     "asks-of-its-logs-not-recorded": "{n} ask(s) of its logs not in the records ({why}): whether it ran is not known yet",
 }
