@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from bamboo.codemap import trace
+from bamboo.codemap import pathcond, trace
 from bamboo.codemap.gates import must_prints_resolve
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
@@ -1125,3 +1125,49 @@ def test_an_arm_whose_change_a_later_reset_takes_back_says_the_resets_and_where_
         [_line(TAKEN, "ERR")],
     )
     assert _branch(user, "K").taken_back is None
+
+
+def test_what_attach_keeps_lives_only_while_it_runs(tmp_path: Path, monkeypatch) -> None:
+    """``_changes_of``, ``_object_sites`` and ``_holds_key`` keep their answers while :func:`mustprints.attach` runs,
+    and only then: what was kept outside it was read without the corpus's calls, so attach starts empty and ends
+    empty."""
+    started: list[bool] = []
+    attach = mustprints._attach
+
+    def watched(*args, **kwargs):
+        started.append(all(not kept for kept in mustprints._KEPT))
+        found = attach(*args, **kwargs)
+        started.append(any(kept for kept in mustprints._KEPT))
+        return found
+
+    monkeypatch.setattr(mustprints, "_attach", watched)
+    mustprints._CHANGES[(0, "job", "PandaID")] = (object(), None)  # type: ignore[assignment]
+    _build(tmp_path, NAMES, ("plain", "A1"), ("rebound", "A2"), ("stored", "A3"))
+
+    assert started == [True, True]
+    assert all(not kept for kept in mustprints._KEPT)
+
+
+def test_a_chain_is_asked_by_its_spelling_and_handed_a_copy() -> None:
+    """Two nodes spelling one chain in one function ask one question: the answer kept for the first is the second's,
+    the same as reading it again, and a caller changing the list it is handed changes nothing kept."""
+    module = ast.parse(NAMES)
+    pathcond.attach_parents(module)
+    func = next(node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "stored")
+    stored = NAMES.splitlines().index("    job.PandaID = 7") + 1
+    first, second = (ast.parse("job", mode="eval").body for _ in range(2))
+    try:
+        found = mustprints._changes_of(func, first, "PandaID")
+        assert found is not None and stored in [one.lineno for one in found]
+        found.clear()
+        again = mustprints._changes_of(func, second, "PandaID")
+        assert again == mustprints._read_changes(func, second, "PandaID") and stored in [one.lineno for one in again]
+        rebound = next(
+            node for node in ast.walk(module) if isinstance(node, ast.FunctionDef) and node.name == "rebound"
+        )
+        again_bound = NAMES.splitlines().index("    job = other") + 1
+        assert [one.lineno for one in mustprints._object_sites(rebound, first)] == [again_bound]
+        assert mustprints._object_sites(rebound, second) == mustprints._read_object_sites(rebound, second)
+    finally:
+        for kept in mustprints._KEPT:
+            kept.clear()

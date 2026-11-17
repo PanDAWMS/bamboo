@@ -176,6 +176,9 @@ def attach(
         if isinstance(node, _FUNCTIONS)
     }
     _ACROSS = (calls, files) if calls is not None else None
+    # What was kept outside an attach was read without the corpus's calls.
+    for kept in _KEPT:
+        kept.clear()
     try:
         return _attach(
             junctions, function_prints, modules, declarations, key_froms, tables
@@ -184,6 +187,8 @@ def attach(
         _ACROSS = None
         _ASSIGNMENTS.clear()
         _SINGLES.clear()
+        for kept in _KEPT:
+            kept.clear()
 
 
 def _attach(
@@ -606,9 +611,23 @@ def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
     return runs
 
 
+#: :func:`_object_sites`' answers while :func:`attach` runs, by the function's id and the object as spelled -- 573
+#: objects asked 100124 times on pin s; each with its function, as :data:`_ASSIGNMENTS` keeps it.
+_OBJECT_SITES: dict[tuple[int, str], tuple[ast.AST, tuple[ast.AST, ...]]] = {}
+
+
 def _object_sites(func: ast.AST, held: ast.expr) -> list[ast.AST]:
     """Where the object *held* -- a name, ``tmpTaskSpec``, or an attribute chain, ``self.job`` -- can be bound again
-    in *func*: the bindings of the chain's root name, every store to the chain."""
+    in *func*: the bindings of the chain's root name, every store to the chain.  Read once for each function and
+    object while :func:`attach` runs: the answer is the chain's, by its names, not the node's."""
+    key = (id(func), ast.unparse(held))
+    kept = _OBJECT_SITES.get(key)
+    if kept is None:
+        kept = _OBJECT_SITES[key] = (func, tuple(_read_object_sites(func, held)))
+    return list(kept[1])
+
+
+def _read_object_sites(func: ast.AST, held: ast.expr) -> list[ast.AST]:
     chain: set[str] = set()
     root: ast.expr = held
     while isinstance(root, ast.Attribute):
@@ -1325,10 +1344,28 @@ def _logger_made(
     return None
 
 
+#: :func:`_holds_key`'s answers while :func:`attach` runs, by the function, the key's expression as spelled, where it
+#: counts and the statements filling it, the statement read at and the expression read -- 12092 asked 218634 times
+#: on pin s; each with the nodes its ids are of, so that no id is reused while the entry lives.
+_HOLDS_KEY: dict[tuple, tuple[tuple[ast.AST, ...], bool]] = {}
+
+
 def _holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
     """Whether *expression*, read at *at*, holds what *key*'s expression holds where the write counts -- and so
     does every statement filling an SQL arm's bind with it: the key itself, a name bound to it once
-    (:func:`_bound_to`), or what the key, a name or an attribute chain, is bound to once (:func:`_bound_from`)."""
+    (:func:`_bound_to`), or what the key, a name or an attribute chain, is bound to once (:func:`_bound_from`).
+    Read once for each such question while :func:`attach` runs: of the key, only its expression's spelling, where
+    it counts and its fills are read."""
+    asked = (
+        id(func), ast.unparse(key.expression), id(key.at), tuple(id(one) for one in key.filled), id(at), expression
+    )
+    kept = _HOLDS_KEY.get(asked)
+    if kept is None:
+        kept = _HOLDS_KEY[asked] = ((func, key.at, *key.filled, at), _read_holds_key(func, key, at, expression))
+    return kept[1]
+
+
+def _read_holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
     try:
         read = ast.parse(expression, mode="eval").body
     except SyntaxError:
@@ -1483,10 +1520,25 @@ def _unbound_since(
     return not reaching(arm, [site for site in sites if site is not printed], [printed])
 
 
+#: :func:`_changes_of`'s answers while :func:`attach` runs, by the function's id, the chain as spelled and the
+#: attribute -- 744 chains asked 32340 times on pin s; each with its function, as :data:`_ASSIGNMENTS` keeps it.
+_CHANGES: dict[tuple[int, str, str], tuple[ast.AST, Optional[tuple[ast.AST, ...]]]] = {}
+
+
 def _changes_of(func: ast.AST, written: ast.expr, attribute: str) -> Optional[list[ast.AST]]:
     """Where *written*'s *attribute* can change in *func*, as :func:`_unbound_since` reads it: the bindings of the
     chain's root name, every store to the chain, every call on an object of the chain or handed one that may change
-    the value.  None where the chain's root is no name."""
+    the value.  None where the chain's root is no name.  Read once for each function, chain and attribute while
+    :func:`attach` runs: the answer is the chain's, by its names -- :func:`changes.may_change` reads it so too."""
+    key = (id(func), ast.unparse(written), attribute)
+    kept = _CHANGES.get(key)
+    if kept is None:
+        found = _read_changes(func, written, attribute)
+        kept = _CHANGES[key] = (func, None if found is None else tuple(found))
+    return None if kept[1] is None else list(kept[1])
+
+
+def _read_changes(func: ast.AST, written: ast.expr, attribute: str) -> Optional[list[ast.AST]]:
     chain = [ast.unparse(written) + "." + attribute]
     value = ast.Attribute(value=written, attr=attribute, ctx=ast.Load())
     root: ast.expr = written
@@ -1744,3 +1796,8 @@ def _printing(
             name="", map_id="", derived_from="", owner="", function="", count=0
         )
     return max(holding, key=lambda node: node.anchor.line_start)  # type: ignore[union-attr]
+
+
+#: The answers :func:`attach` keeps while it runs (:data:`_CHANGES`, :data:`_OBJECT_SITES`, :data:`_HOLDS_KEY`),
+#: emptied as it starts and ends: :func:`_changes_of` reads the corpus's calls only inside it.
+_KEPT: tuple[dict, ...] = (_CHANGES, _OBJECT_SITES, _HOLDS_KEY)
