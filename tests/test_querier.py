@@ -3809,7 +3809,9 @@ def test_l2_asks_a_movers_logs_only_where_judgement_3_could_rule_it_out_and_goes
     assert lines[-1] == "not ruled out: 5 mover(s)"
     # the long stay: the last six hours alone, so a run not found there rules nothing out
     last = ["2026-01-01 09:00:00", "2026-01-01 15:00:00"]
-    assert [a for a in asked[5:] if a[0] == "silent.log"] == [["silent.log", last]]
+    # and, bundle G's G-3, the stay's start too, from its row less 10 min to 10 min after it: no run there either
+    assert [a for a in asked[5:] if a[0] == "silent.log"] == [["silent.log", last],
+                                                               ["silent.log", ["2025-12-30 11:50:00", "2025-12-30 12:10:00"]]]
     assert long["p/w.py::silent"] == "no run found" and long["p/w.py::ran"] == "ran"
     # the writer reached by a guard: the rest asked where the last six hours hold no run, so it did not run
     assert [a for a in asked[5:] if a[0] == "selected.log"] == [["selected.log", last],
@@ -18248,3 +18250,149 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
     assert got["another"]["said"] == [] and got["outside"]["said"] == [] and got["already"]["said"] == [], got
     # the row value's second is the moving pass's own (its write fell in [20:59:59, 21:00:00), the pass began 20:59:59.x)
     assert got["its_second"]["said"] == [], got
+
+
+def test_g1_g4_g5_a_bare_key_hole_printing_other_keys_a_key_marked_writer_and_callers_by_the_printed_parameter(tmp_path):
+    """Bundle G.  G-1: K64 reads a bare name whose hole the map's prints name the written class's key column, bound
+    alike at the row and the arm: every record holding another key says the arm's turn wrote none of the key's; one
+    holding the key says nothing.  G-4: a writer every recorded run of which is marked by the class's key names its
+    runs by it.  G-5: of the callers U1 lists, one every way of a printed parameter from which ends at another literal
+    is not the moving run's; one at the value, or at no literal, stays; all would go: none goes.  The parameters a run
+    printed as handed are those no binding of the name precedes."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap import pathcond
+            from bamboo.querier import evaluate as E
+            from bamboo.querier import which_ran as WR
+
+            got = {}
+            # G-1
+            src = ("def f(tasks):\\n"
+                   "    for taskID in tasks:\\n"
+                   "        log(f'action=release jediTaskID={taskID}')\\n"
+                   "        release(taskID)\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            fn = N(owner="w.py::f", node=node)
+            stmt = WR.R.statement_at(node, 4)
+            row = N(line=3, stmt=WR.R.statement_at(node, 3),
+                    map_rows=[N(holes=[N(expression="taskID", columns=["JediTaskSpec.jediTaskID"])])],
+                    capture=lambda rec: {"taskID": rec.v})
+            WR.row_names.names = lambda *a: {}
+            env = E.Env()
+            env.subject, env.written, env.keys = "<task>.status", "JediTaskSpec.status", frozenset({"jediTaskID"})
+            env.table = {"task": {"jediTaskID": N(value="7")}}
+
+            def sn(*values):
+                return N(run=N(records=[N(v=v) for v in values]), hits={3: [(i, None, None) for i in range(len(values))]})
+            got["g1"] = [WR.other_objects(fn, stmt, 4, row, sn("11", "12"), env), WR.other_objects(fn, stmt, 4, row, sn("11", "7"), env),
+                         # a hole another hole follows captures empty (4074's jediTaskID before its since-clause): not read
+                         WR.other_objects(fn, stmt, 4, row, sn("", ""), env)]
+            got["holes"] = WR._bare_key_holes(row, "JediTaskSpec", frozenset({"jediTaskID"}))
+            # G-4
+            RR._identity_attrs = lambda cls: ["JediTaskSpec.jediTaskID"]
+            runs = {181: [N(key=[N(columns=["JediTaskSpec.jediTaskID"])])], 364: [N(key=[N(columns=["JediTaskSpec.vo"])])],
+                    621: [], 700: [N(key=[N(columns=["JediTaskSpec.jediTaskID"])]), N(key=[])]}
+            RR.R._prints_of = lambda owner, lines: N(runs=runs[lines[0]])
+            r = RR.Rerun.__new__(RR.Rerun)
+            got["g4"] = [r._marked_by_key(WR.Candidate("t.py", "f", [line], ["x.log"]), "JediTaskSpec.status") for line in (181, 364, 621, 700)]
+            # G-5
+            def way(value, route, end="constant"):
+                return N(end=end, value=value, why="", route=route, steps=())
+            ways = [way("'10'", ("pandaserver/daemons/scripts/copyArchive.py:634", "pandaserver/taskbuffer/TaskBuffer.py:1190")),
+                    way("'51'", ("pandaserver/daemons/scripts/copyArchive.py:1197", "pandaserver/taskbuffer/TaskBuffer.py:1190")),
+                    way("", ("pandajedi/jediorder/TaskCommando.py:228",), end="stop")]
+            RR.SR.param_ways = lambda owner, p: ways
+            found = [RR.Caller("pandaserver/daemons/scripts/copyArchive.py::cleanup", [634], 2, "none"),
+                     RR.Caller("pandaserver/daemons/scripts/copyArchive.py::main", [1197], 2, "none"),
+                     RR.Caller("pandajedi/jediorder/TaskCommando.py::runImpl", [228], 2, "none")]
+            q = N(mover="j.py::killJob")
+            r.lines = []
+            r._missed_q = N(mover="j.py::killJob", run=N())
+            r._printed_parameters = lambda mover, run: {"code": "51"}
+            got["g5"] = [c.lines for c in r._callers_by_printed(q, found)]
+            r._printed_parameters = lambda mover, run: {"code": "99"}
+            got["g5 all"] = len(r._callers_by_printed(q, found[:2]))
+            # the printed parameters
+            src2 = ("def killJob(self, pandaID, code, prodManager):\\n"
+                    "    log(f'code={code} role={prodManager}')\\n"
+                    "    if isinstance(code, int):\\n"
+                    "        code = str(code)\\n"
+                    "    log(f'again {code}')\\n")
+            m2 = ast.parse(src2)
+            pathcond.attach_parents(m2)
+            caps = {2: {"code": "51", "prodManager": "True"}, 5: {"code": "x"}}
+            rows = [N(line=2, capture=lambda rec: caps[2]), N(line=5, capture=lambda rec: caps[5])]
+            RR.R.function = lambda rel, func, lines: N(node=m2.body[0], rows=rows)
+            RR.R.seen = lambda fn, run, mode: N(hits={2: [(0, None, None)], 5: [(1, None, None)]})
+            r.mode = None
+            got["printed"] = RR.Rerun._printed_parameters(r, "j.py::killJob", N(records=[N(), N()]))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["g1"] == ["row 3 printed only for other values of taskID (2 time(s)), not '7'", "", ""], got
+    assert got["holes"] == {"taskID": "jediTaskID"}, got
+    assert got["g4"] == [True, False, False, False], got
+    assert got["g5"] == [[1197], [228]] and got["g5 all"] == 2, got
+    assert got["printed"] == {"code": "51", "prodManager": "True"}, got
+
+
+def test_g3_a_writer_taking_the_row_by_its_key_is_asked_at_the_stay_s_start_too(tmp_path):
+    """Bundle G, G-3: judgement 3 asks a writer that takes the row by its key over the window's last part only (K16);
+    where that holds no run of its own, the stay's start is asked too, from the row less SLACK to SLACK after it.  A run
+    there is read as the mover having run (its passes over that span); none leaves the verdict as before, and so does
+    an ask of it no record answers: kept for a records round, it does not stop the step."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import windows as W
+
+            RR.prints_nothing = lambda owner, lines: False
+            RR.of_mover = lambda run, owner: True
+            RR.spans = lambda run, window: run.at >= window[0] and run.at <= window[1]
+            RR._entries_of = lambda writers, owner: []
+
+            def go(head_run=True, head_missed=False):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.unanswered, r.hop = [], [], "S1"
+                r.files_of = lambda owner, today, lines: ["db.log"]
+                r.logs = N(names=lambda files: files, needs_window=True)
+                r.warn_split = lambda owner, lines: None
+                asked = []
+
+                def ask_mover(key, owner, to_hand, asking, rest, owners):
+                    asked.append(list(asking.window))
+                    head = asking.window[0] < "2026-11-14 09"
+                    runs = [N(at="2026-11-14 08:14:00")] if head_run and head else []
+                    return {"db.log": runs}, [(N(key="k1"), "why")] if head_missed and head else [], {}, asking
+                r._ask_mover = ask_mover
+                r._premises = lambda *a: {"window": {"held": False, "why": "x"}}
+                asking = W.Asking(("2026-11-14 23:16:36", "2026-11-15 05:16:36"), None, "last part")
+                rest = W.Asking(("2026-11-14 08:03:58", "2026-11-14 23:16:36"), None, "rest")
+                entry = {"verdict": None, "reasons": [], "premises": None}
+                passes, missed = r._absence("s.py::activateJob", {72: RR.Arm(72, ["activated"], [])}, [], entry, [],
+                                            "JobSpec.jobStatus", "7", asking, rest, "key", None)
+                return {"asked": asked, "verdict": entry["verdict"], "passes": passes and list(passes.asking.window),
+                        "missed": len(missed), "kept": len(r.unanswered)}
+            print(json.dumps({"run": go(), "none": go(head_run=False), "unrecorded": go(head_run=False, head_missed=True)}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["run"]["asked"] == [["2026-11-14 23:16:36", "2026-11-15 05:16:36"], ["2026-11-14 08:03:58", "2026-11-14 08:23:58"]], got
+    assert got["run"]["verdict"] == "ran" and got["run"]["passes"] == ["2026-11-14 08:03:58", "2026-11-14 08:23:58"], got
+    assert got["none"]["verdict"] == "no-run-found" and got["none"]["passes"] is None, got
+    # the stay's start not in the records: its ask is kept for a records round, and the step goes on as before (no stop)
+    assert got["unrecorded"]["verdict"] == "no-run-found" and got["unrecorded"]["missed"] == 0 and got["unrecorded"]["kept"] == 1, got

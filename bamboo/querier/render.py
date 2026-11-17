@@ -685,6 +685,8 @@ TEMPLATES: dict[str, str] = {
     "prints-nothing-not-followed": "{n} arm(s) that write another value {arms}; the map has no prints of its own for it, so no run in a log is its own: not followed (KNOWN_ISSUES.md K25)",
     "over-the-whole-window": " over the whole window",
     "from-the-last-part-by-key": " from {start}, the window's last part, which alone is asked of a writer that takes a row by its key (KNOWN_ISSUES.md K16)",
+    # bundle G, G-3: the stay's start, where a writer taking the row by its key may have run as the call that began it did
+    "the-stay-s-start-by-key": "from {start} to {end}, the stay's start, where a writer taking the row by its key may have run as the call that began the stay did (G-3)",
     "did-not-run-judgement-3": "no run of its own found in {to_hand}{over}: it did not run (judgement 3)",
     "no-run-found-not-ruled-out": "no run of its own found in {to_hand}{over}: not followed, though not ruled out (KNOWN_ISSUES.md K19)",
     # a mover's reasons (MT, L2)

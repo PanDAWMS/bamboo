@@ -5557,6 +5557,20 @@ class Rerun:
                     out.add(name)
         return out
 
+    def _marked_by_key(self, c: Candidate, subject: str) -> bool:
+        """G-4 (P33): whether every run the map records for the function of each of *c*'s arms is marked by a key
+        holding the class's identity (``FunctionPrintsNode.runs``, as :func:`key_marks` reads one): it names its runs by
+        the key whenever it runs.  TaskCommando's ``<jediTaskID=...>``; not a poller under ``label=user``."""
+        ident = set(_identity_attrs(subject.partition(".")[0]))
+        if not ident or not c.lines:
+            return False
+        for line in c.lines:
+            found = R._prints_of(c.owner, [line])
+            runs = list(getattr(found, "runs", None) or [])
+            if not runs or not all(any(ident & set(k.columns or []) for k in run.key or []) for run in runs):
+                return False
+        return True
+
     def _unshown(self, readings: list, cands: list[Candidate], key: str, state: dict, env: E.Env,
                  window: tuple[str, str]) -> list[Possible]:
         """The arms of *cands*, writers none of whose logs is shown to name its runs by *key* (:meth:`_named`): no run
@@ -5734,7 +5748,14 @@ class Rerun:
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
         at.update(self._ended_before(cands, at, handed, runs, (lo, hi)))
         env = self.base_env(at=state["time"])
-        maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
+        unnamed = [c for c in cands if not any(f in named or f in holes for f in c.log_files)]
+        # G-4 (P33, bundle G, tmaeno's OK 2026-11-17 16:0x): a writer whose every arm's run is marked by the key names
+        # its runs by it whenever it runs: its logs searched whole at the row with no run there is no pass of it
+        marked = [c for c in unnamed if c.log_files and self._marked_by_key(c, subject)]
+        for c in marked:
+            self.say(f"  no pass of {c.owner.split('::')[-1]} at {when}: its marks hold the key, and {list(c.log_files)} "
+                     "searched whole there show no run of it (G-4)")
+        maybe = self._unshown(readings, [c for c in unnamed if c not in marked], key, state, env, (lo, hi))
         maybe = self._recorded(subject, key, state, asking, maybe)
         if not at and not holes and not handed:
             self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
@@ -7037,6 +7058,25 @@ class Rerun:
             entry["verdict"] = "ran"
             return Passes(owner, logs, list(arms.values()), key, searched, owners, subject=subject,
                           entries=_entries_of(writers, owner)), missed
+        if way == "key" and rest is not None and rest.window is not None and self.logs.needs_window and not holes:
+            # G-3 (P12, bundle G, tmaeno's OK 2026-11-17 16:0x): a writer taking the row by its key may have run as the
+            # call that began the stay did -- setupper's activateJob at NJ-defined-late's start: the stay's start is
+            # asked too, from the row less SLACK to SLACK after it.  A run there is read; none says no more than before,
+            # and nor does an ask no record answers: it is kept for a records round, and the step goes on as before
+            # (merged into the step's asks, it stopped NJ-transferring-stuck's S1 ahead of the branch bundle D ended)
+            lo = rest.window[0]
+            hi = min(rest.window[1], W._down(W.when(lo) + 2 * W.SLACK))
+            head = W.Asking((lo, hi), None, T.Said("the-stay-s-start-by-key", {"start": lo, "end": hi}))
+            hfound, hmissed, _, _ = self._ask_mover(key, owner, to_hand, head, None, owners)
+            if hmissed:
+                self._keep_unanswered(hmissed)
+            if hlogs := self._runs_of(hfound, owner, head):
+                self.say(f"  {name}: a run of its own at the stay's start, {lo} .. {hi} (G-3)")
+                entry["verdict"] = "ran"
+                return Passes(owner, hlogs, list(arms.values()), key, head, owners, subject=subject,
+                              entries=_entries_of(writers, owner)), missed
+            self.say(f"  {name}: {'no run of its own at' if not hmissed else 'not recorded at'} the stay's start, "
+                     f"{lo} .. {hi}, either (G-3)")
         entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, searched, missed, holes, writers, rest)
         if holes:
             # not found is not "did not run" where the search did not reach
@@ -7796,6 +7836,7 @@ class Rerun:
         cls = q.subject.partition(".")[0]
         found = callers_of(q.entries, cls, q.key, self._key_columns(q.subject, q.key))
         self.need(T.Said("a-caller-the-map-lists", {"func": func}), found, "K55")
+        found = self._callers_by_printed(q, found)
         ways = {"marks": "asked for its marks holding the key", "key": "asked for the key alone (a row of it prints it)",
                 "none": "its runs print no key"}
         for c in found:
@@ -7806,6 +7847,66 @@ class Rerun:
         if len(asks) == 1:
             return asks[0]
         return Fork(asks, [T.Said("caller-branch", {"caller": c.owner.split("::")[-1], "lines": c.lines}) for c in found])
+
+    def _callers_by_printed(self, q: Callers, found: list[Caller]) -> list[Caller]:
+        """Bundle G, G-5 (P28, out/gm/qk-design.md, tmaeno's OK 2026-11-17 16:0x): of the callers U1 lists, those every
+        way of a parameter the mover printed comes in by from them ends at a literal other than the value its moving run
+        printed (the map's ParameterFrom, :func:`sources.param_ways`, the way's route holding one of the caller's call
+        lines) did not hand that run its value.  killJob prints ``code=51`` at 840 before any rebinding of ``code``:
+        copyArchive's calls handing '10' or '2' are not the one.  A caller with a way the map does not end at a literal,
+        or at the value, stays; where every caller would go, none goes.  Only the mover's moving run of a late value."""
+        q2 = getattr(self, "_missed_q", None)
+        if len(found) < 2 or q2 is None or q2.mover != q.mover or q2.run is None:
+            return found
+        printed = self._printed_parameters(q.mover, q2.run)
+        if not printed:
+            return found
+        bare = _bare(q.mover)
+        ways = {p: SR.param_ways(bare, p) for p in printed}
+        kept: list[tuple[Caller, str]] = []
+        dropped: list[tuple[Caller, str]] = []
+        for c in found:
+            rel = c.owner.partition("::")[0]
+            sites = {f"{Path(rel).name}:{line}" for line in c.lines}
+            why = ""
+            for p, value in printed.items():
+                mine = [w for w in ways[p] if any(f"{Path(r.rpartition(':')[0]).name}:{r.rpartition(':')[2]}" in sites
+                                                  for r in w.route)]
+                if mine and all(w.end == SR.CONSTANT and not w.steps and w.why not in SR.NO_LITERAL
+                                and not SR.same_value(w.value, value) for w in mine):
+                    why = f"its calls hand {p} {sorted({w.value for w in mine})}, none the value the run printed for it"
+                    break
+            (dropped if why else kept).append((c, why))
+        if not kept or not dropped:
+            return found
+        for c, why in dropped:
+            self.say(f"  {c.owner.split('::')[-1]} at {c.lines}: not the caller of the run that moved it: {why} (G-5)")
+        return [c for c, _ in kept]
+
+    def _printed_parameters(self, mover: str, run) -> dict[str, str]:
+        """G-5: the mover's parameters its moving *run* printed as handed -- a bare parameter name in a hole of a row
+        no binding of that name in the function precedes -- each with the one value its records there hold.  A name
+        printed with two values, or bound before the print, is left out."""
+        rel, _, func = _bare(mover).partition("::")
+        try:
+            fn = R.function(rel, func, [])
+        except (LookupError, ValueError, SyntaxError):
+            return {}
+        node = fn.node
+        args = node.args
+        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)} - {"self", "cls"}
+        bound: dict[str, int] = {}
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id in params:
+                bound[n.id] = min(bound.get(n.id, n.lineno), n.lineno)
+        sn = R.seen(fn, run, self.mode)
+        values: dict[str, set[str]] = {}
+        for row in fn.rows:
+            for i, _, _ in sn.hits.get(row.line, ()):
+                for expr, text in row.capture(run.records[i]).items():
+                    if expr in params and text is not None and row.line < bound.get(expr, row.line + 1):
+                        values.setdefault(expr, set()).add(str(text).strip())
+        return {p: v.pop() for p, v in values.items() if len(v) == 1}
 
     def caller(self, q: CallerPasses):
         """U2: which way each pass of one caller went on the row in the window -- its calls into the mover are its arms,

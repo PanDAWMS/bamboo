@@ -1963,27 +1963,55 @@ def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.S
     ``update unmerged PandaID={umJob.PandaID}`` at 1252 printed the unmerged jobs' keys under the merge job's mark,
     so 1236, which writes umJob, did not write the merge job.  Only the key, which no pass changes; not where the
     map records nothing the arm writes, nor for a name whose value a record does not show.
+
+    Bundle G, G-1 (P53, out/gm/qk-design.md, tmaeno's OK 2026-11-17 16:0x): a bare name whose hole the map's prints
+    name the written class's key column (``function_prints``' hole columns) is read the same way, bound alike at the
+    row and at the arm: AtlasAnalWatchDog's 195 ``action=release_... jediTaskID={taskID}`` before 196 printed other
+    tasks' IDs only, so no turn of 196 in the pass wrote the key's task.
+
+    A hole that another hole follows with no literal between captures nothing (:func:`rows._regex` takes it lazily):
+    an empty value is no key, and the hole is not read.  prepareTasksToBeFinished_JEDI's 4074 ``... for
+    jediTaskID={jediTaskID}{f' since {errorDialog}' if errorDialog else ''}`` printed the key's task, read empty.
     """
     m = re.fullmatch(r"<(\w+)>\.\w+", env.subject) if env is not None else None
     if env is None or m is None or not env.keys or not env.written:
         return ""
     entity = m[1]
-    bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
-    if not bound or not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node):
+    if not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node):
         return ""
+    bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
     captures = [row.capture(sn.run.records[i]) for i, _, _ in sn.hits.get(row.line, ())]
+    keyed = _bare_key_holes(row, env.written.partition(".")[0], env.keys)
     for expr in sorted({e for c in captures for e in c}):
         name, _, column = expr.rpartition(".")
+        if not name and expr in keyed:
+            name, column = expr, keyed[expr]
+        elif not bound or bound.get(name) != entity:
+            continue
         held = env.table.get(entity, {}).get(column)
-        if column not in env.keys or bound.get(name) != entity or held is None:
+        if column not in env.keys or held is None:
             continue
         values = [c.get(expr) for c in captures]
-        if any(v is None for v in values) or not row_names.same_binding(fn.node, name, [row.line], line):
+        if (any(v is None or not str(v).strip() for v in values)
+                or not row_names.same_binding(fn.node, name, [row.line], line)):
             continue
         wanted = str(held.value)
         if wanted not in [str(v).strip() for v in values]:
             return f"row {row.line} printed only for other values of {expr} ({len(values)} time(s)), not {wanted!r}"
     return ""
+
+
+def _bare_key_holes(row: R.Row, cls: str, keys: frozenset[str]) -> dict[str, str]:
+    """G-1: the bare names among *row*'s holes the map's prints name a key column of *cls* by (``columns``), each with
+    the column: ``taskID`` -> ``jediTaskID``.  A name the map names two columns by is left out."""
+    out: dict[str, str] = {}
+    for mr in getattr(row, "map_rows", None) or []:
+        for h in getattr(mr, "holes", None) or []:
+            expr = getattr(h, "expression", "") or ""
+            cols = {c.partition(".")[2] for c in getattr(h, "columns", None) or [] if c.partition(".")[0] == cls} & keys
+            if expr.isidentifier() and len(cols) == 1:
+                out.setdefault(expr, cols.pop())
+    return out
 
 
 #: the calls a ``while`` takes its next element by (Q5): ``self.job_output_reports.pop()``, ``queue.get()``
