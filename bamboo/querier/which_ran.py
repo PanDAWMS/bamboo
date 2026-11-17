@@ -220,8 +220,8 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
         return parts, how
     shown = called_in(fn, run, mode)
     if shown:
-        return parts, f"{how}; no record only {fn.name} prints, its call shown by {shown}"
-    return [], f"{how}; no record only {fn.name} prints, nor a caller's row after its call: not shown to be a pass of it"
+        return parts, f"{how}; no record only {fn.shown} prints, its call shown by {shown}"
+    return [], f"{how}; no record only {fn.shown} prints, nor a caller's row after its call: not shown to be a pass of it"
 
 
 def called_in(fn: R.Function, run: Run, mode: str) -> str:
@@ -512,7 +512,7 @@ def _passes(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[
         at = [p for p in parts if near(p)]
         if not at:
             far = sum(1 for p in parts if spans(p, window))
-            of = fn.name if by is fn else f"{by.name} (calling {fn.name})"
+            of = fn.shown if by is fn else f"{by.shown} (calling {fn.shown})"
             why.append(f"{where}: none of its {len(parts)} pass(es) of {of} is at the window"
                        + (f" ({far} span(s) it with no record within {EDGE.seconds // 60} min of it)" if far else ""))
             continue
@@ -607,7 +607,7 @@ def subject_values(seens: list[R.Seen], attr: str) -> list[tuple[int, str, str]]
             for i, _, _ in sn.hits.get(row.line, ()):
                 for expr, value in row.capture(sn.run.records[i]).items():
                     if re.fullmatch(rf"[\w.]+\.{re.escape(attr)}", expr):
-                        found.append((i, value.strip(), f"{sn.fn.name}:{row.line}"))
+                        found.append((i, value.strip(), f"{sn.fn.shown}:{row.line}"))
     return sorted(set(found))
 
 
@@ -643,7 +643,7 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
                     if not (about_row or of_class or own_local):
                         continue
                     seen_values.setdefault(expr, set()).add(value.strip())
-                    where.setdefault(expr, f"hole of {sn.fn.name}:{row.line} at {sn.run.records[i].span}")
+                    where.setdefault(expr, f"hole of {sn.fn.shown}:{row.line} at {sn.run.records[i].span}")
                     printers.setdefault(expr, set()).add(sn.fn.owner)
     put = {}
     for expr, values in seen_values.items():
@@ -751,7 +751,7 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
                 # every record the row reads counts against one value, the placed ones name the source
                 values.setdefault(name, set()).add(value.strip())
                 if i in placed and (name not in last or last[name][0].lineno < s.lineno):
-                    last[name] = (s, expr, f"hole of {fn.name}:{row.line} at {sn.run.records[i].span}")
+                    last[name] = (s, expr, f"hole of {fn.shown}:{row.line} at {sn.run.records[i].span}")
     put: dict[str, str] = {}
     for name, seen_values in values.items():
         if len(seen_values) != 1 or name not in last:
@@ -1342,8 +1342,7 @@ def write_prints(owner: str) -> list:
 
 
 def _bare_owner(owner: str) -> str:
-    rel, _, qual = owner.partition("::")
-    return f"{rel}::{qual.rpartition('.')[2]}"
+    return R.named(owner)
 
 
 class PrintedBinds(NamedTuple):
@@ -2163,7 +2162,7 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
     guards are the statement's and its callers' ``pathcond.arm_condition``; one read at another line
     (``E.read_elsewhere``) is not solved here.
     """
-    guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.arm_condition(stmt)] + callers_guards(fn)
+    guards = [(g, f"{fn.shown}:{stmt.lineno}") for g in pathcond.arm_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
         if E.read_elsewhere(guard):
             continue
@@ -2438,7 +2437,7 @@ def judge(
             if named:
                 v.reasons.append(
                     f"a traceback frame raised at {sorted(raised)}" if raised is not None
-                    else f"a traceback frame of {fn.name} cannot be placed in the corpus: no row after {line} is required"
+                    else f"a traceback frame of {fn.shown} cannot be placed in the corpus: no row after {line} is required"
                 )
             where = f"{Path(c.rel).name}::{c.func}:{line}"
             if proof.kind == "positive" and v.kind == "excluded":

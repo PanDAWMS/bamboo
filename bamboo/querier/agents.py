@@ -435,8 +435,7 @@ def waker_readers(key_froms: list, read_sites: list, row_tables: set[str], owner
     (*row_tables*, lower case), or no waker inserts.  *owner* and the KeyFroms' owners compare as ``file::function``."""
 
     def bare(o: str) -> str:
-        rel, _, qual = o.partition("::")
-        return f"{rel}::{qual.rpartition('.')[2]}"
+        return R.named(o)
 
     sites = {(r.owner, r.anchor.line_start): r for r in read_sites}
     readers: list[tuple[Any, str]] = []

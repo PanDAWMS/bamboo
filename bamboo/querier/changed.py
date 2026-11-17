@@ -308,7 +308,7 @@ def printed_at(fn: R.Function, sn: R.Seen, at: ast.stmt, wanted: str, read: Call
             continue
         record = sn.run.records[at_[0]]
         q = Point(fn, row.stmt, [row.stmt], True)
-        where = f"row {fn.name}:{row.line} at {record.span}"
+        where = f"row {fn.shown}:{row.line} at {record.span}"
         after = row.stmt is not at and precedes(p, q, fn, once)
         for expr, value in row.capture(record).items():
             value = value.strip()
@@ -439,7 +439,7 @@ def last_change(
                 continue
             record = sn.run.records[at[0]]
             for expr, value in row.capture(record).items():
-                printed.append((Point(sn.fn, row.stmt, place, True), expr, value.strip(), f"row {sn.fn.name}:{row.line} at {record.span}"))
+                printed.append((Point(sn.fn, row.stmt, place, True), expr, value.strip(), f"row {sn.fn.shown}:{row.line} at {record.span}"))
 
     def keeping(c: str) -> Keeps | None:
         """*keeps* for a chain of the subject's field: the reach answers for that field alone."""
@@ -477,7 +477,7 @@ def last_change(
             for expr, value in row.capture(record).items():
                 if expr == own[0] and (way := holds(Point(fn, row.stmt, [row.stmt], True), Point(fn, stmt, [stmt]), own[0], fn,
                                                     value.strip(), keeping(own[0]), skip=skip)) is not None:
-                    found.append((value.strip(), f"row {fn.name}:{row.line} at {record.span}", way))
+                    found.append((value.strip(), f"row {fn.shown}:{row.line} at {record.span}", way))
         return found[0] if len({value for value, _, _ in found}) == 1 else None
 
     def at_call(v: Any) -> Point | None:

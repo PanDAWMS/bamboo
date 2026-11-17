@@ -476,7 +476,8 @@ def _index(fragment_id: int) -> tuple[dict, dict]:
         guards.setdefault((g.owner, g.test_line), []).append(g)
     runs: dict[str, list] = {}
     for r in getattr(fragment, "runnables", None) or []:
-        runs.setdefault(r.owner.rpartition("::")[2], []).append(r)
+        # by the bare name a call spells (the map names a def its module repeats with what encloses it, D-1)
+        runs.setdefault(r.owner.rpartition("::")[2].rpartition(".")[2], []).append(r)
     return guards, runs
 
 
@@ -1021,7 +1022,7 @@ def _cut(s: Any) -> str:
             node = R.def_holding(rel, int(ln))
         except (OSError, SyntaxError):
             continue
-        owner = f"{rel}::{node.name}" if node is not None else ""
+        owner = R.owner_of(rel, node) if node is not None else ""
         on = [g for g in guarded[(rel, int(ln))] if g.owner == owner]
         if not on or node is None:
             continue

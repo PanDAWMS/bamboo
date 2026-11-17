@@ -86,7 +86,53 @@ def tree(rel: str) -> ast.Module:
 
 
 def functions(rel: str, name: str) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    return [f for f, _ in pathcond.functions_with_owner(tree(rel)) if f.name == name]
+    """The defs of *rel* *name* names: a bare name, each def of that name; a name with what encloses it -- as the
+    map's records name one def of a name its module repeats (D-1, :func:`named`), ``main.FinisherThr.run`` -- the
+    def at its reach row's line, else the one whose qualified name it is."""
+    bare = name.rpartition(".")[2].partition("#")[0]
+    found = [f for f, _ in pathcond.functions_with_owner(tree(rel)) if f.name == bare]
+    if bare == name:
+        return found
+    line = _names(id(mapdump.fragment()))[1].get(f"{rel}::{name}")
+    return [f for f in found if (f.lineno == line if line else pathcond.qualified_name(f) == name)]
+
+
+@functools.cache
+def _names(fragment_id: int) -> tuple[dict[str, str], dict[str, int]]:
+    """``(owner -> named_as, owner -> def line)`` of the installed dump's reach rows (``ReachNode``; *fragment_id*
+    keys the cache to the dump): only the rows that say a ``named_as``."""
+    names: dict[str, str] = {}
+    lines: dict[str, int] = {}
+    for n in getattr(mapdump.fragment(), "reach_graph", None) or []:
+        if getattr(n, "named_as", ""):
+            names[n.owner] = n.named_as
+            lines[n.owner] = n.anchor.line_start
+    return names, lines
+
+
+def named(owner: str) -> str:
+    """D-1 (P27; out/gm/qk-design.md's bundle D, tmaeno's OK 2026-11-17 12:44; the map's ``ReachNode.named_as``):
+    *owner* -- ``file::Class.function``, as the reach rows and the prints name a def, or as the other records do --
+    as the map's records other than those name it: ``file::function`` where its module defines one function of that
+    name, else with what encloses it (``datasetManager.py``'s seven ``run``: ``main.FinisherThr.run`` and the like).
+    The dump's word where it says one; otherwise the bare name, as a dump before D-1 named every def."""
+    got = _names(id(mapdump.fragment()))[0].get(owner)
+    if got:
+        return got
+    rel, _, qual = owner.partition("::")
+    if "." in qual and _names(id(mapdump.fragment()))[0]:
+        # a name with what encloses it the reach rows do not hold: the def it names, named as they name it
+        found = functions(rel, qual)
+        if len(found) == 1:
+            got = _names(id(mapdump.fragment()))[0].get(f"{rel}::{pathcond.qualified_name(found[0])}")
+            if got:
+                return got
+    return f"{rel}::{qual.rpartition('.')[2]}"
+
+
+def owner_of(rel: str, node: ast.AST) -> str:
+    """The def *node* of *rel* as the map's records name it (:func:`named`)."""
+    return named(f"{rel}::{pathcond.qualified_name(node)}")
 
 
 def own_nodes(root: ast.AST) -> Iterable[ast.AST]:
@@ -749,9 +795,17 @@ class Function:
     rows: list[Row]
     arms: list[int]
 
-    @property
+    @functools.cached_property
     def owner(self) -> str:
-        return f"{self.rel}::{self.name}"
+        """The def as the map's records name it (:func:`owner_of`, D-1), whichever spelling found it."""
+        return owner_of(self.rel, self.node)
+
+    @functools.cached_property
+    def shown(self) -> str:
+        """The def as the output names it: as the map's records name it (``owner`` past its file), as every other line of
+        the output names a def -- with what encloses it where its module repeats its name (``main.FinisherThr.run``),
+        which ``name``, the def's own, does not tell."""
+        return self.owner.partition("::")[2]
 
     def row_at(self, stmt: ast.stmt) -> Row | None:
         return next((r for r in self.rows if r.stmt is stmt), None)
@@ -1073,7 +1127,9 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
             )
         )
     rows.sort(key=lambda r: r.line)
-    return Function(rel, name, node, rows, list(arms))
+    # the def's own name, whichever spelling found it (a name with what encloses it, D-1): every reader compares it with
+    # the corpus's names -- a def, a call's attribute, a traceback frame; the map's name is ``owner``
+    return Function(rel, node.name, node, rows, list(arms))
 
 
 def function(rel: str, name: str, arms: Iterable[int] = (), within: Iterable[int] = ()) -> Function:
@@ -1438,14 +1494,14 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
     """
     entry = entry_row(fn)
     if entry is None:
-        return [run], f"{fn.name} has no entry row: the run is not split"
+        return [run], f"{fn.shown} has no entry row: the run is not split"
     read = _entry_reads(fn, run, mode)
     starts = sorted(i for i, whole, _ in read if whole)
     if not starts:
         unread = sum(1 for _, whole, _ in read if whole is None)
         found = (f"is read whole at none of its {len(read)} record(s) in the run"
                  + (f" ({unread} the map cannot read whole)" if unread else "")) if read else "is not in the run"
-        return [run], f"entry row {entry.line} of {fn.name} {found}: the run is not split"
+        return [run], f"entry row {entry.line} of {fn.shown} {found}: the run is not split"
     cuts = starts + [len(run.records)]
     parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
     before = f"; {starts[0]} record(s) before the first are not a pass of it" if starts[0] else ""
@@ -1455,7 +1511,7 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
     unsure = unsure_cuts(fn, entry, run, mode)
     premise = (f"; {unsure} record(s) of a handler's row its entry row may have raised into: cut as the others, the "
                "entry row read as printed (a premise)") if unsure else ""
-    return parts, f"cut at entry row {entry.line} of {fn.name}{by}: {len(parts)} pass(es){before}{premise}"
+    return parts, f"cut at entry row {entry.line} of {fn.shown}{by}: {len(parts)} pass(es){before}{premise}"
 
 
 def prefix_holes(fn: Function, row: Row, record: Record) -> dict[str, str]:

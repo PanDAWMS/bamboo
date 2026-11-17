@@ -2425,7 +2425,7 @@ def test_rule_6_asks_whether_the_guard_needs_the_value_whatever_value_a_hole_gav
             from bamboo.querier.which_ran import rewriter
 
             node = R.functions("pandaserver/a.py", "handle")[0]
-            fn = N(rel="pandaserver/a.py", name="handle", node=node)
+            fn = N(rel="pandaserver/a.py", name="handle", shown="handle", node=node)
             stmt = node.body[0]
             def env(**held):
                 return E.Env({k: E.Value(v, "hole") for k, v in held.items()}, {"self.job": "job"})
@@ -2892,7 +2892,7 @@ def test_s3_goes_on_from_a_guards_if_above_the_arm_or_its_else_and_reads_no_guar
     r.lines, r.opened, r.hand, r.hand_used, r.hop = [], [], {}, [], None
     arms = [RR.Arm(6, ["two"], ["not (a == 1)", "b == 1", "s in ['ready']  [in setOnHold()]", "not (d == 1)  [at 9]"]),
             RR.Arm(8, ["three"], ["not (a == 1)", "not (b == 1)", "c == 1"])]
-    went = r.blocked(RR.Blocked(N(node=fn, name="f"), 10, [None], [env], arms))
+    went = r.blocked(RR.Blocked(N(node=fn, name="f", shown="f"), 10, [None], [env], arms))
     print(json.dumps(found))
     print(json.dumps(elsewhere))
     print(json.dumps([went.guard, went.line]))
@@ -4668,9 +4668,9 @@ def test_s3_reads_an_early_exit_above_an_arm_as_its_guard_and_says_an_arm_in_an_
             attach_parents(lone)
             r = RR.Rerun.__new__(RR.Rerun)
             r.lines, r.opened, r.hand, r.hand_used, r.hop = [], [], {}, [], None
-            went = r.blocked(RR.Blocked(N(node=func, name="check"), 4, [None], [E.Env()], [after, handled]))
+            went = r.blocked(RR.Blocked(N(node=func, name="check", shown="check"), 4, [None], [E.Env()], [after, handled]))
             try:
-                r.blocked(RR.Blocked(N(node=lone, name="lone"), 7, [None], [E.Env()], [Arm(6, ["failed"], [])]))
+                r.blocked(RR.Blocked(N(node=lone, name="lone", shown="lone"), 7, [None], [E.Env()], [Arm(6, ["failed"], [])]))
                 stop = None
             except RR.Stop as e:
                 stop = e.args[0]
@@ -8676,7 +8676,7 @@ def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(
             singles["at a status's row"] = [w.chosen.line, w.via.line]
 
             # where H3 reads the run up to: the chosen line's function, or the caller at its call for a stand-in
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         must_rows=lambda node, site: (None, [N(lineno=site[1] + 1)]),
                         seen=lambda fn, run, mode: N(hits={212: [(3, None, None)], 6: [(9, None, None)]}))
             at = r._guard_at(stood, N(name="extract", node="extract"))
@@ -9492,7 +9492,7 @@ def test_an_attributes_answer_ends_at_h3_where_its_arms_guards_hold_and_names_th
             from bamboo.querier import rerun
             from bamboo.querier.which_ran import Candidate, Verdict
 
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             # a guard's call is read through the pure functions, which E fills from pandaserver at the first call; the
             # dev install (CI) has no pandaserver, and useScout is no pure function either way
@@ -9640,7 +9640,7 @@ def test_a_status_arm_whose_value_a_called_method_returns_reads_the_maps_ways_to
             from bamboo.querier import rerun
             from bamboo.querier.which_ran import Candidate, Verdict
 
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             # a guard's call (spec.is_hpo()) is read through the pure functions, which E fills from pandaserver at the first
             # call; the dev install (CI) has no pandaserver, and the call is no pure function either way
@@ -9911,7 +9911,7 @@ def test_rule_6_reads_an_early_exit_above_the_write_as_a_guard_on_the_way_to_it(
             from bamboo.querier.which_ran import rewriter
 
             node = R.functions("pandaserver/a.py", "handle")[0]
-            fn = N(rel="pandaserver/a.py", name="handle", node=node)
+            fn = N(rel="pandaserver/a.py", name="handle", shown="handle", node=node)
             print(json.dumps(rewriter(fn, node.body[1], "jobStatus", "failed", E.Env({}, {"self.job": "job"}))))
             """,
         )
@@ -10984,7 +10984,7 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
             from bamboo.querier import rerun
             from bamboo.querier.which_ran import Candidate, Verdict
 
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             guards = {("extract", 5): ["task.x"], ("gen", 9): ["task.y"], ("old", 3): ["task.z"], ("rec", 99): [], ("put", 7): []}
             rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
@@ -11181,7 +11181,7 @@ def test_a_condition_an_arm_left_rests_on_is_dropped_where_h3_reads_it_holding(t
             from bamboo.querier import rerun
             from bamboo.querier.which_ran import Candidate, Verdict
 
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             guards = {("extract", 5): ["task.x"], ("gen", 9): ["task.x", "task.y"]}
             rerun.pathcond = N(arm_condition=lambda site: guards[site], path_condition=lambda site: guards[site],
@@ -11249,7 +11249,7 @@ def test_an_attributes_one_writer_left_none_dropped_by_a_guard_is_the_only_way_t
             from bamboo.querier import rerun
             from bamboo.querier.which_ran import Candidate, Verdict
 
-            rerun.R = N(function=lambda rel, func, lines: N(name=func, node=func), statement_at=lambda node, line: (node, line),
+            rerun.R = N(function=lambda rel, func, lines: N(name=func, shown=func, node=func), statement_at=lambda node, line: (node, line),
                         entries=lambda fn, run, mode: [0], must_rows=lambda node, site: (None, []), seen=lambda fn, run, mode: N(hits={}))
             # a guard's call (task.useScout()) is read through the pure functions, which E fills from pandaserver at the first
             # call; the dev install (CI) has no pandaserver, and the call is no pure function either way
@@ -11364,7 +11364,7 @@ def test_an_attribute_end_says_what_it_leaves_unread_of_its_value_reaching_the_r
             from bamboo.codemap import pathcond
             tree = ast.parse(textwrap.dedent(src))
             pathcond.attach_parents(tree)
-            fns = {f.name: N(node=f, name=f.name) for f in tree.body}
+            fns = {f.name: N(node=f, name=f.name, shown=f.name) for f in tree.body}
             sql_arm = [N(why="not_an_attribute_arm")]
             mapdump._FRAGMENT[:] = [N(junctions=[
                 N(subject="T.status", owner="p/m.py::DB.set_status", branches=[N(line=6, rewrites_open=sql_arm)]),
@@ -11988,7 +11988,7 @@ def test_f1_reads_the_entry_by_the_call_a_callers_run_shows_where_no_printed_arg
                      describe=lambda: f"the run {{token!r}}")
 
         arm = run("arm < PandaID=9 >", "13:43:27", "13:43:29")
-        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm")
+        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm", shown="arm")
         ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
         stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
         got = {{}}
@@ -12067,7 +12067,7 @@ def test_owi_ends_an_entry_at_the_one_call_the_map_holds_into_it_where_nothing_e
         hole = [N(kind="hole", at="pandaserver/n.py:7", text="x.arm")]
         arm = N(token="arm", first="2026-11-02 13:43:27,000", last="2026-11-02 13:43:29,000", machine="m1",
                 describe=lambda: "the run 'arm'")
-        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm")
+        fn = N(node=ast.parse("def arm(self):\\n    pass").body[0], rel=M, name="arm", shown="arm")
         ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
         stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
         got = {{}}
@@ -12133,7 +12133,7 @@ def test_ebv_ends_an_entry_at_the_one_call_the_values_its_run_printed_at_its_ent
         sites = [N(owner=f"{{M}}::K.{{c}}", line=int(at.rpartition(":")[2])) for c, at in (("c1", c1), ("c2", c2), ("c3", c3))]
         arm = N(token="arm", first="2026-11-02 13:43:27,000", last="2026-11-02 13:43:29,000", machine="m1",
                 describe=lambda: "the run 'arm'")
-        fn = N(node=ast.parse("def arm(self, code, user):\\n    pass").body[0], rel=M, name="arm")
+        fn = N(node=ast.parse("def arm(self, code, user):\\n    pass").body[0], rel=M, name="arm", shown="arm")
         ended = [SR.Term("g", "x", (SR.End("x", SR.CONSTANT, "constant", f"{{M}}:1"),))]
         stopped = [SR.Term("g", "y", (SR.End("y", SR.STOP, "self_field", f"{{M}}:1"),))]
         W, C = SR.Way, SR.CONSTANT
@@ -15963,12 +15963,14 @@ def test_a_write_s_count_print_says_whether_it_landed(tmp_path):
             got = {"first": RR._landed(fn, sn, 0, 2751, b), "second": RR._landed(fn, sn, 6, 2751, b),
                    "none": RR._landed(fn, N(hits={2751: [(0, "x", None)]}), 0, 2751, b),
                    "no_counts": RR._landed(fn, sn, 0, 2751, N())}
+            # whether it landed, and the count print's line (E-4 names it where it says none)
+            got = {k: v[0] for k, v in got.items()} | {"lines": [got["first"][1], got["second"][1]]}
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
-    assert got == {"first": True, "second": False, "none": None, "no_counts": None}, got
+    assert got == {"first": True, "second": False, "none": None, "no_counts": None, "lines": [2770, 2778]}, got
 
 
 def test_s3_reads_a_tested_name_off_its_callee_s_print_or_its_one_literal(tmp_path):
@@ -16065,7 +16067,7 @@ def test_s4_says_the_part_the_values_read_make_a_guard_false_by_and_ends(tmp_pat
             open_ = RR.false_by_values(ast.parse("u and a > 1", mode="eval").body, env_of(a=(5, "x")))
             r = RR.Rerun.__new__(RR.Rerun)
             r.lines, r.opened, r.ends, r.rests, r.end_code, r.hand, r.hand_used, r.hop = [], [], [], [], None, {}, [], ""
-            fn = N(name="setScoutJobData_JEDI", owner="t.py::setScout")
+            fn = N(name="setScoutJobData_JEDI", shown="setScoutJobData_JEDI", owner="t.py::setScout")
             nxt = r.input(RR.Input(fn, guard, 1226, [N(first="17:20:39,615")], [env], ["exhausted"]))
             print(json.dumps({"by": by, "either": either, "open": open_, "next": nxt,
                               "lines": [x for x in r.lines if x.startswith(("  pass", '"use'))],
@@ -18547,3 +18549,185 @@ def test_h_a_take_s_pass_by_heads_a_self_stamping_term_by_writes_callers_by_serv
     assert jedi == [["tb.py::killJobs", "tcm.py::reassign", "ca.py::main"], []], jedi
     assert got["h4"] == ["99", None], got
     assert got["h5"] is True, got
+
+
+_REPEATED_RUN = textwrap.dedent("""\
+    def main():
+        class A:
+            def run(self):
+                pass
+
+        class B:
+            def run(self):
+                pass
+
+
+    class K:
+        def only(self):
+            pass
+""")
+
+
+def test_i_a_def_its_module_repeats_is_named_with_what_encloses_it_where_the_dump_says(tmp_path):
+    """D-1 (bundle D's OK, the map's ReachNode.named_as): the records name a def its module repeats with what encloses
+    it, and every reader of an owner reads it so; a dump before D-1, every def bare."""
+    (_corpus(tmp_path) / "pandaserver" / "dm.py").write_text(_REPEATED_RUN)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump, rerun as RR, rows as R, value_reach as VR
+
+            R.ROWS_FROM = "walk"
+            rel = "pandaserver/dm.py"
+            def row(qual, line, named=True):
+                bare = qual.rpartition(".")[2]
+                said = f"{rel}::{qual}" if bare == "run" else f"{rel}::{bare}"
+                return N(owner=f"{rel}::{qual}", named_as=said if named else "", anchor=N(line_start=line))
+            new = N(reach_graph=[row("main", 1), row("main.A", 2), row("main.A.run", 3), row("main.B.run", 7),
+                                 row("K.only", 12)])
+            old = N(reach_graph=[row("main.A.run", 3, False), row("main.B.run", 7, False)])
+            got = {}
+            for name, fragment in (("new", new), ("old", old)):
+                mapdump._FRAGMENT[:] = [fragment]
+                got[name] = {
+                    "functions": [[f.lineno for f in R.functions(rel, n)] for n in ("run", "main.B.run", "K.only", "main.C.run")],
+                    "named": [R.named(f"{rel}::{q}") for q in ("main.A.run", "K.only", "run", "only")],
+                    "bare": [RR._bare(f"{rel}::main.B.run"), RR._plain(f"panda:{rel}::main.B.run"), VR.bare(f"{rel}::K.only")],
+                    "owner_of": [R.owner_of(rel, f) for f in R.functions(rel, "run")],
+                    "function": [(fn := R.function(rel, "main.B.run")).node.lineno, fn.name, fn.shown, fn.owner]
+                                if name == "new" else None,
+                }
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    rel = "pandaserver/dm.py"
+    new, old = got["new"], got["old"]
+    assert new["functions"] == [[3, 7], [7], [12], []], new
+    assert new["named"] == [f"{rel}::main.A.run", f"{rel}::only", f"{rel}::run", f"{rel}::only"], new
+    assert new["bare"] == [f"{rel}::main.B.run", f"{rel}::main.B.run", f"{rel}::only"], new
+    assert new["owner_of"] == [f"{rel}::main.A.run", f"{rel}::main.B.run"], new
+    # found by the map's spelling: the def's own name to compare with the corpus's, printed as the map names it
+    assert new["function"] == [7, "run", "main.B.run", f"{rel}::main.B.run"], new
+    # a dump with no named_as: every def bare, as before D-1; a name with what encloses it still finds its def
+    assert old["functions"] == [[3, 7], [7], [12], []], old
+    assert old["named"] == [f"{rel}::run", f"{rel}::only", f"{rel}::run", f"{rel}::only"], old
+    assert old["bare"] == [f"{rel}::run", f"{rel}::run", f"{rel}::only"], old
+    assert old["owner_of"] == [f"{rel}::run", f"{rel}::run"], old
+
+
+_COUNTED = textwrap.dedent("""\
+    def upd(cur, pid, st):
+        log(f"start {pid}")
+        sql = "UPDATE t SET s=:s, m=CURRENT_DATE WHERE p=:p"
+        cur.execute(sql)
+        n = cur.rowcount
+        log(f"attemptNr=1 nUp={n} new={st}")
+
+
+    def upd2(cur, pid, st, flag):
+        log(f"start {pid}")
+        if flag:
+            sql = "UPDATE t SET s=:s, m=CURRENT_DATE WHERE p=:p"
+            cur.execute(sql)
+        n = cur.rowcount
+        log(f"attemptNr=1 nUp={n} new={st}")
+""")
+
+
+def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unsettled_amount_reaches_the_age(tmp_path):
+    """E-1 (W8: a callee's run marked by a column that references the key's class's identity), E-4 (a printed row
+    count after the write: 0 changed no row), E-5 (``col < clock - X units`` false all the stay where X units reach the
+    most the column's age reaches on its timeline)."""
+    (tmp_path / "counted.py").write_text(_COUNTED)
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, datetime as dt, json, re
+            from types import SimpleNamespace as N
+            from bamboo.codemap import pathcond
+            from bamboo.querier import mapdump, rerun as RR, timeline as TL
+
+            got = {}
+            # E-1: jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid; the contents' composite key a column at a time
+            def ref(cols, attrs, table, tcols, tattrs):
+                return N(columns=cols, attrs=attrs, table=table, table_columns=tcols, table_attrs=tattrs)
+            mapdump._FRAGMENT[:] = [N(tables=[
+                N(name="jedi_tasks", spec_class="JediTaskSpec", identity_attrs=["JediTaskSpec.jediTaskID"], references=[]),
+                N(name="jedi_datasets", spec_class="JediDatasetSpec", identity_attrs=["JediDatasetSpec.datasetID"], references=[
+                    ref(["jeditaskid"], ["JediDatasetSpec.jediTaskID"], "jedi_tasks", ["jeditaskid"], ["JediTaskSpec.jediTaskID"])]),
+                N(name="jedi_dataset_contents", spec_class="JediFileSpec", identity_attrs=["JediFileSpec.fileID"], references=[
+                    ref(["jeditaskid", "datasetid"], ["JediFileSpec.jediTaskID", "JediFileSpec.datasetID"], "jedi_datasets",
+                        ["jeditaskid", "datasetid"], ["JediDatasetSpec.jediTaskID", "JediDatasetSpec.datasetID"])]),
+                N(name="jedi_events", spec_class="", identity_attrs=[], references=[
+                    ref(["jeditaskid"], [], "jedi_tasks", ["jeditaskid"], ["JediTaskSpec.jediTaskID"])])])]
+            got["e1"] = RR.referencing("JediTaskSpec")
+
+            # E-4: the count print after the arm's statement, every way to it passing the arm (upd), or not (upd2)
+            tree = ast.parse(open("counted.py").read())
+            pathcond.attach_parents(tree)
+            defs = {f.name: f for f in tree.body if isinstance(f, ast.FunctionDef)}
+            RR.trace.hole_values = lambda m, text, token, whole=False: (re.findall(r"=(\\S+)", text), [])
+
+            def landed(name, arm, start, count, texts):
+                fn = N(node=defs[name], row_at=lambda s: N(line=s.lineno, map_rows=[N()]) if isinstance(s, ast.Expr) else None)
+                hits = {}
+                for i, t in enumerate(texts):
+                    hits.setdefault(start if t.startswith("start") else count, []).append((i, 10, ""))
+                sn = N(hits=hits, run=N(records=[N(text=t, token="upd < PandaID=7 >") for t in texts]))
+                b = N(line=arm, count_prints=[], printed_counts=[N(line=count, holes=[1])])
+                return RR._landed(fn, sn, 0, start, b)[0]
+
+            got["e4"] = {
+                "one": landed("upd", 3, 2, 6, ["start 7", "attemptNr=1 nUp=1 new=running"]),
+                "none": landed("upd", 3, 2, 6, ["start 7", "attemptNr=1 nUp=0 new=running"]),
+                "next": landed("upd", 3, 2, 6, ["start 7", "start 7", "attemptNr=1 nUp=0 new=running"]),
+                "off": landed("upd2", 12, 10, 15, ["start 7", "attemptNr=1 nUp=0 new=running"]),
+            }
+            # a branch writing at two statements: which run the count is of is not said, so it is not read
+            fn = N(node=defs["upd"], row_at=lambda s: N(line=s.lineno, map_rows=[N()]) if isinstance(s, ast.Expr) else None)
+            sn = N(hits={2: [(0, 10, "")], 6: [(1, 10, "")]},
+                   run=N(records=[N(text=t, token="upd < PandaID=7 >") for t in ["start 7", "attemptNr=1 nUp=0 new=running"]]))
+            got["e4"]["other_lines"] = RR._landed(fn, sn, 0, 2, N(line=3, other_lines=[9], count_prints=[],
+                                                                 printed_counts=[N(line=6, holes=[1])]))[0]
+
+            # E-5: writes at 10:20 and 10:35 (ran) from 10:00, an open arm writing the clock; the stay 10:00 .. 11:00
+            t = lambda h, m: dt.datetime(2026, 1, 1, h, m)
+            w = lambda at: TL.Write(at=at, lo=at, hi=at, how=TL.RAN, arms=("upd:3",), where="upd:6", machine="m1")
+            def timeline(writes, opens):
+                return TL.Timeline(start=t(10, 0), end=t(11, 0), first=(t(10, 0), t(10, 0)), first_assumed=(t(10, 0), t(10, 0)),
+                                   writes=writes, opens=opens)
+            r = RR.Rerun.__new__(RR.Rerun)
+            r._timeline = lambda subject, q: timeline((w(t(10, 20)), w(t(10, 35))), (TL.Opening("lock:9", dt.timedelta(0), dt.timedelta(0)),))
+            def term(op, **v):
+                return N(node="compare", op=op, settled=False, subject="JobSpec.modificationTime", text="modificationTime<:modificationTime",
+                         values=[N(**{"base": "naive_utcnow", "offset_seconds": None, "scale_seconds": -3600.0,
+                                      "said": "naive_utcnow() - timedelta(hours=timeout)@9", "needs": [], **v})])
+            said = r._timeline_false_if(term("<"), None)
+            got["e5"] = [RR.T.text(said) if said is not None else None,
+                         r._timeline_false_if(term(">"), None), r._timeline_false_if(term("<", offset_seconds=-60.0), None),
+                         r._timeline_false_if(term("<", needs=["timeLimit"]), None)]
+            r._timeline = lambda subject, q: timeline((w(t(10, 20)),), (TL.Opening("any:9", None, None),))
+            got["e5"].append(r._timeline_false_if(term("<"), None))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["e1"] == {"JediDatasetSpec.jediTaskID": ["jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid"],
+                         "JediFileSpec.jediTaskID": ["jedi_dataset_contents.jeditaskid -> jedi_datasets.jeditaskid",
+                                                     "jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid"]}, got
+    # the count print's 1 and 0; one after the next call's start is that call's; one a way reaches past the arm, none
+    assert got["e4"] == {"one": True, "none": False, "next": None, "off": None, "other_lines": None}, got
+    assert got["e5"][0] == (
+        "modificationTime<:modificationTime: false for the row at every moment of the stay where naive_utcnow() - "
+        "timedelta(hours=timeout)@9 is at least 0.42 (in units of 3600 s): on its 2 write(s) read in the stay (0 more "
+        "in the 10 min before it), 1 arm(s) writing at any moment, the column was never more than 25.0 min old there "
+        "(E-5)"), got
+    # another op, a settled offset, a parameter's scale, an open arm whose least is not read: nothing said
+    assert got["e5"][1:] == [None, None, None, None], got

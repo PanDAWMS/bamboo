@@ -118,7 +118,7 @@ def walk(fn: R.Function, line: int) -> Asked:
         types=_types(),
     )
     start = asker.start()
-    out = Asked(start.steps, asker, start.frontier, start.note, f"{fn.name}:{line}")
+    out = Asked(start.steps, asker, start.frontier, start.note, f"{fn.shown}:{line}")
     made.append(out)
     return out
 

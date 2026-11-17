@@ -324,6 +324,7 @@ TEMPLATES: dict[str, str] = {
     "shown-to-write": "shown to write",
     "guard-read-false": "{guard!r} read false",
     "guard-read-false-on": "{guard!r} read false{on}",
+    "a-printed-count-of-none": "its statement changed no row, as the count printed at {line} says (E-4)",
     "guard-not-read": "{guard!r} not read",
     # a window's why (windows.Asking.why)
     "window-at-transition": "the statuslog's {status!r} at {time}, {where}",
@@ -428,6 +429,7 @@ TEMPLATES: dict[str, str] = {
     "it-called-the-mover": "it called the mover",
     "not-into-the-mover": "not into the mover",
     "a-callee-run-is-the-caller-s": "each run of {callee} read is {caller}'s call: {n} other function(s) reach {callee} within 3 calls, and that one of them ran it on the row then is not excluded",
+    "a-callee-marked-by-a-reference": "each run of {callee} read is marked by {attr}, which holds a {cls}'s key by the foreign key(s) the schema declares ({keys:join=; }): a run marked by the key is read as the key's (E-1)",
     "one-process-a-machine": "one process of {caller} on {machine}: the two runs are one pass of it",
     "took-it-in-the-next-step": "{mover} took the row at {at} on {machine} in the step after {callee}'s in one pass of {caller}, which calls {callee} at {lines} before {mover} at {mover_lines}: the stay began in that step, at {began}, {rest}; its passes read by its callees: {passes:join=; }; premises: {premises:join=; }",
     "the-step-ended-at": "and the step went on to {last}, {rest} s after",
@@ -741,6 +743,7 @@ TEMPLATES: dict[str, str] = {
     "none-of-wrote-it-besides": "none of {arms:join=, } wrote {column} in the stay, besides the {n} write(s) the records show",
     "a-run-time-value-not-none": "the value {arms:join=, } write(s) to {column}, known only at run time, is not None (the map does not rule None out)",
     "timeline-term-held": "{term}: surely held for the row {spans}, on the writes the records show",
+    "timeline-term-false-if": "{term}: false for the row at every moment of the stay where {said} is at least {least} (in units of {unit} s): on its {n} write(s) read in the stay ({m} more in the {slack} min before it), {opens} arm(s) writing at any moment, the column was never more than {age} old there (E-5)",
     "timeline-term-held-if": "{term}: surely held for the row {spans}, on the writes the records show, where {named:join= and }",
     "none-of-wrote-it": "none of {arms:join=, } wrote {column} in the stay",
     "none-of-began-it": "none of {arms:join=, } began the stay",

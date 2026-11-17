@@ -45,7 +45,7 @@ def local_env(fn: R.Function, run: Run, mode: str, line: int, base: E.Env) -> E.
                 rebound = [b.lineno for b in R._binding_sites(fn.node, expr, line) if b.lineno > row.line]
                 if rebound:
                     continue
-                env.put_hole(expr, value.strip(), f"hole of {fn.name}:{row.line} at {run.records[i].span}", [fn.owner])
+                env.put_hole(expr, value.strip(), f"hole of {fn.shown}:{row.line} at {run.records[i].span}", [fn.owner])
     return env
 
 
