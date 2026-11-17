@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
+from typing import Any
 
 #: the bounds of a value nothing bounds
 LOW = datetime.datetime.min
@@ -32,6 +33,17 @@ HIGH = datetime.datetime.max
 #: how a print shows a write: the statement ran with the printed binds, or the pass reached the print
 RAN = "ran"
 REACHED = "reached"
+
+#: A column a selecting statement tests ``IS NULL`` (Q1 batch 2 part 1, out/gm/qk-design.md, tmaeno's OK 2026-11-16)
+#: holds one of two states, kept as a time column's value is, as bounds: NULL below any value, a value above it.
+#: ``(NULL, NULL)`` is surely NULL, ``(SET, SET)`` surely a value, ``(NULL, SET)`` either; a write read, an open arm and
+#: the stay's start set and widen them as they do a time's.  getTasksToBeFinished_JEDI's ``lockedBy IS NULL``.
+NULL = LOW
+SET = HIGH
+#: the states an arm's outcome writes: the literal ``None``, a value, or either
+NULL_ONLY = (NULL, NULL)
+SET_ONLY = (SET, SET)
+EITHER = (NULL, SET)
 
 
 @dataclass(frozen=True)
@@ -79,11 +91,34 @@ class Timeline:
     #: those of them no print names the row at the stay's start, while another's does: named, where the open arms
     #: are, as having not begun it (*first_assumed* leaves them out)
     begun_assumed: tuple[str, ...] = ()
+    #: a column tested ``IS NULL``: the arms read as writing a value they know only at run time, as one that is not
+    #: None (``runtime(pid)``), "func:line" each
+    premised: tuple[str, ...] = ()
+    #: the writes a print reached whose statement's guard the pass's printed values read false: not written, each
+    #: ``(at, "func:line", machine, the guard with its values)`` (bundle A, A-1)
+    not_run: tuple[tuple[datetime.datetime, str, str, Any], ...] = ()
+    #: arms writing the status from a value known only at run time whose write the records show as the stay began,
+    #: read as having written the value seen (A-3), "func:line" each
+    begun_runtime: tuple[str, ...] = ()
+    #: arms writing the status from a value known only at run time, in no function of an arm that may begin it with
+    #: the value itself, of which no write was read as it began: read, as M3(a)-1 reads them, as not having begun it --
+    #: a premise said with *begun_by* (A-3), "func:line" each
+    runtime_unread: tuple[str, ...] = ()
+    #: the row's value of the column as the rows file read it, where every arm of the column writes the clock with one
+    #: offset: ``(written at, the value, the arms, when it was read)`` -- the last write was then, and none since
+    #: (bundle A, A-4: P24, NT-scouting-late's assessmentTime 19:53:41 by prepareTasksToBeFinished_JEDI:3744 or
+    #: getAchievedTasks_JEDI:3283)
+    row_value: tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str] | None = None
+
+    def read(self) -> bool:
+        """Whether the records or the row read anything of the column: a write, an arm shown not to, the row's value."""
+        return bool(self.writes or self.absent or self.row_value)
 
     def pieces(self, assume: bool = False) -> list[tuple[datetime.datetime, datetime.datetime, datetime.datetime,
                                                           datetime.datetime, tuple[Opening, ...]]]:
         """``(from, to, lo, hi, opens)`` over [start, end], cut at each write read: the bounds the writes read leave,
-        and the arms that may write it in the piece (none where *assume* names them as having not)."""
+        and the arms that may write it in the piece (none where *assume* names them as having not).  From the row's
+        value's write on (*row_value*), the column holds that value and no arm writes it."""
         out = []
         lo, hi = self.first_assumed if assume else self.first
         at = self.start
@@ -95,7 +130,18 @@ class Timeline:
             lo, hi = (w.lo, w.hi) if w.how == RAN else (min(lo, w.lo), max(hi, w.hi))
             at = w.at
         out.append((at, self.end, lo, hi, opens))
-        return out
+        if self.row_value is None:
+            return out
+        since, value = self.row_value[0], self.row_value[1]
+        held = []
+        for a, z, plo, phi, popens in out:
+            if z <= since:
+                held.append((a, z, plo, phi, popens))
+            elif a >= since:
+                held.append((a, z, value, value, ()))
+            else:
+                held += [(a, since, plo, phi, popens), (since, z, value, value, ())]
+        return held
 
 
 def fold(writes, lo: datetime.datetime, hi: datetime.datetime) -> tuple[datetime.datetime, datetime.datetime]:
@@ -106,15 +152,25 @@ def fold(writes, lo: datetime.datetime, hi: datetime.datetime) -> tuple[datetime
     return lo, hi
 
 
+def state_opening(arm: str, states: tuple[datetime.datetime, datetime.datetime]) -> Opening:
+    """An open arm of a column tested ``IS NULL`` writing *states* (``NULL_ONLY``, ``SET_ONLY``, ``EITHER``): the state
+    it writes holds whatever moment it runs, so its offsets are the farthest ones, which ``_plus`` holds at ``NULL``
+    and ``SET``."""
+    return Opening(arm, None if states[0] == NULL else datetime.timedelta.max,
+                   None if states[1] == SET else datetime.timedelta.min)
+
+
 def first_bounds(begun: datetime.datetime, since: datetime.datetime, starts: bool, lacking: bool, writes,
-                 opens) -> tuple[datetime.datetime, datetime.datetime]:
+                 opens, start: tuple[datetime.datetime, datetime.datetime] | None = None) -> tuple[datetime.datetime, datetime.datetime]:
     """The column's bounds as the stay began at *begun*: *begun* itself where an arm writing the value and the column
-    may have begun it (*starts*); where one writing the value alone may have (*lacking*), or none writing both is
-    read, what the writes read from *since* to *begun* leave, from no bound, widened by *opens* -- the last write
-    before the stay may be older than *since*, and is then not read."""
+    may have begun it (*starts*) -- *start*, where the column's arm of that pass writes another value than the clock
+    (the states of a column tested ``IS NULL``; the clock with an offset, bundle A's A-2); where one writing the value
+    alone may have (*lacking*), or none
+    writing both is read, what the writes read from *since* to *begun* leave, from no bound, widened by *opens* -- the
+    last write before the stay may be older than *since*, and is then not read."""
     ways = []
     if starts:
-        ways.append((begun, begun))
+        ways.append(start or (begun, begun))
     if lacking or not starts:
         lo, hi = fold([w for w in writes if since <= w.at <= begun], LOW, HIGH)
         for o in opens:
@@ -170,6 +226,32 @@ def surely_true(op: str, offset: datetime.timedelta, pieces) -> list[tuple[datet
     return joined
 
 
+def surely_false(op: str, offset: datetime.timedelta, pieces) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Where ``col <op> clock + offset`` surely fails, piece by piece as :func:`surely_false_between` reads one: below
+    it, up to where the least the column may hold, less the offset, is reached; above it, from where the most is."""
+    out = []
+    for p in pieces:
+        a, b = p[0], p[1]
+        if op in ("<", "<="):
+            lo, _ = bounds_at(p, a)
+            turn = _plus(lo, -offset)
+            if lo != LOW and turn >= a:
+                out.append((a, min(b, turn)))
+        elif op in (">", ">="):
+            if any(o.hi is None or o.hi > offset for o in p[4]) or p[3] == HIGH:
+                continue
+            turn = _plus(p[3], -offset)
+            if turn <= b:
+                out.append((max(a, turn), b))
+    joined: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for a, b in out:
+        if joined and a <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], b))
+        else:
+            joined.append((a, b))
+    return joined
+
+
 def surely_false_all(op: str, offset: datetime.timedelta, pieces) -> bool:
     """Whether ``col <op> clock + offset`` surely fails at every moment of the pieces."""
     return bool(pieces) and surely_false_between(op, offset, pieces, pieces[0][0], pieces[-1][1])
@@ -196,3 +278,32 @@ def surely_false_between(op: str, offset: datetime.timedelta, pieces, a: datetim
         else:
             return False
     return met
+
+
+def surely_state_between(null: bool, pieces, a: datetime.datetime, b: datetime.datetime) -> bool:
+    """Whether a column tested ``IS NULL`` surely is NULL (*null*), or surely holds a value, at every moment of
+    [*a*, *b*]: its bounds there, widened by the open arms (:func:`bounds_at`), are that state alone."""
+    met = False
+    for p in pieces:
+        lo_t, hi_t = max(p[0], a), min(p[1], b)
+        if lo_t > hi_t:
+            continue
+        met = True
+        lo, hi = bounds_at(p, hi_t)
+        if (hi != NULL) if null else (lo != SET):
+            return False
+    return met
+
+
+def state_spans(null: bool, pieces) -> list[tuple[datetime.datetime, datetime.datetime]]:
+    """Where a column tested ``IS NULL`` surely is NULL (*null*), or surely holds a value: the pieces whose bounds,
+    widened by their open arms to the piece's end, are that state alone, joined where they meet."""
+    joined: list[tuple[datetime.datetime, datetime.datetime]] = []
+    for p in pieces:
+        if not surely_state_between(null, [p], p[0], p[1]):
+            continue
+        if joined and p[0] <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], p[1]))
+        else:
+            joined.append((p[0], p[1]))
+    return joined

@@ -18,13 +18,17 @@ not place (``crosses_open``).
 
 Spellings: the map's read sites, their crossings and the junctions name a function ``file::function``; its reach graph
 names it ``file::Class.function``.  Both are read as ``file::function`` (:func:`bare`): two classes of one file with a
-method of one name are one function here, as they are in the crossings the map writes.
+method of one name are one function here, as they are in the crossings the map writes.  The walk itself is the map's
+closure over its reach graph (:func:`closure`), each call followed for the classes it holds for: a ``file::function``
+start starts as each definition of that name, and what it reaches is read as ``file::function`` again.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+
+from bamboo.querier import map_reach as MR
 
 #: how many calls past a function the rows are handed to are followed in the map's reach graph (the M2 measure's,
 #: ``m2_down3``: 26 of the 29 late questions named their movers at 3)
@@ -65,34 +69,22 @@ class Reach:
         return self.closed and b not in self.reached and b in self.other and b not in self.entered
 
 
-def calls_of(reach_graph: Iterable) -> dict[str, frozenset[str]]:
-    """The map's reach graph as ``file::function`` -> the functions it calls."""
-    out: dict[str, set[str]] = {}
-    for node in reach_graph:
-        callees = out.setdefault(bare(node.owner), set())
-        callees.update(bare(c.to) for c in getattr(node, "calls", None) or [] if getattr(c, "to", None))
-    return {k: frozenset(v) for k, v in out.items()}
+def closure(starts: Iterable[str], depth: int | None = DEPTH, stop: frozenset[str] = frozenset()) -> frozenset[str]:
+    """*starts* and what they call, *depth* calls deep (None: all of it), not going into a function in *stop*: the
+    map's closure (:func:`map_reach.reached`), each call followed for the classes it holds for and into those it runs
+    as.  A start the reach graph names (``file::Class.function``) starts as that one, a ``file::function`` one as each
+    definition of that name."""
+    starts = list(starts)
+    cut = (lambda node, call: bare(call.to) in stop) if stop else None
+    return frozenset({bare(s) for s in starts} | {bare(o) for o in MR.reached(starts, depth, cut)})
 
 
-def closure(starts: Iterable[str], calls: dict[str, frozenset[str]], depth: int | None = DEPTH,
-            stop: frozenset[str] = frozenset()) -> frozenset[str]:
-    """*starts* and what they call, *depth* calls deep (None: all of it), not going through a function in *stop*."""
-    seen = set(starts)
-    edge = set(seen)
-    n = 0
-    while edge and (depth is None or n < depth):
-        edge = {t for o in edge for t in calls.get(o, ()) if t not in stop} - seen
-        seen |= edge
-        n += 1
-    return frozenset(seen)
-
-
-def entered(endpoints: Iterable, calls: dict[str, frozenset[str]]) -> frozenset[str]:
+def entered(endpoints: Iterable) -> frozenset[str]:
     """Every function an API endpoint of the map reaches, its own and all it calls."""
-    return closure((bare(e.function) for e in endpoints if getattr(e, "function", None)), calls, None)
+    return closure((e.function for e in endpoints if getattr(e, "function", None)), None)
 
 
-def other_values(read_sites: Iterable, subject: str, observed: str, calls: dict[str, frozenset[str]]) -> frozenset[str]:
+def other_values(read_sites: Iterable, subject: str, observed: str) -> frozenset[str]:
     """The functions that get rows of *subject*'s object only from the map's statements selecting it at values other
     than *observed*, and what those call up to :data:`DEPTH` calls (not through such a statement's own function).
 
@@ -122,11 +114,11 @@ def other_values(read_sites: Iterable, subject: str, observed: str, calls: dict[
             kinds.setdefault(bare(c), set()).add(kind)
     only = frozenset(t for t, k in kinds.items() if k == {"other"})
     rest = frozenset(t for t, k in kinds.items() if k != {"other"})
-    return (closure(only, calls, stop=frozenset(own - only)) | only) - closure(rest, calls)
+    return (closure(only, stop=frozenset(own - only)) | only) - closure(rest)
 
 
-def reach(statements: list, crossed: Iterable[str], movers: Iterable[str], calls: dict[str, frozenset[str]],
-          entered_by: frozenset[str], other: frozenset[str] = frozenset()) -> Reach:
+def reach(statements: list, crossed: Iterable[str], movers: Iterable[str], entered_by: frozenset[str],
+          other: frozenset[str] = frozenset()) -> Reach:
     """The reach of *statements*, those selecting the value that hand on rows.
 
     *movers* are the writers ``rerun._reached`` gives the rows to, *crossed* the functions the statements (or one
@@ -135,8 +127,8 @@ def reach(statements: list, crossed: Iterable[str], movers: Iterable[str], calls
     other statements are reached only as ``_reached`` places them.  *other* is :func:`other_values`'."""
     reads = tuple(f"{rs.owner.split('::')[-1]}@{rs.line}" for rs in statements)
     own = frozenset(bare(rs.owner) for rs in statements)
-    starts = {bare(o) for o in [*crossed, *movers]}
-    reached = closure(starts, calls, stop=own - starts) | starts
+    starts = [*crossed, *movers]
+    reached = closure(starts, stop=own - {bare(o) for o in starts})
     open_ = tuple(
         f"{rs.owner.split('::')[-1]}@{rs.line}: "
         + ("callers not complete" if not getattr(rs, "callers_complete", False) else "a crossing not placed")
