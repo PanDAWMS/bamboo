@@ -22967,7 +22967,7 @@ def test_a_message_sent_with_a_literal_type_is_joined_to_the_function_taking_onl
             _at('"job_generator"', _MESSAGE_FEEDER),
             "job_generator",
             {"taskid": "jediTaskID"},
-            "pkg/procs.py::process",
+            "pkg/procs.py::GeneratorProc.process",
             [("taskid", _at('int(msg_dict["taskid"])', _MESSAGE_PROCS), "task_id")],
         )
     ]

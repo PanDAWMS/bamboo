@@ -32,6 +32,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import bare_name
 from bamboo.codemap.gitsource import blob_sha as git_blob_sha
 
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ def containing_function(tree: ast.Module, line: int, owner: str) -> Optional[ast
     and the innermost is the fallback.  Neither is a guess about which function
     matters: the map names one, and containment settles it when it does not.
     """
-    wanted = owner.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+    wanted = bare_name(owner)
     holders = [
         node
         for node in walk(tree)

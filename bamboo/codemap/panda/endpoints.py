@@ -119,7 +119,7 @@ def routes_in(trees: dict[str, ast.AST]) -> list[tuple[str, str, str]]:
                 and not node.name.startswith("_")
                 and node.name not in NOT_ROUTED
             ):
-                found.append((version, f"{name}/{node.name}", f"{rel}::{node.name}"))
+                found.append((version, f"{name}/{node.name}", f"{rel}::{C.def_name(node)}"))
     return list(dict.fromkeys(found))
 
 

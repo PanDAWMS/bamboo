@@ -40,6 +40,7 @@ from typing import Iterator, Optional
 
 from bamboo.codemap import callfacts, values
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import Anchor, CoverageStat, FilterStageNode, SourceModule
 from bamboo.codemap.pathcond import (
     attach_parents,
@@ -412,7 +413,7 @@ def extract(
                 1 for stage in (*found.values(), *named) if stage.conditions
             )
 
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             explained_labels = {
                 stage.label for stage in (*found.values(), *named) if stage.conditions
             }

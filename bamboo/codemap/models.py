@@ -8023,6 +8023,15 @@ class ReachNode(BaseNode):
     map_id: str
     derived_from: str
     owner: str = Field(..., description="``file::qualified.name``, ``#n`` after a repeated one.")
+    named_as: str = Field(
+        default="",
+        description=(
+            "The owner the other records name the function by (:func:`bamboo.codemap.calls.def_name`): "
+            "``file::name`` where its module defines one function of that name, an ``@overload`` stub not counted, "
+            "else *owner* (``datasetManager.py::main.FinisherThr.run``).  A reader keyed on the definition finds it "
+            "by its file and its ``def`` line, *anchor*'s ``line_start``."
+        ),
+    )
     cls: str = Field(default="", description="``file::Class`` holding the method; empty for a function.")
     function: str = Field(..., description="The function's own name.")
     classes: list[str] = Field(

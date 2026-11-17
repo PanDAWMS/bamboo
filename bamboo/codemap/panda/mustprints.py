@@ -66,6 +66,7 @@ from pydantic import BaseModel, Field
 from bamboo.codemap import pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.callfacts import LOG_METHODS
+from bamboo.codemap.calls import spells
 from bamboo.codemap.models import (
     EXIT_LINE,
     LOG_FILES_FOLLOWED,
@@ -789,10 +790,10 @@ def _sites(
         func = _function_at(tree, line)
         if func is None:
             return HOLE_MODULE_BODY
-        # A junction's owner need not spell the nesting -- ``datasetManager.py::run``
-        # is any of seven -- and the prints' owner does: ``main.FinisherThr.run``.
+        # A junction's owner spells the nesting only where the module repeats the name
+        # (:func:`calls.spells`), and the prints' owner always does: ``main.FinisherThr.run``.
         nested = pathcond.qualified_name(func)
-        if nested != qualname and not nested.endswith("." + qualname):
+        if not spells(func, qualname):
             return f"line {line} is in {nested}, not {qualname}"
         statement = _statement_at(func, line)
         if statement is None:

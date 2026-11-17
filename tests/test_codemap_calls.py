@@ -4055,3 +4055,84 @@ def test_a_scopes_own_nodes_and_defs_read_once_are_what_walking_it_gives_in_its_
     if source == _NESTED_SCOPES:
         (outer,) = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"]
         assert [one.name for one in calls_mod.bound_defs(outer)] == ["inner", "Inner", "inner"]
+
+
+_OWNERS = """\
+from typing import overload
+
+
+def solo():
+    def inner():
+        pass
+
+
+def run():
+    pass
+
+
+class A:
+    def run(self):
+        pass
+
+
+class B:
+    def run(self):
+        pass
+
+
+class C:
+    @property
+    def value(self):
+        return 1
+
+    @value.setter
+    def value(self, given):
+        pass
+
+
+@overload
+def clean(x: int) -> int: ...
+@overload
+def clean(x: str) -> str: ...
+def clean(x):
+    return x
+"""
+
+
+def test_an_owner_names_a_function_bare_where_its_module_defines_the_name_once_else_by_its_id() -> None:
+    """``run`` is defined three times in the module, so each is named by its id -- the top-level one ``run``, the
+    methods ``A.run`` and ``B.run`` --; ``solo`` and the nested ``inner`` once, so bare.  A property's setter repeats
+    its getter's name in one scope: ``C.value`` and ``C.value#2``.  ``clean``'s ``@overload`` stubs do not count, so
+    it is bare, and the name finds the body that runs.  The id spells a function too (``solo.inner``), not the bare name of a repeated one.  An owner's bare name drops the nesting and the ``#n``."""
+    tree = ast.parse(_OWNERS)
+    pathcond.attach_parents(tree)
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    named = sorted((node.lineno, calls_mod.def_name(node)) for node in functions)
+    assert named == [
+        (4, "solo"),
+        (5, "inner"),
+        (9, "run"),
+        (14, "A.run"),
+        (19, "B.run"),
+        (25, "C.value"),
+        (29, "C.value#2"),
+        (34, "clean"),
+        (36, "clean"),
+        (37, "clean"),
+    ]
+    for line, spelled in named:
+        if spelled != "clean":
+            assert calls_mod.def_named(tree, spelled).lineno == line  # type: ignore[union-attr]
+    assert calls_mod.def_named(tree, "clean").lineno == 37  # type: ignore[union-attr]
+    assert calls_mod.def_named(tree, "C") is None
+    inner = calls_mod.def_named(tree, "solo.inner")
+    assert inner is calls_mod.def_named(tree, "inner") and inner is not None
+    assert calls_mod.spells(inner, "inner") and calls_mod.spells(inner, "solo.inner")
+    method = calls_mod.def_named(tree, "A.run")
+    assert method is not None and not calls_mod.spells(method, "run")
+    assert calls_mod.def_name(ast.parse("def loose(): pass").body[0]) == "loose"
+    assert [calls_mod.bare_name(f"f.py::{spelled}") for spelled in ("A.run", "C.value#2", "solo")] == [
+        "run",
+        "value",
+        "solo",
+    ]

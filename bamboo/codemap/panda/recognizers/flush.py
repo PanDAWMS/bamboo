@@ -376,7 +376,7 @@ def flush_methods(
                         func, logfile.files_of(module.rel_path, declared, inherited)
                     )
                 ),
-                owner=f"{module.rel_path}::{func.name}",
+                owner=f"{module.rel_path}::{calls_mod.def_name(func)}",
                 flushed=frozenset(flushed),
                 criteria=criteria,
                 guard_binds=guard_binds,
@@ -568,7 +568,7 @@ def attach(
     annotated = 0
     for module in modules:
         for func, owner in functions_with_owner(module.tree):
-            here = by_owner.get(f"{module.rel_path}::{func.name}")
+            here = by_owner.get(f"{module.rel_path}::{calls_mod.def_name(func)}")
             if not here:
                 continue
             uses = []
@@ -883,7 +883,7 @@ def _call_key_froms(
     ``WHERE`` is made of a dict parameter's items, one per key of the dict the call hands it.  A term the method
     fills only with values of its own -- its rows, its ``self`` -- is :data:`KEY_IN_CALLEE`.  Its object is the spec,
     and what it writes is read after the reach record: the caller's assignments on the spec that reach the call."""
-    caller = f"{rel_path}::{func.name}"
+    caller = f"{rel_path}::{calls_mod.def_name(func)}"
     found: dict[tuple[str, str, str], KeyFrom] = {}
 
     def put(table: str, term: str, spelled: str, spec: str, binds: list, unread: str) -> None:
@@ -980,7 +980,7 @@ def _row_key_source(
     values: ``updateTask_JEDI`` names its row by the criteria it is handed, not by the spec beside them."""
     mine = [record for record in records if record._object is not None and record._object[1] == spec]
     source = RowKeySource(
-        owner=f"{module.rel_path}::{func.name}",
+        owner=f"{module.rel_path}::{calls_mod.def_name(func)}",
         file=module.rel_path,
         statement=call.lineno,
         columns=sorted(columns),

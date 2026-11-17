@@ -55,7 +55,7 @@ from typing import NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import Calls, CallSite, Target, bind
+from bamboo.codemap.calls import Calls, CallSite, Target, bare_name, bind
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     LOG_FILES_OF_MODULE,
@@ -884,8 +884,7 @@ def _caller_files(
     -- the same last-segment rule the attribution slice uses to name a
     function.
     """
-    where, _, method = owner.partition("::")
-    reached = inward.get(where, {}).get(method.split(".")[-1], ())
+    reached = inward.get(owner.partition("::")[0], {}).get(bare_name(owner), ())
     return sorted(
         {file for entry, _door, _call in reached for file in files_of(entry, declared, inherited)}
         - set(mine)

@@ -21,7 +21,7 @@ import ast
 from typing import Optional, Sequence
 
 from bamboo.codemap import reach
-from bamboo.codemap.calls import own_nodes
+from bamboo.codemap.calls import def_name, own_nodes
 from bamboo.codemap.models import (
     ExitKeeps,
     FunctionPrintsNode,
@@ -140,7 +140,7 @@ def _defined_at(tree: ast.AST, line: int) -> Optional[ast.AST]:
 
 
 def _keeps(held: _Function) -> list[ExitKeeps]:
-    owner = f"{held.file}::{getattr(held.func, 'name', '')}"
+    owner = f"{held.file}::{def_name(held.func)}"
     asked = [statement for statement, _lines in (*held.arms.values(), *held.prints.values(), *held.calls.values())]
 
     def lines(kept: set[int], of: dict[int, tuple[ast.stmt, set[int]]]) -> list[int]:
@@ -176,7 +176,7 @@ def _keeps(held: _Function) -> list[ExitKeeps]:
 
 
 def _print_loops(held: _Function) -> list[PrintLoops]:
-    owner = f"{held.file}::{getattr(held.func, 'name', '')}"
+    owner = f"{held.file}::{def_name(held.func)}"
     found = []
     for statement, lines in held.prints.values():
         loops = [getattr(loop, "lineno", 0) for loop in flow.loops_around(statement)]

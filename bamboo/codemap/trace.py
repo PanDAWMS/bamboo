@@ -311,7 +311,7 @@ def _located(tree: ast.Module, owner: str, line: Optional[int]) -> Optional[ast.
     """The function of *tree* *owner* names: the one holding *line*, or with no line the first of its name."""
     if line is not None:
         return containing_function(tree, line, owner)
-    wanted = owner.rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+    wanted = calls_mod.bare_name(owner)
     return next((node for node, _cls in pathcond.functions_with_owner(tree) if node.name == wanted), None)
 
 

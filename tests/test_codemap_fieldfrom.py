@@ -677,7 +677,7 @@ def test_a_take_from_a_container_reads_its_receiver_s_element(
     # The field read on with the steps past it: its binding's parameter, its caller's WeightedLists.
     (bound,) = _field(built, WORKER_CLASS, "reports").bindings
     assert _ends(bound.sources) == {
-        ("parameter", "reports", f"{QUEUE}::__init__", (), ())
+        ("parameter", "reports", f"{QUEUE}::Worker.__init__", (), ())
     }
 
 

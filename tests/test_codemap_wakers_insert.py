@@ -179,6 +179,7 @@ def _fragment() -> MapFragment:
         map_id="m",
         derived_from="v",
         owner=f"{REL}::DBProxy.send",
+        named_as=f"{REL}::send",
         cls=f"{REL}::DBProxy",
         function="send",
         anchor=Anchor(package=PACKAGE, file=REL, line_start=_def_line("send")),

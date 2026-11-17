@@ -13,6 +13,7 @@ import functools
 from typing import Callable, Iterable, Optional
 
 from bamboo.codemap import values
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     EntityNode,
     KeyFrom,
@@ -157,7 +158,7 @@ def _families(
     functions: dict[tuple[str, str], list[ast.AST]] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            functions.setdefault((module.rel_path, func.name), []).append(func)
+            functions.setdefault((module.rel_path, def_name(func)), []).append(func)
     parent: dict[str, str] = {}
 
     def root(table: str) -> str:

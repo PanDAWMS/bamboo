@@ -73,9 +73,12 @@ from bamboo.codemap.calls import (
     Recorded,
     Target,
     Types,
+    bare_name,
+    def_name,
     keyed_setattr,
     own_nodes,
     receiver_parameter,
+    spells,
 )
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
@@ -427,7 +430,7 @@ def statement_stops(
     thing come to disagree.  The precondition stops are the write's and are
     left to ``extract``.
     """
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     found: list[ReadingStop] = []
     seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
     skipped: list[sql.Skip] = []
@@ -459,7 +462,7 @@ def _row_key_source(
                 for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run)
             )
     source = RowKeySource(
-        owner=f"{rel_path}::{func.name}",
+        owner=f"{rel_path}::{def_name(func)}",
         file=rel_path,
         statement=run.call.lineno,
         columns=sorted(statement.preconditions),
@@ -484,7 +487,7 @@ def _key_froms(
     reach record (:func:`attach_key_sources`).  A term none of whose runs has a bind map is :data:`KEY_NO_MAP`; one
     whose runs fill none, :data:`KEY_NO_BIND`.
     """
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     for term, bind, mapping in _row_terms(func, run, statement):
         name = (owner, run.call.lineno, statement.table, term)
         record = keyed.get(name)
@@ -841,7 +844,7 @@ def _insert_from(
     obj_class: Optional[str] = None,
     mades: Optional[list[ast.Call]] = None,
 ) -> KeyFrom:
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     # Apart from a WHERE term of the same spelling: a run that updates or inserts the row (``addStdOut``'s
     # ``sqlU`` or ``sqlI``) has both, and they are not one record.
     name = (owner, run.call.lineno, table, "\0insert " + term)
@@ -1128,7 +1131,7 @@ def _set_from(
     new_row: Optional[bool],
     read: Callable[[], list[sql.Bind]],
 ) -> None:
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     name = (owner, run.call.lineno, table, column.lower(), text)
     record = wrote.get(name)
     if record is None:
@@ -1244,7 +1247,7 @@ def _write_print(
     class the text does not spell under the key its class's map stores it by (*map_keys*) -- less those a sequence
     fills where the map is ``useSeq=True``.  *run* is one call's (:func:`_each_call`); *statement* is ``None`` for an
     ``INSERT`` whose columns are the object's (``{JobSpec.columnNames()}``)."""
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     name = (owner, run.call.lineno, table)
     if name in printed:
         return
@@ -1329,7 +1332,7 @@ def _mark_object(
         return
     spelled_obj = ast.unparse(obj)
     attributes = {a.lower(): a for a in attributor.declared_attributes(obj_class)}
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     for term, bind, _mapping in _row_terms(func, run, statement):
         record = keyed.get((owner, run.call.lineno, statement.table, term))
         if record is None:
@@ -1434,7 +1437,7 @@ def extract(
             # run twice.  Counting both would inflate the coverage denominator
             # with duplicates and make the slice look worse than it reads.
             seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             skipped: list[sql.Skip] = []
             writing: Optional[_Writing] = None
             for run in sql.executions(func, skipped):
@@ -1490,7 +1493,7 @@ def extract(
                                     reason=PRECONDITION_BIND_UNSETTLED,
                                     detail=term,
                                     file=module.rel_path,
-                                    owner=f"{module.rel_path}::{func.name}",
+                                    owner=f"{module.rel_path}::{def_name(func)}",
                                     line=run.call.lineno,
                                     statement=run.call.lineno,
                                 )
@@ -1556,7 +1559,7 @@ def extract(
                                     reason=why[0] if why else "no reason given",
                                     detail=why[1] if len(why) > 1 else "",
                                     file=module.rel_path,
-                                    owner=f"{module.rel_path}::{func.name}",
+                                    owner=f"{module.rel_path}::{def_name(func)}",
                                     table=statement.table,
                                     column=column,
                                     # The name ``_record`` would have used, so
@@ -1566,7 +1569,7 @@ def extract(
                                     junction=JunctionNode.make_name(
                                         map_id,
                                         SubjectNode.make_name(qualifier, attribute),
-                                        f"{module.rel_path}::{func.name}",
+                                        f"{module.rel_path}::{def_name(func)}",
                                     ),
                                 )
                             )
@@ -2005,7 +2008,7 @@ def _record(
     guards some of the statements the call runs carry and when.
     """
     subject = SubjectNode.make_name(spec_class, attribute)
-    owner = f"{module.rel_path}::{func.name}"
+    owner = f"{module.rel_path}::{def_name(func)}"
     name = JunctionNode.make_name(map_id, subject, owner)
 
     junction = junctions.get(name)
@@ -3354,7 +3357,7 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                     Unexplained(
                         reason=_why_not_run(func, name),
                         file=module.rel_path,
-                        owner=f"{module.rel_path}::{func.name}",
+                        owner=f"{module.rel_path}::{def_name(func)}",
                         # The variable, not a table: this slice counts
                         # statements, and which tables one names is what it
                         # could not get to.
@@ -4715,7 +4718,7 @@ def read_side(
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             # Keyed by the window as well as the text.  A statement is emitted
             # once per call site, so deduplicating on the text alone keeps the
             # first pairing and throws the rest away -- which is exactly the
@@ -6177,7 +6180,7 @@ class _Reading:
         #: what a call of it gives back.
         self.ruled: dict[int, frozenset[int]] = {}
         #: The names junction owners' functions have: where a hole spelled ``x.f(...)`` could land at one.
-        self.owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
+        self.owner_names = {bare_name(owner) for owner in owners}
         self._summaries: dict[tuple, _Summary] = {}
         self._reads: dict[tuple, bool] = {}
         self._placed: dict[tuple, Optional[Placed]] = {}
@@ -6787,7 +6790,7 @@ class _Crossings:
             self._again(("back", key))
             return
         self._returned.add(key)
-        owner = f"{file}::{func.name}"  # type: ignore[attr-defined]
+        owner = f"{file}::{def_name(func)}"
         if owner in self.returning and isinstance(getattr(func, "parent", None), ast.Module):
             self.returned.setdefault(owner, set()).update(paths)
         reading = self.reading
@@ -6806,7 +6809,7 @@ class _Crossings:
                 self._way.append(("back", site.file, site.func, site.call))
                 try:
                     carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
-                    owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                    owner = f"{site.file}::{def_name(site.func)}"
                     if owner in reading.owners and reading.reads_in(carry):
                         self._cross(owner)
                     for call in _own_calls(site.func):
@@ -7354,7 +7357,7 @@ class _Filled:
                         kind=KEY_SEQUENCE,
                         line=line,
                         name=sequence,
-                        site_owner=f"{self.file}::{self.func.name}",
+                        site_owner=f"{self.file}::{def_name(self.func)}",
                         site_line=run_line,
                         paths=_spelled_paths(paths),
                     )
@@ -7503,7 +7506,7 @@ def _site_function(
             node
             for node in walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == wanted
+            and spells(node, wanted)
             and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
         ),
         None,
@@ -8096,7 +8099,7 @@ def _reaches(
             returned = _NOTHING
             break
         carry = _PathCarry(reading, file, step, (), call_values={id(call): returned})
-        owner = f"{file}::{step.name}"
+        owner = f"{file}::{def_name(step)}"
         if owner in reading.owners and reading.reads_in(carry):
             crossings._cross(owner)
         for other in _own_calls(step):
@@ -8228,7 +8231,7 @@ def attach_key_sources(
             first, last = func.lineno, func.end_lineno or func.lineno
             sites = [
                 site
-                for site in sites_of.get(f"{file}::{func.name}", ())
+                for site in sites_of.get(f"{file}::{def_name(func)}", ())
                 if first <= site.anchor.line_start <= last
             ]
             held = filled[id(func)] = (
@@ -8606,7 +8609,7 @@ def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str
         for source in key_from.sources:
             if source.kind != KEY_PARAMETER or source.name not in named:
                 continue
-            source.site_owner = f"{file}::{func.name}"
+            source.site_owner = f"{file}::{def_name(func)}"
             source.site_line = func.lineno
             found.setdefault((source.site_owner, func.lineno, source.name), (file, func, source.name))
     return list(found.values())
@@ -8717,7 +8720,7 @@ def _unpersisted(
     made: list[KeyFrom] = []
     for module in modules:
         for func, owner_class in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             here = by_owner.get(owner)
             if not here:
                 continue
@@ -8796,7 +8799,7 @@ def _uses(
         placed = reading.place(carry, call)
         if placed is not None and placed.targets:
             handed.append(call.lineno)
-            callees |= {f"{target.file}::{target.func.name}" for target in placed.targets}  # type: ignore[attr-defined]
+            callees |= {target.owner for target in placed.targets}
     returned = [
         node.lineno
         for node in own_nodes(func)

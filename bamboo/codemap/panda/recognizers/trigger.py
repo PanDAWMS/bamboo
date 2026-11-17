@@ -52,6 +52,7 @@ from typing import Collection, Iterator, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import bare_name, def_name
 from bamboo.codemap.models import (
     ARRIVES_BY_CALL,
     ARRIVES_BY_DISPATCH,
@@ -1354,12 +1355,9 @@ def _classes_owning_a_junction(
         for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef) or node.name in spec_classes:
                 continue
-            methods = [
-                child.name
-                for child in node.body
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
-            ]
-            if not any(f"{module.rel_path}::{name}" in owners for name in methods):
+            defs = [child for child in node.body if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            methods = [child.name for child in defs]
+            if not any(f"{module.rel_path}::{def_name(child)}" in owners for child in defs):
                 continue
             found.setdefault(node.name, []).append(
                 (
@@ -1455,7 +1453,7 @@ def dispatch_fanouts(modules: list[SourceModule]) -> dict[str, list[DispatchFano
                 continue
             fanouts = list(_fanouts_in(func, declared, subclasses))
             if fanouts:
-                found.setdefault(f"{module.rel_path}::{func.name}", []).extend(fanouts)
+                found.setdefault(f"{module.rel_path}::{def_name(func)}", []).extend(fanouts)
     return found
 
 
@@ -1630,7 +1628,7 @@ def attach(
 
     reached = 0
     for junction in junctions:
-        owner_module, _, method = junction.owner.partition("::")
+        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
         # Keyed by how it arrived as well as by where from.  Without that a
         # facade crossing and a plain call that share a door name collide, and
         # the survivor is whichever was built last -- which silently replaced
@@ -1744,7 +1742,7 @@ def unreached_reasons(
     for junction in junctions:
         if junction.entry_points:
             continue
-        owner_module, _, method = junction.owner.partition("::")
+        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
         callers = inward.get(owner_module, {}).get(method, ())
         if method == "<module>":
             reason = RUNS_AT_IMPORT
@@ -1870,7 +1868,7 @@ def attach_calls(junctions: list[JunctionNode], modules: list[SourceModule]) -> 
     targets = _consulted_targets(modules)
     found = 0
     for junction in junctions:
-        owner_module, _, method = junction.owner.partition("::")
+        owner_module, method = junction.owner.partition("::")[0], bare_name(junction.owner)
         junction.calls = sorted(targets.get(owner_module, {}).get(method, ()))
         if junction.calls:
             found += 1

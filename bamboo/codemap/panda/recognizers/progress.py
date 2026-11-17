@@ -41,6 +41,7 @@ from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond, values
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -617,7 +618,7 @@ def unclaimed_tags(
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             if owner not in claimed:
                 continue
             # A literal piece of an f-string renders as itself and the whole
@@ -1286,7 +1287,7 @@ def extract(
                 explained += 1
                 attributed.add((spec_class, target.attr))
 
-            qualname = func.name if func is not None else "<module>"
+            qualname = def_name(func) if func is not None else "<module>"
             owner = f"{module.rel_path}::{qualname}"
             subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)

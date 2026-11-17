@@ -199,6 +199,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     # hold lines, as ``statements`` does above: between two builds of one tree
     # they do not move.
     NodeType.REACH.value: (
+        "named_as",
         "cls",
         "function",
         "classes",

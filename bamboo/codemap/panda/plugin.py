@@ -1625,7 +1625,7 @@ def _attach_called_from(junctions, calls) -> None:
             tree = calls.types.tree(file)
             found: list[str] = []
             for func in walk(tree) if tree is not None else ():
-                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or func.name != name:
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not calls_mod.spells(func, name):
                     continue
                 if junction.anchor is not None and not (
                     func.lineno <= junction.anchor.line_start <= (func.end_lineno or func.lineno)
@@ -1650,7 +1650,7 @@ def _attach_not_run_on(junctions, calls) -> None:
             named[(file, name)] = [
                 one
                 for one in (walk(tree) if tree is not None else ())
-                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and one.name == name
+                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and calls_mod.spells(one, name)
             ]
         candidates = named[(file, name)]
         anchor = junction.anchor
@@ -1695,7 +1695,7 @@ def _stops_read_again(modules, roots, stops) -> list[str]:
         calls = Calls(Types(roots, {module.rel_path: (module.blob_sha, module.tree)}))
         with sql.across_calls(calls):
             for func, _cls in functions_with_owner(module.tree):
-                owner = f"{module.rel_path}::{func.name}"
+                owner = f"{module.rel_path}::{calls_mod.def_name(func)}"
                 again = {
                     (stop.reason, stop.detail, stop.line)
                     for stop in sqlwrite.statement_stops(func, module.rel_path)

@@ -239,12 +239,12 @@ def edges(modules: list[SourceModule], calls: Optional[C.Calls], reader=None) ->
                 for receiver_file, receiver, reads in receivers.get(handed.value, []):
                     found.append(
                         MessageEdge(
-                            sender=f"{file}::{func.name}",  # type: ignore[attr-defined]
+                            sender=f"{file}::{C.def_name(func)}",
                             line=call.lineno,
                             msg_type=handed.value,
                             sent=sent,
                             columns={key: held for key, held in columns.items() if held},
-                            receiver=f"{receiver_file}::{receiver.name}",  # type: ignore[attr-defined]
+                            receiver=f"{receiver_file}::{C.def_name(receiver)}",
                             reads=reads,
                         )
                     )

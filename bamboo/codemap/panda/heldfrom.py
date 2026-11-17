@@ -58,9 +58,11 @@ from bamboo.codemap.calls import (
     Target,
     _rebinds,
     bind,
+    def_name,
     keyed_setattr,
     own_nodes,
     returns,
+    spells,
 )
 from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
@@ -940,7 +942,7 @@ def _called_at(ways: list[_Way], here: str) -> list[_Way]:
 
 
 def owner_of(file: str, func: ast.AST) -> str:
-    return f"{file}::{getattr(func, 'name', '<module>')}"
+    return f"{file}::{def_name(func) or '<module>'}"
 
 
 def _class_key(file: str, cls: ast.ClassDef) -> str:
@@ -3139,7 +3141,7 @@ class _Reader:
             self._routes = {}
             for _version, route, owner in endpoints.routes_in(self.trees):
                 self._routes.setdefault(owner, set()).add(route)
-        routes = self._routes.get(f"{file}::{getattr(func, 'name', '')}")
+        routes = self._routes.get(f"{file}::{def_name(func)}")
         if not routes:
             return []
         default = _default_of(func, name)
@@ -3543,7 +3545,7 @@ def _function_at(tree: ast.AST, name: str, line: int) -> Optional[ast.AST]:
     for node in walk(tree):
         if (
             isinstance(node, _FUNCTIONS)
-            and node.name == name
+            and spells(node, name)
             and node.lineno <= line <= (node.end_lineno or node.lineno)
         ):
             return node
@@ -3825,7 +3827,7 @@ def guard_froms(
                 (
                     node
                     for node in (walk(tree) if tree is not None else ())
-                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                    if isinstance(node, _FUNCTIONS) and spells(node, name) and node.lineno == site.owner_line
                 ),
                 None,
             )
