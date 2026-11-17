@@ -165,6 +165,7 @@ from bamboo.querier.which_ran import (
     Moment,
     Verdict,
     at_window,
+    before_stretch,
     class_of,
     holds_key,
     inside_call,
@@ -2352,6 +2353,60 @@ def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
     return marks_holding(owner, line, lambda k: bool(ident & set(k.columns)), key) if ident else ()
 
 
+def after_marks(arm: Any, cls: str, key: str) -> tuple[str, ...]:
+    """Q5 (P40(b)): what a print after *arm*'s write (``attr_time.Arm``) carries where it holds *cls*'s key *key*: for
+    each print the map says the function runs after the write on every way (``AfterPrint.every_way``) with a hole in
+    its message holding the written row's identity (``MustName.row`` written), the print's literal text around that
+    hole, the key in it -- insertTaskParamsPanda's 3853 ``{comm_cmd} jediTaskID={jediTaskID} with {...}`` after its
+    ramCount arm at 3840: "jediTaskID=53652263 with".  A pass that wrote prints it, so asked over the object's life it
+    reads the writer's passes of the key, as :func:`key_marks` reads a run's mark (F3; out/gm/qk-design.md, the H2-2
+    bundle's Q5, tmaeno's OK 2026-11-17 09:4x).  Empty where no such print is read."""
+    ident = set(_identity_attrs(cls))
+    out: set[str] = set()
+    for p in getattr(arm, "after_prints", None) or ():
+        exprs = {n.expression for n in p.names
+                 if n.row == MUST_ROW_WRITTEN and n.column in ident and getattr(n, "part", "") == "message"}
+        if not getattr(p, "every_way", False) or not exprs:
+            continue
+        found = R._prints_of(arm.owner, [p.line])
+        for st in getattr(found, "statements", None) or []:
+            for row in st.rows or [] if st.line == p.line else []:
+                for h in row.holes or []:
+                    if h.expression in exprs and (text := _around_group(row.capture or "", h.group, key)):
+                        out.add(text)
+    return tuple(sorted(out))
+
+
+def _around_group(capture: str, group: int, value: str) -> str:
+    """*capture*'s literal text either side of its *group*-th group, *value* in the group, stripped; "" where the
+    capture has a group of another kind (``(?``) or not that many, or the text is *value* alone."""
+    if "(?" in capture:
+        return ""
+    parts, cur, depth, i = [], "", 0, 0
+    while i < len(capture):
+        ch = capture[i]
+        if ch == "\\":
+            cur += capture[i:i + 2] if depth == 0 else ""
+            i += 2
+            continue
+        if ch == "(":
+            if depth == 0:
+                parts.append(cur)
+                cur = ""
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    if not 1 <= group < len(parts):
+        return ""
+    left, right = (re.sub(r"\\(.)", r"\1", s) for s in (parts[group - 1], parts[group]))
+    text = (left + value + right).strip()
+    return text if text != value else ""
+
+
 def marks_holding(owner: str, line: int, holds: Callable[[Any], bool], value: str) -> tuple[str, ...]:
     """What *owner*'s lines carry where its run's mark holds *value* in the first hole of the mark's key that *holds*
     picks: each printed prefix of its rows that has the mark's holes (``.*?``, in the mark's order) cut to the text
@@ -3473,6 +3528,8 @@ class Rerun:
     #: the movers L2 found ran on the key in a late value's stay, other than the one that moved it, each followed on its
     #: own (``_late_absence``, ``missed``)
     _late_ran: tuple[Passes, ...] = ()
+    #: the values each history write's row can record (``attr_time.recorded_values``), read once (P37)
+    _recorded_values: dict[str, list[str]] | None = None
     #: the time columns a reading names the arms of as having not written them, by column, while one collects them (a
     #: turn, M3(a)-cap; Q1's assumed spans); None when none does
     _assuming: dict[str, list[str]] | None = None
@@ -5357,6 +5414,64 @@ class Rerun:
         left: list[Possible] = []
         named = self._named(subject, key, readings, tries)
         tries = self._runs_as_rows(subject, key, tries)
+        if not self._scan_tries(subject, attr, value, key, readings, tries, named, left) and (
+                life := self._placed_life(subject, key, readings)) is not None:
+            # no row shows a pass of a writer: the life of the ones on history rows that mark their runs by the key (Q2)
+            cands = self._h2_candidates(subject, life[2])
+            self._stop_unanswered(self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), life[1],
+                                            owners_of([c.owner for c in cands]), whole=True)[1])
+            more = self._runs_as_rows(subject, key, [life])
+            self._scan_tries(subject, attr, value, key, readings, more, named | self._named(subject, key, readings, [life]),
+                             left)
+            tries = tries + more
+        if (answer := self._answer(left)) is not None:
+            self.question = answer.question
+            return answer
+        return OneOf(left, len(tries))
+
+    def _placed_life(self, subject: str, key: str, readings: list) -> tuple[dict, W.Asking, list] | None:
+        """Q2 (P38): where no statuslog row shows a pass of a writer of an attribute no history records, F3's life for
+        the writers that are on history rows (``attr_time.arms``' placed) and mark their runs by the object's key
+        (:func:`key_marks`): a pass of theirs may have written between the rows, writing none -- setScoutJobData_JEDI's
+        1217 (mergeWalltime) in prepareTasksToBeFinished_JEDI's sqlEA 'reset in running' pass, which writes no status
+        (NR-T-53639338-mergeWalltime).  Read run by run as F3's life is (:meth:`_runs_as_rows`), each run judged as a
+        row is, where the printed bind map tells the value it wrote (``_printed_write``).  None where no writer is so,
+        the subject has a history, or the life's ends are not known (said)."""
+        if PT.history(subject) is not None:
+            return None
+        fragment = mapdump.fragment()
+        cls = subject.partition(".")[0]
+        # an arm on a history row holds its pairs, which hash not: kept as pairs, not as keys
+        marks = [(a, m) for a in AT.arms(fragment, subject, readings) if a.placed and (m := key_marks(a.owner, a.line, cls, key))]
+        if not marks:
+            return None
+        names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a, _ in marks)
+        life = W.lifetime(self._made_at(cls), self._read_at(subject), tuple(sorted({s for _, m in marks for s in m})))
+        if life.window is None:
+            self.say(f"Q2: {names} not asked over the object's life: {T.text(life.why)}")
+            return None
+        self.say(f"Q2: no row shows a pass of the writers; {names}, on history rows and marking their runs by the "
+                 f"object's key, asked over {T.text(life.why)} (P38)")
+        return {"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, [a for a, _ in marks])
+
+    def _outside_life(self, ran: datetime.datetime, subject: str) -> str:
+        """Q3 (P42): why a write of *subject* run at *ran* is outside the object's life -- after the value was read
+        (:meth:`_read_at`), or before its row was made (:meth:`_made_at`), by more than SLACK either way, the clocks
+        being the database's and the machines' -- so it did not write the value; "" where it is not, or an end is not
+        known.  A write of ``CURRENT_DATE-1`` of a task's modificationTime read the morning after it would have run at
+        the value plus a day, after the read (NR-T-53655760-modificationTime)."""
+        read = self._read_at(subject)
+        if read and ran - W.SLACK > W.when(read):
+            return f"after the value was read at {read}"
+        made = self._made_at(subject.partition(".")[0])
+        if made and ran + W.SLACK < W.when(made):
+            return f"before the row was made at {made}"
+        return ""
+
+    def _scan_tries(self, subject: str, attr: str, value: str, key: str, readings: list, tries: list, named: set[str],
+                    left: list[Possible]) -> bool:
+        """:meth:`_scan`'s reading of *tries* in order, each one's arms added to *left*, until one shows a writer's pass
+        wrote: whether one did."""
         for n, (state, asking, own) in enumerate(tries, 1):
             kind = _f3(state)
             if kind in ("made", "open"):
@@ -5376,11 +5491,8 @@ class Rerun:
                 found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking, named)
             left += found
             if any(p.wrote for p in found):
-                break
-        if (answer := self._answer(left)) is not None:
-            self.question = answer.question
-            return answer
-        return OneOf(left, len(tries))
+                return True
+        return False
 
     def _runs_as_rows(self, subject: str, key: str, tries: list) -> list:
         """*tries* with F3's life (``_f3`` "span": the logs of writers on no history row of the object that mark their
@@ -5604,10 +5716,12 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
+        self._mark_row_after(cands, subject, readings, state)
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                    owners_of([c.owner for c in cands]), whole=True)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        at.update(self._ended_before(cands, at, handed, runs, (lo, hi)))
         env = self.base_env(at=state["time"])
         maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
         maybe = self._recorded(subject, key, state, asking, maybe)
@@ -5722,13 +5836,44 @@ class Rerun:
         cls = subject.partition(".")[0]
         births = [a for a in found if a.unplaced and a.born]
         marks = {a: key_marks(a.owner, a.line, cls, self.args.key) for a in found if a.unplaced and not a.born}
+        # one whose runs no mark holds the key of, but which prints the key after its write on every way, is asked by
+        # that print as a marked one is by its mark (Q5)
+        printing = set()
+        for a, m in marks.items():
+            if not m and (got := after_marks(a, cls, self.args.key)):
+                marks[a] = got
+                printing.add(id(a))
         marked = [a for a, m in marks.items() if m]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
                      f"{p.callee.split('.')[-1]} {p.order}" for p in a.placed})) + ")") +
-                     ("; a birth: it wrote as the row was made" if a in births else "; its runs are marked by the object's key" if a in marked else ""))
+                     ("; a birth: it wrote as the row was made" if a in births else
+                      "; it prints the object's key after its write on every way" if id(a) in printing else
+                      "; its runs are marked by the object's key" if a in marked else ""))
         unplaced = [a for a in found if a.unplaced and a not in births and a not in marked]
+        # Q3 (P42): one whose write is its clock plus a settled offset ran at the value less the offset, if it wrote it:
+        # none where that is outside the object's life (before its row was made, after the value was read, by more than
+        # SLACK either way: the clocks are the database's and the machines'), or the selection its key comes from
+        # returns no row of the object then; else asked around then
+        clocked: list[tuple[AT.Arm, W.Asking]] = []
+        for a in list(unplaced):
+            off = _written_offset(a)
+            around = W.near_ran(attr, value, off) if off is not None else None
+            if off is None or around is None:
+                continue
+            unplaced.remove(a)
+            ran = W.when(value) - off
+            if outside := self._outside_life(ran, subject):
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: its write is its clock plus {int(off.total_seconds())} s, so it "
+                         f"ran at {ran} if it wrote {value!r}, {outside}: it did not write it (P42)")
+                continue
+            if (why := self._selection_false(a.owner, a.line, subject, ran)) is not None:
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: its write is its clock plus {int(off.total_seconds())} s, so it "
+                         f"ran at {ran} if it wrote {value!r}, when the selection its key comes from returns no row of the "
+                         f"object: {why} (P42)")
+                continue
+            clocked.append((a, around))
         self.need(T.Said("every-writer-of-on-a-history-row", {"subject": subject, "value": value, "n_unplaced": len(unplaced), "n_found": len(found)}), not unplaced)
         states = self.data["statuslog"]["states"]
         rows = AT.row_writers(found, states, AT.recorded_values(fragment))
@@ -5755,6 +5900,10 @@ class Rerun:
             self.say(f"F3: {a.owner.split('::')[-1]}:{a.line} writes the time it runs: asked over {asking.why}")
             end = asking.window[1] if asking.window else value
             tries.insert(0, ({"status": None, "time": end, "f3": "span"}, asking, AT.readings_of(readings, [a])))
+        for a, asking in clocked:
+            self.say(f"Q3: {a.owner.split('::')[-1]}:{a.line} asked over {asking.why} (P42)")
+            tries.insert(0, ({"status": None, "time": asking.window[1] if asking.window else value, "f3": "span"}, asking,
+                             AT.readings_of(readings, [a])))
         if births:
             names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
             self.need(T.Said("when-the-row-was-made-for-the", {"names": names}), made)
@@ -5777,11 +5926,15 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
+        self._mark_row_after(cands, subject, readings, state)
+        if asking.holds_write:
+            cands = self._selected_out(cands, subject, W.when(hi))
         runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                             owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        at.update(self._ended_before(cands, at, handed, runs, (lo, hi)))
         self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at or handed)
         # a batched writer's run ended before the row: a run of its own log, judged as the others are
         at = {**at, **{r.log.name: [r] for r in handed.values()}}
@@ -5862,6 +6015,96 @@ class Rerun:
         said = (f"the key's row was there before {state['status']!r} at {state['time']}, so its writes that make a row "
                 f"are no candidates: {'; '.join(left)} (KNOWN_ISSUES.md K29)") if left else ""
         return kept, said
+
+    def _mark_row_after(self, cands: list[Candidate], subject: str, readings: list, state: dict | None) -> None:
+        """P37: a candidate each of whose ways of writing the statuslog row *state* writes it by a call after its write
+        (the map's history pairs, ``attr_time.after_on_row``) is read with the passes that ended before the row, where
+        none is at it (``Candidate.row_after``: the time of the row before, "" where none).  Not for a window with no
+        row (a value held, a time, F3's)."""
+        if state is None or state.get("f3") or not state.get("status"):
+            return
+        fragment = mapdump.fragment()
+        if self._recorded_values is None:
+            self._recorded_values = AT.recorded_values(fragment)
+        owners = AT.after_on_row(AT.arms(fragment, subject, readings), state, self._recorded_values)
+        if not owners:
+            return
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        since = max((s["time"][:19] for s in states if s["time"][:19] < state["time"][:19]), default="")
+        for c in cands:
+            if c.owner in owners:
+                c.row_after = since
+
+    def _ended_before(self, cands: list[Candidate], at: dict[str, list], handed: dict[str, Run], runs: dict[str, list],
+                      window: tuple[str, str]) -> dict[str, list]:
+        """P37: for a candidate read with the passes that ended before the row (``Candidate.row_after``), the key's runs
+        in each of its logs that hold none at the row and meet the stretch from the row before to it
+        (``which_ran.before_stretch``), by log; said where taken.  A batched writer's run (:meth:`_batched`) stands."""
+        out: dict[str, list] = {}
+        for c in cands:
+            if c.row_after is None or c.owner in handed:
+                continue
+            stretch = before_stretch(window, c.row_after)
+            for name in c.log_files:
+                if name in at or name in out or name not in runs:
+                    continue
+                if held := [r for r in runs[name] if spans(r, stretch)]:
+                    out[name] = held
+                    self.say(f"{c.func}: no run of the key in {name} at the row; the map has its history call after its "
+                             f"write, so its runs from {stretch[0]} to the row are read (P37)")
+        return out
+
+    def _selection_false(self, owner: str, line: int, subject: str, at: datetime.datetime) -> str | None:
+        """Q3 (P39, P42): why the selections *owner*'s write of *subject* at *line* draws its key from return no row of
+        the object at *at*: each ``rows`` source of the write's key (the map's ``KeyFrom``, read in the writer itself)
+        is a read site read as judgement 3 reads a route's record (:meth:`_route_refuses`: a refused pair it holds, a
+        restricted subject whose values lack the row's, a condition false), at that one moment -- the object's status the
+        statuslog's then, its other columns as judgement 3 takes them (the rows file's; KNOWN_ISSUES.md K17).  Every one false: the words; else None, and None where the key is drawn from no
+        selection the map reads.  getAchievedTasks_JEDI's 3303 asks ``goal IS NOT NULL``: a task whose row holds no goal
+        is none of its rows (NR-T-53646395-assessmentTime)."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        if fragment is None or history is None:
+            return None
+        writes = [kf for kf in getattr(fragment, "key_froms", None) or []
+                  if _bare(kf.owner) == _bare(owner) and line in (kf.writes.get(subject) or [])]
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        names = [s.name for kf in writes for s in kf.sources if s.kind == "rows" and not s.via]
+        if not names or any(n not in sites for n in names):
+            return None
+        drawn = [sites[n] for n in names]
+        states = [s for s in (self.data.get("statuslog") or {}).get("states") or [] if _when(s.get("time_extended") or s["time"]) <= at]
+        if not states:
+            return None
+        then = f"at {at.isoformat(' ')[:19]}"
+        q = Missed(history.subject, states[-1]["status"], "", at, at, [], "", None, end=then, start=then)
+        said = []
+        for site in {id(site): site for site in drawn}.values():
+            why = self._route_refuses(site, q)
+            if not why:
+                return None
+            said.append(f"@{site.anchor.line_start} " + "; ".join(why))
+        return ", ".join(said)
+
+    def _selected_out(self, cands: list[Candidate], subject: str, at: datetime.datetime) -> list[Candidate]:
+        """Q3 (P39): *cands* less each line whose selection returns no row of the object at *at*, the time the write
+        itself is in (a window holding the write, ``W.Asking.holds_write``), and a candidate left with no line; each
+        said.  The judge then reads the rest as before: one left alone wrote there (KNOWN_ISSUES.md K47) --
+        prepareTasksToBeFinished_JEDI's 3744, whose pass printed no key for a task with no finished job, once
+        getAchievedTasks_JEDI's 3283 is out (NR-T-53646395-assessmentTime)."""
+        out = []
+        for c in cands:
+            kept = []
+            for line in c.lines:
+                if (why := self._selection_false(c.owner, line, subject, at)) is None:
+                    kept.append(line)
+                else:
+                    self.say(f"  {c.func}:{line} did not write at {at}: the selection its key comes from returns no row "
+                             f"of the object then: {why} (P39)")
+            if kept:
+                c.lines = kept
+                out.append(c)
+        return out
 
     def _candidates(self, readings: list) -> list[Candidate]:
         return [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]

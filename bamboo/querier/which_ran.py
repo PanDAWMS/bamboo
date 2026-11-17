@@ -238,6 +238,18 @@ def at_window(run: Run, window: tuple[str, str]) -> bool:
     return any(lo <= r.stamp[:19] <= hi for r in run.records)
 
 
+def ends_before(run: Run, window: tuple[str, str], since: str) -> bool:
+    """Whether *run*, or a pass of one, can have written a statuslog row at *window* after its last record: it began
+    after *since* (the time of the row before; "" where none) and by the window's end, and its last record lies before
+    the window, within EDGE of it.  Read for a writer whose pass writes the row by a call after its write
+    (:attr:`Candidate.row_after`), and only where no pass of it is at the window (:func:`at_window`): its last print
+    can come before the row -- insertNewJob in a bulk insert queues its job's statuslog row for bulk_insert_new_jobs'
+    executemany, which wrote 'pending' at 21:02:38.14, 2.5 s after the pass's last record at 21:02:35.684
+    (NR-J-7424719827-prodUserName, P37).  A pass that began by the row before can have written that row instead."""
+    lo, _ = before_stretch(window, since)
+    return since[:19] < run.first[:19] <= window[1] and lo <= run.last[:19] < window[0]
+
+
 def _key_through_call(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
                       called_at: Callable[[R.Function, Candidate], list[str]] | None) -> str:
     """A run of the key that ran inside one of *part*'s calls, said as where it is; '' for none.  *part* is a pass of
@@ -400,7 +412,30 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
     does, or where a run of the key ran inside one of its calls (:func:`_key_through_call`).  A mark that names no key
     spans every pass of a worker:
     rescueUnLockedTasksWithPicked_JEDI's ``< vo=atlas label=user >`` on aipanda081 held 155 passes, the key in one at
-    19:11, and was read for a write at 13:09:14 that aipanda082's pass made."""
+    19:11, and was read for a write at 13:09:14 that aipanda082's pass made.
+
+    Where no pass is at the window and *c* writes its row by a call after its write (:attr:`Candidate.row_after`), the
+    passes that ended before the row, from the row before on, are read instead (:func:`ends_before`, P37): *found*
+    holds the runs meeting that stretch too (:func:`before_stretch`)."""
+    kept, why = _passes(c, [r for r in found if spans(r, window)], window, logs, mode, called_at,
+                        lambda p: at_window(p, window))
+    if kept or c.row_after is None:
+        return kept, why
+    since = c.row_after
+    before, _ = _passes(c, found, window, logs, mode, called_at, lambda p: ends_before(p, window, since))
+    return (before, why) if before else (kept, why)
+
+
+def before_stretch(window: tuple[str, str], since: str) -> tuple[str, str]:
+    """The stretch a pass :func:`ends_before` *window* lies in: from the row before (*since*), or from EDGE before the
+    window where that is later, to the window's end."""
+    lo = (datetime.datetime.fromisoformat(window[0][:19]) - EDGE).isoformat(" ")
+    return max(lo, since[:19]), window[1]
+
+
+def _passes(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
+            called_at: Callable[[R.Function, Candidate], list[str]] | None, near: Callable[[Run], bool]) -> tuple[list[Run], list[str]]:
+    """:func:`passes_at`'s reading, a pass taken where *near* holds of it."""
     fn = R.function(c.rel, c.func, c.lines)
     kept: list[Run] = []
     why: list[str] = []
@@ -413,7 +448,7 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
             continue
         by = cutter(fn, run, mode, called_at)
         parts = _cut(run, sorted({0, *R.entries(by, run, mode), len(run.records)}))
-        at = [p for p in parts if at_window(p, window)]
+        at = [p for p in parts if near(p)]
         if not at:
             far = sum(1 for p in parts if spans(p, window))
             of = fn.name if by is fn else f"{by.name} (calling {fn.name})"
@@ -438,6 +473,10 @@ class Candidate:
     log_files: list[str] = field(default_factory=list)
     run: Run | None = None  # set when the caller already knows which run it belongs to
     note: str = ""
+    #: where the window is a statuslog row every way of the function writes by a call after its write (the map's
+    #: history pairs, order ``after``): the time of the row before ("" where none), from which a pass that ended
+    #: before the row is read where none is at it (:func:`ends_before`); None for any other candidate
+    row_after: str | None = None
 
     @property
     def owner(self) -> str:
@@ -1974,7 +2013,8 @@ def judge(
             # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
             reasons: list[str] = []
             for name in to_hand:
-                found = [r for r in logs[name] if window is None or spans(r, window)]
+                stretch = before_stretch(window, c.row_after) if window is not None and c.row_after is not None else None
+                found = [r for r in logs[name] if window is None or spans(r, window) or (stretch and spans(r, stretch))]
                 if found and window is not None:
                     found, dropped = passes_at(c, found, window, logs, mode, called_at)
                     if not found:
@@ -1983,6 +2023,10 @@ def judge(
                 if found:
                     run = run_holding(c, found, mode)
                     if run is not None:
+                        if window is not None and not spans(run, window):
+                            p_notes.append(f"ROW AFTER: {c.func}'s pass {run.first}..{run.last} ended before the row at "
+                                           f"{window[0]}: the map has its history call after its write, and no pass of "
+                                           f"it is at the row (P37)")
                         break
                     reasons.append(f"none of the key's {len(found)} runs in {name} at {window[0] if window else 'any time'} holds a row of it")
                     continue

@@ -22,7 +22,7 @@ run it shows read as a row is.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 #: an arm's outcome that is the time the write runs
 NOW = frozenset({"runtime(CURRENT_DATE)", "runtime(naive_utcnow())"})
@@ -43,6 +43,11 @@ class Arm:
     unplaced: str
     #: its branch makes the object's row (*born* of :func:`arms`): it wrote as the row was made
     born: bool = False
+    #: the prints its function can run after its write (the branch's ``after_prints``; Q5, ``rerun.after_marks``), not
+    #: compared: an arm is a key by its line
+    after_prints: tuple = field(default=(), compare=False)
+    #: the branch's ``amount`` (a clock plus a settled offset; Q3's P42, ``rerun._written_offset``), not compared
+    amount: object = field(default=None, compare=False)
 
 
 def arms(fragment, subject: str, readings: list, born: Callable[[str, object], bool] | None = None) -> list[Arm]:
@@ -67,7 +72,8 @@ def arms(fragment, subject: str, readings: list, born: Callable[[str, object], b
             pairs = b.history or []
             placed = tuple(p for p in pairs if p.row in ON_THE_ROW)
             why = "" if placed else _unplaced(pairs, b.history_hole)
-            out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(owner, b))))
+            out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(owner, b)),
+                           tuple(getattr(b, "after_prints", None) or ()), getattr(b, "amount", None)))
     return out
 
 
@@ -112,6 +118,21 @@ def row_writers(found: list[Arm], states: list[dict], values: dict[str, list[str
                 if (not literal or s["status"] in recorded) and a not in by_row.get(i, []):
                     by_row.setdefault(i, []).append(a)
     return [(states[i], by_row[i]) for i in sorted(by_row, reverse=True)]
+
+
+def after_on_row(found: list[Arm], state: dict, values: dict[str, list[str]]) -> set[str]:
+    """The owners (a reading's ``file::function``) each of whose pairs that can write *state*, as :func:`row_writers`
+    reads them, has its history call after the arm's write (``HistoryPair.order`` ``after``), one pair at least: a pass
+    of theirs writes the row after its write, and can print its last before the row's time (P37,
+    ``which_ran.ends_before``)."""
+    after: dict[str, bool] = {}
+    for a in found:
+        for p in a.placed:
+            recorded = [v for w in p.writes for v in values.get(w, ["runtime(?)"])]
+            if recorded and not any(v.startswith("runtime(") for v in recorded) and state.get("status") not in recorded:
+                continue
+            after[a.owner] = after.get(a.owner, True) and getattr(p, "order", "") == "after"
+    return {owner for owner, yes in after.items() if yes}
 
 
 def readings_of(readings: list, arms: list[Arm]) -> list:
