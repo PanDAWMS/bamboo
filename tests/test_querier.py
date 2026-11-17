@@ -18689,12 +18689,27 @@ def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unse
                 "next": landed("upd", 3, 2, 6, ["start 7", "start 7", "attemptNr=1 nUp=0 new=running"]),
                 "off": landed("upd2", 12, 10, 15, ["start 7", "attemptNr=1 nUp=0 new=running"]),
             }
-            # a branch writing at two statements: which run the count is of is not said, so it is not read
+            # a branch writing at two statements, on a record made before M-E4: which run the count is of is not said
             fn = N(node=defs["upd"], row_at=lambda s: N(line=s.lineno, map_rows=[N()]) if isinstance(s, ast.Expr) else None)
             sn = N(hits={2: [(0, 10, "")], 6: [(1, 10, "")]},
                    run=N(records=[N(text=t, token="upd < PandaID=7 >") for t in ["start 7", "attemptNr=1 nUp=0 new=running"]]))
             got["e4"]["other_lines"] = RR._landed(fn, sn, 0, 2, N(line=3, other_lines=[9], count_prints=[],
                                                                  printed_counts=[N(line=6, holes=[1])]))[0]
+            # M-E4: a count is of one statement's run; read where the arm's write runs at that one statement
+            kept, before = [], list(mapdump._FRAGMENT)
+            def counted(other, run, writes):
+                kept.append(frag := N(key_froms=[N(owner="counted.py::upd", statement=s, writes={"S.s": ls}, reads=False)
+                                                 for s, ls in writes]))
+                mapdump._FRAGMENT[:] = [frag]
+                b = N(line=3, other_lines=other, count_prints=[], printed_counts=[N(line=6, holes=[1], run=run)])
+                return RR._landed(fn, sn, 0, 2, b, "counted.py::upd", "S.s")[0]
+            got["e4"]["runs"] = {
+                "one": counted([], 4, [(4, [3])]),
+                "another": counted([], 13, [(4, [3])]),
+                "two": counted([5], 4, [(4, [3]), (13, [5])]),
+                "one_other_lines": counted([5], 4, [(4, [3, 5])]),
+            }
+            mapdump._FRAGMENT[:] = before
 
             # E-5: writes at 10:20 and 10:35 (ran) from 10:00, an open arm writing the clock; the stay 10:00 .. 11:00
             t = lambda h, m: dt.datetime(2026, 1, 1, h, m)
@@ -18723,7 +18738,10 @@ def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unse
                          "JediFileSpec.jediTaskID": ["jedi_dataset_contents.jeditaskid -> jedi_datasets.jeditaskid",
                                                      "jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid"]}, got
     # the count print's 1 and 0; one after the next call's start is that call's; one a way reaches past the arm, none
-    assert got["e4"] == {"one": True, "none": False, "next": None, "off": None, "other_lines": None}, got
+    # with M-E4's run: read where the arm's write runs at the count's one statement -- with other_lines too -- not
+    # where the count is of another statement's run, nor where the arm writes at two
+    assert got["e4"] == {"one": True, "none": False, "next": None, "off": None, "other_lines": None,
+                         "runs": {"one": False, "another": None, "two": None, "one_other_lines": False}}, got
     assert got["e5"][0] == (
         "modificationTime<:modificationTime: false for the row at every moment of the stay where naive_utcnow() - "
         "timedelta(hours=timeout)@9 is at least 0.42 (in units of 3600 s): on its 2 write(s) read in the stay (0 more "

@@ -509,7 +509,29 @@ def _write_bounds(value, at: datetime.datetime) -> tuple[datetime.datetime, date
     return value if value is not None else (TL.LOW, TL.HIGH)
 
 
-def _landed(fn, sn, i: int, line: int, b) -> tuple[bool | None, int]:
+@functools.cache
+def _write_runs(fragment_id: int) -> dict[tuple[str, str], list[tuple[frozenset[int], int]]]:
+    """``(owner, subject) -> [(the lines it writes the subject's values on, the line the statement runs on)]`` of the
+    installed dump's writes (``KeyFrom.writes`` and ``statement``; *fragment_id* keys the cache to the dump): every
+    write the map read, a statement no placed caller runs too."""
+    out: dict[tuple[str, str], list[tuple[frozenset[int], int]]] = {}
+    for kf in getattr(mapdump.fragment(), "key_froms", None) or []:
+        if getattr(kf, "reads", False) or not kf.statement:
+            continue
+        for subject, lines in (kf.writes or {}).items():
+            out.setdefault((_bare(kf.owner), subject), []).append((frozenset(lines), kf.statement))
+    return out
+
+
+def _branch_runs(owner: str, subject: str, b) -> set[int]:
+    """The lines the statements writing the arm *b* of *owner*'s *subject* run on: each write whose ``KeyFrom.writes``
+    holds the subject at the branch's line or one of its ``other_lines`` (prepareTasksToBeFinished_JEDI's lockedBy
+    arm at 3839 with 3844: sqlTU's run at 4075, sqlTUU's at 4090)."""
+    lines = {b.line, *(getattr(b, "other_lines", None) or [])}
+    return {run for at, run in _write_runs(id(mapdump.fragment())).get((_bare(owner), subject), []) if at & lines}
+
+
+def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") -> tuple[bool | None, int]:
     """R (the map's batch 2, ``Branch.count_prints``): what the first count print of the write's statement in the run
     after the write's print (record *i*, of the print at *line*) and before that print's next record says of the rows
     the run changed -- False for none or not one (lockTask_JEDI's ``done with {} locked by another``, the lock's
@@ -519,14 +541,25 @@ def _landed(fn, sn, i: int, line: int, b) -> tuple[bool | None, int]:
 
     E-4 (out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``Branch.printed_counts``): a print
     holding the row count of the statement's run in a hole is read the same way, where every way from the function's
-    entry to it passes the arm (``flow.passes_before``): 0 changed no row, 1 or more changed it -- updateJobStatus's
+    entry to it passes one of the arm's lines (``flow.passes_before``): 0 changed no row, 1 or more changed it -- updateJobStatus's
     243 ``attemptNr={} nUp={} old={} new={}`` after its UPDATE at 241, the heartbeat's modificationTime arm at 238.
 
-    Neither count is read for a branch that writes at more than one statement (``Branch.other_lines``): the map does
-    not say which statement's run a count is of (prepareTasksToBeFinished_JEDI's 3839 with 3844: 4092 counts sqlTUU's
-    run, not sqlTU's; the map's note 2026-11-17 19:2x, a ``run`` field proposed) -- None."""
-    if getattr(b, "other_lines", None):
+    Each count is of one statement's run, the line it runs on its ``run`` (the map's M-E4): it is read where the arm's
+    write runs at that one statement (:func:`_branch_runs` of *owner*'s *subject*), not where it runs at several or at
+    another -- prepareTasksToBeFinished_JEDI's lockedBy arm at 3839 with 3844 writes at sqlTU's run at 4075 and
+    sqlTUU's at 4090, and 4092 counts sqlTUU's only -- None.  A record made before M-E4 (``run`` 0) does not say
+    which run it counts: no count is read for an arm with ``other_lines`` there, as before it."""
+    counts = [*(getattr(b, "count_prints", None) or []), *(getattr(b, "printed_counts", None) or [])]
+    if not counts:
         return None, 0
+    if any(not getattr(c, "run", 0) for c in counts):
+        if getattr(b, "other_lines", None):
+            return None, 0
+        runs = None
+    else:
+        runs = _branch_runs(owner, subject, b)
+        if len(runs) != 1:
+            return None, 0
     nxt = min((k for k, _, _ in sn.hits.get(line, ()) if k > i), default=None)
     first: tuple[int, bool, int] | None = None
 
@@ -541,17 +574,19 @@ def _landed(fn, sn, i: int, line: int, b) -> tuple[bool | None, int]:
     for cp in getattr(b, "count_prints", None) or []:
         stmt = R.statement_at(fn.node, cp.line)
         crow = fn.row_at(stmt) if stmt is not None else None
-        if crow is None:
+        if crow is None or (runs is not None and cp.run not in runs):
             continue
         for k in records_after(crow):
             if first is None or k < first[0]:
                 first = (k, cp.rows in ("one", "some"), cp.line)
     printed = getattr(b, "printed_counts", None) or []
-    arm = R.statement_at(fn.node, b.line) if printed else None
+    # the arm's lines, every one at once: a way to the print passes one of them (``flow.passes_before``)
+    arms = [s for at in (b.line, *(getattr(b, "other_lines", None) or [])) if (s := R.statement_at(fn.node, at)) is not None] if printed else []
     for pc in printed:
         stmt = R.statement_at(fn.node, pc.line)
         crow = fn.row_at(stmt) if stmt is not None else None
-        if stmt is None or crow is None or arm is None or not _passes_arm(stmt, arm):
+        if (stmt is None or crow is None or not arms or (runs is not None and pc.run not in runs)
+                or not _passes_arm(stmt, arms)):
             continue
         for k in records_after(crow):
             count = _printed_count(crow, sn.run.records[k], pc.holes)
@@ -560,10 +595,10 @@ def _landed(fn, sn, i: int, line: int, b) -> tuple[bool | None, int]:
     return (None, 0) if first is None else (first[1], first[2])
 
 
-def _passes_arm(printed: ast.stmt, arm: ast.stmt) -> bool:
-    """Whether every way from the function's entry to *printed* passes *arm* (``flow.passes_before``)."""
+def _passes_arm(printed: ast.stmt, arms: list[ast.stmt]) -> bool:
+    """Whether every way from the function's entry to *printed* passes one of *arms* (``flow.passes_before``)."""
     try:
-        return flow.passes_before(printed, [arm])
+        return flow.passes_before(printed, arms)
     except (ValueError, LookupError):
         return False
 
@@ -11304,7 +11339,7 @@ class Rerun:
                         held = [n for n in shown if n.line == line and _hole_holds(row, record, n, key)]
                         if held:
                             # R: the statement's count print in the same run says whether the write landed
-                            landed, counted_at = _landed(fn, sn, i, row.line, b)
+                            landed, counted_at = _landed(fn, sn, i, row.line, b, j.owner, j.subject)
                             if landed is False:
                                 # E-4: the run changed no row -- not a write, and read as not having written it, as
                                 # A-1 reads a write whose guard its pass read false
