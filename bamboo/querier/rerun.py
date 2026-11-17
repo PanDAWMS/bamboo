@@ -5257,6 +5257,7 @@ class Rerun:
                 self.say(f"{len(out)} left out, no read of {before!r}'s rows ({', '.join(reach.reads)}) reaching them, "
                          f"only reads of other values, and no API endpoint (M2): {', '.join(names)}")
                 self.result["left_out_by_reach"] = {"before": before, "reads": list(reach.reads), "owners": names}
+        readings = self._handed_other(subject, value, readings)
         attr = subject.split(".")[-1]
 
         # H2
@@ -5990,6 +5991,76 @@ class Rerun:
             R.check_blobs(inv, "derive-strategy's readings")
             self._readings[(subject, value)] = inv.hops[0].strategy.readings
         return self._readings[(subject, value)]
+
+    def _handed_other(self, subject: str, value: str, readings: list) -> list:
+        """M2 (P40(a), out/gm/qk-design.md's H2-2 bundle; the map's ``ParameterFrom``, its answer 2026-11-17): *readings*
+        less each line whose value is a parameter every call into its function hands as a literal other than *value*
+        (:meth:`_calls_handing`); a reading left with no line goes.  A line one of whose calls hands a value not so read
+        stays, the calls ruled out said.  entity_module's reassignShare:477 writes ``JobSpec.gshare = runtime(gshare)``:
+        AtlasAnalWatchDog:717 hands 'Express Analysis' and AtlasProdWatchDog:196 'Express'; TaskCommando:345 and
+        task_api:717 values made at run time, which stay (NR-J-7424203630-gshare)."""
+        kept = []
+        for r in readings:
+            lines = []
+            for line in r.lines:
+                calls = self._calls_handing(subject, value, r.owner, line)
+                if calls is None:
+                    lines.append(line)
+                    continue
+                other = [f"{c} ({', '.join(o)})" for c, (o, k) in calls.items() if not k]
+                left = [f"{c} ({', '.join(k)})" for c, (o, k) in calls.items() if k]
+                where = f"  {r.owner.split('::')[-1]}:{line}, writing a parameter"
+                if left:
+                    lines.append(line)
+                    if other:
+                        self.say(f"{where}: its call(s) {'; '.join(other)} hand another value than {value!r}; left: "
+                                 f"{', '.join(left)} (P40(a))")
+                else:
+                    self.say(f"{where}: every call into it hands another value than {value!r}: {'; '.join(other)}; "
+                             f"no candidate (P40(a))")
+            if lines == list(r.lines):
+                kept.append(r)
+            elif lines:
+                kept.append(r.model_copy(update={"lines": lines}))
+        return kept
+
+    def _calls_handing(self, subject: str, value: str, owner: str, line: int) -> dict[str, tuple[list[str], list[str]]] | None:
+        """The calls a value of *subject* written at *owner*'s *line* comes in by, where the map's branches there all
+        write a parameter (``runtime(<name>)``, ``Branch.handed``), each with ``(others, kept)``: the parameter's ways
+        (:func:`sources.param_ways`) by the call where they part -- their routes, read from where the value is made
+        inward, less the calls every way goes by (``file:line``; reassignShare's TaskBuffer:2081) -- the literals other
+        than *value* they end at, and why any other way of it is kept: it ends at *value* ("the value"), at a part of a
+        value, at a literal only part of the value, or anywhere else (a value made at run time, the database, an API's
+        parameter, a stop, by its kind).  None where the line writes no parameter or a way has no route."""
+        branches = _branches_at(subject, owner, line)
+        names = {str(getattr(b.handed, "name", "")).rpartition(".")[2] for b in branches if getattr(b, "handed", None)}
+        if not branches or len(names) != 1 or not all(str(b.outcome or "").startswith("runtime(") and b.handed for b in branches):
+            return None
+        ways = SR.param_ways(_bare(owner), names.pop())
+        if not ways or any(not w.route for w in ways):
+            return None
+        common = 0
+        while all(len(w.route) > common and w.route[-1 - common] == ways[0].route[-1 - common] for w in ways):
+            common += 1
+        calls: dict[str, tuple[list[str], list[str]]] = {}
+        for w in ways:
+            at = w.route[-1 - common] if len(w.route) > common else w.route[0]
+            others, kept = calls.setdefault(f"{Path(at.rpartition(':')[0]).name}:{at.rpartition(':')[2]}", ([], []))
+            if w.end != SR.CONSTANT:
+                why = f"{w.end}: {w.why}" if w.end == SR.STOP and w.why else w.end
+            elif w.steps:
+                why = "a part of a value"
+            elif w.why in SR.NO_LITERAL:
+                why = w.why
+            elif SR.same_value(w.value, value):
+                why = "the value"
+            else:
+                why = ""
+                if w.value not in others:
+                    others.append(w.value)
+            if why and why not in kept:
+                kept.append(why)
+        return calls
 
     def _unborn(self, readings: list, subject: str, state: dict | None) -> tuple[list, str]:
         """``(readings, said)``: *readings* less their lines that make the row (births, K29) where the statuslog holds

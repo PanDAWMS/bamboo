@@ -5629,6 +5629,73 @@ def test_a_writer_printing_the_key_after_its_write_on_every_way_is_asked_by_that
     assert got["around"] == ["X jediTaskID=", "jediTaskID=X with", "with X", "", ""]
 
 
+def test_a_writer_of_a_parameter_every_call_into_which_hands_another_literal_is_no_candidate(tmp_path):
+    # M2 (P40(a)): reassignShare:477 writes gshare = runtime(gshare); its calls hand 'Express Analysis', 'Express', and
+    # values made at run time (the database, a part of a value); a second writer's every call hands a literal
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as NS
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import sources as SR
+
+            W = lambda end, value, route, why="", steps=(): SR.Way(end, value, why, tuple(route), steps=tuple(steps))
+            ways = {
+                # each route read from where the value is made inward, as param_ways gives it
+                ("e.py::reassignShare", "gshare"): [
+                    W(SR.CONSTANT, "'Express Analysis'", ["a/AtlasAnalWatchDog.py:717", "t/TaskBuffer.py:2081"]),
+                    W(SR.CONSTANT, "'Express'", ["a/AtlasProdWatchDog.py:196", "t/TaskBuffer.py:2081"]),
+                    W(SR.CONSTANT, "None", ["c/TaskCommando.py:344", "c/TaskCommando.py:345", "t/TaskBuffer.py:2081"], steps=["gshare"]),
+                    W(SR.CONSTANT, "'Undefined'", ["t/TaskBuffer.py:2101", "r/RefinerUtils.py:144", "c/TaskCommando.py:344",
+                                                   "c/TaskCommando.py:345", "t/TaskBuffer.py:2081"]),
+                    W(SR.DATABASE, "", ["j/JediTaskBuffer.py:456", "r/RefinerUtils.py:134", "c/TaskCommando.py:345", "t/TaskBuffer.py:2081"]),
+                    W(SR.API, "", ["s/task_api.py:686", "s/task_api.py:717", "t/TaskBuffer.py:2081"], why="no_caller"),
+                    W(SR.STOP, "", ["t/TaskBuffer.py:2078", "t/TaskBuffer.py:2081"], why="raises"),
+                ],
+                ("e.py::setShare", "share"): [W(SR.CONSTANT, "'Express'", ["a/X.py:1"]), W(SR.CONSTANT, "'Test'", ["a/Y.py:2"])],
+            }
+            SR.param_ways = lambda owner, name, **k: ways.get((owner, name), [])
+            handed = lambda name: NS(name=name)
+            branches = {("e.py::reassignShare", 477): [NS(outcome="runtime(gshare)", handed=handed("gshare"))],
+                        ("e.py::setShare", 9): [NS(outcome="runtime(share)", handed=handed("share"))],
+                        ("e.py::setShare", 12): [NS(outcome="'Express'", handed=None)]}
+            RR._branches_at = lambda subject, owner, line: branches.get((owner, line), [])
+
+            class Reading(NS):
+                def model_copy(self, update):
+                    return Reading(**{**vars(self), **update})
+
+            readings = [Reading(owner="e.py::reassignShare", lines=[477]), Reading(owner="e.py::setShare", lines=[9, 12])]
+            r = RR.Rerun.__new__(RR.Rerun)
+            said = []
+            r.say = said.append
+            got = {}
+            for value in ("Test", "Express", "Other"):
+                got[value] = [[x.owner, x.lines] for x in r._handed_other("JobSpec.gshare", value, readings)]
+            got["said"] = said
+            got["calls"] = r._calls_handing("JobSpec.gshare", "Test", "e.py::reassignShare", 477)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # setShare:9 hands 'Express' and 'Test' only: no candidate of 'Other', a candidate of the two it hands
+    assert got["Other"] == [["e.py::reassignShare", [477]], ["e.py::setShare", [12]]]
+    assert got["Test"] == got["Express"] == [["e.py::reassignShare", [477]], ["e.py::setShare", [9, 12]]]
+    # the ways by the call where they part, past TaskBuffer:2081 they all go by: TaskCommando's end at a literal, a part
+    # of a value and the database; task_api's at an API; the function's own stop at its def
+    assert got["calls"] == {"AtlasAnalWatchDog.py:717": [["'Express Analysis'"], []], "AtlasProdWatchDog.py:196": [["'Express'"], []],
+                            "TaskCommando.py:345": [["'Undefined'"], ["a part of a value", "database"]],
+                            "task_api.py:717": [[], ["api"]], "TaskBuffer.py:2078": [[], ["stop: raises"]]}
+    assert got["said"][0] == ("  reassignShare:477, writing a parameter: its call(s) AtlasAnalWatchDog.py:717 ('Express Analysis'); "
+                              "AtlasProdWatchDog.py:196 ('Express') hand another value than 'Test'; left: TaskCommando.py:345 "
+                              "(a part of a value, database), task_api.py:717 (api), TaskBuffer.py:2078 (stop: raises) (P40(a))")
+    assert any(s.startswith("  setShare:9, writing a parameter: every call into it hands another value than 'Other'")
+               for s in got["said"])
+
+
 def test_a_writer_whose_selection_returns_no_row_of_the_object_when_it_would_have_run_did_not_write(tmp_path):
     # Q3 (P42, P39): getTasksToAssign_JEDI's write of modificationTime is its clock, its key from 4150's rows, which
     # restrict the task's status to 'assigning'; at 15:29:16 the statuslog has the task 'prepared'
@@ -7715,6 +7782,7 @@ def test_a_status_rows_single_window_whose_judge_chooses_no_writer_is_read_as_on
                 r = rerun_(hand)
                 seen = {}
                 r._writers = lambda subject, value, key: ["readings"]
+                r._handed_other = lambda subject, value, readings: readings
                 r._h2_candidates = lambda subject, readings: []
                 r._writer_logs = lambda subject, readings, cands=None: []
                 r._created = lambda holding: None
@@ -8423,6 +8491,7 @@ def test_h2_goes_on_from_a_stand_ins_arm_shown_to_write_read_on_its_callers_run(
                 return [caller]
 
             r._writers, r._h2_candidates = (lambda subject, value, key: ["readings"]), cands
+            r._handed_other = lambda subject, value, readings: readings
             r._writer_logs = lambda subject, readings, cands=None: ["panda-TaskRefiner.log"]
             r._wrote_at = lambda *a: rerun.Wrote(["readings"], answer.question, ["cands"], env, Verdict(caller, 300, "positive", []))
             w = r._which_wrote("JobSpec.jobStatus", "running", "7", {"status": "running", "time": "2026-10-29 04:10:00"})
