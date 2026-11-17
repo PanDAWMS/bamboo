@@ -67,6 +67,7 @@ from bamboo.codemap import pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.callfacts import LOG_METHODS
 from bamboo.codemap.models import (
+    EXIT_LINE,
     LOG_FILES_FOLLOWED,
     MUST_PART_BIND,
     MUST_PART_MARK,
@@ -82,10 +83,11 @@ from bamboo.codemap.models import (
     PrintRow,
     SourceModule,
     TableRecord,
+    TakenBack,
 )
-from bamboo.codemap.panda import changes, flow, mapentries
+from bamboo.codemap.panda import changes, flow, mapentries, order
 from bamboo.codemap.panda.recognizers import progress
-from bamboo.codemap.reaching import reaching
+from bamboo.codemap.reaching import reaching, reaching_end
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -235,6 +237,7 @@ def _attach(
             branch.must_names = None
             branch.after_prints = None
             branch.made_before = None
+            branch.taken_back = None
             branch.must_hole = ""
             sites = _sites(junction, branch, trees)
             if isinstance(sites, str):
@@ -268,6 +271,10 @@ def _attach(
                 if held is not None and not reaching(arm, entry, [statement]):
                     held.append(line)
     found = 0
+    # Each junction's own arms, for what may run between an object's construction and an arm of it (made_before).
+    own_arms: dict[int, list[ast.stmt]] = {}
+    for junction, _branch, sites in located:
+        own_arms.setdefault(id(junction), []).extend(site.statement for site in sites)
     for junction, branch, sites in located:
         reached = [site for site in sites if must[id(site.statement)] is not None]
         if not reached:
@@ -305,7 +312,29 @@ def _attach(
             for written in [_written_object(site.statement, junction.subject)]
         ]
         if made and made[0] is not None and all(one == made[0] for one in made[1:]):
-            branch.made_before = made[0]
+            kept = [
+                _made_held(site, written, junction.subject, own_arms[id(junction)])
+                for site in reached
+                for written in [_written_object(site.statement, junction.subject)]
+            ]
+            branch.made_before = made[0].model_copy(
+                update={
+                    "held": all(one[0] for one in kept),
+                    "arms_between": sorted({line for one in kept for line in one[1]}),
+                }
+            )
+        backs = [
+            _taken_back(site, written, junction.subject, statements[id(site.func)])
+            for site in reached
+            for written in [_written_object(site.statement, junction.subject)]
+        ]
+        if backs and all(one is not None for one in backs):
+            opened = {line for one in backs for line in one[1]}  # type: ignore[index]
+            branch.taken_back = TakenBack(
+                resets=sorted({line for one in backs for line in one[0]}),  # type: ignore[index]
+                open=sorted(opened),
+                open_prints=sorted(set.intersection(*(set(one[2]) for one in backs))) if opened else [],  # type: ignore[index]
+            )
         each: list[list[MustName]] = []
         afters: list[dict[int, AfterPrint]] = []
         counted: dict[int, str] = {}
@@ -439,6 +468,18 @@ def _made_before(
     """The construction making the object *written* that is the only binding of its name reaching the arm --
     ``tmpTaskSpec = JediTaskSpec()``, a class called with nothing -- and the written field's value as its constructor
     left it (*initial*, :func:`progress.spec_initial_values`); None otherwise."""
+    made = _construction(site, written)
+    if made is None:
+        return None
+    called = made.value.func  # type: ignore[attr-defined]
+    cls = called.id if isinstance(called, ast.Name) else called.attr if isinstance(called, ast.Attribute) else ""
+    left = initial.get((cls, subject.rpartition(".")[2]))
+    return MadeBefore(line=made.lineno, cls=cls, value=left) if left is not None else None
+
+
+def _construction(site: _Site, written: Optional[ast.expr]) -> Optional[ast.Assign]:
+    """``tmpTaskSpec = JediTaskSpec()``: the assignment of a class called with nothing to the name *written*, where it
+    is the only binding of the name reaching the arm; None otherwise."""
     if not isinstance(written, ast.Name) or not isinstance(site.func, _FUNCTIONS):
         return None
     held = pathcond.held_at(site.func, written.id, site.statement)
@@ -446,7 +487,7 @@ def _made_before(
         return None
     (made,) = held.sites
     value = getattr(made, "value", None)
-    if not (
+    if (
         isinstance(made, ast.Assign)
         and len(made.targets) == 1
         and isinstance(made.targets[0], ast.Name)
@@ -455,11 +496,97 @@ def _made_before(
         and not value.args
         and not value.keywords
     ):
+        return made
+    return None
+
+
+def _made_held(
+    site: _Site, written: Optional[ast.expr], subject: str, own: list[ast.stmt]
+) -> tuple[bool, list[int]]:
+    """Whether the field the arm writes holds what its construction left up to the arm but for the junction's own
+    arms (*own*), and the lines of those that can run between: nothing else that may change it
+    (:func:`_changes_of`) runs on a way from the construction to the arm in one turn (:func:`flow.changed_between`)."""
+    made = _construction(site, written)
+    if made is None or written is None:
+        return False, []
+    attribute = subject.rpartition(".")[2]
+    sites = _changes_of(site.func, written, attribute)
+    if sites is None:
+        return False, []
+    spelled = ast.unparse(written)
+    same = [
+        one
+        for one in own
+        if one is not site.statement
+        and pathcond.enclosing_function(one) is site.func
+        and (object_ := _written_object(one, subject)) is not None
+        and ast.unparse(object_) == spelled
+    ]
+    mine = {id(one) for one in same}
+    others = [one for one in sites if one is not made and id(one) not in mine]
+    between = sorted({one.lineno for one in same if flow.changed_between(made, site.statement, [one])})
+    return not flow.changed_between(made, site.statement, others), between
+
+
+def _taken_back(
+    site: _Site, written: Optional[ast.expr], subject: str, prints: dict[int, Optional[ast.stmt]]
+) -> Optional[tuple[list[int], list[int], list[int]]]:
+    """The lines of the calls taking the arm's change back on its object that a way from the arm reaches in one turn
+    (:func:`order.reset_columns`); the lines a way from the arm reaches without passing one: each ``return``, the
+    function's end (:data:`EXIT_LINE`), each call made on the object or handed it; and the lines of the *prints* every
+    such way passes first.  None where no reset is reached."""
+    if written is None or not isinstance(site.func, _FUNCTIONS):
         return None
-    called = value.func
-    cls = called.id if isinstance(called, ast.Name) else called.attr if isinstance(called, ast.Attribute) else ""
-    left = initial.get((cls, subject.rpartition(".")[2]))
-    return MadeBefore(line=made.lineno, cls=cls, value=left) if left is not None else None
+    arm = site.statement
+    attribute = subject.rpartition(".")[2]
+    spelled = ast.unparse(written)
+    resets: list[ast.stmt] = []
+    handing: list[ast.stmt] = []
+    returns: list[ast.stmt] = []
+    for node in walk(site.func):
+        if isinstance(node, ast.Return) and pathcond.enclosing_function(node) is site.func:
+            returns.append(node)
+            continue
+        if not isinstance(node, ast.Call) or pathcond.enclosing_function(node) is not site.func:
+            continue
+        statement = _statement_of(node)
+        if statement is None or statement is arm:
+            continue
+        called = node.func
+        if isinstance(called, ast.Attribute) and ast.unparse(called.value) == spelled:
+            columns = order.reset_columns(node)
+            if columns is not None and (attribute in columns or "*" in columns):
+                resets.append(statement)
+                continue
+        if _given(node, {spelled}):
+            handing.append(statement)
+    resets = [one for one in resets if reaching(one, [arm], entered=[arm], once=flow.turn_loops(arm, one))]
+    if not resets:
+        return None
+    targets = [
+        one
+        for one in [*returns, *handing]
+        if all(one is not reset for reset in resets) and reaching(one, [arm], resets, entered=[arm, *resets])
+    ]
+    ends = bool(reaching_end(site.func, [arm], resets, entered=[arm, *resets]))
+    open_ = {one.lineno for one in targets} | ({EXIT_LINE} if ends else set())
+
+    def covers(printed: ast.stmt) -> bool:
+        killers = [*resets, printed]
+        return all(not reaching(one, [arm], killers, entered=[arm, *killers]) for one in targets) and not (
+            ends and reaching_end(site.func, [arm], killers, entered=[arm, *killers])
+        )
+
+    covering = sorted(
+        line
+        for line, printed in prints.items()
+        if printed is not None
+        and printed is not arm
+        and open_
+        and reaching(printed, [arm], entered=[arm])
+        and covers(printed)
+    )
+    return sorted({one.lineno for one in resets}), sorted(open_), covering
 
 
 def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
@@ -1425,14 +1552,22 @@ def _written_object(statement: ast.stmt, subject: str) -> Optional[ast.expr]:
     """``job`` for ``job.jobStatus = ...`` when *subject* is ``JobSpec.jobStatus``: the object the arm writes to."""
     attribute = subject.rpartition(".")[2]
     if isinstance(statement, ast.Assign):
-        targets = statement.targets
+        targets = list(statement.targets)
     elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
         targets = [statement.target]
     else:
         return None
+    # ``(original_task_spec.userName,) = tmp_res``: each element of a tuple or list target is a target.
+    flat: list[ast.expr] = []
+    while targets:
+        target = targets.pop(0)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            targets[:0] = target.elts
+        else:
+            flat.append(target)
     found = [
         target.value
-        for target in targets
+        for target in flat
         if isinstance(target, ast.Attribute)
         and target.attr == attribute
         and _chain(target.value)

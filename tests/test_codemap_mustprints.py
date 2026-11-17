@@ -1024,3 +1024,104 @@ def test_an_arm_on_an_object_its_function_makes_says_what_the_constructor_left_i
     zero = _build(tmp_path, MADE, ("made", "Z"), subject="JediTaskSpec.attemptNr", declared=TASKS)
     made = _branch(zero, "Z").made_before
     assert made is not None and made.value == "0"
+
+
+HELD = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+class JediTaskSpec(object):
+    attributes = ("jediTaskID", "status")
+
+    def __init__(self):
+        for attr in self.attributes:
+            object.__setattr__(self, attr, None)
+
+
+def held(self, tasks, back):
+    for jediTaskID in tasks:
+        tmpTaskSpec = JediTaskSpec()  # NEW
+        tmpTaskSpec.jediTaskID = jediTaskID
+        if back:
+            tmpTaskSpec.status = "old"  # BACK
+        tmpTaskSpec.status = "done"  # S
+
+
+def packed(self, row):
+    job = JediTaskSpec()
+    job.pack(row)
+    job.status = "done"  # P
+"""
+
+
+def test_a_made_object_s_field_holds_what_its_constructor_left_up_to_the_arm_but_for_the_junction_s_own_arms(
+    tmp_path: Path,
+) -> None:
+    """Between ``tmpTaskSpec = JediTaskSpec()`` and the arm S only the junction's own arm BACK writes ``status``, on
+    a way through the ``if``: held, BACK between (the value before S is BACK's there).  ``job.pack(row)`` between
+    the construction and P is a call on the object that may store the field: not held."""
+    status = _build(tmp_path, HELD, ("held", "S"), others=("BACK",), subject="JediTaskSpec.status", declared=TASKS)
+    made = _branch(status, "S").made_before
+    assert made is not None and (made.line, made.held, made.arms_between) == (
+        _line(HELD, "NEW"),
+        True,
+        [_line(HELD, "BACK")],
+    )
+    packed = _build(tmp_path, HELD, ("packed", "P"), subject="JediTaskSpec.status", declared=TASKS)
+    made = _branch(packed, "P").made_before
+    assert made is not None and (made.held, made.arms_between) == (False, [])
+
+
+TAKEN = """\
+import logging
+
+_logger = logging.getLogger("m")
+
+
+class JediTaskSpec(object):
+    attributes = ("jediTaskID", "userName")
+
+    def resetChangedAttr(self, name):
+        self._changedAttrs.pop(name, None)
+
+
+def checked(self, spec, res):
+    skip = False
+    if res is None:
+        skip = True
+    else:
+        (spec.userName,) = res  # U
+        if spec.userName in ["", None]:
+            skip = True
+            _logger.error("empty DN")  # ERR
+        else:
+            spec.resetChangedAttr("userName")  # RESET
+    if skip:
+        return skip  # RET
+    self.update(spec)  # UPD
+    return False  # DONE
+
+
+def kept(self, spec, name):
+    spec.userName = name  # K
+    self.update(spec)
+"""
+
+
+def test_an_arm_whose_change_a_later_reset_takes_back_says_the_resets_and_where_a_way_leaves_without_one(
+    tmp_path: Path,
+) -> None:
+    """``_check_task_with_unprocessed_inputs``' shape: the arm U (a tuple target) is taken back at RESET on the way
+    with a name; the way with an empty one prints ERR and returns at RET with the change in.  The flow reads no
+    values, so that way may go on past ``if skip:`` to UPD and DONE too: all three are open, and ERR is on every way
+    to them -- a run printing no ERR took the change back.  An arm no reset follows has none."""
+    user = _build(tmp_path, TAKEN, ("checked", "U"), ("kept", "K"), subject="JediTaskSpec.userName", declared=TASKS)
+    back = _branch(user, "U").taken_back
+    assert back is not None and (back.resets, back.open, back.open_prints) == (
+        [_line(TAKEN, "RESET")],
+        [_line(TAKEN, "RET"), _line(TAKEN, "UPD"), _line(TAKEN, "DONE")],
+        [_line(TAKEN, "ERR")],
+    )
+    assert _branch(user, "K").taken_back is None

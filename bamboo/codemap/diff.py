@@ -297,6 +297,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "must_names_whole",
     "must_hole",
     "made_before",
+    "taken_back",
     "after_prints",
     "history",
     "history_hole",

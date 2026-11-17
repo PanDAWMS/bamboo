@@ -453,15 +453,73 @@ class MadeBefore(BaseModel):
     ``TaskCommando.runImpl`` makes ``tmpTaskSpec = JediTaskSpec()`` at 154, and its arm at 197 sets ``status``: made,
     ``status`` is ``None`` (:func:`bamboo.codemap.panda.recognizers.progress.spec_initial_values`).  A reader of
     ``set task_status=None`` at 200 knows the arm did not set it on that way.  The value in memory, not the row's:
-    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  Nor the
-    value just before the arm: what runs between the construction and the arm is not read here -- ``peekJobLog``
-    makes ``job = JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm
-    at 1618.
+    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  *value* is
+    the construction's; whether the field still holds it at the arm is *held* -- ``peekJobLog`` makes ``job =
+    JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm at 1618.
     """
 
     line: int = Field(description="The construction's line: ``tmpTaskSpec = JediTaskSpec()``.")
     cls: str = Field(description="The class constructed: ``JediTaskSpec``.")
     value: str = Field(description="The written field's value as the constructor left it, a literal's ``repr``: ``None``.")
+    held: bool = Field(
+        default=False,
+        description=(
+            "Whether the field holds *value* up to the arm but for the junction's own arms: on no way from the "
+            "construction to the arm, in one turn of each loop holding both, does anything else that may change it "
+            "run -- a binding of the name, a store to the field, a call made on the object or handed it that may store "
+            "the field (``mustprints._changes_of``, as the prints after an arm are read).  ``peekJobLog``'s "
+            "``job.pack(rows[0])`` at 1600 is such a call, between 1599 and 1618."
+        ),
+    )
+    arms_between: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the junction's own arms writing the field on the same object that can run between the "
+            "construction and the arm: on a way through one, the value before the arm is that arm's "
+            "(``TaskCommando.runImpl``'s 181 before 197)."
+        ),
+    )
+
+
+class TakenBack(BaseModel):
+    """The resets that take an arm's change back out of what its object will write as changed
+    (:attr:`Branch.taken_back`), and the places a way from the arm reaches with the change still in.
+
+    ``_check_task_with_unprocessed_inputs`` sets ``original_task_spec.userName`` at 2272 and, in the ``else`` of
+    2273, takes it back with ``original_task_spec.resetChangedAttr("userName")`` at 2286: a write of the changed
+    attributes (``updateTask_JEDI``'s ``valuesMap(onlyChanged=True)``) after it does not take ``userName``.  The way
+    with an empty DN returns at 2290 without it.  A reset changes what is written as changed only: the field keeps the
+    arm's value, and a write of the whole row takes it.  A reset after the object is written is listed as well --
+    ``insertNewJob``'s ``job.resetChangedList()`` at 3217 after the INSERT's ``job.valuesMap()`` at 3199 or 3202 --
+    and *open* names the write a way passes before it.
+    """
+
+    resets: list[int] = Field(
+        description=(
+            "The lines of the calls a way from the arm reaches, in one run, that take the change back on the same "
+            "object: ``resetChangedAttr`` of the field, ``resetChangedList()`` (:func:`bamboo.codemap.panda.order."
+            "reset_columns`).  Sorted."
+        )
+    )
+    open: list[int] = Field(
+        description=(
+            "The lines a way from the arm reaches without passing one of *resets*, where the object may be written "
+            "or leave the function with the change in: each ``return``, ``-1`` (``EXIT_LINE``) for falling off the "
+            "end, and each call made on the object or handed it.  Empty: every way from the arm takes the change back "
+            "first.  "
+            "Sorted."
+        )
+    )
+    open_prints: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where *open* is not empty: the owner's prints every way from the arm to a line of *open* passes -- the "
+            "way that misses the resets prints them first.  ``_check_task_with_unprocessed_inputs``' ``has an empty "
+            "DN`` error at 2277: a run whose records hold none of them after the arm took the change back.  The ways "
+            "are the flow's, with no values read: a way through ``to_skip = True`` may go on past ``if to_skip:``.  "
+            "Sorted."
+        ),
+    )
 
 
 class AfterPrint(BaseModel):
@@ -1261,6 +1319,13 @@ class Branch(BaseModel):
             "construction and the written field's value as the constructor left it (:class:`MadeBefore`).  None "
             "where it is not so made, or the constructor's value for the field is not read; read by "
             ":mod:`bamboo.codemap.panda.mustprints`."
+        ),
+    )
+    taken_back: Optional[TakenBack] = Field(
+        default=None,
+        description=(
+            "Where a call a way from the arm reaches takes the change back out of what its object writes as changed "
+            "(:class:`TakenBack`); None where none does.  Read by :mod:`bamboo.codemap.panda.mustprints`."
         ),
     )
     after_prints: Optional[list[AfterPrint]] = Field(
