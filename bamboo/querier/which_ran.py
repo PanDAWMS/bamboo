@@ -67,6 +67,7 @@ from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
+from bamboo.querier import map_reach as MR  # noqa: E402
 from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier import windows as W  # noqa: E402
@@ -298,6 +299,92 @@ def recorded_in_pass(fn: R.Function, found: list[Run], window: tuple[str, str], 
     return None
 
 
+#: how many calls up :func:`cutter` walks from a candidate's function to a caller printing in the same run, and how many
+#: functions it asks there at most
+CALLER_DEPTH = 4
+CALLER_MAX = 40
+
+
+def _function_of(owner: str) -> R.Function | None:
+    """The querier's function for the map's *owner* (``rel::Class.method``), picked by the lines it prints; None where
+    the file holds no def of that name."""
+    rel, name = owner.partition("::")[0], owner.rpartition("::")[2].rpartition(".")[2]
+    try:
+        return R.function(rel, name, within=R.print_lines(owner))
+    except (LookupError, OSError, SyntaxError, ValueError):
+        return None
+
+
+def cutter(fn: R.Function, run: Run, mode: str,
+           called_at: Callable[[R.Function, Candidate], list[str]] | None) -> R.Function:
+    """The function whose passes *run* is cut into for a candidate of *fn* (bundle C, C-1, the step after measure bE):
+    *fn*, or the outermost of the functions that call on into it by the map (*called_at*) and print in *run* too.  A
+    callee printing through its caller's logger runs inside the caller's pass, and cut at its own entry row it would
+    leave the caller's rows before the call in a pass apart: the adder's handle_failed_job, whose ``AdderGen.run will
+    call job_failure_postprocessing`` at 363 is its entry row, prints under the PandaID its callers process_job_report
+    and AdderGen.run print under too; cut there, the judge read its candidate 374 on one run and the callers' on
+    another, joined no run of the key's (one root is needed), and rule R no longer read process_job_report's 444
+    before 374 (NJ-starting-late).  The callers are read backwards up the map's calls (``map_reach.callers``) within
+    CALLER_DEPTH calls, through those that print nothing in *run* (the adder's finalize_job_status, between
+    process_job_report and handle_failed_job), at most CALLER_MAX functions; of them, those that print a record of *run*
+    (:func:`_prints_in`) and from which the map's reach goes on into *fn* (*called_at*) print there, and the one of
+    them no other reaches is the outermost.  None of them, *fn*; two outermost, which pass holds the call is not told:
+    *fn* too."""
+    record = MR.graph()
+    if called_at is None or record is None or not fn.node.body:
+        return fn
+    held = _CUTTERS.get((id(run), id(fn.node)))
+    if held is not None and held[0] is run:
+        return held[1]
+
+    def as_callee(f: R.Function) -> Candidate:
+        return Candidate(f.rel, f.node.name, [f.node.body[0].lineno])
+
+    start = record.function_at(fn.rel, fn.node.body[0].lineno)
+    asked: set[str] = {start} if start else set()
+    frontier = set(asked)
+    for _ in range(CALLER_DEPTH):
+        frontier = {c for f in frontier for c in MR.callers(f)} - asked
+        asked |= frontier
+        if not frontier or len(asked) > CALLER_MAX:
+            break
+    printing = [g for owner in sorted(asked - {start}) if (g := _function_of(owner)) is not None and g.node is not fn.node
+                and g.node.body and _prints_in(owner, g, run, mode) and called_at(g, as_callee(fn))]
+    outer = [g for g in printing if not any(h is not g and called_at(h, as_callee(g)) for h in printing)]
+    found = outer[0] if len(outer) == 1 and len(asked) <= CALLER_MAX else fn
+    _CUTTERS[(id(run), id(fn.node))] = (run, found)
+    return found
+
+
+def _prints_in(owner: str, g: R.Function, run: Run, mode: str) -> bool:
+    """Whether the map's function *owner* (*g*) printed a record of *run*: a row of *g* reads it, and the map reads
+    the record as that row's whole in the run's log (``rows.whole_writers``: its mark, then its message, anchored at
+    both ends, through the log files its logger reaches).  A row's text alone proves nothing (KNOWN_ISSUES.md K42), and
+    measure bE2 read it so twice: TaskCommando.start's ``start``, printed to panda-TaskCommando.log, read
+    getTasksToExecCommand_JEDI's ``start`` in panda-JediDBProxy.log (MT-finishing-late, NT-tobroken-late), and
+    TaskRefiner.start's rows, through a logger with no mark, read records under a task's mark in its own log
+    (NT-registered-late); cut by them (no entry row there) the run was read whole, its pass at every window."""
+    return any(owner in R.whole_writers(run.records[i], run.log.name)
+               for at in R.seen(g, run, mode).hits.values() for i, _, _ in at)
+
+
+#: cutter's answers by the run and the candidate's function, kept with the run (an id is reused only once it is gone)
+_CUTTERS: dict[tuple[int, int], tuple[Run, R.Function]] = {}
+#: the passes a run is cut into, by the run and its cuts: every candidate cut alike holds the same pass objects, so the
+#: judge reads them as one run (its join of runs, rule R's pass)
+_PARTS: dict[tuple[int, tuple[int, ...]], tuple[Run, list[Run]]] = {}
+
+
+def _cut(run: Run, cuts: list[int]) -> list[Run]:
+    """*run*'s passes at *cuts* (indexes, its ends among them), the same objects for the same run and cuts."""
+    key = (id(run), tuple(cuts))
+    held = _PARTS.get(key)
+    if held is None or held[0] is not run:
+        held = (run, [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)])
+        _PARTS[key] = held
+    return held[1]
+
+
 def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
               called_at: Callable[[R.Function, Candidate], list[str]] | None = None) -> tuple[list[Run], list[str]]:
     """``(passes, why the rest went)``: of the key's runs whose span holds *window*, the passes of *c*'s function the
@@ -305,7 +392,10 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
 
     A run whose mark names another method is not *c*'s (:func:`of_mover`).  A run is cut into passes at the
     function's entry row (``rows.entries``), the records before the first entry a pass of their own -- the log can
-    start inside one; a function with no entry row, or one pass, keeps the run whole.  A pass is at the window where
+    start inside one; a function with no entry row, or one pass, keeps the run whole.  Where a caller of the function
+    prints in the run too, the run is cut at the outermost such caller's entry row instead (:func:`cutter`): the
+    function's call is a part of that caller's pass, and every candidate of the run is cut alike, into the same pass
+    objects (:func:`_cut`).  A pass is at the window where
     its span holds it and a record of it lies near (:func:`at_window`), and it holds the key where one of its records
     does, or where a run of the key ran inside one of its calls (:func:`_key_through_call`).  A mark that names no key
     spans every pass of a worker:
@@ -321,12 +411,13 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
             method = run.token.partition(" <")[0]
             others[method] = others.get(method, 0) + 1
             continue
-        cuts = sorted({0, *R.entries(fn, run, mode), len(run.records)})
-        parts = [run] if len(cuts) == 2 else [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+        by = cutter(fn, run, mode, called_at)
+        parts = _cut(run, sorted({0, *R.entries(by, run, mode), len(run.records)}))
         at = [p for p in parts if at_window(p, window)]
         if not at:
             far = sum(1 for p in parts if spans(p, window))
-            why.append(f"{where}: none of its {len(parts)} pass(es) of {fn.name} is at the window"
+            of = fn.name if by is fn else f"{by.name} (calling {fn.name})"
+            why.append(f"{where}: none of its {len(parts)} pass(es) of {of} is at the window"
                        + (f" ({far} span(s) it with no record within {EDGE.seconds // 60} min of it)" if far else ""))
             continue
         keyed = [p for p in at if holds_key(fn, p, logs, mode, called_at)]

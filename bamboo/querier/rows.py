@@ -37,6 +37,7 @@ from typing import Iterable
 
 from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import PrintRow
+from bamboo.codemap.panda import flow
 from bamboo.codemap.panda.plugin import PandaCodeMapPlugin
 from bamboo.codemap.panda.provenance import classify
 from bamboo.codemap.panda.recognizers.selection import log_level
@@ -1326,13 +1327,62 @@ def entry_row(fn: Function) -> Row | None:
     times in 26 minutes.  Each pass prints this row once, before the others
     (rule 20).  None when no row comes before all the others -- the function
     is then not split, and the caller says so.
+
+    Bundle C, C-1 (out/gm/qk-design.md, tmaeno's OK 2026-11-16 23:06; the map's part, codemap-xl 965c6dd): read by
+    the map's flow.  The rows are grouped by the logger each prints through (``flow.logger_groups``:
+    JobGenerator.runImpl's tmpLog bound at 602 and again for each input chunk at 622 are two loggers), and a group's
+    entry is the row every other is printed after on every way on which its logger is bound, for a run that shows no
+    handler's mark (``flow.entry_print`` with ``raised`` []): doForPreStaging's handler row 296, through the tmpLog
+    its try binds at 135, no longer stands in the way of its ``start`` at 136.  Where a run holds a handler's row the
+    entry may not come before, :func:`passes` says it (:func:`unsure_cuts`).  A map before that part reads as before.
     """
-    found = []
+    entry_print, logger_groups = getattr(flow, "entry_print", None), getattr(flow, "logger_groups", None)
+    if entry_print is None or logger_groups is None:
+        # a map before the entry print (codemap-xl 965c6dd): the reading of before
+        found = []
+        for r in fn.rows:
+            others = [s for s in fn.rows if s is not r and _logger_of(s) == _logger_of(r)]
+            if others and all(r.stmt in must_rows(fn.node, s.stmt)[0] for s in others):
+                found.append(r)
+        return min(found, key=lambda r: r.line) if found else None
+    held = _ENTRY.get(id(fn.node))
+    if held is not None and held[0] is fn.node:
+        return next((r for r in fn.rows if r.stmt is held[1]), None) if held[1] is not None else None
+    printed = [e for group in logger_groups([r.stmt for r in fn.rows]) if (e := entry_print(group, raised=[])) is not None]
+    first = min(printed, key=lambda s: (s.lineno, s.col_offset), default=None)
+    _ENTRY[id(fn.node)] = (fn.node, first)
+    return next((r for r in fn.rows if r.stmt is first), None) if first is not None else None
+
+
+#: entry_row's answers by the function's node, kept with the node (its id is reused only once the node is gone)
+_ENTRY: dict[int, tuple[ast.AST, ast.stmt | None]] = {}
+
+
+def _handler_of(fn: Function, stmt: ast.stmt) -> ast.ExceptHandler | None:
+    """The innermost ``except`` of *fn* holding *stmt*, or None."""
+    node: ast.AST = stmt
+    while node is not fn.node:
+        node = node.parent  # type: ignore[attr-defined]
+        if isinstance(node, ast.ExceptHandler):
+            return node
+    return None
+
+
+def unsure_cuts(fn: Function, entry: Row, run: Run, mode: str) -> int:
+    """C-1's premise (bundle C; the map's ``flow.printed_before``): the records in *run* of a row of *fn* in a handler
+    that its entry row may not come before where the run entered that handler -- the entry print itself may have
+    raised into it (doForPreStaging's ``start`` at 136 into 296) -- so their pass may hold no record of the entry row.
+    Each is cut as the others, its entry row read as printed.  0 with a map before the entry print."""
+    printed_before = getattr(flow, "printed_before", None)
+    if printed_before is None:
+        return 0
+    hits = seen(fn, run, mode).hits
+    n = 0
     for r in fn.rows:
-        others = [s for s in fn.rows if s is not r and _logger_of(s) == _logger_of(r)]
-        if others and all(r.stmt in must_rows(fn.node, s.stmt)[0] for s in others):
-            found.append(r)
-    return min(found, key=lambda r: r.line) if found else None
+        handler = _handler_of(fn, r.stmt) if r.line in hits else None
+        if handler is not None and r is not entry and not printed_before(entry.stmt, r.stmt, raised=[handler]):
+            n += len(hits[r.line])
+    return n
 
 
 def entries(fn: Function, run: Run, mode: str) -> list[int]:
@@ -1402,7 +1452,10 @@ def passes(fn: Function, run: Run, mode: str) -> tuple[list[Run], str]:
     literal = sum(1 for _, _, lit in read if lit)
     by = (f" ({literal} read as its line only with its holes taking any characters, nothing else printing it)"
           if literal else "")
-    return parts, f"cut at entry row {entry.line} of {fn.name}{by}: {len(parts)} pass(es){before}"
+    unsure = unsure_cuts(fn, entry, run, mode)
+    premise = (f"; {unsure} record(s) of a handler's row its entry row may have raised into: cut as the others, the "
+               "entry row read as printed (a premise)") if unsure else ""
+    return parts, f"cut at entry row {entry.line} of {fn.name}{by}: {len(parts)} pass(es){before}{premise}"
 
 
 def prefix_holes(fn: Function, row: Row, record: Record) -> dict[str, str]:

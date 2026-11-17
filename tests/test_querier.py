@@ -15902,6 +15902,185 @@ def test_a_write_whose_statement_s_guard_its_pass_read_false_did_not_run_and_the
     assert got["two"] is None and got["one statement"] is None, got
 
 
+_C1 = """
+class W:
+    def doIt(self):
+        try:
+            tmpLog = MsgWrapper(logger, "<label=x>")
+            tmpLog.debug("start")
+            if self.locked():
+                tmpLog.debug("locked by another process. Skipped")
+                return
+            tmpLog.debug("done")
+        except Exception:
+            tmpLog.error("failed in doIt")
+"""
+
+
+def test_the_entry_row_is_read_on_the_ways_its_logger_is_bound(tmp_path):
+    """Bundle C, C-1 (the map's flow.logger_groups / entry_print / printed_before, codemap-xl 965c6dd): a handler's
+    row through a logger the try binds does not stand in the way of the row printed first after the binding, for a run
+    that shows no handler's mark -- doForPreStaging's 296 and its start at 136.  A run holding the handler's row is cut
+    as the others, the entry row read as printed (a premise said).  With a map before that part the reading is as
+    before: no entry row."""
+    (_corpus(tmp_path) / "pandajedi" / "w.py").write_text(_C1)
+    lines = _C1.splitlines()
+    at = {k: lines.index(t) + 1 for k, t in {"start": '            tmpLog.debug("start")',
+                                             "failed": '            tmpLog.error("failed in doIt")'}.items()}
+    stamp = "2026-01-01 00:{:02d}:00,000 panda.log.X: DEBUG    <label=x> {}\n"
+    texts = ["start", "locked by another process. Skipped", "start", "done", "failed in doIt", "start", "done"]
+    (tmp_path / "w.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.codemap.panda import flow
+            from bamboo.querier import rows as R
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            A = AT
+            got = {}
+            run, = runs_for(read_log("w.log"), "label=x")
+            for name in ("entry_print", "logger_groups", "printed_before"):
+                if hasattr(flow, name):
+                    delattr(flow, name)
+            fn = R.function("pandajedi/w.py", "doIt")
+            got["before"] = R.entry_row(fn)
+            # the map's part, as the flow reads it for a run with no handler's mark
+            flow.logger_groups = lambda prints: [list(prints)]
+            flow.entry_print = lambda prints, raised=None: next(s for s in prints if s.lineno == A["start"])
+            flow.printed_before = lambda first, then, raised=None: then.lineno != A["failed"]
+            R._ENTRY.clear()
+            fn = R.function("pandajedi/w.py", "doIt")
+            entry = R.entry_row(fn)
+            got["entry"] = entry.line
+            parts, said = R.passes(fn, run, "outside")
+            got["passes"] = [len(p.records) for p in parts]
+            got["said"] = said
+            print(json.dumps(got))
+            """.replace("AT", json.dumps(at)),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["before"] is None, got
+    assert got["entry"] == at["start"], got
+    assert got["passes"] == [2, 3, 2], got
+    assert got["said"].endswith("1 record(s) of a handler's row its entry row may have raised into: cut as the "
+                                "others, the entry row read as printed (a premise)"), got
+
+
+_C1B = """
+class G:
+    def __init__(self):
+        self.logger = MsgWrapper(logger, "<jediTaskID=777>")
+
+    def run(self):
+        self.logger.debug("new start")
+        self.process()
+        self.logger.debug("end")
+
+    def process(self):
+        self.logger.debug("processing")
+        self.handle()
+
+    def handle(self):
+        if self.failed:
+            self.logger.debug("will call")
+        self.job.status = "failed"
+
+    def quiet(self):
+        self.handle()
+"""
+
+
+def test_a_callees_run_is_cut_where_its_printing_callers_is(tmp_path):
+    """Bundle C, C-1, the step after measure bE (NJ-starting-late): a candidate's run is cut at the entry row of the
+    outermost function that calls on into its function by the map and prints in the same run -- the adder's
+    handle_failed_job, its 363 an entry row, is judged on AdderGen.run's pass, as process_job_report is -- and every
+    candidate cut alike holds the same pass objects.  A caller that prints nothing there is passed over (the adder's
+    finalize_job_status); two printing there, neither reaching the other, leave the function its own entry row, as
+    does a map without the calls."""
+    (_corpus(tmp_path) / "pandajedi" / "g.py").write_text(_C1B)
+    lines = _C1B.splitlines()
+    at = {k: lines.index(t) + 1 for k, t in {
+        "__init__": "    def __init__(self):", "run": "    def run(self):", "process": "    def process(self):",
+        "handle": "    def handle(self):", "quiet": "    def quiet(self):",
+        "write": '        self.job.status = "failed"', "call": "        self.handle()"}.items()}
+    stamp = "2026-01-01 00:{:02d}:00,000 panda.log.X: DEBUG    <jediTaskID=777> {}\n"
+    texts = ["new start", "processing", "will call", "end"] * 2
+    (tmp_path / "w.log").write_text("".join(stamp.format(i, t) for i, t in enumerate(texts)))
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.codemap.panda import flow
+            from bamboo.querier import map_reach as MR
+            from bamboo.querier import rows as R
+            from bamboo.querier import which_ran as WR
+            from bamboo.querier.records import read_log, runs_for
+
+            R.ROWS_FROM = "walk"
+            A = AT
+            rel = "pandajedi/g.py"
+            defs = ("__init__", "run", "process", "handle", "quiet")
+            # the map's part C-1 reads: one logger, its first print the entry
+            flow.logger_groups = lambda prints: [list(prints)]
+            flow.entry_print = lambda prints, raised=None: min(prints, key=lambda s: s.lineno)
+            flow.printed_before = lambda first, then, raised=None: True
+            R._ENTRY.clear()
+            run, = runs_for(read_log("w.log"), "777")
+            window = ("2026-01-01 00:02:00", "2026-01-01 00:02:00")
+            span = lambda r: [r.first[14:19], r.last[14:19], len(r.records)]
+            handle = WR.Candidate(rel, "handle", [A["write"]], ["w.log"])
+            process = WR.Candidate(rel, "process", [A["call"]], ["w.log"])
+            logs = {"w.log": [run]}
+            got = {"entries": {n: R.entries(R.function(rel, n), run, "outside") for n in ("run", "process", "handle")}}
+            # the map's reach: run calls on into process, process into quiet, quiet (printing none) into handle -- the
+            # adder's AdderGen.run, process_job_report, finalize_job_status, handle_failed_job
+            reach = {"run": {"process", "quiet", "handle"}, "process": {"quiet", "handle"}, "quiet": {"handle"}}
+            MR.graph = lambda: N(function_at=lambda file, line: f"{rel}::G." + max((d for d in defs if A[d] <= line), key=lambda d: A[d]))
+            callers = {"run": set(), "process": {"run"}, "quiet": {"process"}, "handle": {"quiet"}}
+            MR.callers = lambda owner: {f"{rel}::G.{c}" for c in callers.get(owner.rpartition(".")[2], set())}
+            R.print_lines = lambda owner: []
+            # the map's word on who can have printed a record there: its text, its mark, the log files
+            printer = {"new start": "run", "end": "run", "processing": "process", "will call": "handle"}
+            R.whole_writers = lambda record, log: frozenset({f"{rel}::G.{printer[record.text]}"})
+            called = lambda fn, callee: [f"{rel}:{A['call']}"] if callee.func in reach.get(fn.name, set()) else []
+            got["own"] = [span(p) for p in WR.passes_at(handle, [run], window, logs, "outside")[0]]
+            kept_h = WR.passes_at(handle, [run], window, logs, "outside", called)[0]
+            kept_p = WR.passes_at(process, [run], window, logs, "outside", called)[0]
+            got["caller"] = [span(p) for p in kept_h]
+            got["same"] = len(kept_h) == len(kept_p) == 1 and kept_h[0] is kept_p[0]
+            got["by"] = WR.cutter(R.function(rel, "handle"), run, "outside", called).name
+            # run's rows read the records, but the map says another log's function printed them: run prints nothing
+            # there, and the outermost caller printing in the run is process
+            printer.update({"new start": "elsewhere", "end": "elsewhere"})
+            WR._CUTTERS.clear()
+            got["elsewhere"] = WR.cutter(R.function(rel, "handle"), run, "outside", called).name
+            printer.update({"new start": "run", "end": "run"})
+            # two callers printing in the run, neither reaching the other: which pass holds the call is not told
+            callers.update({"handle": {"process", "run"}, "process": set(), "quiet": set()})
+            reach.update({"run": {"handle"}, "process": {"handle"}})
+            WR._CUTTERS.clear()
+            got["two"] = WR.cutter(R.function(rel, "handle"), run, "outside", called).name
+            print(json.dumps(got))
+            """.replace("AT", json.dumps(at)),
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["entries"] == {"run": [0, 4], "process": [1, 5], "handle": [2, 6]}, got
+    assert got["own"] == [["02:00", "05:00", 4]], got
+    assert got["caller"] == [["00:00", "03:00", 4]], got
+    assert got["same"] is True, got
+    assert got["by"] == "run", got
+    assert got["elsewhere"] == "process", got
+    assert got["two"] == "handle", got
+
+
 def test_a_count_print_after_the_write_naming_the_row_is_a_write_of_it(tmp_path):
     """Bundle A, A-3 through the map's part 1 (Branch.after_prints): a record of a count print after the arm's write
     (``rows`` one or some: it prints only where the run changed rows) whose hole holds the written row's key is a write
