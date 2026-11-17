@@ -1177,6 +1177,17 @@ message, the line as written; `matches` and `capture` take both, and the hole's 
   datasetManager pass now reads its printed values, and run:735 is excluded with [730] not in the run, in place of
   all four of its must rows.
 
+- *The writers' table reads it the same way* (I-5, 2026-11-17).  `rows._found`, which `line_writers` and
+  `whole_writers` read every function of the dump by, searched the message alone, so a record of such a print had
+  no writer at all.  `which_ran._rows_shown` counted that as the function's own, but I-5 found no other function
+  reading ActivatorWithRuleThr's 963 records whole and kept ActivatorThr's 863 hits on them (measure bJ4m).  A row
+  whose print begins with a hole (`records.LEADING_HOLE` on the map row's text; 52 rows with no prefix in x13zgd) is
+  now searched on the line as written too.
+- *Not read: a print whose text begins with blanks* (17 rows with no prefix in x13zgd, e.g. `f' killing {...}'`,
+  `'    -> skip ...'`, `f' >>> action=...'`).  The parser takes the blanks with the level, and the map's pattern
+  begins with them, so neither `Row.texts` nor the table finds such a message.  Revisit by reading a pattern's
+  leading blanks as optional (the map's pattern or the querier's reading of it).
+
 *Shows:* nothing of its own; the rows of such a print are found and captured.
 *Revisit:* when the map's pattern for a markless logger's print says where the message begins (the token split
 off), or the parser knows which loggers have a mark.
@@ -1355,6 +1366,27 @@ MR-T-53351604-splitRule.  It is kept now: the callee's line that does show 284 r
 or a mark its logger may write that the map did not read) does not count: PostProcessor.start's "done" and
 TaskRefiner.start's "start" have no prefix for that reason, and counted, they would take every "done" and
 "start" of their logs, "doBasicPostProcess done with taskStatus=..." (122) among them, which they cannot print.
+
+A record is not even found by a row the map reads it as not whole where another row reads it whole (I-5,
+`rows._whole_first` in `rows.seen`; tmaeno's OK 2026-11-17 23:1x): a pattern is searched inside the text, so
+ActivatorThr's 863 `{PandaID} skip since {scope}:{lfn} is missing` was found in ActivatorWithRuleThr's 963 lines
+`... is missing with rule`, and U2 read the four 963 records of MJ-assigned-late as ActivatorThr's passes too: its
+D-4 reason said "printed 863" (e5d4b50).  Placing alone (above) did not stop that: rule 4, D-4 and the cutting of
+passes read what a row finds (`Seen.present`).  A row that cannot say (None), a record the search cut, and a record
+no row reads whole are as found: where the map guesses a hole's class wrong (updateTask_JEDI 1483's `{sql}` read as a
+token until the map's HTB, codemap-xliii), the row the record is really of reads it as not whole and loses it only
+where another row reads it whole.
+
+`line_writers` reads the same rule across functions.  A function is not a writer of a record when every row of it
+that finds the record reads it as not whole and another function's row reads it whole; a record the search cut is
+as found (`rows._read_writers`, which fills `whole_writers` too).  Without this rule, once the table read K53's
+lines, ActivatorThr was a writer of 963's records, and `_rows_shown` set aside four of ActivatorWithRuleThr's twelve
+runs in NJ-assigned-stuck and two of four in MJ-assigned-late as "no record only it prints" (try bJ4t).  Measured
+in bJ4m (the seven T-late cases I-5 moved): every record a row lost was found inside a longer line the other row
+reads whole, and the lost row reads it as not whole even with every hole taking any characters: `'start'` inside
+`start {1}{iTasks}/... jediTaskID=...`, `'done'` inside `done new status=...`, one T_TASK UPDATE inside another, and
+`_read_task_with_unprocessed_inputs`'s SELECT inside `_check_task_with_unprocessed_inputs`'s.  Their conclusions are
+unchanged; only the way to them is written differently.
 
 Rule 6 (`which_ran.rewriter`) solves the callers' guards too (`callers_guards`) and reads `<x>.<attr>` in them as the
 key's object whatever x is: archiveJob 1783's `job.jobStatus == 'finished'` tests the merge job, while

@@ -51,7 +51,7 @@ import datetime
 import functools
 import itertools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -554,6 +554,8 @@ class Verdict:
     #: the must rows a positive verdict was shown by (``rows.implying_rows`` printed), none for another proof: a reader
     #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a'))
     proven: list[int] = field(default_factory=list)
+    #: D-4: why the call arm hands no element of the key's turn (:func:`turn_left_before_append`), empty otherwise
+    unhanded: str = ""
 
     def describe(self) -> str:
         return f"{self.kind:10s} {Path(self.candidate.rel).name}::{self.candidate.func}:{self.line}  " + "; ".join(self.reasons)
@@ -2003,21 +2005,47 @@ def turn_left_before_append(sn: R.Seen, line: int, mode: str) -> str:
     with rule``) is missing from the run where its absence counts: the key's turn did not reach the append, and the
     list the call hands holds no element of it.  Not where the turn's rows are read in no such run."""
     fn, run = sn.fn, sn.run
-    for loop, at, element in appended_turns(fn, line):
-        append = R.statement_at(fn.node, at)
-        if append is None:
-            continue
+    for loop, at, element, rows in _turn_rows(fn, line):
         inside = {id(n) for n in ast.walk(loop)}
-        before, _ = R.must_rows(fn.node, append, set())
-        for s in before:
-            row = fn.row_at(s)
-            if row is None or id(s) not in inside or sn.present(row) or not (hole := _turn_hole(row, element)):
+        for row, hole in rows:
+            if sn.present(row):
                 continue
             shown = [r for r in fn.rows if id(r.stmt) in inside and sn.present(r) and _turn_hole(r, element) == hole]
             if shown and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func, row):
                 return (f"the key's turn of the loop at {loop.lineno} printed {shown[0].line} and not {row.line}, which every "
                         f"way to the append at {at} prints: the call at {line} hands no {element} of the key's turn (D-4)")
     return ""
+
+
+def _turn_rows(fn: R.Function, line: int) -> list[tuple[ast.For | ast.AsyncFor, int, str, list[tuple[R.Row, str]]]]:
+    """``(loop, append line, element, [(row, hole)])`` for each append filling the list the call at *line* hands
+    (:func:`appended_turns`): the rows of the loop every way to the append prints that begin with a hole of the
+    element (968's ``{tmpJob.PandaID} to activate with rule`` before 969)."""
+    out = []
+    for loop, at, element in appended_turns(fn, line):
+        append = R.statement_at(fn.node, at)
+        if append is None:
+            continue
+        inside = {id(n) for n in ast.walk(loop)}
+        before, _ = R.must_rows(fn.node, append, set())
+        rows = [(row, hole) for s in before if id(s) in inside and (row := fn.row_at(s)) is not None
+                and (hole := _turn_hole(row, element))]
+        out.append((loop, at, element, rows))
+    return out
+
+
+def handing_rows(fn: R.Function, lines: Iterable[int]) -> list[int]:
+    """I-2's premise for a caller's passes read by D-4 (:func:`turn_left_before_append`): the rows that every way to
+    an append filling a list one of the calls at *lines* hands prints, each beginning with a hole of the appended
+    element -- so a pass that handed an element prints a record of it.  Empty where a call hands a list the map reads
+    no such append for, or an append has no such row."""
+    found: list[int] = []
+    for line in lines:
+        turns = _turn_rows(fn, line)
+        if not turns or any(not rows for *_, rows in turns):
+            return []
+        found += [row.line for *_, rows in turns for row, _ in rows]
+    return sorted(set(found))
 
 
 def empty_loops(fn: R.Function, stmt: ast.stmt, callee: dict[str, tuple[str, str]]) -> str:
@@ -2534,6 +2562,7 @@ def judge(
                                                    v.line, mode):
                 v.kind = "excluded"
                 v.reasons.append(unhanded)
+                v.unhanded = unhanded
 
     # P again on each kept candidate, with the other verdicts: a call changes the subject to the observed value only
     # where the map reaches, from it, a writer of that value not excluded (printed.Reaching)

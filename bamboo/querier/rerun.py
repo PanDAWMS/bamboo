@@ -170,6 +170,7 @@ from bamboo.querier.which_ran import (
     class_of,
     constant_on_way,
     cut_passes,
+    handing_rows,
     holds_key,
     hole_values,
     inside_call,
@@ -1832,6 +1833,17 @@ def key_terms(key_froms: list, owner: str, line: int) -> KeyTerms:
     return KeyTerms(tuple(joined), tuple(either), tuple(handed), tuple(other))
 
 
+def taken_as_handed(key_froms: list, owner: str, subject: str, lines: set[int]) -> bool:
+    """I-2: whether every write of *subject* at *lines* of *owner* takes its row by a key the map draws, in the owner
+    itself, from its parameters alone (its ``KeyFrom`` sources with no ``via``, each ``parameter``; one through a call
+    route is where a caller got what it hands): the owner runs on a row only as its callers hand it -- activateJob's
+    113 by ``job.PandaID`` (and, through TaskBuffer.py:982, peekJob's rows), not FinisherThr.run's writes, by the rows
+    its own selection reads."""
+    kfs = [kf for kf in key_froms if _bare(kf.owner) == _bare(owner) and set(kf.writes.get(subject) or []) & lines]
+    own = [[s for s in kf.sources if not getattr(s, "via", None)] for kf in kfs]
+    return bool(kfs) and all(mine and all(s.kind == KEY_PARAMETER for s in mine) for mine in own)
+
+
 def _tree_leaves(node) -> list:
     """The terms of a condition tree (the map's ``all``/``any`` nodes opened)."""
     if node.node in ("all", "any"):
@@ -2030,7 +2042,8 @@ class Blocked:
     """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
     candidates (:func:`took_none`), or ran none of the arms (:func:`ran_no_arm`) and not all by one exit shown: then
     *left_by* holds the exits such a pass may have left by, and *took*, where any pass was shown to leave by one, each
-    pass's (None for one not shown)."""
+    pass's (None for one not shown).  *unhanded*, each pass's D-4 reason where every arm of it was a call handing no
+    element of the key's turn (``Verdict.unhanded``), empty for one otherwise."""
 
     fn: R.Function
     exit_line: int | None
@@ -2039,6 +2052,7 @@ class Blocked:
     arms: list[Arm]
     left_by: tuple[int, ...] = ()
     took: tuple[int | None, ...] = ()
+    unhanded: tuple[str, ...] = ()
 
 
 @dataclass
@@ -2066,8 +2080,9 @@ class Callers:
     """Why a mover's passes did not take the row in *window*: its callers' passes of the key there (U1; KNOWN_ISSUES.md
     K55).  *kind* is the stop it goes on from: ``before``, a late mover's passes before the move (K45); ``window``, a
     mover's passes in the window; ``statement``, a statement of the mover's that took the row only at the move (L2's
-    judgement 1).  *entries* are the mover's ``called_from``; *up*, the hop-1 caller U1 went up from (once: the map
-    lists two hops)."""
+    judgement 1); ``after``, a stuck value's mover, which runs on the row only as its callers hand it, after its last
+    pass on the row (I-2).  *entries* are the mover's ``called_from``; *up*, the hop-1 caller U1 went up from (once:
+    the map lists two hops)."""
 
     mover: str
     arms: list[Arm]
@@ -2078,6 +2093,10 @@ class Callers:
     entries: list[str]
     before: str | None = None
     up: str | None = None
+    #: I-2, kind ``after``: the end of the mover's last pass on the row (to the microsecond; the window opens at its
+    #: second), and what S2 read of its passes
+    after: str | None = None
+    left: T.Said | None = None
 
 
 @dataclass
@@ -7423,7 +7442,39 @@ class Rerun:
             return up
         self.need(T.Said("a-pass-in-the-window-that-holds-the-key", {"func": func, "unkeyed": unkeyed}) if unkeyed
                   else T.Said("a-pass-of-the-mover-in-the-window"), found)
-        return self._which_way(fn, rel, func, found, q.arms)
+        blocked = self._which_way(fn, rel, func, found, q.arms)
+        if q.before is None and q.stay is None and since is not None and (up := self._callers_after(q, found, blocked)) is not None:
+            return up
+        return blocked
+
+    def _callers_after(self, q: Passes, found: list, blocked: Blocked) -> Callers | None:
+        """I-2 (D-4b, out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x): a stuck value's mover
+        whose arms' writes take the row by what its callers hand it alone (the map's KeyFrom sources, each a parameter)
+        runs on the row again only where a caller hands it the row.  After its last pass on the row (*found*'s, the way
+        S2 read them *blocked*) to the window's end, the statuslog's as_of, its callers' passes are read (U1, kind
+        ``after``), in place of S3 on the guard that pass left by: activateJob's 21:32:49 pass left by 151, then
+        ActivatorWithRuleThr's turns of the key each left before the append (D-4; NJ-assigned-stuck).  None where the
+        map lists no caller, the window is not known (the door over files), nothing is left of it, or an arm's key comes
+        from elsewhere (a selection of its own: the stay is its selection's, S1 and H read it)."""
+        if not q.entries or not found or not self.logs.needs_window:
+            return None
+        window = W.stuck(self.data.get("statuslog", {}), self.args.observed).window
+        last = found[-1].last
+        if window is None or W.when(last) >= W.when(window[1]):
+            return None
+        subject = q.subject or self.args.subject
+        if not taken_as_handed(getattr(mapdump.fragment(), "key_froms", None) or [], q.owner, subject, {a.line for a in q.arms}):
+            return None
+        func = q.owner.split("::")[-1]
+        n = len(found)
+        way = (T.Said("passes-left-by", {"n": n, "exit": f"{func}:{blocked.exit_line}"}) if blocked.exit_line is not None
+               else T.Said("passes-ran-no-arm", {"n": n, "left_by": list(blocked.left_by)}) if blocked.left_by
+               else T.Said("passes-took-none", {"n": n}))
+        self.say(f"{func} runs on the row only as its callers hand it (the keys of its arms' writes are parameters, by the "
+                 f"map's KeyFrom), and no pass of it is on the row from {last[:23]} to {window[1]}: its callers' passes "
+                 "after it are read, not the guard its last pass left by (I-2)")
+        return Callers(q.owner, q.arms, subject, q.key, (last[:19], window[1]), "after", q.entries, after=last[:23],
+                       left=T.Said("the-mover-s-last-pass", {"mover": func, "last": last[:23], "way": way}))
 
     def _callers_of_mover(self, q: Passes, since: str | None, kind: str) -> Callers | None:
         """U1's question where no pass of the mover *q* asks of took the row in the window: its callers' passes there,
@@ -7961,12 +8012,17 @@ class Rerun:
         took: list[int | None] = []  # the exit a pass that ran no arm was shown to leave by, None where none is shown
         envs = []
         left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1, S-2a)
+        unhanded: list[str] = []  # D-4: a pass every arm of which was a call handing no element of the key's turn
+        arm_lines = {a.line for a in arms}
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
             j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
             self.say(j.report(p))
+            mine = [v for v in j.verdicts if v.line in arm_lines]
+            unhanded.append("; ".join(dict.fromkeys(v.unhanded for v in mine))
+                            if mine and len(mine) == len(arm_lines) and all(v.unhanded for v in mine) else "")
             if j.chosen is None and (arm := _the_arm_taken(j, {a.line for a in arms})) is not None:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
@@ -7994,7 +8050,7 @@ class Rerun:
         if all(v is None for v in chosen) and len(set(took)) == 1 and took[0] is not None:
             # every pass ran no arm and was shown to leave by the same exit: the way they went
             self.say(f"every pass ({len(found)}) left by {func}:{took[0]}")
-            return Blocked(fn, took[0], found, envs, arms)
+            return Blocked(fn, took[0], found, envs, arms, unhanded=tuple(unhanded))
         taken = {v.line if v is not None else None for v in chosen}
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
@@ -8002,7 +8058,7 @@ class Rerun:
                  else f"every pass ({len(found)}) of {func} took none of its candidates" if not left_by
                  else f"every pass ({len(found)}) of {func} ran none of its arms")
         return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)),
-                       tuple(took) if exit_line is None and any(x is not None for x in took) else ())
+                       tuple(took) if exit_line is None and any(x is not None for x in took) else (), tuple(unhanded))
 
     # ------------------------------------------------------------ Callers: what called the mover on the row
     def callers(self, q: Callers):
@@ -8186,7 +8242,12 @@ class Rerun:
                     found += parts
                     whole |= {id(p) for p in parts if p is run}
         found = sorted((p for p in found if p.first[:19] <= end), key=lambda p: p.first)
-        found, moved_on = self._stay_edges(fn, c.owner, c.lines, up.subject, up.key, found, start, whole)
+        if up.after is not None:
+            # I-2: the passes begun after the mover's last on the row; the window opens at no statuslog row
+            found = [p for p in found if W.when(p.first) > W.when(up.after)]
+            moved_on: list = []
+        else:
+            found, moved_on = self._stay_edges(fn, c.owner, c.lines, up.subject, up.key, found, start, whole)
         keyed = [p for p in found if holds_key(fn, p, runs, self.mode, self._called_at)]
         if len(found) > len(keyed):
             self.say(f"{len(found) - len(keyed)} pass(es) of {func} in the window print no record of the key, nor run it inside a call: not read")
@@ -8206,9 +8267,39 @@ class Rerun:
         outcomes = sorted({o for a in up.arms for o in a.outcomes})
         arms = [Arm(line, outcomes, self._call_guards(rel, line)) for line in c.lines]
         blocked = self._which_way(fn, rel, func, keyed, arms)
+        if self._caller_handed_none(c, up, fn, keyed, blocked, to_hand, asking, holes):
+            return None
         self.need(T.Said("caller-called-mover-not-found", {"caller": func, "line": blocked.exit_line, "mover": mover}),
                   blocked.exit_line not in c.lines, "K55")
         return blocked
+
+    def _caller_handed_none(self, c: Caller, up: Callers, fn: R.Function, keyed: list, blocked: Blocked, to_hand: list[str],
+                     asking: W.Asking, holes: dict) -> bool:
+        """I-2 (out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x), one rule for U2 whatever the
+        window's end (a late value's move, a stuck one's as_of): where every pass of the caller *c* on the row in the
+        window had each of its calls into the mover hand a list without the key's element (D-4, ``Blocked.unhanded``),
+        no pass of it handed the mover the row there -- where every pass of it on the row is read: the window searched
+        whole, every log of it asked, and a pass handing the key's element printing a record of it (the rows every way
+        to the append prints begin with the element's key, :func:`which_ran.handing_rows`).  An END and True; False,
+        said why, where a premise does not hold (S3 reads on)."""
+        if not keyed or len(blocked.unhanded) != len(keyed) or not all(blocked.unhanded):
+            return False
+        func = c.owner.split("::")[-1]
+        rows = handing_rows(fn, c.lines)
+        premises = {"window": self._searched_whole(to_hand, asking, asking, [], holes, None),
+                    "logs": every_log_asked(c.owner, c.lines, to_hand),
+                    "prints": {"held": bool(rows), "why": T.Said("a-handing-prints-the-element", {"rows": rows, "lines": c.lines})
+                               if rows else T.Said("a-handing-prints-no-element", {"lines": c.lines})}}
+        failing = [p["why"] for p in premises.values() if not p["held"]]
+        if failing:
+            self.say(f"every pass of {func} on the row handed {up.mover.split('::')[-1]} no element of the key's turn (D-4), "
+                     f"but not every pass of it on the row is read: {'; '.join(T.text(w) for w in failing)}")
+            return False
+        self.end(T.Said("no-pass-of-the-caller-handed-the-row", {
+            "caller": func, "lines": c.lines, "mover": up.mover.split("::")[-1], "n": len(keyed),
+            "start": up.after or up.window[0], "end": up.window[1], "why": list(dict.fromkeys(blocked.unhanded)),
+            "after": up.left or "", "premises": [p["why"] for p in premises.values()]}))
+        return True
 
     def _call_tied(self, c: Caller, up: Callers) -> bool:
         """Q1 part 2 (call-tied runs; out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06; P22,
@@ -8526,7 +8617,8 @@ class Rerun:
         outer = [e.split(" -> ")[0] for e in up.entries if " -> " in e and _site(e.split(" -> ")[1]) in sites]
         if c.hop == 1 and up.up is None and outer:
             self.say(f"up to {func}'s callers: {outer}")
-            return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner)
+            return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner,
+                           after=up.after, left=up.left)
         if moving and up.before is not None and self._agent_cycles(c, up, moving, absent=True):
             return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],

@@ -955,9 +955,10 @@ def _prefix_regex(prefixes: tuple[str, ...]) -> re.Pattern[str]:
 
 
 #: ``[fragment, [(pattern, owner, prefix regex or None, logs or None, map row)], {text: [(owner, prefix, logs, map
-#: row)]}, {(log, token, text): writers}, {(log, token, text): whole writers}, {first word: rows with no prefix},
-#: {(log, token, text): literal writers}]`` for the installed dump (:func:`line_writers`, :func:`whole_writers`,
-#: :func:`literal_writers`); the fragment is held, so a dump installed after is told from it by identity
+#: row)]}, {(log, token, text, cut): writers}, {(log, token, text, cut): whole writers}, {first word: rows with no
+#: prefix}, {(log, token, text): literal writers}, [rows whose print begins with a hole]]`` for the installed dump
+#: (:func:`line_writers`, :func:`whole_writers`, :func:`literal_writers`); the fragment is held, so a dump installed
+#: after is told from it by identity
 _WRITERS: list = []
 
 
@@ -970,6 +971,8 @@ def _writers() -> list | None:
         rows = []
         # the rows with no prefix by their pattern's first word: a line its logger writes with no mark is cut there (K70)
         heads: dict[str, list] = {}
+        # the rows whose print begins with a hole: a logger with no mark writes its value first (K53)
+        lead: list = []
         for f in fragment.function_prints:
             for st in f.statements:
                 logs = frozenset(st.log_files) if st.log_files_basis == "logger" else None
@@ -979,13 +982,19 @@ def _writers() -> list | None:
                         rows.append(row)
                         if not r.prefix and (word := head_word(r.pattern)):
                             heads.setdefault(word, []).append(row)
-        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads, {}]
+                        if LEADING_HOLE.match(getattr(r, "text", "") or ""):
+                            lead.append(row)
+        _WRITERS[:] = [fragment, rows, {}, {}, {}, heads, {}, lead]
     return _WRITERS
 
 
 def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]]:
     """``(owner, map row)`` of the rows :func:`line_writers` reads *record* by; a row with no prefix whose pattern's
-    first word is the record's token reads the line as written, that word on (K70)."""
+    first word is the record's token reads the line as written, that word on (K70), and a row whose print begins with
+    a hole reads it too (K53, as :meth:`Row.texts`): the parser took the hole's value for the token, and the map's
+    pattern begins at the blank after it, which the message alone does not hold.  ActivatorWithRuleThr's 963
+    ``f"{PandaID} skip since {scope}:{lfn} is missing with rule"`` was read by no function's row here, so
+    :func:`whole_writers` named none for ActivatorThr's 863, which finds the record inside it (I-5, MJ-assigned-late)."""
     by_text = writers[2]
     if record.text not in by_text:
         by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
@@ -993,6 +1002,9 @@ def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]
     found = [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
     found += [(o, r) for regex, o, _, logs, r in writers[5].get(record.token, ())
               if (logs is None or log in logs) and regex.match(line) and (o, r) not in found]
+    if record.token:
+        found += [(o, r) for regex, o, p, logs, r in writers[7] if (logs is None or log in logs)
+                  and (p is None or p.match(line)) and regex.search(line) and (o, r) not in found]
     return found
 
 
@@ -1006,14 +1018,27 @@ def line_writers(record: Record, log: str) -> frozenset[str]:
     (configurator_read_panda_sites's ``configurator_read_sites < ... >``).  A row with no pattern the map can ask with
     (all holes) is not counted: it can print any text at any length, which MIN_PROOF does not read either.  A mark
     inside an outer one's text (:meth:`Row.written_by`) is not read: the message is then more than the row's text,
-    which proves nothing below MIN_PROOF.  None without a dump."""
+    which proves nothing below MIN_PROOF.  A function whose every row finding the record reads it as not whole
+    (``trace.reads_whole`` False) has not printed it where another function's row reads it whole (I-5, as
+    :func:`_whole_first` reads a function's own rows): ActivatorThr's 863 ``... is missing`` is found inside
+    ActivatorWithRuleThr's 963 ``... is missing with rule``, and named so, 963's own record showed no pass of its
+    function (``which_ran._rows_shown``, MJ-assigned-late).  A record the search cut: as found.  None without a dump."""
     if (writers := _writers()) is None:
         return frozenset()
-    known: dict[tuple[str, str, str], frozenset[str]] = writers[3]
-    key = (log, record.token, record.text)
+    known: dict[tuple[str, str, str, bool], frozenset[str]] = writers[3]
+    key = (log, record.token, record.text, record.cut)
     if key not in known:
-        known[key] = frozenset(o for o, _ in _found(writers, record, log))
+        _read_writers(writers, record, log, key)
     return known[key]
+
+
+def _read_writers(writers: list, record: Record, log: str, key: tuple[str, str, str, bool]) -> None:
+    """:func:`line_writers` and :func:`whole_writers` of *record*, kept at *key*: the rows :func:`_found` reads it by,
+    and what the map says each reads of it (``trace.reads_whole``)."""
+    said = [(o, trace.reads_whole(row, record.token, record.text)) for o, row in _found(writers, record, log)]
+    whole = frozenset(o for o, s in said if s is True)
+    writers[4][key] = whole
+    writers[3][key] = frozenset(o for o, s in said if s is not False or record.cut or not whole - {o})
 
 
 def whole_writers(record: Record, log: str) -> frozenset[str]:
@@ -1026,11 +1051,10 @@ def whole_writers(record: Record, log: str) -> frozenset[str]:
     their log (KNOWN_ISSUES.md K42).  None without a dump."""
     if (writers := _writers()) is None:
         return frozenset()
-    known: dict[tuple[str, str, str], frozenset[str]] = writers[4]
-    key = (log, record.token, record.text)
+    known: dict[tuple[str, str, str, bool], frozenset[str]] = writers[4]
+    key = (log, record.token, record.text, record.cut)
     if key not in known:
-        known[key] = frozenset(
-            o for o, row in _found(writers, record, log) if trace.reads_whole(row, record.token, record.text) is True)
+        _read_writers(writers, record, log, key)
     return known[key]
 
 
@@ -1297,12 +1321,33 @@ class Seen:
 
 def seen(fn: Function, run: Run, mode: str) -> Seen:
     hits: dict[int, list[tuple[int, int, str]]] = {}
+    owner = ""
     for i, record in enumerate(run.records):
-        for row in fn.rows:
-            literal, source = row.matches(record, mode)
-            if literal:
-                hits.setdefault(row.line, []).append((i, literal, source))
+        found = [(row, *row.matches(record, mode)) for row in fn.rows]
+        found = [(row, literal, source) for row, literal, source in found if literal]
+        if found:
+            owner = owner or f"{fn.rel}::{pathcond.qualified_name(fn.node)}"
+        for row, literal, source in _whole_first(found, record, run.log.name, owner):
+            hits.setdefault(row.line, []).append((i, literal, source))
     return _seen(fn, run, mode, hits)
+
+
+def _whole_first(found: list[tuple[Row, int, str]], record: Record, log: str, owner: str) -> list[tuple[Row, int, str]]:
+    """I-5 (out/gm/qk-design.md, tmaeno's OK 2026-11-17 23:1x): of a function's rows that find *record* (``(row,
+    literal, source)``), one the map reads the record as whole (:meth:`Row.reads_whole`) keeps it, and one it reads as
+    not whole loses it where another row reads it whole -- of the function's own, or of another function of the dump
+    in the log (:func:`whole_writers`).  ActivatorThr's 863 ``{PandaID} skip since {scope}:{lfn} is missing`` is found
+    inside ``... is missing with rule``, which ActivatorWithRuleThr's 963 reads whole (MJ-assigned-late).  A row that
+    cannot say (None), a record the search cut, or one no row reads whole: as found.  K42's placing of a record
+    (:func:`_seen`), extended to its being found at all."""
+    if not found or record.cut:
+        return found
+    said = {id(row): row.reads_whole(record) for row, _, _ in found}
+    if False not in said.values():
+        return found
+    if True not in said.values() and not whole_writers(record, log) - {owner}:
+        return found
+    return [h for h in found if said[id(h[0])] is not False]
 
 
 def _seen(fn: Function, run: Run, mode: str, hits: dict[int, list[tuple[int, int, str]]]) -> Seen:

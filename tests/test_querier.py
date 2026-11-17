@@ -5486,7 +5486,8 @@ def test_a_candidate_is_read_on_its_pass_that_holds_the_key_at_the_window_and_th
     assert entries == [0] and kept == [["2026-01-01 13:00:00,000", "2026-01-01 13:00:00,000", 4]]
     # the loop's records the map reads as not the entry row's line neither cut nor count as unread
     assert cut == "cut at entry row 31 of finish: 1 pass(es)"
-    assert inside == "entry row 31 of finish is read whole at none of its 2 record(s) in the run: the run is not split"
+    # I-5: the loop's row reads "start 5" and "start 777" whole, so the entry row's "start" does not even find them
+    assert inside == "entry row 31 of finish is not in the run: the run is not split"
     # any of the statement's map rows that reads the record whole does; None only where none can say
     assert got["whole"] == [True, True, False, None, False]
     # a record the map cannot read whole does not cut: the two passes stay one, and the word says why
@@ -5551,7 +5552,7 @@ def test_sc_an_entry_record_read_only_literally_cuts_where_nothing_else_can_have
             for writers in ("alone", "shared"):
                 shared = rows_of(kill, "pandaserver/a.py::other") if writers == "shared" else []
                 R._WRITERS[:] = [dump, rows_of(kill, "pandaserver/a.py::kill") + rows_of(twin, "pandaserver/a.py::kill_twin")
-                                 + shared, {}, {}, {}, {}, {}]
+                                 + shared, {}, {}, {}, {}, {}, []]
                 first = run["blank"].records[0]
                 got[writers] = [R.entries(kill, run["blank"], "outside"), R.passes(kill, run["blank"], "outside")[1],
                                 sorted(R.line_writers(first, "w.log")), sorted(R.literal_writers(first, "w.log"))]
@@ -8957,7 +8958,8 @@ def test_a_row_shorter_than_min_proof_proves_only_as_its_whole_message_no_other_
             # configurator_read_panda_sites's comment names configurator_read_sites: both write its mark
             shared = "configurator_read_sites\\\\ <\\\\ .*?\\\\ >\\\\ "
             prints = lambda owner, prefix, pattern, logs=("j.log",), basis="logger": N(
-                owner=owner, statements=[N(rows=[N(prefix=prefix, pattern=pattern)], log_files=list(logs), log_files_basis=basis)])
+                owner=owner, statements=[N(rows=[N(prefix=prefix, pattern=pattern, capture="", prefix_hole="")],
+                                           log_files=list(logs), log_files_basis=basis)])
             base = [prints("pandaserver/m.py::M.activateJob", own, "start"),
                     prints("pandaserver/m.py::M.configurator_read_panda_sites", shared, "done"),
                     prints("pandaserver/n.py::N.configurator_read_sites", shared, "done"),
@@ -10796,9 +10798,9 @@ def test_a_line_its_logger_writes_with_no_mark_is_read_from_its_first_word_and_i
             owner = "p/f.py::Feeder.feed"
             mapdump._FRAGMENT[:] = [N(function_prints=[N(owner=owner, runs=[], statements=[
                 N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
-                  rows=[N(pattern=bare, prefix=None)]),
+                  rows=[N(pattern=bare, prefix=None, capture="", prefix_hole="")]),
                 N(log_files_basis="logger", runs=[], handed_runs=[], log_files=["panda-x.log"],
-                  rows=[N(pattern=marked, prefix="<jediTaskID={} gshare={}>")]),
+                  rows=[N(pattern=marked, prefix="<jediTaskID={} gshare={}>", capture="", prefix_hole="")]),
             ])])]
             runs = runs_for(read_log("panda-x.log"), "5")
             # as a recorded search reads them: on a machine, with ends of what was searched for each mark
@@ -17931,7 +17933,9 @@ def test_p35_the_arms_of_a_write_statement_are_read_off_its_printed_bind_map_in_
                 fn = R.function("pandaserver/c.py", func, lines)
                 for row in fn.rows:
                     if row.line == prints[func]:
-                        row.map_rows = [N(holes=[N(entries=entries[func], entries_open=[])])]
+                        # no capture: the map cannot say the row reads a record whole (I-5 keeps its hits)
+                        row.map_rows = [N(holes=[N(entries=entries[func], entries_open=[])], capture="", prefix="",
+                                          prefix_hole="")]
                 wp = N(owner=f"pandaserver/c.py::C.{func}", statement=prints[func] + 1, arms={S: arms[func]},
                        binds=[N(column=S, bind=":status")], printed_by=[N(line=prints[func], lead="", gap="")])
                 W.write_prints = lambda owner: [wp] if owner.endswith("::" + func) else []
@@ -18859,6 +18863,10 @@ def test_i_a_number_marked_run_holds_no_word_led_row_and_a_list_filled_by_turns_
                 "appended": WR.turn_left_before_append(seen({12, 16}), 19, "outside"),
                 "no_row_of_the_turn": WR.turn_left_before_append(seen(set()), 19, "outside"),
             }
+            # I-2's premise: a pass handing the key's element prints a row of it (16 on every way to the append)
+            got["handing"] = {"one": WR.handing_rows(fn, [19]), "and_a_line_handing_no_list": WR.handing_rows(fn, [19, 18])}
+            mapdump._FRAGMENT[:] = [N(parameter_froms=[])]
+            got["handing"]["no_way"] = WR.handing_rows(fn, [19])
             print(json.dumps(got))
             """,
         )
@@ -18877,6 +18885,127 @@ def test_i_a_number_marked_run_holds_no_word_led_row_and_a_list_filled_by_turns_
         "at 19 hands no tmpJob of the key's turn (D-4)"), got
     # the turn printed the row before the append, or no row of the turn is in the run: nothing said
     assert got["left"]["appended"] == "" and got["left"]["no_row_of_the_turn"] == "", got
+    # I-2: the row every handing prints; none where a line hands no list filled so, or the map reads no such way
+    assert got["handing"] == {"one": [16], "and_a_line_handing_no_list": [], "no_way": []}, got
+
+
+def test_i_a_row_reading_a_record_as_not_whole_loses_it_where_another_row_reads_it_whole(tmp_path):
+    """I-5: ActivatorThr's 863 ``... is missing`` is found inside ActivatorWithRuleThr's 963 ``... is missing with
+    rule``; the map reads the record whole as 963's, so 863 does not find it.  A row reading it whole keeps it, one
+    that cannot say keeps it, and so does every row where no row reads it whole or the search cut it."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rows as R
+
+        o = "pandaserver/dm.py::main.ActivatorThr.run"
+        rec = N(cut=False, token="7425194334", text="skip since a:b is missing with rule")
+
+        def row(said):
+            return N(reads_whole=lambda record, s=said: s)
+
+        def lit(found, record=rec, writers=("pandaserver/dm.py::main.ActivatorWithRuleThr.run",)):
+            R.whole_writers = lambda record, log: frozenset(writers)
+            return [h[1] for h in R._whole_first(found, record, "panda-datasetManager.log", o)]
+
+        no, yes, cannot = row(False), row(True), row(None)
+        print(json.dumps({
+            "another_function_whole": lit([(no, 20, "map")]),
+            "a_sibling_whole": lit([(no, 20, "map"), (yes, 30, "map")], writers=()),
+            "cannot_say": lit([(no, 20, "map"), (cannot, 25, "map")]),
+            "none_whole": lit([(no, 20, "map")], writers=(o,)),
+            "cut": lit([(no, 20, "map")], record=N(cut=True, token=rec.token, text=rec.text)),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"another_function_whole": [], "a_sibling_whole": [30], "cannot_say": [25], "none_whole": [20],
+                   "cut": [20]}, got
+
+
+def test_i_the_writers_of_a_line_read_a_print_beginning_with_a_hole_as_the_line_was_written(tmp_path):
+    """I-5 on the writers' table: a logger with no mark writes ``f"{PandaID} skip since ..."`` with the value first,
+    the parser takes it for the token, and the map's pattern begins at the blank after it (K53).  The table read the
+    message alone, so ActivatorWithRuleThr's 963 record had no writer, and I-5 kept ActivatorThr's 863 hit on it."""
+    stamp = "2026-01-01 00:00:0{},000 panda.log.X: DEBUG    {}\n"
+    (tmp_path / "x.log").write_text("".join(stamp.format(i, m) for i, m in enumerate((
+        "777 skip since s:f1 is missing with rule", "777 skip since s:f1 is missing",
+        "< jediTaskID=1 > 777 skip since s:f1 is missing"))))
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.codemap.models import PrintRow
+        from bamboo.querier import mapdump, rows as R
+        from bamboo.querier.records import read_log
+
+        log = read_log("x.log")
+        head = "\\\\ skip\\\\ since\\\\ [^:]*:[^\\\\ ]*\\\\ is\\\\ missing"
+        cap = "([^\\\\ ]*)\\\\ skip\\\\ since\\\\ ([^:]*):([^\\\\ ]*)\\\\ is\\\\ missing"
+        text = "f'{tmpJob.PandaID} skip since {tmpFile.scope}:{tmpFile.lfn} is missing"
+
+        def prints(owner, tail, prefix=""):
+            row = PrintRow(text=text + tail + "'", pattern=head + tail.replace(" ", "\\\\ "),
+                           capture=cap + tail.replace(" ", "\\\\ "), prefix=prefix)
+            return N(owner=owner, statements=[N(rows=[row], log_files=[log.name], log_files_basis="logger")])
+
+        plain, rule = "pandaserver/dm.py::main.ActivatorThr.run", "pandaserver/dm.py::main.ActivatorWithRuleThr.run"
+        fragment = N(function_prints=[prints(plain, ""), prints(rule, " with rule")])
+        mapdump.fragment = lambda: fragment
+        from dataclasses import replace
+
+        got = {}
+        records = dict(zip(("with_rule", "plain", "marked"), log.records))
+        records["with_rule_cut"] = replace(records["with_rule"], cut=True)
+        for name, record in records.items():
+            got[name] = [record.token, sorted(o.rsplit(".", 2)[1] for o in R.line_writers(record, log.name)),
+                         sorted(o.rsplit(".", 2)[1] for o in R.whole_writers(record, log.name))]
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        # the value is the token; both rows find the line, the one with the rule reads it whole, so the one without
+        # it, which reads it as not whole, has not printed it
+        "with_rule": ["777", ["ActivatorWithRuleThr"], ["ActivatorWithRuleThr"]],
+        "plain": ["777", ["ActivatorThr"], ["ActivatorThr"]],
+        # a line holding the text after a mark: found as before (the message holds the pattern); no row reads it
+        # whole, so the one finding it stays a writer
+        "marked": ["< jediTaskID=1 >", ["ActivatorThr"], []],
+        # a record the search cut: as found
+        "with_rule_cut": ["777", ["ActivatorThr", "ActivatorWithRuleThr"], ["ActivatorWithRuleThr"]],
+    }, got
+
+
+def test_i_a_mover_whose_writes_take_the_row_by_its_parameters_runs_on_it_only_as_its_callers_hand_it(tmp_path):
+    """I-2 (D-4b): a stuck value's mover whose every write of the subject at its arms takes the row by a key the map
+    draws from its parameters alone runs on the row only as a caller hands it -- activateJob's by ``job.PandaID`` --,
+    so after its last pass its callers' passes are read; a write keyed by the rows of its own selection, or by a
+    field, is not."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier.rerun import taken_as_handed
+
+        o, s = "pandaserver/js.py::activateJob", "JobSpec.jobStatus"
+
+        def kf(*kinds, lines=(72,), owner=o, via=()):
+            return N(owner=owner, writes={s: list(lines)}, sources=[N(kind=k, via=[]) for k in kinds] + [
+                N(kind="rows", via=list(via))] * bool(via))
+
+        print(json.dumps({
+            "parameter": taken_as_handed([kf("parameter")], o, s, {72}),
+            "and_a_callers_rows": taken_as_handed([kf("parameter", via=["pandaserver/tb.py:982"])], o, s, {72}),
+            "a_callers_rows_alone": taken_as_handed([kf(via=["pandaserver/tb.py:982"])], o, s, {72}),
+            "and_rows": taken_as_handed([kf("parameter"), kf("rows", lines=(72, 80))], o, s, {72}),
+            "self_field": taken_as_handed([kf("self_field")], o, s, {72}),
+            "no_source": taken_as_handed([kf()], o, s, {72}),
+            "another_arm": taken_as_handed([kf("rows", lines=(80,)), kf("parameter")], o, s, {72}),
+            "another_owner": taken_as_handed([kf("parameter", owner="pandaserver/js.py::resetJob")], o, s, {72}),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    # a source through a call route is where a caller got what it hands (activateJob's 113: peekJob's rows via
+    # TaskBuffer.py:982); the owner's own sources decide
+    assert got == {"parameter": True, "and_a_callers_rows": True, "a_callers_rows_alone": False, "and_rows": False,
+                   "self_field": False, "no_source": False, "another_arm": True, "another_owner": False}, got
 
 
 def test_i_an_element_of_an_objects_field_is_read_in_what_its_construction_handed_its_init(tmp_path):
