@@ -1170,3 +1170,74 @@ def test_a_spec_column_is_read_through_its_descriptor_and_one_of_a_value_changes
 
     assert found("hand") == [("inner", ".jobParameters")]
     assert found("hand_bound") == []
+
+
+VALUE_PARAMETERS = """\
+class Holder:
+    def hand(self, job):
+        take(job.PandaID)
+        keep(job.PandaID)
+        take_whole(job)
+
+
+class JobSpec:
+    def handOn(self):
+        take(self.task)
+
+    def keepOn(self):
+        keep(self.task)
+
+
+def take(x: int):
+    x.PandaID = 0
+
+
+def keep(x):
+    x.PandaID = 0
+
+
+def take_whole(x: "int | None"):
+    x.PandaID = 0
+
+
+def read(job: JobSpec):
+    job.handOn()
+    job.keepOn()
+"""
+
+
+def test_what_a_parameter_declared_a_value_is_handed_the_definition_changes_nothing_inside(tmp_path: Path) -> None:
+    """``take(x: int)`` is handed ``job.PandaID`` of a ``job`` whose class no declaration says -- ``Watcher.run``'s
+    ``getWorkersForJob(job.PandaID)``, its job ``peekJobs(...)[0]`` of a ``list[Any]`` --: a value no change in place
+    touches, whatever the argument is declared; so is the job handed whole to a parameter declared one.  ``keep(x)``,
+    declaring nothing, may change what it is handed.  Read for an attribute's change too: ``take(self.task)`` sets no
+    ``PandaID`` of the task, ``keep(self.task)`` does."""
+    root = tmp_path / PACKAGE
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("")
+    (root / "values.py").write_text(VALUE_PARAMETERS)
+    tree = ast.parse(VALUE_PARAMETERS)
+    pathcond.attach_parents(tree)
+    file = f"{PACKAGE}/values.py"
+    module = SourceModule(
+        package=PACKAGE, rel_path=file, tree=tree, source=VALUE_PARAMETERS, blob_sha=blob_sha(VALUE_PARAMETERS)
+    )
+    calls = sqlwrite.corpus_calls([module], {PACKAGE: root})
+    assert calls is not None
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    line = {text.strip(): number for number, text in enumerate(VALUE_PARAMETERS.splitlines(), 1)}
+    hand = functions["hand"]
+    assert [
+        (change.kind, change.key, change.line)
+        for change in changes.object_changes(calls, file, hand, "job", hand.args, None)
+    ] == [("inner", ".PandaID", line["keep(job.PandaID)"])]
+
+    read = functions["read"]
+    made = {ast.unparse(one.value): one.value for one in read.body if isinstance(one, ast.Expr)}
+
+    def asked(text: str) -> object:
+        change = changes.may_change(calls, file, read, made[text], ast.parse("job.task.PandaID", mode="eval").body)
+        return None if change is None else (change.name, change.why)
+
+    assert asked("job.handOn()") is None
+    assert asked("job.keepOn()") == ("PandaID", changes.STORED)

@@ -577,7 +577,7 @@ class _Reading:
             given = [
                 (name, rest)
                 for name, value in parameters.items()
-                if value is not None and (rest := held_by(value))
+                if value is not None and (rest := held_by(value)) and not self._takes_a_value(target, name)
             ]
             if sum(
                 1
@@ -1326,15 +1326,17 @@ class _Reading:
             except Exception:  # noqa: BLE001
                 found += unread("not bound")
                 continue
+            # A parameter declared a value no change in place can touch -- ``getWorkersForJob(self, PandaID: int)``
+            # -- is changed nothing inside by the definition, whatever the argument is declared (:meth:`_takes_a_value`).
             whole = {
                 name
                 for name, one in parameters.items()
-                if one is not None and _is_object(one, holds)
+                if one is not None and _is_object(one, holds) and not self._takes_a_value(target, name)
             }
             pieces = [
                 (name, one)
                 for name, one in parameters.items()
-                if one is not None and _part_of(one, holds)
+                if one is not None and _part_of(one, holds) and not self._takes_a_value(target, name)
             ]
             # A static or class method called on it, or a method read off its class, is not handed it as its
             # first parameter: what it is handed is bound above.  Nor is a class's __init__ a call builds an object
@@ -1377,6 +1379,17 @@ class _Reading:
             return False
         declared = self.types._annotation_of(file, func, part)
         return declared is not None and self.types.states_immutable(*declared)
+
+    def _takes_a_value(self, target: Target, parameter: str) -> bool:
+        """Whether *target* declares its *parameter* a value no change in place can touch -- ``getWorkersForJob(self,
+        PandaID: int)`` in ``Watcher.run``, handed ``job.PandaID`` of a ``job`` whose class no declaration says --
+        (:meth:`Types.states_immutable`): what the parameter is handed, the definition changes nothing inside and
+        sets no attribute of, on the premise that a declaration holds.  A ``*args`` or ``**kwargs`` is not read."""
+        args = getattr(target.func, "args", None)
+        for one in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args is not None else ():
+            if one.arg == parameter:
+                return one.annotation is not None and self.types.states_immutable(target.file, one.annotation)
+        return False
 
     def _driver_changes(
         self, file: str, func: ast.AST, call: ast.Call, handed: list, parts: list, holds
