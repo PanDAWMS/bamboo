@@ -15902,6 +15902,83 @@ def test_a_write_whose_statement_s_guard_its_pass_read_false_did_not_run_and_the
     assert got["two"] is None and got["one statement"] is None, got
 
 
+def test_a_count_print_after_the_write_naming_the_row_is_a_write_of_it(tmp_path):
+    """Bundle A, A-3 through the map's part 1 (Branch.after_prints): a record of a count print after the arm's write
+    (``rows`` one or some: it prints only where the run changed rows) whose hole holds the written row's key is a write
+    of that row its statement ran -- reactivatePendingTasks_JEDI's ``jediTaskID={} action=reactivate`` at 4735 after its
+    sqlTU arm at 4728, NT-registered-late's stay begun on aipanda088 at 03:06:37,930.  Another print after the write is
+    not such, and none of them says a write absent: the window is not made whole by them."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime as D
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap.models import MustName
+
+            RR.R.function = lambda rel, name, lines=(), within=(): N(node=None, row_at=lambda stmt: N(line=stmt.line))
+            RR.R.statement_at = lambda node, line: N(line=line)
+            RR.R.seen = lambda fn, run, mode: N(hits={4735: [(i, "action=reactivate", None) for i in range(len(run.records))]})
+            RR._hole_holds = lambda row, record, name, key: f"jediTaskID={key} " in record.text
+            RR.every_log_asked = lambda *a: {"held": True}
+            RR.prints_naming = lambda *a: {"held": True}
+            RR.of_mover = lambda run, owner: False
+            calls = []
+            RR.R.entries = lambda fn, run, mode: list(calls)
+            key = "53633566"
+            run = N(records=[N(stamp="2026-11-15 03:06:37,930", machine="aipanda088.cern.ch",
+                               text=f"#ATM #KV jediTaskID={key} action=reactivate", token="reactivatePendingTasks_JEDI < vo=atlas >"),
+                             N(stamp="2026-11-15 03:06:37,950", machine="aipanda088.cern.ch",
+                               text="#ATM #KV jediTaskID=53633567 action=reactivate", token="reactivatePendingTasks_JEDI < vo=atlas >"),
+                             N(stamp="2026-11-15 03:06:37,960", machine="aipanda088.cern.ch",
+                               text=f"#ATM #KV jediTaskID={key} action=reactivate", token="reactivatePendingTasks_JEDI < vo=atlas >")])
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.mode = "outside"
+            r.args = N(key=key)
+            r.logs = N(names=lambda files: list(files))
+            r.files_of = lambda owner, files, lines: ["panda-JediDBProxy.log"]
+            r._ask = lambda key, names, asking, owners=None, whole=False, quiet=False: ({"panda-JediDBProxy.log": [run]}, [], {})
+            r._keep_unanswered = lambda missed: None
+            r._searched_whole = lambda *a: {"held": True}
+            j = N(owner="t.py::reactivatePendingTasks_JEDI", log_files=["panda-JediDBProxy.log"])
+            name = MustName(line=4735, expression="jediTaskID", column="JediTaskSpec.jediTaskID", row="written", part="message")
+            b = N(line=4728, must_names=[], after_prints=[N(line=4735, rows="some", names=[name], every_way=False)])
+            keys = {"JediTaskSpec.jediTaskID"}
+            window = (D.datetime(2026, 11, 15, 2, 56, 37), D.datetime(2026, 11, 15, 3, 6, 38))
+            found, whole = RR.Rerun._column_writes(r, j, b, keys, window, [])
+            got = {"count": [[str(f[0]), f[1], f[2], f[3]] for f in found], "whole": whole,
+                   "names": [n.line for n in RR._counted_names(b, keys)]}
+            # a print after the write that is no count print says nothing of the rows
+            b2 = N(line=4728, must_names=[], after_prints=[N(line=4735, rows="", names=[name], every_way=True)])
+            got["other"] = list(RR.Rerun._column_writes(r, j, b2, keys, window, []))
+            # outside the window: no write read, and still not whole
+            late = (D.datetime(2026, 11, 15, 3, 10), D.datetime(2026, 11, 15, 3, 20))
+            got["late"] = list(RR.Rerun._column_writes(r, j, b, keys, late, []))
+            # a map before after_prints: none
+            got["none"] = RR._counted_names(N(line=4728, must_names=[]), keys)
+            # the records of the row in two calls of the function: two writes
+            calls.append(2)
+            got["calls"] = [str(f[0]) for f in RR.Rerun._column_writes(r, j, b, keys, window, [])[0]]
+            calls.clear()
+            # a must print naming the row: its count prints confirm its write, they are not read as another
+            must = MustName(line=4700, expression="jediTaskID", column="JediTaskSpec.jediTaskID", row="written", part="message")
+            b3 = N(line=4728, must_names=[must], after_prints=b.after_prints)
+            got["must"] = RR.Rerun._column_writes(r, j, b3, keys, window, [])[0]
+            got["ran"] = RR.TL.RAN
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["names"] == [4735], got
+    assert got["count"] == [["2026-11-15 03:06:37.930000", "aipanda088.cern.ch", "reactivatePendingTasks_JEDI:4735", got["ran"]]], got
+    assert got["whole"] is False, got
+    assert got["other"] == [[], False] and got["late"] == [[], False] and got["none"] == [], got
+    assert got["calls"] == ["2026-11-15 03:06:37.930000", "2026-11-15 03:06:37.960000"] and got["must"] == [], got
+
+
 def test_stay_value_keeps_an_arm_whose_statement_table_is_not_read(tmp_path):
     """M3(a)-1: a statement whose table the map does not read (``''``: updateTask_JEDI's UPDATE built from
     bindUpdateChangesExpression) is not known to write another table, so its arm may write the column in the stay; one
@@ -16578,6 +16655,7 @@ def test_cap_take_reads_the_first_selection_below_the_cap_after_the_turn(tmp_pat
                       *cycle("a", "<s1>", "00:12:00", [3]),                # another process's width: another label's
                       *cycle("a", "<a2>", "00:15:00", [968, 0, 0, 0])],    # below the cap: the take
                 "b": [*cycle("b", "<b1>", "00:12:30", [0, 0, 0, 0])],      # none: beside one that took the same rows
+                "c": [*cycle("c", "<s0>", "00:11:30", [2])],               # width 1 below the cap, not taking it
             }
             got = {"caps": [AG.cap_rows(["< 1000"]), AG.cap_rows(["<= 50"]), AG.cap_rows(["< nTasks"]), AG.cap_rows([])]}
             found, why = AG.cap_take(picks, "a", "2026-01-01 00:15:40,000", turn, 999, "")
@@ -16598,17 +16676,31 @@ def test_cap_take_reads_the_first_selection_below_the_cap_after_the_turn(tmp_pat
                            P("a", "<a2>", "managed", "", "2026-01-01 00:15:00,000", "968")]}
             n, _ = AG.cap_take(named, "a", "2026-01-01 00:15:40,000", turn, 999, "managed")
             got["named"] = [n.take.mark, [q.mark for q in n.full], n.place, list(n.others)]
+            # C-3 (b): with nothing ruling width 1 out, either process's selection may have taken it: not told
+            both = {k: v for k, v in picks.items() if k != "c"}
+            got["both"] = AG.cap_take(both, "a", "2026-01-01 00:15:40,000", turn, 999, "")[1]
+            # one process alone on the machine: read as before, no width weighed
+            alone = {"a": [q for q in picks["a"] if q.mark != "<s1>"], "b": picks["b"]}
+            got["alone"] = AG.cap_take(alone, "a", "2026-01-01 00:15:40,000", turn, 999, "")[0].take.mark
             print(json.dumps(got))
             """,
         )
     )
     got = json.loads(out.splitlines()[-1])
     assert got["caps"] == [999, 50, None, None], got
-    assert got["take"] == ["<a2>", "968", ["<a1>"], ["<b1>"], 0, 4, ["<s1>"]], got
-    assert got["odd"] == "b's selection at 00:12:30,000 returned 12 row(s), fewer than 999, and did not take it", got
-    assert got["two"] == "the take's cycle <a2> returned rows at 2 of its 4 selections", got
-    assert got["full"].startswith("the last selection on a before the pass returned 999 row(s)"), got
+    # width 1 is ruled out by c's selection, so width 4's take is read
+    assert got["take"] == ["<a2>", "968", ["<a1>"], ["<b1>"], 0, 4, ["<s1>", "<s0>"]], got
+    ruled = "cycles of 1 selection(s) are not: c's selection at 00:11:30,000 returned 2 row(s), fewer than 999, and did not take it"
+    # both widths ruled out
+    assert got["odd"] == ("no width of the cycles on a that returned rows is the row's (cycles of 4 selection(s) are not: "
+                          "b's selection at 00:12:30,000 returned 12 row(s), fewer than 999, and did not take it; " + ruled + ")"), got
+    assert got["two"] == f"cycles of 4 selection(s) are the row's ({ruled}): the take's cycle <a2> returned rows at 2 of its 4 selections", got
+    assert got["full"] == (f"cycles of 4 selection(s) are the row's ({ruled}): the last selection of them on a before the pass "
+                           "returned 999 row(s), not fewer than 999"), got
     assert got["named"] == ["<a2>", ["<a1>"], -1, []], got
+    assert got["both"] == ("cycles of 4 and 1 selection(s) on a returned rows before the pass, and none of them is shown not "
+                           "to be the row's: which one's selection took it is not told"), got
+    assert got["alone"] == "<a2>", got
 
 
 def test_waker_readers_take_a_movers_key_from_a_table_its_wakers_write(tmp_path):

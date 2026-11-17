@@ -492,7 +492,15 @@ def cap_take(picks: dict[str, list[Pick]], machine: str, first: str, turn: datet
     statement returns at most *cap* rows and began to return the row at *turn*: the machine's last selection of the
     row's label before *first* that returned some rows, fewer than *cap*; every one of the label's from *turn* to it, on
     any machine, returned *cap* rows or none.  With *label* the selections are the label's; without, the row's place in
-    a cycle is the one place the take's cycle returned rows at.  ``(CapTake, "")``, or None with why not."""
+    a cycle is the one place the take's cycle returned rows at.  ``(CapTake, "")``, or None with why not.
+
+    Without *label*, where the machine's selections that returned rows come from cycles of more than one width (more
+    than one process selects there), the take is not the last of them all (bundle C, C-3 (b); out/gm/qk-design.md,
+    tmaeno's choice 2026-11-17): each width is read in turn as the row's, the take being the last of that width's, and
+    a width with a selection of the row's place below the cap that did not take the row is not the row's.  Where one
+    width is left it is read; where none or more than one, the take is not told.  NT-registered-late's aipanda081: the
+    1-label process's cycles are not the row's (aipanda086's one-row selection did not take it), and the 4-label
+    process's last selection before the pass returned the cap, 999."""
     cycles: dict[tuple[str, str], list[Pick]] = {}
     for qs in picks.values():
         for q in qs:
@@ -503,16 +511,42 @@ def cap_take(picks: dict[str, list[Pick]], machine: str, first: str, turn: datet
     def began(q: Pick) -> datetime.datetime:
         return when(q.after or q.at)
 
+    def width_of(q: Pick) -> int:
+        return len(cycles[(q.machine, q.mark)])
+
     hi = when(first)
     took = [q for q in picks.get(machine, []) if (not label or q.label == label) and began(q) >= turn
             and when(q.at) <= hi and (_count(q) or 0) > 0]
     if not took:
         return None, f"no selection on {machine.split('.')[0]} from {turn:%H:%M:%S} to {first[11:19]} returned rows"
-    take = took[-1]
+    widths = [] if label else sorted({width_of(q) for q in took}, reverse=True)
+    if len(widths) <= 1:
+        found, why, _ = _cap_read(took[-1], picks, cycles, machine, turn, cap, label, began, "")
+        return found, why
+    reads = {w: _cap_read([q for q in took if width_of(q) == w][-1], picks, cycles, machine, turn, cap, label, began,
+                          " of them") for w in widths}
+    left = [w for w in widths if not reads[w][2]]
+    ruled = "; ".join(f"cycles of {w} selection(s) are not: {reads[w][1]}" for w in widths if w not in left)
+    if len(left) == 1:
+        w = left[0]
+        found, why, _ = reads[w]
+        return found, ("" if found is not None else f"cycles of {w} selection(s) are the row's ({ruled}): {why}")
+    if not left:
+        return None, f"no width of the cycles on {machine.split('.')[0]} that returned rows is the row's ({ruled})"
+    return None, (f"cycles of {' and '.join(str(w) for w in left)} selection(s) on {machine.split('.')[0]} returned rows "
+                  "before the pass, and none of them is shown not to be the row's: which one's selection took it is "
+                  "not told" + (f" ({ruled})" if ruled else ""))
+
+
+def _cap_read(take: Pick, picks: dict[str, list[Pick]], cycles: dict[tuple[str, str], list[Pick]], machine: str,
+              turn: datetime.datetime, cap: int, label: str, began, of: str) -> tuple[CapTake | None, str, bool]:
+    """:func:`cap_take` read on *take* as the last selection of the row's before the pass: ``(CapTake or None, why
+    not, whether a selection of the row's place below the cap did not take it)`` -- the last only rules the place out
+    as the row's.  *of*: " of them" where *take* is read as one width's among others."""
     n = _count(take)
     if n is None or n >= cap:
-        return None, (f"the last selection on {machine.split('.')[0]} before the pass returned {take.count} row(s), "
-                      f"not fewer than {cap}")
+        return None, (f"the last selection{of} on {machine.split('.')[0]} before the pass returned {take.count} row(s), "
+                      f"not fewer than {cap}"), False
     place, width = -1, 0
     others: tuple[Pick, ...] = ()
     if label:
@@ -521,7 +555,7 @@ def cap_take(picks: dict[str, list[Pick]], machine: str, first: str, turn: datet
         cycle = cycles[(take.machine, take.mark)]
         rows_at = [i for i, q in enumerate(cycle) if (_count(q) or 0) > 0]
         if len(rows_at) != 1:
-            return None, f"the take's cycle {take.mark} returned rows at {len(rows_at)} of its {len(cycle)} selections"
+            return None, f"the take's cycle {take.mark} returned rows at {len(rows_at)} of its {len(cycle)} selections", False
         place, width = rows_at[0], len(cycle)
         mine = [qs[place] for qs in cycles.values() if len(qs) == width]
         others = tuple(q for qs in cycles.values() if len(qs) != width for q in qs
@@ -531,9 +565,9 @@ def cap_take(picks: dict[str, list[Pick]], machine: str, first: str, turn: datet
     if odd:
         q = odd[0]
         return None, (f"{q.machine.split('.')[0]}'s selection at {q.at[11:23]} returned {q.count} row(s), fewer than "
-                      f"{cap}, and did not take it")
+                      f"{cap}, and did not take it"), True
     return CapTake(take, cap, tuple(q for q in before if _count(q) == cap), tuple(q for q in before if _count(q) == 0),
-                   place, width, others), ""
+                   place, width, others), "", False
 
 
 def _defs_named(name: str) -> list[str]:

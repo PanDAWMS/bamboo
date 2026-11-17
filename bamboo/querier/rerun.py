@@ -541,6 +541,17 @@ def _landed(fn, sn, i: int, line: int, b) -> bool | None:
     return first[1] in ("one", "some")
 
 
+def _counted_names(b, keys: set[str]) -> list:
+    """The holes of the count prints after the arm *b*'s write (the map's ``Branch.after_prints`` whose ``rows`` is
+    "one" or "some": the line prints only where the run changed rows) that hold the written row's key (``MustName.row``
+    ``written``, its column among *keys*).  A record of one holding the key says the statement changed that row:
+    reactivatePendingTasks_JEDI's ``jediTaskID={} action=reactivate`` at 4735 after its ``sqlTU`` arm at 4728, under
+    ``if tmpRow > 0:``.  Not every way that changes a row need print it, so its absence says nothing.  Empty where the
+    dump reads no after prints (a map before them)."""
+    return [n for p in getattr(b, "after_prints", None) or [] if getattr(p, "rows", "") in ("one", "some")
+            for n in p.names if n.row == MUST_ROW_WRITTEN and n.column in keys]
+
+
 #: a write whose statement's printed bind map leaves its column out: an object's ``valuesMap(onlyChanged=True)`` holds
 #: only the attributes changed, so the statement ran without writing that column (:func:`_printed_write`)
 UNWRITTEN = object()
@@ -8044,11 +8055,11 @@ class Rerun:
                          "no label in what was searched: one may be the row's")
                 return False
             if not AG.one_process(chain, spans.get(m, {})):
-                # C-3 (bundle C, W3; out/gm/qk-design.md, tmaeno's OK 2026-11-16 23:06): with no label on the lines, the
-                # cap's take among more than one process's selections is not told either -- NT-registered-late's
-                # aipanda081, where TaskRefiner's 4-label process took the row with a full 999 and its 1-label one
-                # returned 1 row just before the pass
-                if label and self._cap_take(c, sel, picks, label, moving, up):
+                # C-3 (bundle C, W3; out/gm/qk-design.md, tmaeno's choice (b) 2026-11-17): with no label on the lines,
+                # agents.cap_take reads each process's width in turn as the row's and keeps the one the cap does not
+                # contradict -- NT-registered-late's aipanda081, where TaskRefiner's 4-label process took the row with a
+                # full 999 and its 1-label one returned 1 row just before the pass
+                if self._cap_take(c, sel, picks, label, moving, up):
                     return True
                 self.say(f"(C) not read: {sel.agent_name}'s cycles{' for ' + label if label else ''} on {m.split('.')[0]} overlap: "
                          "more than one process selects there, and which one took the row is not told by its lines")
@@ -10239,11 +10250,20 @@ class Rerun:
 
         Bundle A, A-1 (out/gm/qk-design.md, tmaeno's OK 2026-11-16): a write whose statement's guard the pass holding
         the record reads false on the values it printed did not run there (:meth:`_not_run_in_pass`) -- not a write,
-        though its run was read, each put in *not_run_out* ``(at, "func:line", machine, the guard)``."""
+        though its run was read, each put in *not_run_out* ``(at, "func:line", machine, the guard)``.
+
+        Bundle A, A-3's reading through the map's part 1 (the count prints' key holes, tmaeno's OK to ask for it
+        2026-11-16 20:49): a record of a count print after the write that holds the key (:func:`_counted_names`) is a
+        write of the row the statement ran (``timeline.RAN``) -- NT-registered-late's reactivatePendingTasks_JEDI:4728
+        on aipanda088 at 03:06:37,930.  Such prints say nothing of a write absent, so they do not make the window whole;
+        they are read only where no must print names the row (there they confirm its write, :func:`_landed`), and a
+        call's records of them are one write, at the first (unlockTasks_JEDI's 919, once for each dataset of the task)."""
         key = self.args.key
         shown = [n for n in b.must_names or [] if n.row == MUST_ROW_WRITTEN and n.column in keys]
         named = [n for n in b.must_names or [] if n.row == "" and n.part == MUST_PART_BIND and n.column in keys]
-        names = shown + named
+        # where a must print names the row, its count prints confirm that write (:func:`_landed`), not another
+        counted = [] if shown else _counted_names(b, keys)
+        names = shown + named + counted
         rel, _, func = _bare(j.owner).partition("::")
         to_hand = self.logs.names(self.files_of(j.owner, list(j.log_files or []), [b.line]))
         if not names or not to_hand:
@@ -10257,6 +10277,9 @@ class Rerun:
             missed_out += missed
         found: list[tuple[datetime.datetime, str, str, str, tuple]] = []
         unwritten = False  # a run read whose statement's printed map shows it did not write the column
+        # a count print's records of the row in one call of the function are one write, at the first: unlockTasks_JEDI
+        # prints 919 for each dataset of the task it unlocked once
+        by_call: dict[tuple[int, int], tuple[datetime.datetime, str, str, str, tuple]] = {}
         for line in sorted({n.line for n in names}):
             try:
                 fn = R.function(rel, func, within=[line])
@@ -10275,6 +10298,13 @@ class Rerun:
                         if not window[0] <= at <= window[1] or any(
                                 other != row.line and any(k == i and lit >= literal for k, lit, _ in hs)
                                 for other, hs in sn.hits.items()):
+                            continue
+                        if any(n.line == line and _hole_holds(row, record, n, key) for n in counted):
+                            # the statement's count print names the row: it changed it there (bundle A's remaining
+                            # reader, the map's part 1)
+                            call = (id(run), sum(1 for e in R.entries(fn, run, self.mode) if e <= i))
+                            if call not in by_call or at < by_call[call][0]:
+                                by_call[call] = (at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.RAN, ())
                             continue
                         held = [n for n in shown if n.line == line and _hole_holds(row, record, n, key)]
                         if held:
@@ -10305,6 +10335,7 @@ class Rerun:
                                     not_run_out.append((at, SV._name(j.owner, b.line), (record.machine or "").split(".")[0], guard))
                                 continue
                             found.append((at, record.machine or "", f"{func.rpartition('.')[2]}:{line}", TL.REACHED, ()))
+        found += by_call.values()
         premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),
                     "logs": every_log_asked(j.owner, [b.line], to_hand),
                     "prints": prints_naming(writers, j.owner, [b.line], keys)}
