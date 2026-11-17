@@ -545,10 +545,16 @@ def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") ->
     243 ``attemptNr={} nUp={} old={} new={}`` after its UPDATE at 241, the heartbeat's modificationTime arm at 238.
 
     Each count is of one statement's run, the line it runs on its ``run`` (the map's M-E4): it is read where the arm's
-    write runs at that one statement (:func:`_branch_runs` of *owner*'s *subject*), not where it runs at several or at
-    another -- prepareTasksToBeFinished_JEDI's lockedBy arm at 3839 with 3844 writes at sqlTU's run at 4075 and
-    sqlTUU's at 4090, and 4092 counts sqlTUU's only -- None.  A record made before M-E4 (``run`` 0) does not say
-    which run it counts: no count is read for an arm with ``other_lines`` there, as before it."""
+    write runs at one of the arm's statements (:func:`_branch_runs` of *owner*'s *subject*), not at another.  Where the
+    arm's write runs at several, each statement writes the arm's outcome as the map spells it, the same value where
+    that is a literal (the map, 2026-11-17 21:5x: a branch is one outcome and path condition, its statements' writes
+    merged into it): for such an arm a count of 1 or more at any of its statements' runs says the value was written,
+    and 0 says it was not only where every one of them is counted, each 0 -- prepareTasksToBeFinished_JEDI's lockedBy
+    arm at 3839 with 3844 (NULL) writes at sqlTU's run at 4075 and sqlTUU's at 4090; 4092 counts sqlTUU's only, so
+    its 1 says NULL was written, its 0 nothing.  An arm whose outcome is no literal (a bind, a name: the statements may
+    write different values under one spelling) is read at one statement only (tmaeno's "add" 2026-11-17 21:1x,
+    out/gm/qk-design.md).  A record made before M-E4 (``run`` 0) does not say which run it counts: no count is read
+    for an arm with ``other_lines`` there, as before it."""
     counts = [*(getattr(b, "count_prints", None) or []), *(getattr(b, "printed_counts", None) or [])]
     if not counts:
         return None, 0
@@ -558,10 +564,17 @@ def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") ->
         runs = None
     else:
         runs = _branch_runs(owner, subject, b)
-        if len(runs) != 1:
+        if not runs or (len(runs) > 1 and not _literal_outcome(b)):
             return None, 0
+    several = runs is not None and len(runs) > 1
     nxt = min((k for k, _, _ in sn.hits.get(line, ()) if k > i), default=None)
-    first: tuple[int, bool, int] | None = None
+    #: the first count record after the write's print, by the run it counts where the arm writes at several (else 0)
+    found: dict[int, tuple[int, bool, int]] = {}
+
+    def note(run: int, k: int, wrote: bool, at: int) -> None:
+        at_run = run if several else 0
+        if at_run not in found or k < found[at_run][0]:
+            found[at_run] = (k, wrote, at)
 
     def records_after(crow: R.Row) -> Iterable[int]:
         for k, literal, _ in sn.hits.get(crow.line, ()):
@@ -577,8 +590,7 @@ def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") ->
         if crow is None or (runs is not None and cp.run not in runs):
             continue
         for k in records_after(crow):
-            if first is None or k < first[0]:
-                first = (k, cp.rows in ("one", "some"), cp.line)
+            note(getattr(cp, "run", 0), k, cp.rows in ("one", "some"), cp.line)
     printed = getattr(b, "printed_counts", None) or []
     # the arm's lines, every one at once: a way to the print passes one of them (``flow.passes_before``)
     arms = [s for at in (b.line, *(getattr(b, "other_lines", None) or [])) if (s := R.statement_at(fn.node, at)) is not None] if printed else []
@@ -590,9 +602,26 @@ def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") ->
             continue
         for k in records_after(crow):
             count = _printed_count(crow, sn.run.records[k], pc.holes)
-            if count is not None and (first is None or k < first[0]):
-                first = (k, count > 0, pc.line)
-    return (None, 0) if first is None else (first[1], first[2])
+            if count is not None:
+                note(getattr(pc, "run", 0), k, count > 0, pc.line)
+    if not several:
+        return (found[0][1], found[0][2]) if 0 in found else (None, 0)
+    wrote = sorted((k, at) for k, w, at in found.values() if w)
+    if wrote:
+        return True, wrote[0][1]
+    if runs is not None and set(found) == runs:
+        return False, min(found.values())[2]
+    return None, 0
+
+
+def _literal_outcome(b) -> bool:
+    """Whether the arm *b* writes a value its source spells as a literal (``None``, ``'ready'``, ``0``): the one value
+    every statement writing the arm writes (:func:`_landed`); not a bind, a name, a call or the clock."""
+    try:
+        ast.literal_eval(str(getattr(b, "outcome", "") or "").strip())
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False
+    return True
 
 
 def _passes_arm(printed: ast.stmt, arms: list[ast.stmt]) -> bool:

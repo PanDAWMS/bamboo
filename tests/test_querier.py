@@ -18709,6 +18709,25 @@ def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unse
                 "two": counted([5], 4, [(4, [3]), (13, [5])]),
                 "one_other_lines": counted([5], 4, [(4, [3, 5])]),
             }
+
+            # an arm writing at two statements (4 and 13): read where its outcome is a literal -- 1 at either run says
+            # written, 0 only where both runs are counted
+            def several(outcome, count_runs, n):
+                kept.append(frag := N(key_froms=[N(owner="counted.py::upd", statement=s, writes={"S.s": ls}, reads=False)
+                                                 for s, ls in [(4, [3]), (13, [5])]]))
+                mapdump._FRAGMENT[:] = [frag]
+                texts = ["start 7", f"attemptNr=1 nUp={n} new=running"]
+                one = N(hits={2: [(0, 10, "")], 6: [(1, 10, "")]},
+                        run=N(records=[N(text=t, token="upd < PandaID=7 >") for t in texts]))
+                b = N(line=3, other_lines=[5], outcome=outcome, count_prints=[],
+                      printed_counts=[N(line=6, holes=[1], run=r) for r in count_runs])
+                return RR._landed(fn, one, 0, 2, b, "counted.py::upd", "S.s")[0]
+            got["e4"]["several"] = {
+                "literal_one": several("None", [4], 1),
+                "literal_zero_one_counted": several("None", [4], 0),
+                "literal_zero_every": several("'done'", [4, 13], 0),
+                "name_one": several("st", [4], 1),
+            }
             mapdump._FRAGMENT[:] = before
 
             # E-5: writes at 10:20 and 10:35 (ran) from 10:00, an open arm writing the clock; the stay 10:00 .. 11:00
@@ -18741,7 +18760,11 @@ def test_i_a_referencing_mark_a_printed_row_count_and_a_term_false_where_an_unse
     # with M-E4's run: read where the arm's write runs at the count's one statement -- with other_lines too -- not
     # where the count is of another statement's run, nor where the arm writes at two
     assert got["e4"] == {"one": True, "none": False, "next": None, "off": None, "other_lines": None,
-                         "runs": {"one": False, "another": None, "two": None, "one_other_lines": False}}, got
+                         "runs": {"one": False, "another": None, "two": None, "one_other_lines": False},
+                         # at two statements: a literal's 1 at one run is written; its 0 at one of two runs says
+                         # nothing, at both not written; a name's value may differ between them: not read
+                         "several": {"literal_one": True, "literal_zero_one_counted": None, "literal_zero_every": False,
+                                     "name_one": None}}, got
     assert got["e5"][0] == (
         "modificationTime<:modificationTime: false for the row at every moment of the stay where naive_utcnow() - "
         "timedelta(hours=timeout)@9 is at least 0.42 (in units of 3600 s): on its 2 write(s) read in the stay (0 more "
