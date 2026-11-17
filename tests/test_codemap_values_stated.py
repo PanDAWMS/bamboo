@@ -36,6 +36,9 @@ def f(self, timeLimit, time_limit, days=None):
     varMap[":local_now"] = moment.now()
     varMap[":utc_now"] = datetime.datetime.now(datetime.timezone.utc)
     varMap[":today"] = datetime.date.today()
+    varMap[":said_amount"] = naive_utcnow() - datetime.timedelta(hours=self.config.hours)
+    varMap[":said_two"] = naive_utcnow() - datetime.timedelta(hours=self.config.hours, minutes=5)
+    varMap[":said_twice"] = naive_utcnow() - 2 * datetime.timedelta(hours=self.config.hours)
 '''
 
 
@@ -80,3 +83,16 @@ def test_what_the_source_does_not_settle_is_said_not_guessed():
     assert said[":rounded"].said.startswith("(naive_utcnow()")
     assert (said[":number"].offset, said[":number"].numeric) == (21600.0, True)
     assert said[":word"].constant == "pending"
+
+
+def test_the_clock_less_a_duration_of_one_value_not_settled_is_the_clock_and_seconds_per_unit_of_it():
+    """``naive_utcnow() - datetime.timedelta(hours=<a value the source does not settle>)``: the clock, ``-3600``
+    times the value, the whole said.  Two amounts, or the duration used in any other way, are said as a whole."""
+    said = _stated()
+    one = said[":said_amount"]
+    assert (one.base, one.offset, one.scale, one.needs) == ("naive_utcnow", None, -3600.0, ())
+    assert one.said.startswith("naive_utcnow() - datetime.timedelta(hours=self.config.hours)@")
+    for name in (":said_two", ":said_twice"):
+        assert (said[name].base, said[name].scale) == ("", None)
+        assert said[name].said
+

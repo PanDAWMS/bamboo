@@ -2248,8 +2248,10 @@ class ConditionValue(BaseModel):
             "and nothing settled beside it: a bind amount the statement adds to a database clock -- "
             "``CURRENT_DATE-:days`` is ``-86400`` times the bind's value -- or Python's clock less a ``timedelta`` "
             "of a parameter -- ``naive_utcnow() - datetime.timedelta(minutes=timeLimit)`` is ``-60`` times "
-            "``timeLimit`` (``needs``).  ``None`` for any other amount: ``2 * timeLimit`` minutes, or an hour "
-            "beside it."
+            "``timeLimit`` (``needs``) -- or of one expression the map does not settle, the amount itself: "
+            "``naive_utcnow() - datetime.timedelta(hours=workflow_timeout_map['analysis'])`` is ``-3600`` times "
+            "it, with *base* ``naive_utcnow`` and the whole in ``said``.  ``None`` for any other amount: "
+            "``2 * timeLimit`` minutes of a parameter, an hour beside it, or two amounts."
         ),
     )
     subject: str = Field(default="", description="A ``column`` side's subject, spelled as ``ConditionNode.subject``.")
@@ -2262,7 +2264,8 @@ class ConditionValue(BaseModel):
         description=(
             "``<expression>@<line>`` where the source does not settle the value: "
             "a configuration lookup, several writes reaching the bind, a bind "
-            "nothing in the map fills."
+            "nothing in the map fills.  With a *base* and *scale_seconds*, the "
+            "clock less a duration of one value it does not settle."
         ),
     )
     rows: Optional[RowsTerm] = Field(

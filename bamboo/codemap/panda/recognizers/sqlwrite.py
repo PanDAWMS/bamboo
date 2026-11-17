@@ -3124,6 +3124,9 @@ def _number(amount: float) -> str:
 
 def _bind_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue:
     """A bind the statement compares a column with, filled with *value*."""
+    if value.said and value.base:
+        # The clock less a duration of one value the source does not settle (values.Stated.scale).
+        return ConditionValue(kind="bind", text=side.text, base=value.base, scale_seconds=value.scale, said=value.said)
     if value.said:
         return ConditionValue(kind="bind", text=side.text, said=value.said)
     if value.constant:

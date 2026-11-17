@@ -2071,6 +2071,38 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     ]
 
 
+def test_a_bind_of_the_clock_less_hours_of_a_value_not_settled_is_the_clock_and_seconds_per_unit_of_it(tmp_path):
+    """copyArchive's ``naive_utcnow() - datetime.timedelta(hours=workflow_timeout_map['analysis'])``: the clock, -3600
+    times the value the map does not settle, the whole said."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def pick(self, timeout_map):\n"
+        "        comment = ' /* DBProxy.pick */'\n"
+        "        varMap = {}\n"
+        "        varMap[':st'] = 'activated'\n"
+        "        varMap[':c'] = naive_utcnow() - datetime.timedelta(hours=timeout_map['analysis'])\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:st AND modificationTime<:c'\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+    (statement,) = side.statements.values()
+    trees = {one.entry.split("@")[0]: one.tree for one in statement.condition_trees}
+    (limit,) = trees["modificationTime<:c"].items[0].items
+    (value,) = limit.values
+    assert (value.base, value.offset_seconds, value.needs, value.scale_seconds) == ("naive_utcnow", None, [], -3600.0)
+    assert value.said == "naive_utcnow() - datetime.timedelta(hours=timeout_map['analysis'])@6"
+
+
 def test_a_term_about_other_rows_carries_them_with_its_binds_settled_by_the_same_run(tmp_path):
     """``NOT EXISTS`` over the task's datasets: the term stays ``other``, and says the rows, the correlation by
     subject, and the subquery's clause with its bind read off the run as a statement's own clause is."""
