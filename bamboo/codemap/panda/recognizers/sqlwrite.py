@@ -145,6 +145,7 @@ from bamboo.codemap.models import (
     JunctionNode,
     KeyFrom,
     KeySource,
+    ListPrint,
     OpenCrossing,
     OrderHole,
     ParameterFrom,
@@ -154,6 +155,7 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     RowFall,
     RowKeySource,
+    RowLoop,
     RowsTerm,
     SetFrom,
     SourceModule,
@@ -7676,11 +7678,13 @@ def _attach_falls(
         if func is None:
             continue
         loops, _names = _row_loops(func, site.anchor.line_start, site.region[1])
+        site.row_loops = _row_loop_records(func, site.anchor.line_start, site.region[1], loops)
         if not loops:
             continue
         returned = _returned_names(func)
         rows = {site.name} | named_by.get(site.name, set())
         reader = of(func, site.anchor.file)
+        site._list_puts = _list_puts(func, loops, site.row_loops, reader, rows)
         falls: dict[int, RowFall] = {}
         hand_ons: dict[int, HandOn] = {}
         # A list the row loops work the rows through again is a copy of them, not where they are handed on.
@@ -7753,6 +7757,168 @@ def _leads_on(test: ast.If, other: list[ast.stmt], handing: list[ast.stmt]) -> b
     return any(
         reaching(one, [start], killers, entered=[start, *killers], once=flow.turn_loops(test, one)) for one in later
     )
+
+
+#: Methods that change a list or a set in place, so a later read of it may not hold what a loop put into it: what a
+#: print of it prints is not every row.  Reordering (``sort``, ``reverse``) keeps every element.
+_CHANGING = frozenset(
+    {"append", "add", "extend", "insert", "remove", "pop", "popitem", "clear", "discard", "update", "setdefault"}
+)
+
+
+def _kept_between(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, first: int, last: int) -> bool:
+    """Whether nothing on a line after *first* and before *last* binds *name* again or changes it in place -- a
+    changing method (:data:`_CHANGING`), an item stored or deleted, an augmented assignment."""
+    if any(not one.nested and first < getattr(one.site, "lineno", 0) < last for one in bindings(func, name)):
+        return False
+    for node in own_nodes(func):
+        if not first < getattr(node, "lineno", 0) < last:
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _CHANGING
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            return False
+        targets = (
+            node.targets
+            if isinstance(node, (ast.Assign, ast.Delete))
+            else [node.target]
+            if isinstance(node, ast.AugAssign)
+            else []
+        )
+        if any(isinstance(one, ast.Subscript) and isinstance(one.value, ast.Name) and one.value.id == name for one in targets):
+            return False
+    return True
+
+
+def _every_turn(loop: ast.For | ast.AsyncFor | ast.While, statement: ast.stmt) -> bool:
+    """Whether every way through a turn of *loop* passes *statement*, a statement of its body (:func:`flow.passes_after`
+    from the body's first)."""
+    first = loop.body[0]
+    if statement is first:
+        return True
+    if enclosing_function(statement) is not enclosing_function(loop):
+        return False
+    try:
+        return flow.passes_after(first, statement)
+    except ValueError:
+        return False
+
+
+def _rebound_before(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, line: int, loop: ast.AST, seeds: Iterable[ast.AST]
+) -> bool:
+    """Whether a binding of *name* other than where the statement run at *line* lands its rows (*seeds*) lies between
+    it and *loop*, giving the name a value that can hold rows -- not ``None`` nor an empty literal, which no turn
+    walks: ``copyArchive.py::main`` binds ``res`` to ``lockJobsForReassign``'s value at 765, and its loop at 768
+    walks that, not 749's rows; ``lockJobOutputReport``'s ``resGL = None`` in a handler leaves its loop the rows'."""
+    held = {id(one) for one in seeds}
+    for one in bindings(func, name):
+        if one.nested:
+            continue
+        statement = site_of(one.site)
+        if id(statement) in held or not line < getattr(statement, "lineno", 0) < getattr(loop, "lineno", 0):
+            continue
+        value = getattr(statement, "value", None)
+        if isinstance(value, ast.Constant) and value.value is None:
+            continue
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not value.elts:
+            continue
+        if isinstance(value, ast.Dict) and not value.keys:
+            continue
+        return True
+    return False
+
+
+def _row_loop_records(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int, loops: list[ast.For | ast.AsyncFor | ast.While]
+) -> list[RowLoop]:
+    """:attr:`ReadSiteNode.row_loops`: each of *loops* (:func:`_row_loops`, the statement run at *line*, its stretch
+    ending at *last*), sorted by line -- the name its header reads that holds the rows or a copy of them, the put
+    filling a copy, and whether it takes each row in a turn of its own (:attr:`RowLoop.each_row`): a ``for`` over the
+    cursor or over a name the rows land in, nothing else bound to it between (:func:`_rebound_before`), or over a copy
+    a loop taking each row puts every row into on every way through its turn (:func:`_copies`), nothing binding or
+    changing the copy between (:func:`_kept_between`).
+    ``getTasksToBeFinished_JEDI``'s ``for ... in taskStatList`` at 1654 is one; ``copyArchive.py::main``'s ``while
+    iJob < len(jobs)`` at 884, walking its copy by slices, is not."""
+    seeds = _rows_written(func, line, last)
+    names = {name for node in seeds for name in _assigned_names(node)}
+    lists = {name for node in seeds if not isinstance(node, (ast.For, ast.AsyncFor)) for name in _assigned_names(node)}
+    cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
+    filled: dict[str, tuple[ast.For | ast.AsyncFor | ast.While, ast.stmt]] = {}
+    each: dict[int, bool] = {}
+    records: list[RowLoop] = []
+    for loop in sorted(loops, key=lambda one: (one.lineno, one.col_offset)):
+        header = loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else loop.test
+        read = [one.id for one in walk(header) if isinstance(one, ast.Name)]
+        over = next((name for name in read if name in names), "")
+        copy = "" if over else next((name for name in read if name in filled), "")
+        walked = loop.iter.id if isinstance(loop, (ast.For, ast.AsyncFor)) and isinstance(loop.iter, ast.Name) else ""
+        if id(loop) in cursor_loops:
+            each_row = isinstance(loop, (ast.For, ast.AsyncFor))
+        elif copy:
+            source, put = filled[copy]
+            each_row = (
+                walked == copy
+                and each.get(id(source), False)
+                and _every_turn(source, put)
+                and _kept_between(func, copy, source.end_lineno or source.lineno, loop.lineno)
+            )
+        else:
+            each_row = walked in lists and not _rebound_before(func, walked, line, loop, seeds)
+        each[id(loop)] = each_row
+        records.append(
+            RowLoop(
+                lines=[loop.lineno, loop.end_lineno or loop.lineno],
+                over=over or copy,
+                copy_of=filled[copy][1].lineno if copy else 0,
+                each_row=each_row,
+            )
+        )
+        for name in sorted(_copies(loop)):
+            if name in filled:
+                continue
+            filling = next(
+                (
+                    node
+                    for node in walk(loop)
+                    if isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr in ("append", "add")
+                    and isinstance(node.value.func.value, ast.Name)
+                    and node.value.func.value.id == name
+                ),
+                None,
+            )
+            if filling is not None:
+                filled[name] = (loop, filling)
+    return records
+
+
+def _list_puts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    loops: list[ast.For | ast.AsyncFor | ast.While],
+    records: list[RowLoop],
+    reader: "_Filled",
+    rows: set[str],
+) -> list[tuple[str, ast.stmt]]:
+    """``(name, put)`` for each name the first of *loops* puts a value holding its rows into (as a hand-on's,
+    :func:`_puts_into`) on every way through its turn, the first loop taking each row (*records*' first): the lists a
+    print after the loop can print every row of (:func:`attach_list_prints`)."""
+    if not records or not records[0].each_row:
+        return []
+    first = min(loops, key=lambda one: (one.lineno, one.col_offset))
+    found: dict[str, ast.stmt] = {}
+    for statement, value, key, into in _puts_into(first):
+        if into in found or not _every_turn(first, statement):
+            continue
+        if reader.holds_rows(value, statement, rows) or (key is not None and reader.holds_rows(key, statement, rows)):
+            found[into] = statement
+    return sorted(found.items(), key=lambda one: one[1].lineno)
 
 
 def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -7947,6 +8113,226 @@ def attach_hand_on_prints(
                 sure.append(HandOnPrint(line=printed.line, holes=holes))
             hand_on.sure_prints = sure
             found += bool(sure)
+    return found
+
+
+def _list_hole(expression: str, name: str) -> str:
+    """How the hole *expression* holds the list *name*: ``whole`` -- the name, ``str()`` or ``repr()`` of it, a
+    ``join`` over it -- or ``slice`` -- ``name[a:b]``, or ``str()`` of it -- else ``""``."""
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return ""
+
+    def is_name(one: ast.AST) -> bool:
+        return isinstance(one, ast.Name) and one.id == name
+
+    def is_slice(one: ast.AST) -> bool:
+        return isinstance(one, ast.Subscript) and is_name(one.value) and isinstance(one.slice, ast.Slice)
+
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("str", "repr"):
+        if len(node.args) == 1 and not node.keywords:
+            node = node.args[0]
+    if is_name(node):
+        return "whole"
+    if is_slice(node):
+        return "slice"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+    ):
+        joined = node.args[0]
+        if is_name(joined) or (
+            isinstance(joined, (ast.GeneratorExp, ast.ListComp))
+            and len(joined.generators) == 1
+            and is_name(joined.generators[0].iter)
+            and not joined.generators[0].ifs
+        ):
+            return "whole"
+    return ""
+
+
+def _is_len(node: ast.AST, name: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == name
+    )
+
+
+def _not_empty(test: ast.expr, name: str) -> bool:
+    """Whether *test* holds exactly where the list *name* is not empty: ``name``, ``len(name)``, ``len(name) > 0``,
+    ``len(name) != 0``, ``len(name) >= 1``, ``name != []``."""
+    if (isinstance(test, ast.Name) and test.id == name) or _is_len(test, name):
+        return True
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    left, op, right = test.left, test.ops[0], test.comparators[0]
+    if _is_len(left, name) and isinstance(right, ast.Constant) and type(right.value) is int:
+        return (isinstance(op, (ast.Gt, ast.NotEq)) and right.value == 0) or (isinstance(op, ast.GtE) and right.value == 1)
+    return (
+        isinstance(left, ast.Name)
+        and left.id == name
+        and isinstance(op, ast.NotEq)
+        and isinstance(right, ast.List)
+        and not right.elts
+    )
+
+
+def _passes_on(loop: ast.stmt, target: ast.stmt, name: str) -> bool:
+    """Whether every way on from *loop* passes *target*, an ``if`` around it that tests the list *name* for not being
+    empty taken as true (:func:`_not_empty`): an empty list has no row to print."""
+    try:
+        if flow.passes_after(loop, target):
+            return True
+        tests = [
+            one
+            for one in ancestors(target)
+            if isinstance(one, ast.If)
+            and one.lineno > (getattr(loop, "end_lineno", None) or loop.lineno)
+            and _not_empty(one.test, name)
+            and any(target is step or any(target is inner for inner in walk(step)) for step in one.body)
+        ]
+        if not tests:
+            return False
+        tests.sort(key=lambda one: one.lineno)
+        previous: ast.stmt = loop
+        for test in tests:
+            if previous is not test and not flow.passes_after(previous, test):
+                return False
+            previous = test.body[0]
+        return target is previous or flow.passes_after(previous, target)
+    except ValueError:
+        return False
+
+
+def _walks_by(walk_loop: ast.AST, part: ast.Subscript, name: str) -> bool:
+    """Whether *walk_loop* walks the whole list *name* by the slice *part* (``name[i : i + n]``): ``i = 0`` last bound
+    before a ``while i < len(name)`` whose body adds ``n`` to ``i`` once, or ``for i in range(0, len(name), n)``."""
+    cut = part.slice
+    if not (
+        isinstance(cut, ast.Slice)
+        and isinstance(cut.lower, ast.Name)
+        and isinstance(cut.upper, ast.BinOp)
+        and isinstance(cut.upper.op, ast.Add)
+        and isinstance(cut.upper.left, ast.Name)
+        and cut.upper.left.id == cut.lower.id
+        and cut.step is None
+    ):
+        return False
+    index, width = cut.lower.id, ast.dump(cut.upper.right)
+    if isinstance(walk_loop, ast.While):
+        test = walk_loop.test
+        if not (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.left, ast.Name)
+            and test.left.id == index
+            and isinstance(test.ops[0], ast.Lt)
+            and _is_len(test.comparators[0], name)
+        ):
+            return False
+        steps = [
+            one
+            for one in walk(walk_loop)
+            if isinstance(one, ast.AugAssign) and isinstance(one.target, ast.Name) and one.target.id == index
+        ]
+        if len(steps) != 1 or not isinstance(steps[0].op, ast.Add) or ast.dump(steps[0].value) != width:
+            return False
+        func = enclosing_function(walk_loop)
+        starts = [
+            one
+            for one in bindings(func, index)
+            if not one.nested and getattr(site_of(one.site), "lineno", walk_loop.lineno) < walk_loop.lineno
+        ] if func is not None else []
+        if not starts:
+            return False
+        start = site_of(max(starts, key=lambda one: getattr(site_of(one.site), "lineno", 0)).site)
+        return isinstance(start, ast.Assign) and isinstance(start.value, ast.Constant) and start.value.value == 0
+    if isinstance(walk_loop, (ast.For, ast.AsyncFor)) and isinstance(walk_loop.target, ast.Name):
+        over = walk_loop.iter
+        return (
+            walk_loop.target.id == index
+            and isinstance(over, ast.Call)
+            and isinstance(over.func, ast.Name)
+            and over.func.id == "range"
+            and len(over.args) == 3
+            and isinstance(over.args[0], ast.Constant)
+            and over.args[0].value == 0
+            and _is_len(over.args[1], name)
+            and ast.dump(over.args[2]) == width
+        )
+    return False
+
+
+def attach_list_prints(
+    read_sites: Iterable[ReadSiteNode], function_prints: Iterable[FunctionPrintsNode], modules: Iterable[SourceModule]
+) -> int:
+    """Give each read site the owner's prints after its first row loop that print every element of a list the loop
+    puts each row into (:attr:`ReadSiteNode.list_prints`, :class:`ListPrint`; the lists :func:`_list_puts` kept):
+    the list whole on every way on from the loop, or by slices in a walk over the whole of it every way on enters --
+    a test of the list being empty taken as true -- nothing binding it again or changing it in place between
+    (:func:`_kept_between`).  ``copyArchive.py::main`` puts each ``PandaID`` of 871's rows into ``jobs`` at 878 and
+    prints ``str(jobs[iJob : iJob + nJob])`` at 885 walking ``jobs`` by 100.  Returns how many sites have one."""
+    trees = {module.rel_path: module.tree for module in modules}
+    printing = {(node.anchor.file, node.anchor.line_start): node for node in function_prints if node.anchor is not None}
+    found = 0
+    for site in read_sites:
+        if not site._list_puts or not site.row_loops or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        node = printing.get((site.anchor.file, func.lineno)) if func is not None else None
+        if func is None or node is None:
+            continue
+        statements = _own_statements(func)
+        first = next(
+            (one for one in own_nodes(func) if isinstance(one, _LOOPS) and one.lineno == site.row_loops[0].lines[0]),
+            None,
+        )
+        if first is None:
+            continue
+        end = first.end_lineno or first.lineno
+        made: dict[int, ListPrint] = {}
+        for into, put in site._list_puts:
+            for printed in node.statements:
+                at = statements.get(printed.line)
+                if at is None or printed.line <= end or printed.line in made:
+                    continue
+                kinds = {hole.expression: _list_hole(hole.expression, into) for row in printed.rows for hole in row.holes}
+                whole = sorted(expression for expression, kind in kinds.items() if kind == "whole")
+                cut = sorted(expression for expression, kind in kinds.items() if kind == "slice")
+                if not (whole or cut) or not _kept_between(func, into, end, printed.line):
+                    continue
+                if whole and _passes_on(first, at, into):
+                    made[printed.line] = ListPrint(line=printed.line, holes=whole, into=into, put=put.lineno)
+                    continue
+                walks = [one for one in flow.loops_around(at) if isinstance(one, _LOOPS) and one.lineno > end]
+                if not cut or not walks:
+                    continue
+                walk_loop = walks[0]
+                part = ast.parse(cut[0], mode="eval").body
+                if isinstance(part, ast.Call):
+                    part = part.args[0]
+                if (
+                    isinstance(part, ast.Subscript)
+                    and _walks_by(walk_loop, part, into)
+                    and _every_turn(walk_loop, at)
+                    and _passes_on(first, walk_loop, into)
+                ):
+                    made[printed.line] = ListPrint(
+                        line=printed.line,
+                        holes=cut,
+                        into=into,
+                        put=put.lineno,
+                        loop=[walk_loop.lineno, walk_loop.end_lineno or walk_loop.lineno],
+                    )
+        site.list_prints = [made[line] for line in sorted(made)]
+        found += bool(made)
     return found
 
 

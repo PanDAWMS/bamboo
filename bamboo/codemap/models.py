@@ -2697,6 +2697,62 @@ class HandOnPrint(BaseModel):
     )
 
 
+class RowLoop(BaseModel):
+    """One loop over a read site's rows (:attr:`ReadSiteNode.row_loops`): over a name they land in, the cursor, or a
+    list a loop over them copies each row into.
+
+    ``getTasksToBeFinished_JEDI``'s statement at 1644 copies its rows into ``taskStatList`` at 1649 and works them
+    through in ``for ... in taskStatList`` at 1654, printing per row there; ``copyArchive.py::main``'s at 871 copies
+    each ``PandaID`` into ``jobs`` at 878 and walks ``jobs`` by slices of 100 in a ``while`` at 884.
+    """
+
+    lines: list[int] = Field(description="``[first, last]`` of the loop.")
+    over: str = Field(
+        default="",
+        description="The name its header reads that holds the rows or a copy of them; empty for a loop over the cursor.",
+    )
+    copy_of: int = Field(
+        default=0,
+        description="Where it walks a copy: the line of the put filling the copy in an earlier row loop.  0 for the rows.",
+    )
+    each_row: bool = Field(
+        default=False,
+        description=(
+            "Whether each turn takes one row and every row has a turn: a ``for`` whose iterable is the cursor, a name "
+            "the rows land in, or a copy every row is put into -- by a row loop taking each row, on every way through "
+            "its turn, the copy bound again nowhere and changed in place nowhere between.  False for a walk by index "
+            "or slices (``while i < len(jobs)``), a ``for`` over anything else, and a copy some rows skip: a reader "
+            "may take a print in the body of a loop with it as printed once per row."
+        ),
+    )
+
+
+class ListPrint(BaseModel):
+    """A print after a statement's first row loop that prints every element of a list the loop puts each row into
+    (:attr:`ReadSiteNode.list_prints`), read for a run that entered no handler.
+
+    The first row loop takes each row (:attr:`RowLoop.each_row`) and puts it, on every way through its turn, into the
+    list; nothing binds the list again or changes it in place between the loop and the print.  And either the print
+    holds the list whole -- ``C``, ``str(C)``, ``repr(C)``, a ``join`` over ``C`` -- and every way on from the loop
+    passes it, a test of the list being empty taken as false (``if len(jobs):``: an empty list has no row to name);
+    or it holds a slice ``C[i : i + n]`` in a loop walking the whole list by that slice (``i = 0`` before it, ``while
+    i < len(C)`` or ``for i in range(0, len(C), n)``, ``i += n``), every way through the loop's body passes it, and
+    every way on from the row loop enters the walk, the same tests taken as false.  ``copyArchive.py::main`` prints
+    ``str(jobs)`` at 864 under ``if len(jobs):`` and ``str(jobs[iJob : iJob + nJob])`` at 885.
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description="Its holes holding the list or the slice, as :attr:`SkeletonHole.expression` spells them.",
+    )
+    into: str = Field(description="The list's name.")
+    put: int = Field(description="The line of the put into it in the first row loop.")
+    loop: list[int] = Field(
+        default_factory=list, description="``[first, last]`` of the walk by slices; empty where it prints the list whole."
+    )
+
+
 class HandOn(BaseModel):
     """A put, in a statement's row loop, of a value holding its rows into a name read after the loop or returned
     (:attr:`ReadSiteNode.hand_ons`): where the loop hands a row on.
@@ -3128,11 +3184,32 @@ class ReadSiteNode(BaseNode):
             "every ``sure_prints`` empty.  Sorted by line."
         ),
     )
+    row_loops: list[RowLoop] = Field(
+        default_factory=list,
+        description=(
+            "Each loop over this statement's rows (:class:`RowLoop`), sorted by line: the loop over them, and a later "
+            "one over a list the rows were copied into -- ``getTasksToBeFinished_JEDI`` copies its rows into "
+            "``taskStatList``, commits, and works them through in a second loop.  *rows_handled* spans them all."
+        ),
+    )
+    list_prints: list[ListPrint] = Field(
+        default_factory=list,
+        description=(
+            "The owner's prints after its first row loop that print every element of a list the loop puts each row "
+            "into (:class:`ListPrint`), sorted by line: ``copyArchive.py::main`` puts each ``PandaID`` of 871's rows "
+            "into ``jobs`` and prints it in slices of 100 at 885."
+        ),
+    )
+    #: ``(list name, the put statement)`` of each list the first row loop puts every row into, kept by
+    #: :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_key_sources` for ``attach_list_prints``.
+    _list_puts: list = PrivateAttr(default_factory=list)
     rows_handled: list[int] = Field(
         default_factory=list,
         description=(
             "``[first, last]`` -- the stretch where this statement's rows are "
-            "worked through, which is the loop over them. Empty where "
+            "worked through: from the first loop over them to the end of the "
+            "last (:attr:`row_loops`), a loop over a list the rows were copied "
+            "into among them, and the lines between the loops. Empty where "
             "nothing loops over them; 151 of the corpus's 264 statements "
             "have one, a median of 11 lines and 238 at worst.\n\n"
             "**Not a second ``region``, and it can outlive one.** ``region`` "
@@ -8596,9 +8673,10 @@ class StatementReading(BaseModel):
     rows_handled: list[int] = Field(
         default_factory=list,
         description=(
-            "``[first, last]`` where the rows are worked through -- the loop "
-            "over them, which can run past ``region``. Empty where nothing "
-            "loops over them."
+            "``[first, last]`` where the rows are worked through -- from the "
+            "first loop over them to the end of the last, a loop over a list "
+            "they were copied into among them (:attr:`ReadSiteNode.row_loops`), "
+            "which can run past ``region``. Empty where nothing loops over them."
         ),
     )
     trace: list[TraceStep] = Field(

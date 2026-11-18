@@ -20882,6 +20882,115 @@ def test_a_row_put_into_a_map_read_after_the_loop_is_handed_on_with_the_prints_e
     assert [(one.line, one.kept) for one in second.falls] == [(at("# NEW"), "body")]
 
 
+#: ``copyArchive.py::main``'s kill paths (a list of the rows' keys printed whole under ``if len(...)`` and in slices
+#: of 100) and ``getTasksToBeFinished_JEDI``'s copy worked through in a second loop.
+_LISTED = '''
+class TaskModule:
+    def kill(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlK = "SELECT jediTaskID FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlK + comment, varMap)  # K
+        res = self.cur.fetchall()
+        tasks = []
+        for (jediTaskID,) in res:  # LOOP
+            tasks.append(jediTaskID)  # PUT
+        if len(tasks):
+            killTasks(tasks)
+            tmpLog.debug(f"kill ({str(tasks)})")  # WHOLE
+            nTask = 100
+            iTask = 0
+            while iTask < len(tasks):  # WALK
+                tmpLog.debug(f"killed ({str(tasks[iTask : iTask + nTask])})")  # SLICE
+                iTask += nTask  # STEP
+        tmpLog.debug(f"first {tasks[:100]}")  # ONCE
+        return None
+
+    def finish(self, vo):
+        varMap = {}
+        varMap[":vo"] = vo
+        sqlF = "SELECT jediTaskID,status FROM ATLAS_PANDA.JEDI_Tasks WHERE vo=:vo "
+        self.cur.execute(sqlF + comment, varMap)  # F
+        try:
+            resList = self.cur.fetchall()
+        except Exception:
+            resList = None
+        taskStatList = []
+        for jediTaskID, taskStatus in resList:  # COPY
+            taskStatList.append((jediTaskID, taskStatus))  # FILL
+        self._commit()
+        for jediTaskID, taskStatus in taskStatList:  # SECOND
+            tmpLog.debug(f"finish jediTaskID={jediTaskID}")  # EACH
+        for i in range(len(taskStatList)):  # INDEX
+            tmpLog.debug(f"index {i}")  # BY
+        resList = self.lockOthers()
+        for jediTaskID, taskStatus in resList:  # OTHER
+            tmpLog.debug(f"other jediTaskID={jediTaskID}")  # ELSE
+'''
+
+
+def test_a_statement_says_each_loop_over_its_rows_and_the_prints_of_a_list_holding_every_row(tmp_path):
+    """A read site names each loop over its rows (:attr:`ReadSiteNode.row_loops`): the loop over them, a later one
+    over the list a loop copies each row into, and one over the name bound again to another value (OTHER, as
+    ``copyArchive.py::main`` binds ``res`` to ``lockJobsForReassign``'s) -- taking each row where the copy holds every
+    row and nothing but ``None`` was bound to the name between (FILL on every way
+    through COPY's turn), not where it walks the list by index (INDEX) or by slices (WALK).  And the prints after the
+    first loop that print every element of the list it puts each row into (:attr:`ReadSiteNode.list_prints`): whole
+    under ``if len(tasks):`` (WHOLE), by slices in a walk over the whole list (SLICE); a slice printed once (ONCE)
+    prints the first hundred only."""
+    from bamboo.codemap import trace
+
+    rel = "pandaserver/taskbuffer/db_proxy_mods/task_module.py"
+    modules, calls, record = _keyed_corpus(tmp_path, {"pandaserver/taskbuffer/Specs.py": _SPECS, rel: _LISTED})
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    froms: list[KeyFrom] = []
+    with sql.across_calls(calls):
+        _subjects, junctions, *_rest = sqlwrite.extract(modules, MAP_ID, VERSION, attributor, key_froms=froms)
+        sites = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor).statements, MAP_ID, VERSION)
+        sqlwrite.attach_key_sources(
+            [], junctions, calls, record, key_froms=froms, read_sites=sites, modules=modules, attributor=attributor
+        )
+    prints = [
+        FunctionPrintsNode(
+            name=f"m:{found.owner}",
+            map_id=MAP_ID,
+            derived_from=VERSION,
+            owner=found.owner,
+            cls=found.cls,
+            function=found.func.name,
+            count=len(found.statements),
+            statements=found.statements,
+            anchor=Anchor(package="pandaserver", file=found.file, line_start=found.func.lineno),
+        )
+        for found in trace.function_prints({"pandaserver": tmp_path / "pandaserver"}, [rel])
+    ]
+    assert sqlwrite.attach_list_prints(sites, prints, modules) == 1
+    lines = _LISTED.split("\n")
+
+    def at(text: str) -> int:
+        return next(number for number, line in enumerate(lines, 1) if text in line)
+
+    by_line = {site.anchor.line_start: site for site in sites}
+    kill, finish = by_line[at("# K")], by_line[at("# F")]
+    assert [(one.lines, one.over, one.copy_of, one.each_row) for one in kill.row_loops] == [
+        ([at("# LOOP"), at("# PUT")], "res", 0, True),
+        ([at("# WALK"), at("# STEP")], "tasks", at("# PUT"), False),
+    ]
+    assert [(one.line, one.holes, one.into, one.put, one.loop) for one in kill.list_prints] == [
+        (at("# WHOLE"), ["str(tasks)"], "tasks", at("# PUT"), []),
+        (at("# SLICE"), ["str(tasks[iTask:iTask + nTask])"], "tasks", at("# PUT"), [at("# WALK"), at("# STEP")]),
+    ]
+    assert kill.rows_handled == [at("# LOOP"), at("# STEP")]
+    assert [(one.lines, one.over, one.copy_of, one.each_row) for one in finish.row_loops] == [
+        ([at("# COPY"), at("# FILL")], "resList", 0, True),
+        ([at("# SECOND"), at("# EACH")], "taskStatList", at("# FILL"), True),
+        ([at("# INDEX"), at("# BY")], "taskStatList", at("# FILL"), False),
+        ([at("# OTHER"), at("# ELSE")], "resList", 0, False),
+    ]
+    assert finish.list_prints == []
+
+
 #: ``prepareTasksToBeFinished_JEDI``'s turn at 3757-3768: one way sets a flag the row is handed on under after the
 #: ``if``s, another hands it on to a second name and sets the flag too.
 _HANDED_LATER = '''

@@ -949,6 +949,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # Which of those prints every way through a row loop's hand-on passes: what a run's lines name each row
         # a statement handed on by.
         sqlwrite.attach_hand_on_prints(fragment.read_sites, fragment.function_prints, self._modules)
+        # And which print, after a row loop, every element of a list the loop puts each row into.
+        sqlwrite.attach_list_prints(fragment.read_sites, fragment.function_prints, self._modules)
         # Which of those prints every path to an arm passes, and which of their
         # holes hold a column of the row the arm writes: what tells the run that
         # wrote a value from the runs that only printed the same lines.
