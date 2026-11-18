@@ -19079,6 +19079,138 @@ def test_k4a_a_source_placed_in_the_value_is_read_where_the_steps_reach_its_plac
     assert got["param_whole"] == [["None", "constant"], ["", "parts-only"]], got
 
 
+def test_k2_a_reached_write_ran_where_its_statement_s_status_shows_and_is_none_of_the_row_s_where_its_selection_takes_other_states(tmp_path):
+    """K-2 (NT-breaking-late): prepareTasksToBeFinished_JEDI's UPDATE at 4075 writes lockedBy NULL (3839) and the status
+    (3971 'tobroken'); a print reaching 3839 at 03:57:57.600 is a run where the statuslog's tobroken row is within a
+    second or two (03:57:57.705), not where none is.  getTasksToBeFinished_JEDI's lock at 1690 takes the rows of its 1644,
+    which selects prepared and breaking tasks: a print reaching it at 03:58:05, the task tobroken, is none of the row's;
+    one in the stay, the task breaking, may be."""
+    out = _ok(_run(tmp_path, """
+        import datetime
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+
+        t = datetime.datetime.fromisoformat
+        states = [{"status": "scouting", "time": "2026-11-13 03:00:00"},
+                  {"status": "tobroken", "time": "2026-11-13 03:57:57", "time_extended": "2026-11-13 03:57:57.705000"},
+                  {"status": "breaking", "time": "2026-11-13 04:03:05", "time_extended": "2026-11-13 04:03:05.708131"}]
+        prep = N(owner="pandaserver/t.py::prepareTasksToBeFinished_JEDI", statement=4075, term="jediTaskID=:jediTaskID",
+                 writes={"JediTaskSpec.lockedBy": [3839], "JediTaskSpec.status": [3964, 3971]},
+                 sources=[N(kind="rows", name="t.py::prepareTasksToBeFinished_JEDI@3700", via=None)])
+        lock = N(owner="pandaserver/t.py::getTasksToBeFinished_JEDI", statement=1690, term="jediTaskID=:jediTaskID",
+                 writes={"JediTaskSpec.lockedBy": [1690]},
+                 sources=[N(kind="rows", name="t.py::getTasksToBeFinished_JEDI@1644", via=None)])
+        site = N(name="t.py::getTasksToBeFinished_JEDI@1644", anchor=N(line_start=1644),
+                 selects=["JediTaskSpec.status=prepared", "JediTaskSpec.status=breaking", "JediDatasetSpec.type=input"])
+        # a statement writing the status and lockedTime by two arms, neither tied: the status row says nothing of it
+        two = N(owner=prep.owner, statement=4200, term="jediTaskID=:jediTaskID",
+                writes={"JediTaskSpec.lockedTime": [3882, 3890], "JediTaskSpec.status": [3964]}, sources=[])
+        RR.mapdump.fragment = lambda: N(key_froms=[prep, lock, two], read_sites=[site])
+        RR.PT.history_of_class = lambda cls: N(subject="JediTaskSpec.status")
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.data = {"statuslog": {"states": states}}
+        arm = lambda line, outcome: N(line=line, outcome=outcome, other_lines=[], same_pass=[])
+        arms = {"JediTaskSpec.status": [arm(3964, "exhausted"), arm(3971, "tobroken")],
+                "JediTaskSpec.lockedBy": [arm(3839, "None")], "JediTaskSpec.lockedTime": [arm(3882, "None"), arm(3890, "x")]}
+        r._subject_writers = lambda subject: [N(owner=prep.owner, branches=arms[subject])]
+        r._together_lines = lambda owner, a, b: True
+        L, q = "JediTaskSpec.lockedBy", N(subject="JediTaskSpec.status")
+        states.insert(1, {"status": "exhausted", "time": "2026-11-13 03:40:00", "time_extended": "2026-11-13 03:40:00.400000"})
+        print(json.dumps({
+            "ran": r._statement_ran(prep.owner, 3839, L, t("2026-11-13 03:57:57.600"), q),
+            "ran far": r._statement_ran(prep.owner, 3839, L, t("2026-11-13 03:57:50"), q),
+            "untied": r._statement_ran(prep.owner, 3882, "JediTaskSpec.lockedTime", t("2026-11-13 03:40:00.300"), q),
+            "other": r._selection_takes_other_states(lock.owner, 1690, L, t("2026-11-13 03:58:05.521")),
+            "in the stay": r._selection_takes_other_states(lock.owner, 1690, L, t("2026-11-13 04:04:44")),
+            "no selection": r._selection_takes_other_states(prep.owner, 3839, L, t("2026-11-13 03:58:05")),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["ran"] == {"by": "prepareTasksToBeFinished_JEDI:3971", "value": "'tobroken'",
+                          "statement": "in the same statement, prepareTasksToBeFinished_JEDI:4075", "then": "03:57:57.705"}, got
+    assert got["ran far"] is None and got["untied"] is None, got
+    assert got["other"] == {"site": "getTasksToBeFinished_JEDI@1644", "takes": ["prepared", "breaking"], "state": "'tobroken'"}, got
+    # a selection whose selects the map gives no history subject, or the row's state among them: not read
+    assert got["in the stay"] is None and got["no selection"] is None, got
+
+
+def test_k4a_prime_a_container_the_dump_gives_is_the_value_whole_and_its_parts_are_notes(tmp_path):
+    """K-4a' (the map's (D)): TaskRefiner.runImpl hands updateTask_JEDI's oldStatus the literal ``[taskStatus]``, a
+    source of its own (``container``) beside self.taskList's ``[2]`` at ``[0]``.  Read whole, the container is a value
+    made of the literal and the part is a note on it (no stop); read by its elements, the container gives no way and
+    the part is read.  On a dump without containers the whole read still stops for the part (K-4a)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import sources as SR
+
+        SR.M.KEY_CONTAINER = "container"
+        old = [N(name="None", kind="constant", paths=[], route=["a.py:1"], steps=[], through=[], at=[]),
+               N(name="[taskStatus]", kind="container", paths=[], route=["r.py:226"], steps=[], at=["r.py:226"]),
+               N(name="self.taskList", kind="rows", paths=["[0]"], route=["r.py:129", "r.py:226"], steps=[], at=[])]
+        SR._callers = lambda: ({("o", "oldStatus"): N(sources=old, stops=[], line=197)}, {})
+        SR._by_the_path = lambda sources, entered: (sources, [])
+        SR._cut = lambda s: False
+        pw = lambda steps: [[w.end, w.why, list(w.route)] for w in SR.param_ways("o", "oldStatus", steps=steps)]
+        got = {}
+        for given in (True, False):
+            SR._containers_given = lambda given=given: given
+            got[str(given)] = {"whole": pw(()), "elements": pw(("[*]",))}
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["True"]["whole"] == [["constant", "constant", ["a.py:1"]], ["constant", "constant-through", ["r.py:226"]]], got
+    assert got["True"]["elements"] == [["database", "rows", ["r.py:129", "r.py:226"]]], got
+    assert got["False"]["whole"][-1] == ["stop", "parts-only", ["o:197"]], got
+
+
+def test_k4b_the_writes_persisting_a_kept_object_read_by_their_status_terms_at_a_moment(tmp_path):
+    """K-4b (the map's (A)(B)(C)): extractCommon sets goal on an object it keeps (KEY_KEPT); the map's kept_hops name
+    runImpl's flush at 602, read in registerTaskInOneShot_JEDI's 5831 (``status=:preStatus``).  On the call's ways the
+    value is 'registered' (getTasksToRefine_JEDI's 1340) or the rows of @1369 (registered, staged); a way of another
+    caller is not the call's.  The task pending: no write lands.  Registered or staged, an open hop, or a write with no
+    status term: not read."""
+    out = _ok(_run(tmp_path, """
+        import datetime
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+        from bamboo.querier import sources as SR
+
+        t = datetime.datetime.fromisoformat
+        hop = N(owner="r.py::runImpl", open="", persisted=[N(statement=602, object="impl.taskSpec")])
+        kept = N(owner="b.py::extractCommon", statement=124, term="", unread=RR.KEY_KEPT, writes={"JediTaskSpec.goal": [276]},
+                 kept_hops=[hop], sources=[])
+        flush = N(owner="r.py::runImpl", statement=602, object="impl.taskSpec", term="jediTaskID=:jediTaskID",
+                  attr="JediTaskSpec.jediTaskID", flushed_in="tc.py::reg", flushed_lines=[5831], writes={}, sources=[])
+        term = N(owner="tc.py::reg", statement=5831, term="status=:preStatus", attr="JediTaskSpec.status", each_element=False,
+                 writes={}, sources=[N(kind="parameter", name="oldTaskStatus", site_owner="tc.py::reg", paths=[])])
+        site = N(name="s.py::getTasksToRefine_JEDI@1369", selects=["JediTaskSpec.status=registered", "JediTaskSpec.status=staged"])
+        RR.PT.history_of_class = lambda cls: N(subject="JediTaskSpec.status")
+        SR.param_ways = lambda owner, name, steps=(): [
+            SR.Way(SR.CONSTANT, "'registered'", "constant", ("s.py:1340", "r.py:129", "r.py:602")),
+            SR.Way(SR.DATABASE, "", "rows", ("s.py:1382", "r.py:602"), site="s.py::getTasksToRefine_JEDI@1369"),
+            SR.Way(SR.CONSTANT, "'pending'", "constant", ("x.py:9",))]
+        r = RR.Rerun.__new__(RR.Rerun)
+
+        def read(state, kfs=(kept, flush, term)):
+            RR.mapdump.fragment = lambda: N(key_froms=list(kfs), read_sites=[site])
+            r.data = {"statuslog": {"states": [{"status": state, "time": "2026-11-15 05:47:37"}]}}
+            return r._persisted_false("b.py::extractCommon", 276, "JediTaskSpec.goal", t("2026-11-15 06:00:00"))
+
+        got = {s: read(s) for s in ("pending", "registered", "staged")}
+        got["open"] = read("pending", (N(**{**vars(kept), "kept_hops": [N(owner="", open="no call placed", persisted=[])]}), flush, term))
+        got["no term"] = read("pending", (kept, flush))
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["pending"] == ("the 1 write(s) persisting it (runImpl) take the row in 'registered', "
+                              "getTasksToRefine_JEDI@1369 (registered, staged) only, the statuslog holding 'pending' then"), got
+    assert got["registered"] is None and got["staged"] is None, got
+    assert got["open"] is None and got["no term"] is None, got
+
+
 def test_p16_a_print_of_every_row_after_the_first_loop_tells_a_pass_reached_the_selection(tmp_path):
     """P16 (the map's HOA and RL): copyArchive main puts each selected PandaID into ``jobs`` and prints the list in
     slices of 100 in a ``while`` after the loop (885); getTasksToBeFinished_JEDI works a copy of its rows through in a

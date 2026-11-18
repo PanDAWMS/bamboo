@@ -1298,6 +1298,9 @@ def _timeline_said(subject: str, tl: TL.Timeline) -> T.Said:
                                         "apart": T.Said("timeline-row-value-apart", {"apart": [
                                             f"{a} ({why})" for a, why in next(iter(tl.row_value[4:]), ())]})
                                         if next(iter(tl.row_value[4:]), ()) else ""}) if tl.row_value else "",
+                                    "confirmed": T.Said("timeline-confirmed", {"writes": [
+                                        T.Said("timeline-confirmed-write", {"at": f"{at:%H:%M:%S.%f}"[:12], "arm": arm, **by})
+                                        for at, arm, by in tl.confirmed]}) if tl.confirmed else "",
                                     "notrun": T.Said("timeline-not-run", {"writes": [
                                         T.Said("timeline-not-run-write", {"at": f"{at:%H:%M:%S.%f}"[:12], "arm": arm,
                                                                           "machine": machine, "guards": guards})
@@ -6434,6 +6437,76 @@ class Rerun:
             said.append(f"@{site.anchor.line_start} " + "; ".join(why))
         return ", ".join(said)
 
+    def _persisted_false(self, owner: str, line: int, subject: str, at: datetime.datetime) -> str | None:
+        """K-4b (bundle K, out/gm/qk-design.md; the map's (A)(B)(C), codemap-xliii 637d38f): why no write persisting
+        *owner*'s arm at *line* lands on the row at *at*, where the arm sets *subject* on an object it keeps in what it
+        was handed (``KEY_KEPT``): the map's ``kept_hops`` name every caller's write persisting it (none open), and each
+        such write -- a flush, read in the method it reaches (``flushed_in``, ``flushed_lines``), or the caller's own
+        statement -- has a term on the class's history subject whose value, on every way the call hands it
+        (``sources.param_ways``, each element where ``each_element``), is not the state the statuslog holds then: a
+        literal of another state, or the rows of a selection whose selects lack it.  goal's arms (extractCommon 276,
+        278) are persisted by TaskRefiner.runImpl's registerTaskInOneShot_JEDI (``status=:preStatus``) and seven
+        updateTask_JEDI flushes (``status IN (:old___in)``), the value on getTasksToRefine_JEDI@1147's way the literal
+        'registered' (1340), on @1369's its rows.  None where any of it is not read."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = [s for s in ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+                  if _when(s.get("time_extended") or s["time"]) <= at]
+        if fragment is None or history is None or not states:
+            return None
+        state = states[-1].get("status")
+        kfs = key_froms()
+        kept = [kf for kf in kfs if _bare(kf.owner) == _bare(owner) and not getattr(kf, "term", "")
+                and getattr(kf, "unread", "") == KEY_KEPT and line in (kf.writes.get(subject) or [])]
+        hops = [h for kf in kept for h in getattr(kf, "kept_hops", None) or []]
+        if not kept or not hops or any(getattr(h, "open", "") for h in hops):
+            return None
+        writes = list(dict.fromkeys((h.owner, w.statement, w.object) for h in hops for w in getattr(h, "persisted", None) or []))
+        if not writes:
+            return None
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        takes: set[str] = set()
+        for caller, statement, obj in writes:
+            own = [kf for kf in kfs if kf.owner == caller and getattr(kf, "statement", None) == statement
+                   and getattr(kf, "object", "") == obj]
+            flushes = [kf for kf in own if getattr(kf, "flushed_in", "")]
+            terms = [(kf, False) for kf in own if getattr(kf, "attr", "") == history.subject and getattr(kf, "term", "")] + [
+                (ck, True) for fk in flushes for ck in kfs if ck.owner == fk.flushed_in
+                and getattr(ck, "statement", None) in (getattr(fk, "flushed_lines", None) or [])
+                and getattr(ck, "attr", "") == history.subject and getattr(ck, "term", "")]
+            if not terms:
+                return None
+            call = f"{caller.partition('::')[0]}:{statement}"
+            for term, flushed in terms:
+                for s in term.sources:
+                    if s.kind == KEY_CONSTANT and not getattr(s, "paths", None):
+                        values = [s.name]
+                    elif s.kind == KEY_PARAMETER and getattr(s, "site_owner", ""):
+                        ways = SR.param_ways(s.site_owner, s.name, steps=("[*]",) if getattr(term, "each_element", False) else ())
+                        ways = [w for w in ways if call in w.route] if flushed else ways
+                        if not ways:
+                            return None
+                        values = []
+                        for w in ways:
+                            if w.end == SR.CONSTANT and w.why not in (SR.THROUGH, SR.MADE_EMPTY):
+                                values.append(w.value)
+                            elif w.end == SR.DATABASE and w.site in sites:
+                                selected = [v.partition("=")[2] for v in getattr(sites[w.site], "selects", None) or []
+                                            if v.partition("=")[0] == history.subject]
+                                if not selected or state in selected:
+                                    return None
+                                takes |= {f"{w.site.rpartition('::')[2]} ({', '.join(selected)})"}
+                            else:
+                                return None
+                    else:
+                        return None
+                    literals = {str(v).strip("'\"") for v in values}
+                    if state in literals:
+                        return None
+                    takes |= {repr(v) for v in sorted(literals)}
+        return (f"the {len(writes)} write(s) persisting it ({', '.join(sorted({c.rpartition('::')[2] for c, _, _ in writes}))}) "
+                f"take the row in {', '.join(sorted(takes))} only, the statuslog holding {state!r} then")
+
     def _selected_out(self, cands: list[Candidate], subject: str, at: datetime.datetime) -> list[Candidate]:
         """Q3 (P39): *cands* less each line whose selection returns no row of the object at *at*, the time the write
         itself is in (a window holding the write, ``W.Asking.holds_write``), and a candidate left with no line; each
@@ -11175,7 +11248,9 @@ class Rerun:
             moments = [q.since, *(_when(s.get("time_extended") or s["time"])
                                   for s in HD.rows_after(states, q.since.isoformat(" "), after.get("as_of")))]
             for owner, line in arms:
-                whys = [self._selection_false(owner, line, subject, t) for t in moments]
+                # K-4b: where the selections are not read at a moment, the writes persisting the arm's object
+                whys = [self._selection_false(owner, line, subject, t) or self._persisted_false(owner, line, subject, t)
+                        for t in moments]
                 if any(w is None for w in whys):
                     said = []
                     break
@@ -11323,6 +11398,7 @@ class Rerun:
         absent: list[str] = []
         premised: set[str] = set()
         not_run: list[tuple[datetime.datetime, str, str, Any]] = []  # A-1: writes their pass's guard read false
+        confirmed: list[tuple[datetime.datetime, str, Any]] = []  # K-2 (a): reached writes read as run
         # why each open arm is: no must print names the row it writes ("unprinted"), a log of it the records lack
         # ("unasked"), or judgement 3's premises not held otherwise ("unread") -- Q1 batch 2 part 2's (ii), (i), (iii)
         open_why: dict[str, str] = self.__dict__.setdefault("_open_why", {}).setdefault((subject, nulls), {})
@@ -11346,6 +11422,16 @@ class Rerun:
                     value = _written_offset(b)
                     opening = TL.Opening(name, value, value)
                 for at, machine, where, how, bound in got:
+                    if how == TL.REACHED:
+                        # K-2 (b): a write whose key's selection takes other states than the row held then is none of
+                        # the row's (getTasksToBeFinished_JEDI's lock at 1690, the task in tobroken)
+                        if (other := self._selection_takes_other_states(j.owner, b.line, subject, at)) is not None:
+                            not_run.append((at, name, machine.split(".")[0], [T.Said("its-selection-takes-other-states", other)]))
+                            continue
+                        # K-2 (a): one whose statement's own status value the statuslog shows then ran
+                        if (by := self._statement_ran(j.owner, b.line, subject, at, q)) is not None:
+                            how = TL.RAN
+                            confirmed.append((at, name, by))
                     # a value its statement's printed bind map holds stands for the arm's own (the bind-print part)
                     read = _printed_bounds(bound[0], nulls) if bound else None
                     shown.setdefault((j.owner, at, machine, where), []).append((name, how, value if read is None else read))
@@ -11428,7 +11514,7 @@ class Rerun:
                          tuple(sorted({(x[0], x[1], x[2]): x for x in not_run}.values(), key=lambda x: (x[0], x[1]))),
                          tuple(began_rt),
                          tuple(r for r in _runtime_apart(before) if r not in began_rt) if begun_by else (),
-                         row_value)
+                         row_value, tuple(confirmed))
         cache[ckey] = tl
 
         def said(lo: datetime.datetime, hi: datetime.datetime) -> str | None:
@@ -11443,6 +11529,7 @@ class Rerun:
             "absent": absent, "open": [o.arm for o in opens], "begun_by": list(begun_by),
             "not_run": [{"at": _iso(str(at)), "arm": arm, "machine": machine} for at, arm, machine, _ in tl.not_run],
             "begun_runtime": list(tl.begun_runtime),
+            "confirmed": [{"at": _iso(str(at)), "arm": arm, "by": by.get("by", "")} for at, arm, by in tl.confirmed],
             "runtime_unread": list(tl.runtime_unread),
             "row_value": {"at": _iso(str(tl.row_value[0])), "value": _iso(str(tl.row_value[1])), "arms": list(tl.row_value[2]),
                           "as_of": tl.row_value[3],
@@ -11529,6 +11616,71 @@ class Rerun:
             if w.how == TL.RAN:
                 # a write run after any that may have left the value: what it wrote is not the value read
                 return None
+        return None
+
+    def _selection_takes_other_states(self, owner: str, line: int, subject: str, at: datetime.datetime) -> dict | None:
+        """K-2 (b) (bundle K, out/gm/qk-design.md): a write of *subject* by *owner*'s arm at *line*, a print reaching it at
+        *at*, is none of the row's where the write's key comes only from selections' rows (the map's ``KeyFrom``
+        ``rows`` sources) and each selection's selects of the class's history subject lack the state the statuslog
+        holds then.  Only that state is read at that moment; the selections' other terms are not (they would be read
+        in the rows file's later values, KNOWN_ISSUES.md K17).  getTasksToBeFinished_JEDI's lock at 1690 at 03:58:05
+        takes rows of its 1644 (prepared, scouted, breaking, toabort, passed) while the task was tobroken
+        (NT-breaking-late).  The words' fields, or None."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = [s for s in ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+                  if _when(s.get("time_extended") or s["time"]) <= at]
+        if fragment is None or history is None or not states:
+            return None
+        writes = [kf for kf in key_froms() if _bare(kf.owner) == _bare(owner) and kf.term
+                  and line in (kf.writes.get(subject) or [])]
+        sources = [s for kf in writes for s in getattr(kf, "sources", None) or []]
+        if not sources or any(s.kind != "rows" or getattr(s, "via", None) for s in sources):
+            return None
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        state = states[-1].get("status")
+        takes: list[str] = []
+        names: list[str] = []
+        for name in dict.fromkeys(s.name for s in sources):
+            site = sites.get(name)
+            values = [v.partition("=")[2] for v in getattr(site, "selects", None) or [] if v.partition("=")[0] == history.subject]
+            if site is None or not values or state in values:
+                return None
+            takes += [v for v in values if v not in takes]
+            names.append(name.rpartition("::")[2])
+        return {"site": ", ".join(names), "takes": takes, "state": repr(state)}
+
+    def _statement_ran(self, owner: str, line: int, subject: str, at: datetime.datetime, q: Missed) -> dict | None:
+        """K-2 (a) (bundle K, out/gm/qk-design.md): a write of *subject* by *owner*'s arm at *line*, a print reaching it at
+        *at*, ran where a status arm of the same function the map ties to it (``stay_value.tied``: ``same_pass``, or
+        the one arm of the column at the status arm's statement, one call running both) writes the value the statuslog
+        shows within a second and ``CLOCKS_APART`` of *at*: that row is the statement's run, and the column went with
+        it.  prepareTasksToBeFinished_JEDI's UPDATE at 4075 writes the status (3971 'tobroken') and lockedBy only by 3839
+        (NULL); the statuslog's tobroken row is at 03:57:57.7, the print at .600 (NT-breaking-late).  updateJobStatus's
+        241 writes endTime by 233 or 67, neither tied: a 'running' row says nothing of endTime.  Another writer of the
+        same status in that second is not told apart.  The words' fields, or None."""
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+        if history is None or not states or subject == history.subject:
+            return None
+        status = history.subject
+        def mine(subj: str) -> list[tuple[str, Any]]:
+            return [(j.owner, b) for j in self._subject_writers(subj) if _bare(j.owner) == _bare(owner) for b in j.branches]
+
+        columns = [c for _, c in mine(subject)]
+        kfs = key_froms()
+        near = CLOCKS_APART + datetime.timedelta(seconds=1)
+        for o, sb in mine(status):
+            value = (sb.outcome or "").strip("'\"") if isinstance(sb.outcome, str) else None
+            then = next((t for s in states if value and s.get("status") == value
+                         and abs((t := _when(s.get("time_extended") or s["time"])) - at) <= near), None)
+            if then is None or not any(c.line == line for c in SV.tied(sb, o, status, subject, columns, kfs, self._together_lines)):
+                continue
+            stmt = next((kf.statement for kf in kfs if kf.owner == o and set(kf.writes.get(status) or []) & SV._lines(sb)
+                         and line in (kf.writes.get(subject) or [])), None)
+            return {"by": SV._name(o, sb.line), "value": repr(value),
+                    "statement": f"in the same statement, {_bare(o).rpartition('::')[2]}:{stmt}" if stmt else "in the same pass",
+                    "then": f"{then:%H:%M:%S.%f}"[:12]}
         return None
 
     def _runtime_began(self, q: Missed, before: SV.Before, begun: datetime.datetime) -> list[str]:

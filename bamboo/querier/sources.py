@@ -340,7 +340,10 @@ def _ways_of_the_value(sources: list[Any], steps: tuple[str, ...] = ()) -> tuple
     the list TaskRefiner.runImpl builds with self.taskList's ``[2]`` at ``[0]``, beside the default ``None`` of other
     callers, and its elements (``[*]``) are that ``[2]``.  And whether the read stops for a part it cannot read
     (:func:`_placed_parts`), or reads no source while one says where a part sits: such a part was dropped unread where
-    another source was the value itself (64 ParameterFroms, 127 GuardFroms and 21 FieldFrom bindings on x13zns)."""
+    another source was the value itself (64 ParameterFroms, 127 GuardFroms and 21 FieldFrom bindings on x13zns).
+    K-4a' (the map's (D), x13zo): where the dump gives a container the code spells a source of its own
+    (:func:`_containers_given`), every way holds a source that is the value, so a part the read does not reach is a
+    note on it, and the read does not stop for it."""
     read: list[tuple[Any, tuple[str, ...]]] = []
     unread = False
     parts = False
@@ -352,7 +355,28 @@ def _ways_of_the_value(sources: list[Any], steps: tuple[str, ...] = ()) -> tuple
         lefts, left_unread = _placed_parts(s, steps)
         read += [(s, left) for left in lefts]
         unread = unread or left_unread
-    return read, unread or (parts and not read)
+    return read, (unread or (parts and not read)) and not _containers_given()
+
+
+def _containers_given() -> bool:
+    """K-4a' (the map's (D), codemap-xliii c9136d7, x13zo): whether the installed dump gives a container the code spells
+    with its elements a source of its own (``KEY_CONTAINER``), its elements' parts beside it."""
+    fragment = mapdump.fragment()
+    return fragment is not None and _containers_in(id(fragment))
+
+
+def _is_container(s: Any) -> bool:
+    """Whether *s* is a container the code spells with its elements (the map's ``KEY_CONTAINER``, (D))."""
+    kind = getattr(M, "KEY_CONTAINER", None)
+    return kind is not None and getattr(s, "kind", None) == kind
+
+
+@functools.cache
+def _containers_in(fragment_id: int) -> bool:
+    kind = getattr(M, "KEY_CONTAINER", None)
+    fragment = mapdump.fragment()
+    return kind is not None and any(s.kind == kind for p in getattr(fragment, "parameter_froms", None) or []
+                                    for s in getattr(p, "sources", None) or [])
 
 
 @dataclass(frozen=True)
@@ -971,6 +995,9 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
                     entered=() if route else entered, changes=on, steps=rest, **back)]
     if _none_stepped(s, rest):
         return []
+    if _is_container(s):
+        # K-4a': a step into the literal takes the parts beside it; whole, a value made of it
+        return [] if rest else [Way(CONSTANT, "", THROUGH, (at,), changes=on, **back)]
     if s.kind == M.KEY_CONSTANT:
         return [Way(CONSTANT, "" if rest or getattr(s, "through", None) else s.name, THROUGH if rest else s.kind, (at,),
                     changes=on, **back)]
@@ -1276,6 +1303,10 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
     rest = (*tuple(getattr(s, "steps", None) or ()), *steps)
     truth = truth and not rest
     here = next(iter(getattr(s, "at", None) or ()), "")
+    if _is_container(s):
+        # K-4a' (the map's (D)): a step into a container the code spells takes the parts beside it (their places,
+        # _ways_of_the_value), not the literal; read whole, a value made of the literal
+        return [] if rest else [Way(CONSTANT, "", THROUGH, route, end_at=here)]
     if truth and (put := _truth_ways(s, route)) is not None:
         return put
     if (built := getattr(s, "elements", None)) and len(rest) > 1 and rest[0].startswith(".") and rest[1].startswith("["):
@@ -1369,6 +1400,9 @@ def none_ways(owner: str, parameter: str, seen: frozenset = frozenset()) -> list
                 out += [(call + up, said) for up, said in none_ways(s.site_owner, name, seen)]
         elif s.kind == M.KEY_CONSTANT:
             out.append((call, NONE_ADMITS if name == "None" else NONE_EXCLUDES))
+        elif _is_container(s):
+            # K-4a': a container the code spells is never None
+            out.append((call, NONE_EXCLUDES))
         elif s.kind == M.KEY_SELF_FIELD and s.site_owner and re.fullmatch(r"self\.\w+", name):
             out.append((call, _field_none(s.site_owner, name[5:], seen)))
         else:

@@ -607,8 +607,11 @@ the first kind is there.  The map does not tell a part on a way of its own (a li
 another source on the same way is (`x = obj; x.child = obj`), and route does not tell them apart either, so the stop is
 the safe reading; on the 48 cases of 11-17 it moved no case.  `none_ways` reads such a part as an unknown way, and a
 callee's test is not cut on a constant where one is unread.
-*Revisit:* when the map gives a container the code builds a source of its own (asked 2026-11-18 06:39, (D)): a part is
-then always a note on a value another source is, and the stop for a whole read goes.
+*Changed (K-4a', bundle K, 2026-11-18; the map's (D), codemap-xliii c9136d7, x13zo):* where the dump gives a container
+the code spells with its elements a source of its own (`KEY_CONTAINER`, `sources._containers_given`), every way holds a
+source that is the value, so a part the read does not reach is a note and the read does not stop for it; the container
+read whole is a value made of the literal (a constant-through way, never None), and a step into it takes the parts
+beside it, not the literal.  On a dump without containers (x13zns, x13znd) the stop stays.
 
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
@@ -865,10 +868,18 @@ parent_tid)`; since K-0 (bundle K) a read's constant index after an element step
 there (`KeySource.paths`, `sources._placed`), and a literal None with a step left gives no way (`_none_stepped`), so the
 key comes in from getTasksToRefine_JEDI's two selections alone.  It still does not read NR-T-53646395-assessmentTime's
 goal: the DEFT selection @1147 has no condition the map reads (another schema's table), so it is not shown to return no
-row of the task.  *Next (K-4, bundle K):* the object goal's arms set is kept in the refiner (KEY_KEPT) and persisted by
-`TaskRefiner.runImpl`'s registerTaskInOneShot_JEDI (`status=:preStatus`) and six updateTask_JEDI flushes (`status IN
-(:old___in)`); their status terms, on the 1340 way the literal 'registered', are read at each moment in place of the
-DEFT selection, once the map's KEY_KEPT hops, `each_element` and `flushed_in` are in a dump (asked 2026-11-18 06:27).
+row of the task.
+
+*Changed (K-4b, bundle K, 2026-11-18; the map's (A)(B)(C), codemap-xliii 637d38f, x13zo):* where the selections are
+not read at a moment, the writes persisting the arm's object are (`Rerun._persisted_false`): the object goal's arms set
+is kept in the refiner (KEY_KEPT), and the map's `kept_hops` name every caller's write persisting it --
+`TaskRefiner.runImpl`'s registerTaskInOneShot_JEDI at 602 (`status=:preStatus`, read in the method it reaches,
+`flushed_in`) and seven updateTask_JEDI flushes (`status IN (:old___in)`, each element) -- whose status value on every
+way the call hands is the literal 'registered' (getTasksToRefine_JEDI's 1340) or the rows of @1369 (registered,
+rerefine, staged).  At a moment the task holds none of those, no write lands.  NR-T-53646395-assessmentTime's
+getAchievedTasks_JEDI:3283 is put out (`goal IS NOT NULL`, P39).  Not read: an open hop, a persisting write with no
+status term, a way of the call ending elsewhere than a literal or a selection whose selects the map gives.  A function
+the object is handed to (`handed_to`) is taken as not persisting it, as the map's records say.
 
 *Changed (K-1, bundle K, 2026-11-18):* A-4 (`Rerun._row_value_write`) read the row's value of a time column as its last
 write only where every arm writes the clock with one offset.  Where the arms write other values too (JobSpec.endTime:
@@ -879,6 +890,26 @@ another value are named as having not written the same value again (`timeline-ro
 endTime 15:35:35 was written by updateJobStatus:233 at 15:35:35.751 as the job went holding, so copyArchive main@381 and
 @405 (`modificationTime<now-3h OR (endTime IS NOT NULL AND endTime<now-3h)`) read as refusing the row all the stay.  A
 value no write in the window matches stays open (NJ-starting-late's columns over a 24 h stay).
+
+### K79. A write a print reached is read as run where the statuslog shows its statement's status, and as none of the row's where its key's selection takes other states
+
+A timeline (Q1) reads a write of a lock or time column as `reached` where a print shows the pass reached it but not its
+statement's run: its value then widens the column's bounds.  NT-breaking-late's lockedBy was NULL from
+prepareTasksToBeFinished_JEDI's 03:57:57 UPDATE, which getTasksToBeFinished_JEDI's 1644 (`lockedBy IS NULL OR
+lockedTime<...`) reads, but both that write and the lock 1690 took at 03:58:05 were reached only.
+
+*Changed (K-2, bundle K, 2026-11-18):* (a) a reached write is read as run where a status arm of its function the map
+ties to it (`stay_value.tied`: `same_pass`, or the status statement's one arm of the column, one call running both)
+writes the value the statuslog shows within two seconds (`Rerun._statement_ran`): prepareTasksToBeFinished_JEDI's 4075
+writes 3971 'tobroken' and lockedBy only by 3839.  A statement writing the column by two arms says nothing of which ran
+(updateJobStatus's 241: endTime by 233 or 67).  (b) A reached write whose key comes only from selections' rows, each
+selecting other states than the statuslog holds then, is none of the row's (`_selection_takes_other_states`): the 1690
+lock takes 1644's rows (prepared, scouted, breaking, toabort, passed) while the task was tobroken.  Only the history
+subject's state is read at that moment, not the selections' other terms (K17).  NT-breaking-late's END now says the
+lock term was true for the row before the take.
+*Not read:* an unlock whose statement writes no status (NT-passed-late's updateDatasetsToFinishTask_JEDI 4352); a
+copy of another column not tied to the write it copies (updateJob 509, the map's (E)); a later run's selection as a
+witness of an earlier state (NT-defined-late's unlockTasks_JEDI@872).
 
 ## H steps
 

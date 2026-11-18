@@ -112,6 +112,9 @@ class Timeline:
     #: other values too, the write the records show whose clock is the value, with the arms writing another value
     #: named as having not written it again after them (NJ-holding-late's endTime by updateJobStatus:233)
     row_value: tuple[Any, ...] | None = None
+    #: K-2 (a): writes a print reached, read as run, the statuslog showing their statement's own status value then:
+    #: ``(at, "func:line", what showed it)`` each (prepareTasksToBeFinished_JEDI's 4075, lockedBy NULL with 'tobroken')
+    confirmed: tuple[tuple[datetime.datetime, str, Any], ...] = ()
 
     def read(self) -> bool:
         """Whether the records or the row read anything of the column: a write, an arm shown not to, the row's value."""

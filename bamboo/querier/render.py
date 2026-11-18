@@ -718,7 +718,7 @@ TEMPLATES: dict[str, str] = {
     "before-written-without": "{arms:join=, } write the value without writing it the time they run",
     "before-may-be-written": "{arms:join=, } may write it while the value holds",
     "born-only-held": "{subject} read from the row after the move: every arm writing it makes the row ({arms:join=, }), so it held that value all the stay",
-    "written-only-before-held": "{subject} read from the row after the move: every arm writing it takes the row by a key from selections that return no row of the object from {since} to the reading: {arms:join=; } (I-4), so it held that value from then on",
+    "written-only-before-held": "{subject} read from the row after the move: no arm writing it lands on the row from {since} to the reading -- its key's selections return no row of the object, or the writes persisting what it sets take the row in other states: {arms:join=; } (I-4, K-4b), so it held that value from then on",
     "held-before": "{subject} read as {value} all the stay:the time of the statuslog row of {observed!r}, to within the pass of {starts:join=, } that wrote both; {out} other line(s) writing it left out{premises:join=}",
     # Q1 part 1: a time column read over the stay from the records (rerun._timeline)
     "for-the-column-s-writes": "for the writes of {where} over {start} .. {end}",
@@ -726,7 +726,12 @@ TEMPLATES: dict[str, str] = {
     "for-a-callee-s-print": "for {callee}'s print at {line} of what its call at {at} gives, inside the pass {first} .. {last}",
     "false-on-the-values-read": "{fn_name}'s test at {line} was false in every pass ({n}) on the values read, by {parts:rjoin=, }{whatever}: the arms were kept off there; why those values were what they were is not read here",
     "whatever-they-held": ", whatever {unread:rjoin=, } held",
-    "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{rowvalue}{notrun}{absent}{opens}{begun:join=}",
+    "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{rowvalue}{confirmed}{notrun}{absent}{opens}{begun:join=}",
+    # K-2 (a): a reached write read as run, its statement's status value the statuslog shows then
+    "timeline-confirmed": "; read as run, the statuslog showing their statement's own status value then: {writes:join=; }",
+    "timeline-confirmed-write": "{at} by {arm} ({by} writes {value} {statement}; the statuslog's row at {then})",
+    # K-2 (b): a reached write whose key's selection takes other states than the row's then
+    "its-selection-takes-other-states": "its key's selection {site} takes {takes:join=, } only, the statuslog holding {state} then",
     "timeline-begun-by": "; the stay begun by {arms:join=, } (the other arms writing the value shown not to then, judgement 3)",
     "timeline-begun-unread": "; {arms:join=, }, which may have begun the stay, print nothing naming the row as it began, while another arm that may have does",
     "timeline-begun-runtime": "; {arms:join=, }, writing the status from a value known only at run time, printed the row as the stay began: read as having written the value seen (a premise)",
