@@ -201,6 +201,9 @@ HISTORY_TABLES: dict[str, str] = {
 }
 #: The attribute a history row is keyed by, per class: the row of the object's own key.
 HISTORY_KEYS: dict[str, str] = {"JobSpec": "PandaID", "JediTaskSpec": "jediTaskID"}
+#: The column a class's row is named by: a history table's, and a file's -- for :func:`objects.may_change`'s key, and
+#: the key field of an object no write persists whose value its KeyFrom reads (:func:`sqlwrite._unpersisted`).
+ROW_KEYS: dict[str, str] = {**HISTORY_KEYS, "FileSpec": "row_ID"}
 #: How many bindings back a writer's argument is read for what its row records (:meth:`_Reader._carried`):
 #: ``archiveJob``'s ``tmpJobStatus`` to ``varMap[":jobStatus"]`` to ``"closed"``.
 CARRIED_DEPTH = 4

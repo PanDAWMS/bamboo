@@ -73,14 +73,21 @@ from bamboo.codemap.calls import (
     Recorded,
     Target,
     Types,
+    bare_name,
+    def_name,
     keyed_setattr,
     own_nodes,
     receiver_parameter,
+    spells,
 )
 from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     FALL_BODY,
     FALL_ELSE,
+    KEPT_DEPTH,
+    KEPT_NO_CALL,
+    KEPT_NOT_A_NAME,
+    KEPT_TOO_DEEP,
     KEY_ATTRIBUTE,
     KEY_BOUND,
     KEY_COLUMN_EXPRESSION,
@@ -140,8 +147,11 @@ from bamboo.codemap.models import (
     HeldSource,
     JoinPair,
     JunctionNode,
+    KeptHop,
+    KeptWrite,
     KeyFrom,
     KeySource,
+    ListPrint,
     OpenCrossing,
     OrderHole,
     ParameterFrom,
@@ -151,6 +161,7 @@ from bamboo.codemap.models import (
     ReadSiteNode,
     RowFall,
     RowKeySource,
+    RowLoop,
     RowsTerm,
     SetFrom,
     SourceModule,
@@ -172,7 +183,7 @@ from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 # has spent the most effort undoing.
 from bamboo.codemap.panda.recognizers import progress
 from bamboo.codemap.panda.recognizers import tables as table_records
-from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
+from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES, ROW_KEYS
 from bamboo.codemap.pathcond import (
     ancestors,
     arm_condition,
@@ -427,7 +438,7 @@ def statement_stops(
     thing come to disagree.  The precondition stops are the write's and are
     left to ``extract``.
     """
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     found: list[ReadingStop] = []
     seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
     skipped: list[sql.Skip] = []
@@ -459,7 +470,7 @@ def _row_key_source(
                 for filled in sql.bound_values(func, run.varmap, bind, run.window, at=run)
             )
     source = RowKeySource(
-        owner=f"{rel_path}::{func.name}",
+        owner=f"{rel_path}::{def_name(func)}",
         file=rel_path,
         statement=run.call.lineno,
         columns=sorted(statement.preconditions),
@@ -484,7 +495,7 @@ def _key_froms(
     reach record (:func:`attach_key_sources`).  A term none of whose runs has a bind map is :data:`KEY_NO_MAP`; one
     whose runs fill none, :data:`KEY_NO_BIND`.
     """
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     for term, bind, mapping in _row_terms(func, run, statement):
         name = (owner, run.call.lineno, statement.table, term)
         record = keyed.get(name)
@@ -497,6 +508,7 @@ def _key_froms(
                 term=term,
                 keyed=mapping,
                 unread=KEY_NO_MAP,
+                each_element=bind.endswith(sqltext.IN_LIST_SUFFIX),
             )
             record._binds = (func, rel_path, [])
             key_froms.append(record)
@@ -841,7 +853,7 @@ def _insert_from(
     obj_class: Optional[str] = None,
     mades: Optional[list[ast.Call]] = None,
 ) -> KeyFrom:
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     # Apart from a WHERE term of the same spelling: a run that updates or inserts the row (``addStdOut``'s
     # ``sqlU`` or ``sqlI``) has both, and they are not one record.
     name = (owner, run.call.lineno, table, "\0insert " + term)
@@ -1128,7 +1140,7 @@ def _set_from(
     new_row: Optional[bool],
     read: Callable[[], list[sql.Bind]],
 ) -> None:
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     name = (owner, run.call.lineno, table, column.lower(), text)
     record = wrote.get(name)
     if record is None:
@@ -1244,7 +1256,7 @@ def _write_print(
     class the text does not spell under the key its class's map stores it by (*map_keys*) -- less those a sequence
     fills where the map is ``useSeq=True``.  *run* is one call's (:func:`_each_call`); *statement* is ``None`` for an
     ``INSERT`` whose columns are the object's (``{JobSpec.columnNames()}``)."""
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     name = (owner, run.call.lineno, table)
     if name in printed:
         return
@@ -1329,7 +1341,7 @@ def _mark_object(
         return
     spelled_obj = ast.unparse(obj)
     attributes = {a.lower(): a for a in attributor.declared_attributes(obj_class)}
-    owner = f"{rel_path}::{func.name}"
+    owner = f"{rel_path}::{def_name(func)}"
     for term, bind, _mapping in _row_terms(func, run, statement):
         record = keyed.get((owner, run.call.lineno, statement.table, term))
         if record is None:
@@ -1434,7 +1446,7 @@ def extract(
             # run twice.  Counting both would inflate the coverage denominator
             # with duplicates and make the slice look worse than it reads.
             seen: set[tuple[str, str, Optional[str], Optional[tuple[int, int]]]] = set()
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             skipped: list[sql.Skip] = []
             writing: Optional[_Writing] = None
             for run in sql.executions(func, skipped):
@@ -1490,7 +1502,7 @@ def extract(
                                     reason=PRECONDITION_BIND_UNSETTLED,
                                     detail=term,
                                     file=module.rel_path,
-                                    owner=f"{module.rel_path}::{func.name}",
+                                    owner=f"{module.rel_path}::{def_name(func)}",
                                     line=run.call.lineno,
                                     statement=run.call.lineno,
                                 )
@@ -1556,7 +1568,7 @@ def extract(
                                     reason=why[0] if why else "no reason given",
                                     detail=why[1] if len(why) > 1 else "",
                                     file=module.rel_path,
-                                    owner=f"{module.rel_path}::{func.name}",
+                                    owner=f"{module.rel_path}::{def_name(func)}",
                                     table=statement.table,
                                     column=column,
                                     # The name ``_record`` would have used, so
@@ -1566,7 +1578,7 @@ def extract(
                                     junction=JunctionNode.make_name(
                                         map_id,
                                         SubjectNode.make_name(qualifier, attribute),
-                                        f"{module.rel_path}::{func.name}",
+                                        f"{module.rel_path}::{def_name(func)}",
                                     ),
                                 )
                             )
@@ -2005,7 +2017,7 @@ def _record(
     guards some of the statements the call runs carry and when.
     """
     subject = SubjectNode.make_name(spec_class, attribute)
-    owner = f"{module.rel_path}::{func.name}"
+    owner = f"{module.rel_path}::{def_name(func)}"
     name = JunctionNode.make_name(map_id, subject, owner)
 
     junction = junctions.get(name)
@@ -3124,6 +3136,9 @@ def _number(amount: float) -> str:
 
 def _bind_amount(side: "sqltext.Side", value: "values.Stated") -> ConditionValue:
     """A bind the statement compares a column with, filled with *value*."""
+    if value.said and value.base:
+        # The clock less a duration of one value the source does not settle (values.Stated.scale).
+        return ConditionValue(kind="bind", text=side.text, base=value.base, scale_seconds=value.scale, said=value.said)
     if value.said:
         return ConditionValue(kind="bind", text=side.text, said=value.said)
     if value.constant:
@@ -3351,7 +3366,7 @@ def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
                     Unexplained(
                         reason=_why_not_run(func, name),
                         file=module.rel_path,
-                        owner=f"{module.rel_path}::{func.name}",
+                        owner=f"{module.rel_path}::{def_name(func)}",
                         # The variable, not a table: this slice counts
                         # statements, and which tables one names is what it
                         # could not get to.
@@ -4712,7 +4727,7 @@ def read_side(
 
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             # Keyed by the window as well as the text.  A statement is emitted
             # once per call site, so deduplicating on the text alone keeps the
             # first pairing and throws the rest away -- which is exactly the
@@ -5530,7 +5545,8 @@ class _PathCarry:
     """Which parts of which names hold the rows in one function, as it runs: a holding is a name and an access path.
 
     The rows come in through the statement's own seeds (*start*: a write holds them whole), the parameters a call
-    hands parts of them to (*seeds*), or the value of a call the function made (*call_values*: the way back).  A
+    hands parts of them to (*seeds*), the value of a call the function made (*call_values*: the way back), or what
+    a call's definition kept in an object the function handed it (*kept_values*: the way back through it).  A
     write holds what its value holds, put at its steps -- ``x.a[k] = v`` puts what ``v`` holds at ``.a[*]`` of ``x``
     -- ``setattr(x, n, v)`` at any field of ``x`` where ``n`` is computed, but in a ``for n, v in P.items()`` what
     each key of ``P`` holds at the field it names (:func:`_keyed_fields`: ``AdderPluginBase.__init__``'s ``params``)
@@ -5571,6 +5587,7 @@ class _PathCarry:
         call_values: Optional[dict[int, _Paths]] = None,
         deciding: bool = False,
         item: Optional[int] = None,
+        kept_values: Optional[dict[int, dict[tuple[str, tuple[str, ...]], _Paths]]] = None,
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
@@ -5589,10 +5606,17 @@ class _PathCarry:
             self._add(write.fresh())
         arguments = getattr(func, "args", None)
         seeds = seeds or {}
+        kept_values = kept_values or {}
         start_ids = {id(node) for node in start}
         for write in self.writes:
             if write.node is arguments and write.source is None and write.call is None and write.name in seeds:
                 write.forced = frozenset(seeds[write.name])
+            elif write.call is not None and id(write.call) in kept_values:
+                # What the call's definition keeps in what this function hands it (:func:`_kept_hops`): the way back
+                # through a kept object, as *call_values* is through a return.
+                kept = kept_values[id(write.call)].get((write.name, write.steps))
+                if kept:
+                    write.forced = _below(write.steps, kept)
             elif (
                 id(write.node) in start_ids
                 and write.call is None
@@ -6174,7 +6198,7 @@ class _Reading:
         #: what a call of it gives back.
         self.ruled: dict[int, frozenset[int]] = {}
         #: The names junction owners' functions have: where a hole spelled ``x.f(...)`` could land at one.
-        self.owner_names = {owner.rsplit("::", 1)[-1] for owner in owners}
+        self.owner_names = {bare_name(owner) for owner in owners}
         self._summaries: dict[tuple, _Summary] = {}
         self._reads: dict[tuple, bool] = {}
         self._placed: dict[tuple, Optional[Placed]] = {}
@@ -6784,7 +6808,7 @@ class _Crossings:
             self._again(("back", key))
             return
         self._returned.add(key)
-        owner = f"{file}::{func.name}"  # type: ignore[attr-defined]
+        owner = f"{file}::{def_name(func)}"
         if owner in self.returning and isinstance(getattr(func, "parent", None), ast.Module):
             self.returned.setdefault(owner, set()).update(paths)
         reading = self.reading
@@ -6803,7 +6827,7 @@ class _Crossings:
                 self._way.append(("back", site.file, site.func, site.call))
                 try:
                     carry = _PathCarry(reading, site.file, site.func, (), call_values={id(site.call): paths})
-                    owner = f"{site.file}::{site.func.name}"  # type: ignore[attr-defined]
+                    owner = f"{site.file}::{def_name(site.func)}"
                     if owner in reading.owners and reading.reads_in(carry):
                         self._cross(owner)
                     for call in _own_calls(site.func):
@@ -7351,7 +7375,7 @@ class _Filled:
                         kind=KEY_SEQUENCE,
                         line=line,
                         name=sequence,
-                        site_owner=f"{self.file}::{self.func.name}",
+                        site_owner=f"{self.file}::{def_name(self.func)}",
                         site_line=run_line,
                         paths=_spelled_paths(paths),
                     )
@@ -7500,7 +7524,7 @@ def _site_function(
             node
             for node in walk(tree)
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == wanted
+            and spells(node, wanted)
             and node.lineno <= site.anchor.line_start <= (node.end_lineno or node.lineno)
         ),
         None,
@@ -7581,6 +7605,7 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                         term=spelled,
                         unread=KEY_NO_MAP,
                         reads=True,
+                        each_element=all(bind.endswith(sqltext.IN_LIST_SUFFIX) for bind in binds),
                     )
                     record._binds = (func, file, [])
                 # A way of an OR, or a term only some runs append, in any of the texts the statement runs with.
@@ -7670,11 +7695,13 @@ def _attach_falls(
         if func is None:
             continue
         loops, _names = _row_loops(func, site.anchor.line_start, site.region[1])
+        site.row_loops = _row_loop_records(func, site.anchor.line_start, site.region[1], loops)
         if not loops:
             continue
         returned = _returned_names(func)
         rows = {site.name} | named_by.get(site.name, set())
         reader = of(func, site.anchor.file)
+        site._list_puts = _list_puts(func, loops, site.row_loops, reader, rows)
         falls: dict[int, RowFall] = {}
         hand_ons: dict[int, HandOn] = {}
         # A list the row loops work the rows through again is a copy of them, not where they are handed on.
@@ -7747,6 +7774,168 @@ def _leads_on(test: ast.If, other: list[ast.stmt], handing: list[ast.stmt]) -> b
     return any(
         reaching(one, [start], killers, entered=[start, *killers], once=flow.turn_loops(test, one)) for one in later
     )
+
+
+#: Methods that change a list or a set in place, so a later read of it may not hold what a loop put into it: what a
+#: print of it prints is not every row.  Reordering (``sort``, ``reverse``) keeps every element.
+_CHANGING = frozenset(
+    {"append", "add", "extend", "insert", "remove", "pop", "popitem", "clear", "discard", "update", "setdefault"}
+)
+
+
+def _kept_between(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, first: int, last: int) -> bool:
+    """Whether nothing on a line after *first* and before *last* binds *name* again or changes it in place -- a
+    changing method (:data:`_CHANGING`), an item stored or deleted, an augmented assignment."""
+    if any(not one.nested and first < getattr(one.site, "lineno", 0) < last for one in bindings(func, name)):
+        return False
+    for node in own_nodes(func):
+        if not first < getattr(node, "lineno", 0) < last:
+            continue
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _CHANGING
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == name
+        ):
+            return False
+        targets = (
+            node.targets
+            if isinstance(node, (ast.Assign, ast.Delete))
+            else [node.target]
+            if isinstance(node, ast.AugAssign)
+            else []
+        )
+        if any(isinstance(one, ast.Subscript) and isinstance(one.value, ast.Name) and one.value.id == name for one in targets):
+            return False
+    return True
+
+
+def _every_turn(loop: ast.For | ast.AsyncFor | ast.While, statement: ast.stmt) -> bool:
+    """Whether every way through a turn of *loop* passes *statement*, a statement of its body (:func:`flow.passes_after`
+    from the body's first)."""
+    first = loop.body[0]
+    if statement is first:
+        return True
+    if enclosing_function(statement) is not enclosing_function(loop):
+        return False
+    try:
+        return flow.passes_after(first, statement)
+    except ValueError:
+        return False
+
+
+def _rebound_before(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, line: int, loop: ast.AST, seeds: Iterable[ast.AST]
+) -> bool:
+    """Whether a binding of *name* other than where the statement run at *line* lands its rows (*seeds*) lies between
+    it and *loop*, giving the name a value that can hold rows -- not ``None`` nor an empty literal, which no turn
+    walks: ``copyArchive.py::main`` binds ``res`` to ``lockJobsForReassign``'s value at 765, and its loop at 768
+    walks that, not 749's rows; ``lockJobOutputReport``'s ``resGL = None`` in a handler leaves its loop the rows'."""
+    held = {id(one) for one in seeds}
+    for one in bindings(func, name):
+        if one.nested:
+            continue
+        statement = site_of(one.site)
+        if id(statement) in held or not line < getattr(statement, "lineno", 0) < getattr(loop, "lineno", 0):
+            continue
+        value = getattr(statement, "value", None)
+        if isinstance(value, ast.Constant) and value.value is None:
+            continue
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set)) and not value.elts:
+            continue
+        if isinstance(value, ast.Dict) and not value.keys:
+            continue
+        return True
+    return False
+
+
+def _row_loop_records(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, line: int, last: int, loops: list[ast.For | ast.AsyncFor | ast.While]
+) -> list[RowLoop]:
+    """:attr:`ReadSiteNode.row_loops`: each of *loops* (:func:`_row_loops`, the statement run at *line*, its stretch
+    ending at *last*), sorted by line -- the name its header reads that holds the rows or a copy of them, the put
+    filling a copy, and whether it takes each row in a turn of its own (:attr:`RowLoop.each_row`): a ``for`` over the
+    cursor or over a name the rows land in, nothing else bound to it between (:func:`_rebound_before`), or over a copy
+    a loop taking each row puts every row into on every way through its turn (:func:`_copies`), nothing binding or
+    changing the copy between (:func:`_kept_between`).
+    ``getTasksToBeFinished_JEDI``'s ``for ... in taskStatList`` at 1654 is one; ``copyArchive.py::main``'s ``while
+    iJob < len(jobs)`` at 884, walking its copy by slices, is not."""
+    seeds = _rows_written(func, line, last)
+    names = {name for node in seeds for name in _assigned_names(node)}
+    lists = {name for node in seeds if not isinstance(node, (ast.For, ast.AsyncFor)) for name in _assigned_names(node)}
+    cursor_loops = {id(node) for node in seeds if isinstance(node, (ast.For, ast.AsyncFor))}
+    filled: dict[str, tuple[ast.For | ast.AsyncFor | ast.While, ast.stmt]] = {}
+    each: dict[int, bool] = {}
+    records: list[RowLoop] = []
+    for loop in sorted(loops, key=lambda one: (one.lineno, one.col_offset)):
+        header = loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else loop.test
+        read = [one.id for one in walk(header) if isinstance(one, ast.Name)]
+        over = next((name for name in read if name in names), "")
+        copy = "" if over else next((name for name in read if name in filled), "")
+        walked = loop.iter.id if isinstance(loop, (ast.For, ast.AsyncFor)) and isinstance(loop.iter, ast.Name) else ""
+        if id(loop) in cursor_loops:
+            each_row = isinstance(loop, (ast.For, ast.AsyncFor))
+        elif copy:
+            source, put = filled[copy]
+            each_row = (
+                walked == copy
+                and each.get(id(source), False)
+                and _every_turn(source, put)
+                and _kept_between(func, copy, source.end_lineno or source.lineno, loop.lineno)
+            )
+        else:
+            each_row = walked in lists and not _rebound_before(func, walked, line, loop, seeds)
+        each[id(loop)] = each_row
+        records.append(
+            RowLoop(
+                lines=[loop.lineno, loop.end_lineno or loop.lineno],
+                over=over or copy,
+                copy_of=filled[copy][1].lineno if copy else 0,
+                each_row=each_row,
+            )
+        )
+        for name in sorted(_copies(loop)):
+            if name in filled:
+                continue
+            filling = next(
+                (
+                    node
+                    for node in walk(loop)
+                    if isinstance(node, ast.Expr)
+                    and isinstance(node.value, ast.Call)
+                    and isinstance(node.value.func, ast.Attribute)
+                    and node.value.func.attr in ("append", "add")
+                    and isinstance(node.value.func.value, ast.Name)
+                    and node.value.func.value.id == name
+                ),
+                None,
+            )
+            if filling is not None:
+                filled[name] = (loop, filling)
+    return records
+
+
+def _list_puts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    loops: list[ast.For | ast.AsyncFor | ast.While],
+    records: list[RowLoop],
+    reader: "_Filled",
+    rows: set[str],
+) -> list[tuple[str, ast.stmt]]:
+    """``(name, put)`` for each name the first of *loops* puts a value holding its rows into (as a hand-on's,
+    :func:`_puts_into`) on every way through its turn, the first loop taking each row (*records*' first): the lists a
+    print after the loop can print every row of (:func:`attach_list_prints`)."""
+    if not records or not records[0].each_row:
+        return []
+    first = min(loops, key=lambda one: (one.lineno, one.col_offset))
+    found: dict[str, ast.stmt] = {}
+    for statement, value, key, into in _puts_into(first):
+        if into in found or not _every_turn(first, statement):
+            continue
+        if reader.holds_rows(value, statement, rows) or (key is not None and reader.holds_rows(key, statement, rows)):
+            found[into] = statement
+    return sorted(found.items(), key=lambda one: one[1].lineno)
 
 
 def _returned_names(func: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
@@ -7944,6 +8133,226 @@ def attach_hand_on_prints(
     return found
 
 
+def _list_hole(expression: str, name: str) -> str:
+    """How the hole *expression* holds the list *name*: ``whole`` -- the name, ``str()`` or ``repr()`` of it, a
+    ``join`` over it -- or ``slice`` -- ``name[a:b]``, or ``str()`` of it -- else ``""``."""
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except SyntaxError:
+        return ""
+
+    def is_name(one: ast.AST) -> bool:
+        return isinstance(one, ast.Name) and one.id == name
+
+    def is_slice(one: ast.AST) -> bool:
+        return isinstance(one, ast.Subscript) and is_name(one.value) and isinstance(one.slice, ast.Slice)
+
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("str", "repr"):
+        if len(node.args) == 1 and not node.keywords:
+            node = node.args[0]
+    if is_name(node):
+        return "whole"
+    if is_slice(node):
+        return "slice"
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "join"
+        and len(node.args) == 1
+    ):
+        joined = node.args[0]
+        if is_name(joined) or (
+            isinstance(joined, (ast.GeneratorExp, ast.ListComp))
+            and len(joined.generators) == 1
+            and is_name(joined.generators[0].iter)
+            and not joined.generators[0].ifs
+        ):
+            return "whole"
+    return ""
+
+
+def _is_len(node: ast.AST, name: str) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "len"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == name
+    )
+
+
+def _not_empty(test: ast.expr, name: str) -> bool:
+    """Whether *test* holds exactly where the list *name* is not empty: ``name``, ``len(name)``, ``len(name) > 0``,
+    ``len(name) != 0``, ``len(name) >= 1``, ``name != []``."""
+    if (isinstance(test, ast.Name) and test.id == name) or _is_len(test, name):
+        return True
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        return False
+    left, op, right = test.left, test.ops[0], test.comparators[0]
+    if _is_len(left, name) and isinstance(right, ast.Constant) and type(right.value) is int:
+        return (isinstance(op, (ast.Gt, ast.NotEq)) and right.value == 0) or (isinstance(op, ast.GtE) and right.value == 1)
+    return (
+        isinstance(left, ast.Name)
+        and left.id == name
+        and isinstance(op, ast.NotEq)
+        and isinstance(right, ast.List)
+        and not right.elts
+    )
+
+
+def _passes_on(loop: ast.stmt, target: ast.stmt, name: str) -> bool:
+    """Whether every way on from *loop* passes *target*, an ``if`` around it that tests the list *name* for not being
+    empty taken as true (:func:`_not_empty`): an empty list has no row to print."""
+    try:
+        if flow.passes_after(loop, target):
+            return True
+        tests = [
+            one
+            for one in ancestors(target)
+            if isinstance(one, ast.If)
+            and one.lineno > (getattr(loop, "end_lineno", None) or loop.lineno)
+            and _not_empty(one.test, name)
+            and any(target is step or any(target is inner for inner in walk(step)) for step in one.body)
+        ]
+        if not tests:
+            return False
+        tests.sort(key=lambda one: one.lineno)
+        previous: ast.stmt = loop
+        for test in tests:
+            if previous is not test and not flow.passes_after(previous, test):
+                return False
+            previous = test.body[0]
+        return target is previous or flow.passes_after(previous, target)
+    except ValueError:
+        return False
+
+
+def _walks_by(walk_loop: ast.AST, part: ast.Subscript, name: str) -> bool:
+    """Whether *walk_loop* walks the whole list *name* by the slice *part* (``name[i : i + n]``): ``i = 0`` last bound
+    before a ``while i < len(name)`` whose body adds ``n`` to ``i`` once, or ``for i in range(0, len(name), n)``."""
+    cut = part.slice
+    if not (
+        isinstance(cut, ast.Slice)
+        and isinstance(cut.lower, ast.Name)
+        and isinstance(cut.upper, ast.BinOp)
+        and isinstance(cut.upper.op, ast.Add)
+        and isinstance(cut.upper.left, ast.Name)
+        and cut.upper.left.id == cut.lower.id
+        and cut.step is None
+    ):
+        return False
+    index, width = cut.lower.id, ast.dump(cut.upper.right)
+    if isinstance(walk_loop, ast.While):
+        test = walk_loop.test
+        if not (
+            isinstance(test, ast.Compare)
+            and len(test.ops) == 1
+            and isinstance(test.left, ast.Name)
+            and test.left.id == index
+            and isinstance(test.ops[0], ast.Lt)
+            and _is_len(test.comparators[0], name)
+        ):
+            return False
+        steps = [
+            one
+            for one in walk(walk_loop)
+            if isinstance(one, ast.AugAssign) and isinstance(one.target, ast.Name) and one.target.id == index
+        ]
+        if len(steps) != 1 or not isinstance(steps[0].op, ast.Add) or ast.dump(steps[0].value) != width:
+            return False
+        func = enclosing_function(walk_loop)
+        starts = [
+            one
+            for one in bindings(func, index)
+            if not one.nested and getattr(site_of(one.site), "lineno", walk_loop.lineno) < walk_loop.lineno
+        ] if func is not None else []
+        if not starts:
+            return False
+        start = site_of(max(starts, key=lambda one: getattr(site_of(one.site), "lineno", 0)).site)
+        return isinstance(start, ast.Assign) and isinstance(start.value, ast.Constant) and start.value.value == 0
+    if isinstance(walk_loop, (ast.For, ast.AsyncFor)) and isinstance(walk_loop.target, ast.Name):
+        over = walk_loop.iter
+        return (
+            walk_loop.target.id == index
+            and isinstance(over, ast.Call)
+            and isinstance(over.func, ast.Name)
+            and over.func.id == "range"
+            and len(over.args) == 3
+            and isinstance(over.args[0], ast.Constant)
+            and over.args[0].value == 0
+            and _is_len(over.args[1], name)
+            and ast.dump(over.args[2]) == width
+        )
+    return False
+
+
+def attach_list_prints(
+    read_sites: Iterable[ReadSiteNode], function_prints: Iterable[FunctionPrintsNode], modules: Iterable[SourceModule]
+) -> int:
+    """Give each read site the owner's prints after its first row loop that print every element of a list the loop
+    puts each row into (:attr:`ReadSiteNode.list_prints`, :class:`ListPrint`; the lists :func:`_list_puts` kept):
+    the list whole on every way on from the loop, or by slices in a walk over the whole of it every way on enters --
+    a test of the list being empty taken as true -- nothing binding it again or changing it in place between
+    (:func:`_kept_between`).  ``copyArchive.py::main`` puts each ``PandaID`` of 871's rows into ``jobs`` at 878 and
+    prints ``str(jobs[iJob : iJob + nJob])`` at 885 walking ``jobs`` by 100.  Returns how many sites have one."""
+    trees = {module.rel_path: module.tree for module in modules}
+    printing = {(node.anchor.file, node.anchor.line_start): node for node in function_prints if node.anchor is not None}
+    found = 0
+    for site in read_sites:
+        if not site._list_puts or not site.row_loops or site.anchor is None:
+            continue
+        func = _site_function(trees, site)
+        node = printing.get((site.anchor.file, func.lineno)) if func is not None else None
+        if func is None or node is None:
+            continue
+        statements = _own_statements(func)
+        first = next(
+            (one for one in own_nodes(func) if isinstance(one, _LOOPS) and one.lineno == site.row_loops[0].lines[0]),
+            None,
+        )
+        if first is None:
+            continue
+        end = first.end_lineno or first.lineno
+        made: dict[int, ListPrint] = {}
+        for into, put in site._list_puts:
+            for printed in node.statements:
+                at = statements.get(printed.line)
+                if at is None or printed.line <= end or printed.line in made:
+                    continue
+                kinds = {hole.expression: _list_hole(hole.expression, into) for row in printed.rows for hole in row.holes}
+                whole = sorted(expression for expression, kind in kinds.items() if kind == "whole")
+                cut = sorted(expression for expression, kind in kinds.items() if kind == "slice")
+                if not (whole or cut) or not _kept_between(func, into, end, printed.line):
+                    continue
+                if whole and _passes_on(first, at, into):
+                    made[printed.line] = ListPrint(line=printed.line, holes=whole, into=into, put=put.lineno)
+                    continue
+                walks = [one for one in flow.loops_around(at) if isinstance(one, _LOOPS) and one.lineno > end]
+                if not cut or not walks:
+                    continue
+                walk_loop = walks[0]
+                part = ast.parse(cut[0], mode="eval").body
+                if isinstance(part, ast.Call):
+                    part = part.args[0]
+                if (
+                    isinstance(part, ast.Subscript)
+                    and _walks_by(walk_loop, part, into)
+                    and _every_turn(walk_loop, at)
+                    and _passes_on(first, walk_loop, into)
+                ):
+                    made[printed.line] = ListPrint(
+                        line=printed.line,
+                        holes=cut,
+                        into=into,
+                        put=put.lineno,
+                        loop=[walk_loop.lineno, walk_loop.end_lineno or walk_loop.lineno],
+                    )
+        site.list_prints = [made[line] for line in sorted(made)]
+        found += bool(made)
+    return found
+
+
 def _put_key(put: ast.stmt) -> Optional[ast.expr]:
     """What a hand-on keys the row by: the subscript's key of ``map[key] = value``, else the value put."""
     if isinstance(put, ast.Assign):
@@ -8093,7 +8502,7 @@ def _reaches(
             returned = _NOTHING
             break
         carry = _PathCarry(reading, file, step, (), call_values={id(call): returned})
-        owner = f"{file}::{step.name}"
+        owner = f"{file}::{def_name(step)}"
         if owner in reading.owners and reading.reads_in(carry):
             crossings._cross(owner)
         for other in _own_calls(step):
@@ -8225,7 +8634,7 @@ def attach_key_sources(
             first, last = func.lineno, func.end_lineno or func.lineno
             sites = [
                 site
-                for site in sites_of.get(f"{file}::{func.name}", ())
+                for site in sites_of.get(f"{file}::{def_name(func)}", ())
                 if first <= site.anchor.line_start <= last
             ]
             held = filled[id(func)] = (
@@ -8295,7 +8704,9 @@ def attach_key_sources(
         )
         read += 1
     if attributor is not None and key_froms is not None:
-        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading))
+        made = _unpersisted(froms, junctions, modules, attributor, reading, of)
+        key_froms.extend(made)
+        _attach_kept_hops(made, froms, reading)
     return read
 
 
@@ -8519,7 +8930,13 @@ def attach_count_prints(
     A branch gets only the prints one of its lines can be followed by in the same turn, by what its own way binds
     (:func:`flow.ruled_out_after`): ``reactivatePendingTasks_JEDI``'s two statements share one run, and the
     ``timeoutFlag`` each arm's way binds gives ``sqlTU``'s arms only ``action=reactivate`` and ``sqlTO``'s only
-    ``timeout``."""
+    ``timeout``.  The prints holding the count itself in a hole go to :attr:`Branch.printed_counts` the same way
+    (:func:`progress.printed_counts`): ``updateJobStatus``'s ``nUp={nUp}``.
+
+    Each print with the run it is of (:attr:`CountPrint.run`, :attr:`PrintedCount.run`): a branch whose write lands
+    at several statements gets the prints of each one's runs, and the line alone does not say which run counted --
+    ``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm writes in ``sqlTU`` and ``sqlTUU``, and its ``nRow`` at 4092
+    is ``sqlTUU``'s run's."""
     by_subject = {(junction.subject, junction.owner): junction for junction in junctions}
     done: set[tuple[str, int]] = set()
     for key_from in key_froms:
@@ -8527,10 +8944,22 @@ def attach_count_prints(
             continue
         done.add((key_from.owner, key_from.statement))
         func, calls = key_from._runs
+        run = key_from.statement
         printed = sorted(
-            {(one.line, one.frame, one.rows): one for call in calls for one in progress.count_prints(func, call, setters)}.items()
+            {
+                (one.line, one.frame, one.rows, run): one.model_copy(update={"run": run})
+                for call in calls
+                for one in progress.count_prints(func, call, setters)
+            }.items()
         )
-        if not printed:
+        counted = sorted(
+            {
+                (one.line, one.frame, run): one.model_copy(update={"run": run})
+                for call in calls
+                for one in progress.printed_counts(func, call, setters)
+            }.items()
+        )
+        if not printed and not counted:
             continue
         statements = _own_statements(func)
         together = [one for one in key_froms if one.owner == key_from.owner and one.statement == key_from.statement]
@@ -8547,15 +8976,18 @@ def attach_count_prints(
                 if not arm_lines:
                     continue
                 arms = [statements[line] for line in sorted(arm_lines) if line in statements]
-                held = {(one.line, one.frame, one.rows): one for one in branch.count_prints}
-                held.update(
-                    (key, one)
-                    for key, one in printed
-                    if one.line not in statements
-                    or not arms
-                    or any(not flow.ruled_out_after(arm, statements[one.line]) for arm in arms)
-                )
+                held = {(one.line, one.frame, one.rows, one.run): one for one in branch.count_prints}
+                held.update((key, one) for key, one in printed if _can_follow(arms, one.line, statements))
                 branch.count_prints = [held[key] for key in sorted(held)]
+                kept = {(one.line, one.frame, one.run): one for one in branch.printed_counts}
+                kept.update((key, one) for key, one in counted if _can_follow(arms, one.line, statements))
+                branch.printed_counts = [kept[key] for key in sorted(kept)]
+
+
+def _can_follow(arms: list[ast.stmt], line: int, statements: dict[int, ast.stmt]) -> bool:
+    """Whether the print at *line* can follow one of *arms* in the same turn (:func:`flow.ruled_out_after`); so it
+    can where either is not placed."""
+    return line not in statements or not arms or any(not flow.ruled_out_after(arm, statements[line]) for arm in arms)
 
 
 def _own_statements(func: ast.AST) -> dict[int, ast.stmt]:
@@ -8596,7 +9028,7 @@ def parameter_ends(key_froms: Iterable[KeyFrom]) -> list[tuple[str, ast.AST, str
         for source in key_from.sources:
             if source.kind != KEY_PARAMETER or source.name not in named:
                 continue
-            source.site_owner = f"{file}::{func.name}"
+            source.site_owner = f"{file}::{def_name(func)}"
             source.site_line = func.lineno
             found.setdefault((source.site_owner, func.lineno, source.name), (file, func, source.name))
     return list(found.values())
@@ -8687,6 +9119,7 @@ def _unpersisted(
     modules: Iterable[SourceModule],
     attributor: SpecAttributor,
     reading: _Reading,
+    of: Callable[[ast.FunctionDef | ast.AsyncFunctionDef, str], "_Filled"],
 ) -> list[KeyFrom]:
     """A KeyFrom for each object of a junction owner whose fields it assigns at an arm no write writes -- no
     statement's record, nor a flush call's, has the arm's line for its subject -- one per what those fields reach
@@ -8694,7 +9127,8 @@ def _unpersisted(
     a statement's rows would otherwise read these as known not to be.  getRandomSeed_JEDI's
     ``tmpFileSpec.status = "ready"``, set after the spec's ``valuesMap()`` is taken, is returned; datasetManager's
     ``job.jobStatus = "failed"`` is handed to ``TaskBuffer.updateJobs``, which persists it a call away.  An arm is a
-    junction's line assigning its subject's attribute on an object of its class, by *attributor*."""
+    junction's line assigning its subject's attribute on an object of its class, by *attributor*.  Each record's
+    *sources* are those of the value the function gives the object's key field, by *of*'s reader (:func:`_object_key`)."""
     written = {
         (key_from.owner, subject, line)
         for key_from in key_froms
@@ -8707,7 +9141,7 @@ def _unpersisted(
     made: list[KeyFrom] = []
     for module in modules:
         for func, owner_class in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             here = by_owner.get(owner)
             if not here:
                 continue
@@ -8716,8 +9150,10 @@ def _unpersisted(
             for node in own_nodes(func):
                 if isinstance(node, ast.stmt):
                     statements.setdefault(node.lineno, []).append(node)
-            used: dict[int, list[tuple[str, int, frozenset[str]]]] = {}
-            found: dict[tuple[str, str], tuple[list[int], set[str], dict[str, set[int]]]] = {}
+            used: dict[int, list[tuple[str, int, frozenset[str], dict[str, _Paths]]]] = {}
+            found: dict[
+                tuple[str, str], tuple[list[int], set[str], dict[str, set[int]], dict[str, _Paths]]
+            ] = {}
             for junction in here:
                 spec, _dot, attribute = junction.subject.rpartition(".")
                 lines = {
@@ -8743,12 +9179,14 @@ def _unpersisted(
                     statement, obj = assigned[0]
                     if id(statement) not in used:
                         used[id(statement)] = _uses(reading, module.rel_path, func, statement)
-                    for kind, at, callees in used[id(statement)]:
-                        ats, handed_to, writes = found.setdefault((ast.unparse(obj), kind), ([], set(), {}))
+                    for kind, at, callees, kept_in in used[id(statement)]:
+                        ats, handed_to, writes, kept = found.setdefault((ast.unparse(obj), kind), ([], set(), {}, {}))
                         ats.append(at)
                         handed_to |= callees
                         writes.setdefault(junction.subject, set()).add(line)
-            for (spelled, kind), (ats, handed_to, writes) in sorted(found.items()):
+                        for name, paths in kept_in.items():
+                            kept[name] = kept.get(name, _NOTHING) | paths
+            for (spelled, kind), (ats, handed_to, writes, kept) in sorted(found.items()):
                 record = KeyFrom(
                     owner=owner,
                     file=module.rel_path,
@@ -8760,19 +9198,46 @@ def _unpersisted(
                     writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
                 )
                 record._runs = (func, [statement for at in sorted(set(ats)) for statement in statements.get(at, ())])
+                record.attr, record.sources = _object_key(func, spelled, record.writes, of(func, module.rel_path))
+                if kind == KEY_KEPT:
+                    record._kept = kept
                 made.append(record)
     return made
 
 
+def _object_key(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, spelled: str, writes: dict[str, list[int]], reader: "_Filled"
+) -> tuple[str, list[KeySource]]:
+    """The key field (:data:`ROW_KEYS`) of the object *spelled* -- of the class whose fields *writes* names -- the
+    function gives a value, as ``<Class>.<field>``, and that value's sources as a bind's are read
+    (:meth:`_Filled.sources`): ``extractCommon``'s ``taskSpec.jediTaskID = jediTaskID`` at 124, its parameter.
+    ``("", [])`` where the function gives none."""
+    for spec in sorted({subject.rpartition(".")[0] for subject in writes}):
+        key = ROW_KEYS.get(spec)
+        if key is None:
+            continue
+        sources: list[KeySource] = []
+        for node in own_nodes(func):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Attribute) and target.attr == key and ast.unparse(target.value) == spelled
+                for target in node.targets
+            ):
+                sources.extend(reader.sources(node.value, node))
+        if sources:
+            return f"{spec}.{key}", sources
+    return "", []
+
+
 def _uses(
     reading: _Reading, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, statement: ast.stmt
-) -> list[tuple[str, int, frozenset[str]]]:
+) -> list[tuple[str, int, frozenset[str], dict[str, _Paths]]]:
     """What the field *statement* assigns reaches next, as the carry reads it from there: each kind of use --
     :data:`KEY_HANDED` (calls of the corpus handed a part of it, or made on what holds it, and the functions they land
     in), :data:`KEY_BOUND` (the database's calls), :data:`KEY_RETURNED`, :data:`KEY_KEPT` (put in what a parameter,
     ``self`` among them, names: the caller holds it after -- adder's ``self.job.ddmErrorCode = ...`` before it
     returns) -- with the first line it is used on (the assignment's, kept), else :data:`KEY_NO_USE` at the
-    assignment.  A call no reading places (a log line, a builtin, a hole) is no use."""
+    assignment.  A call no reading places (a log line, a builtin, a hole) is no use.  :data:`KEY_KEPT`'s, last, are
+    where the field sits in what each parameter holds (``{parameter: paths}``, :meth:`_PathCarry.kept`)."""
     carry = _PathCarry(reading, file, func, (), start=[statement])
     handed: list[int] = []
     callees: set[str] = set()
@@ -8786,7 +9251,7 @@ def _uses(
         placed = reading.place(carry, call)
         if placed is not None and placed.targets:
             handed.append(call.lineno)
-            callees |= {f"{target.file}::{target.func.name}" for target in placed.targets}  # type: ignore[attr-defined]
+            callees |= {target.owner for target in placed.targets}
     returned = [
         node.lineno
         for node in own_nodes(func)
@@ -8796,9 +9261,10 @@ def _uses(
     ]
     arguments = func.args
     handed_in = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
-    kept = [statement.lineno] if handed_in & set(carry.kept()) else []
+    kept_in = {name: paths for name, paths in carry.kept().items() if name in handed_in}
+    kept = [statement.lineno] if kept_in else []
     found = [
-        (kind, min(lines), frozenset(names))
+        (kind, min(lines), frozenset(names), kept_in if kind == KEY_KEPT else {})
         for kind, lines, names in (
             (KEY_HANDED, handed, callees),
             (KEY_BOUND, bound, set()),
@@ -8807,7 +9273,150 @@ def _uses(
         )
         if lines
     ]
-    return found or [(KEY_NO_USE, statement.lineno, frozenset())]
+    return found or [(KEY_NO_USE, statement.lineno, frozenset(), {})]
+
+
+def _attach_kept_hops(made: list[KeyFrom], froms: list[KeyFrom], reading: _Reading) -> None:
+    """:attr:`KeyFrom.kept_hops` of each :data:`KEY_KEPT` record of *made*: from each call into its function, where
+    the object goes in the caller (:func:`_kept_hops`), the writes persisting it being *froms*' records of an
+    object (a flush's call, a statement run with an object's ``valuesMap()``)."""
+    writers: dict[int, list[KeyFrom]] = {}
+    for key_from in froms:
+        if key_from._object is not None and key_from._runs is not None:
+            writers.setdefault(id(key_from._runs[0]), []).append(key_from)
+    done: dict[tuple, list[KeptHop]] = {}
+    for record in made:
+        if record.unread != KEY_KEPT or not record._kept or record._runs is None:
+            continue
+        fields = frozenset(("." + subject.rpartition(".")[2],) for subject in record.writes)
+        record.kept_hops = _kept_hops(
+            reading, record.file, record._runs[0], record._kept, _NOTHING, fields, writers, KEPT_DEPTH, done
+        )
+
+
+def _kept_hops(
+    reading: _Reading,
+    file: str,
+    func: ast.AST,
+    kept: dict[str, _Paths],
+    returned: _Paths,
+    fields: frozenset[tuple[str, ...]],
+    writers: dict[int, list[KeyFrom]],
+    depth: int,
+    done: dict[tuple, list[KeptHop]],
+) -> list[KeptHop]:
+    """Where what *func* keeps in its parameters (*kept*, ``{parameter: paths}``) or returns (*returned*) of an
+    object's assigned *fields* goes in each caller: one :class:`KeptHop` per call into it -- the caller's writes
+    whose object holds one of *fields* as its own field (*writers*), the functions its other calls handed a part of
+    it land in -- and, where the caller keeps or returns it again, its callers' hops, the call put first in their
+    *via*, up to *depth* calls.  Read by the carry from the call (:class:`_PathCarry`'s *kept_values* and
+    *call_values*), not by how the caller spells the object."""
+    key = (file, getattr(func, "lineno", 0), frozenset(kept.items()), returned, fields, depth)
+    if key in done:
+        return done[key]
+    done[key] = []
+    owned = reading.calls.types.method_class(file, func)
+    target = Target(file, func, owned[1] if owned else None)
+    sites = [
+        site
+        for site in reading.calls.callers(target)
+        if not site.in_module and not (site.file == file and site.func is func)
+    ]
+    if not sites:
+        done[key] = [KeptHop(open=KEPT_NO_CALL)]
+        return done[key]
+    if depth <= 0:
+        done[key] = [KeptHop(open=KEPT_TOO_DEEP)]
+        return done[key]
+    receiver = receiver_parameter(target)
+    hops: list[KeptHop] = []
+    for site in sites:
+        at = f"{site.file}:{site.call.lineno}"
+        owner = f"{site.file}::{def_name(site.func)}"
+        try:
+            handed: dict[str, Optional[ast.expr]] = dict(reading.calls.handed(site, target))
+            placed = reading.calls.callees(site.file, site.func, site.call)
+        except Exception:  # noqa: BLE001 -- the record has the call as a hole
+            hops.append(KeptHop(via=[at], owner=owner, open=KEPT_NOT_A_NAME))
+            continue
+        if receiver is not None and not placed.on_class and isinstance(site.call.func, ast.Attribute):
+            handed[receiver] = (
+                reading.calls.made_on(site.file, site.func, site.call) if placed.forwarded else site.call.func.value
+            )
+        values: dict[tuple[str, tuple[str, ...]], _Paths] = {}
+        for parameter, paths in kept.items():
+            where = _access_path(handed.get(parameter))
+            if where is not None:
+                values[where] = values.get(where, _NOTHING) | paths
+        if not values and not returned:
+            hops.append(KeptHop(via=[at], owner=owner, open=KEPT_NOT_A_NAME))
+            continue
+        carry = _PathCarry(
+            reading,
+            site.file,
+            site.func,
+            (),
+            call_values={id(site.call): returned} if returned else None,
+            kept_values={id(site.call): values} if values else None,
+        )
+        held = sorted(
+            {
+                base + "".join((*steps, *path[:-1]))
+                for (base, steps), paths in values.items()
+                for path in paths
+                if path and (path[-1],) in fields
+            }
+        )
+        persisted: dict[tuple[int, str], KeptWrite] = {}
+        taken: set[int] = set()
+        for writer in writers.get(id(site.func), ()):
+            spelled, _class, takers, _excluded = writer._object  # type: ignore[misc]
+            for taker in takers:
+                objects = [
+                    one
+                    for one in (
+                        *(argument for argument in taker.args if not isinstance(argument, ast.Starred)),
+                        *(keyword.value for keyword in taker.keywords),
+                        *([taker.func.value] if isinstance(taker.func, ast.Attribute) else []),
+                    )
+                    if ast.unparse(one) == spelled
+                ]
+                if any(path[:1] in fields for one in objects for path in carry.held(one, taker)):
+                    persisted[(writer.statement, writer.object)] = KeptWrite(
+                        statement=writer.statement, object=writer.object
+                    )
+                    taken.add(id(taker))
+        handed_to: set[str] = set()
+        for call in _own_calls(site.func):
+            if call is site.call or id(call) in taken or not carry.handed_any(call):
+                continue
+            if reading.record.is_database(site.file, call):
+                continue
+            placed_here = reading.place(carry, call)
+            if placed_here is not None:
+                handed_to |= {one.owner for one in placed_here.targets}
+        hops.append(
+            KeptHop(
+                via=[at],
+                owner=owner,
+                held=held,
+                persisted=[persisted[one] for one in sorted(persisted)],
+                handed_to=sorted(handed_to),
+            )
+        )
+        arguments = getattr(site.func, "args", None)
+        parameters = (
+            {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+            if arguments is not None
+            else set()
+        )
+        again = {name: paths for name, paths in carry.kept().items() if name in parameters}
+        back = carry.returns()
+        if again or back:
+            for hop in _kept_hops(reading, site.file, site.func, again, back, fields, writers, depth - 1, done):
+                hops.append(hop.model_copy(update={"via": [at, *hop.via]}))
+    done[key] = hops
+    return hops
 
 
 #: The order a statement's why is told in where several of its key columns are new.

@@ -63,6 +63,9 @@ PREFIX = re.compile(
     r"(?P<token>[A-Za-z_]\w* < <[^<>\n]* >|[A-Za-z_]\w* <(?:[^<>\n]|<[^<>\n]*>)*>"
     r"|<[^<>\n]*>|\S+) ?(?P<message>.*)$"
 )
+#: a print whose text begins with a hole and a space (``f"{job.PandaID} Finisher : Kill"``): a logger with no mark
+#: writes that hole's value first, and :data:`PREFIX` takes it for the token (``rows.Row.texts``, :meth:`Run.holds`)
+LEADING_HOLE = re.compile(r"f?[\"']\{(?P<hole>[^}]+)\}[ ]")
 #: the builders whose mark a line carries as the logger was handed it, blanks and all (``callfacts.LOGGER_MAKERS``):
 #: LogWrapper's prefix and MsgWrapper's token.  make_logger and create_tagged_logger write ``method <token>`` and
 #: ``method < tag >``, which :data:`PREFIX` reads whole.
@@ -450,6 +453,9 @@ class Log:
     #: the machines a recorded answer lists the log on (``listed``): every machine one of its runs may be on (empty in a
     #: file handed in)
     machines: frozenset[str] = frozenset()
+    #: each machine read with its service as the record says (``server``, ``jedi``; empty in a file handed in): bundle
+    #: H's H-3 reads a moving run's machine by it
+    services: dict[str, str] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -562,6 +568,16 @@ def keyed(key: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![0-9A-Za-z_]){re.escape(key)}(?![0-9A-Za-z_])")
 
 
+def _marks_take(prefixes: list[str], token: str) -> bool:
+    """Whether a logger writing one of the map's *prefixes* (a row's ``map_prefixes``) can write the mark *token*, the
+    blank after it or not; the leading blanks are not asked for (``rows._prefix_regex``)."""
+    for p in prefixes:
+        bare = re.sub(r"^(?:\\?\s)+", "", p)
+        if re.fullmatch(bare, f"{token} ", re.S) or re.fullmatch(bare, token, re.S):
+            return True
+    return False
+
+
 @dataclass
 class Run:
     log: Log
@@ -591,7 +607,20 @@ class Run:
         """Whether the run's records hold every line *func* prints through its mark at *level*: not where the door
         asked the mark for another method's rows (``Log.narrowed``) and the level is below WARNING; *func* None for a
         reader that does not say whose row it reads.  Nor for a *row* starting with a head the door asked with the key
-        after it (``Log.keyed``): its lines for other rows were not asked."""
+        after it (``Log.keyed``): its lines for other rows were not asked.
+
+        Nor, in a run whose mark is a number, for a *row* that cannot print under it: one through a logger with no
+        mark whose print begins with a word -- its lines are under that word (:data:`PREFIX`), not under the number a
+        print beginning with a hole's value wrote first, ``f"{tmpJob.PandaID} to activate with rule"``
+        (datasetManager's ``activating ...`` at 971, read as missing from the key's run and the call at 973 excluded
+        for it) -- or one through a logger whose marks, as the map writes them, take no such number
+        (``< jediTaskID=... >``).  A logger writing the number as its mark prints every line of its own under it: the
+        adder's ``LogWrapper(_logger, str(self.job_id))``, ``.*?\\ ``.  I-1, out/gm/qk-design.md's bundle I second
+        half, tmaeno's OK 2026-11-17 20:3x."""
+        if row is not None and self.token.isdigit():
+            prefixes = getattr(row, "map_prefixes", None)
+            if not (_marks_take(prefixes, self.token) if prefixes else LEADING_HOLE.match(getattr(row, "text", "") or "")):
+                return False
         heads = self.log.keyed.get((self.machine, self.token))
         if heads and row is not None and any(shape and shape[0][0] == "lit" and shape[0][1].startswith(tuple(heads))
                                              for shape in getattr(row, "shapes", None) or []):
@@ -681,20 +710,27 @@ class Run:
         return T.text(self.said())
 
 
-def runs_for(log: Log, key: str) -> list[Run]:
+def runs_for(log: Log, key: str, other: Callable[[Record], bool] | None = None) -> list[Run]:
     """Every run of *log* the key appears in, keyed by the machine and the instance token: one mark on two machines
     is two runs (a file handed in is one machine's).  A line its logger writes with no mark is a run of its own
     (:func:`unmarked`, ``Run.alone``): the word :data:`PREFIX` takes for its mark is its text's first, which joins the
-    lines of every pass and object (KNOWN_ISSUES.md K70)."""
+    lines of every pass and object (KNOWN_ISSUES.md K70).  *other*: a record whose message alone holds the key and
+    which names it only as another column (``key_holes.other_column``, K67b B) does not make its mark a run of the
+    key; a mark with another record of the key still is one."""
     pattern = keyed(key)
     heads = _heads_of(log.name)
 
     def alone(r: Record) -> bool:
         return r.token in heads and unmarked(log.name, r.token, r.text)
 
+    def holds(r: Record) -> bool:
+        if key in r.token and pattern.search(r.token):
+            return True
+        return key in r.message and bool(pattern.search(r.message)) and not (other is not None and other(r))
+
     # the pattern finds the key only where its text is, so a record without the text is passed over without it (most
     # of a day-long mark's records: MT-ready-stuck's S1, 62% of its time in this line)
-    hits = [r for r in log.records if (key in r.message and pattern.search(r.message)) or (key in r.token and pattern.search(r.token))]
+    hits = [r for r in log.records if holds(r)]
     # each mark's records in one pass over the log, not one pass a mark: a log of thousands of marks was read again for
     # each (MT-running-stuck's day-long marks: 879 of its 928 s under cProfile)
     by_mark: dict[tuple[str, str], list[Record]] = {}

@@ -453,15 +453,73 @@ class MadeBefore(BaseModel):
     ``TaskCommando.runImpl`` makes ``tmpTaskSpec = JediTaskSpec()`` at 154, and its arm at 197 sets ``status``: made,
     ``status`` is ``None`` (:func:`bamboo.codemap.panda.recognizers.progress.spec_initial_values`).  A reader of
     ``set task_status=None`` at 200 knows the arm did not set it on that way.  The value in memory, not the row's:
-    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  Nor the
-    value just before the arm: what runs between the construction and the arm is not read here -- ``peekJobLog``
-    makes ``job = JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm
-    at 1618.
+    ``JobSpec()`` leaves a field of ``_zeroAttrs`` ``None`` where its ``valuesMap`` gives the row ``0``.  *value* is
+    the construction's; whether the field still holds it at the arm is *held* -- ``peekJobLog`` makes ``job =
+    JobSpec()`` at 1599 and fills it from its row with ``job.pack(rows[0])`` at 1600, before its arm at 1618.
     """
 
     line: int = Field(description="The construction's line: ``tmpTaskSpec = JediTaskSpec()``.")
     cls: str = Field(description="The class constructed: ``JediTaskSpec``.")
     value: str = Field(description="The written field's value as the constructor left it, a literal's ``repr``: ``None``.")
+    held: bool = Field(
+        default=False,
+        description=(
+            "Whether the field holds *value* up to the arm but for the junction's own arms: on no way from the "
+            "construction to the arm, in one turn of each loop holding both, does anything else that may change it "
+            "run -- a binding of the name, a store to the field, a call made on the object or handed it that may store "
+            "the field (``mustprints._changes_of``, as the prints after an arm are read).  ``peekJobLog``'s "
+            "``job.pack(rows[0])`` at 1600 is such a call, between 1599 and 1618."
+        ),
+    )
+    arms_between: list[int] = Field(
+        default_factory=list,
+        description=(
+            "The lines of the junction's own arms writing the field on the same object that can run between the "
+            "construction and the arm: on a way through one, the value before the arm is that arm's "
+            "(``TaskCommando.runImpl``'s 181 before 197)."
+        ),
+    )
+
+
+class TakenBack(BaseModel):
+    """The resets that take an arm's change back out of what its object will write as changed
+    (:attr:`Branch.taken_back`), and the places a way from the arm reaches with the change still in.
+
+    ``_check_task_with_unprocessed_inputs`` sets ``original_task_spec.userName`` at 2272 and, in the ``else`` of
+    2273, takes it back with ``original_task_spec.resetChangedAttr("userName")`` at 2286: a write of the changed
+    attributes (``updateTask_JEDI``'s ``valuesMap(onlyChanged=True)``) after it does not take ``userName``.  The way
+    with an empty DN returns at 2290 without it.  A reset changes what is written as changed only: the field keeps the
+    arm's value, and a write of the whole row takes it.  A reset after the object is written is listed as well --
+    ``insertNewJob``'s ``job.resetChangedList()`` at 3217 after the INSERT's ``job.valuesMap()`` at 3199 or 3202 --
+    and *open* names the write a way passes before it.
+    """
+
+    resets: list[int] = Field(
+        description=(
+            "The lines of the calls a way from the arm reaches, in one run, that take the change back on the same "
+            "object: ``resetChangedAttr`` of the field, ``resetChangedList()`` (:func:`bamboo.codemap.panda.order."
+            "reset_columns`).  Sorted."
+        )
+    )
+    open: list[int] = Field(
+        description=(
+            "The lines a way from the arm reaches without passing one of *resets*, where the object may be written "
+            "or leave the function with the change in: each ``return``, ``-1`` (``EXIT_LINE``) for falling off the "
+            "end, and each call made on the object or handed it.  Empty: every way from the arm takes the change back "
+            "first.  "
+            "Sorted."
+        )
+    )
+    open_prints: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Where *open* is not empty: the owner's prints every way from the arm to a line of *open* passes -- the "
+            "way that misses the resets prints them first.  ``_check_task_with_unprocessed_inputs``' ``has an empty "
+            "DN`` error at 2277: a run whose records hold none of them after the arm took the change back.  The ways "
+            "are the flow's, with no values read: a way through ``to_skip = True`` may go on past ``if to_skip:``.  "
+            "Sorted."
+        ),
+    )
 
 
 class AfterPrint(BaseModel):
@@ -507,7 +565,11 @@ class AfterPrint(BaseModel):
         default="",
         description=(
             "For one of the branch's count prints (:attr:`Branch.count_prints`), what its printing says of the rows "
-            "the run changed, as :attr:`CountPrint.rows`; empty for any other print."
+            "the run changed, as :attr:`CountPrint.rows`; empty for any other print.  Taken from the branch's count "
+            "print at the same line, whose :attr:`CountPrint.run` says which run counted: on a branch written at "
+            "several statements the print follows every write and may count only one statement's run -- "
+            "``retryTask_JEDI``'s ``proc_status`` arm writes at 5180 and 5198, and its 5231 says ``none`` of the "
+            "5198 statement's run at 5201."
         ),
     )
 
@@ -846,6 +908,16 @@ REWRITE_STATEMENT_UNREAD = "statement_unread"
 REWRITE_CUT = "follow_cut"
 
 
+#: Why a passthrough arm's :attr:`Branch.copied_from` may not be every value it copies (:attr:`Branch.copied_open`):
+#: a way to the copy passes none of them -- it may copy what the object held before the function --, one is on the
+#: object only through a hole, the arm is a statement's ``SET a=b`` -- the row's column as it was before the statement
+#: --, or the copy's value is not read.
+COPY_BEFORE = "before"
+COPY_PERHAPS = "perhaps"
+COPY_ROW = "row"
+COPY_UNREAD = "not read"
+
+
 class SamePassWrite(BaseModel):
     """Another column the block of an arm's write writes on the arm's row (:mod:`bamboo.codemap.panda.rewrites`)."""
 
@@ -955,12 +1027,49 @@ class CountPrint(BaseModel):
     """
 
     line: int = Field(description="The print's line in the owner.")
+    run: int = Field(
+        default=0,
+        description=(
+            "The line the run it is of runs on (:attr:`KeyFrom.statement`).  A branch whose write lands at several "
+            "statements (*other_lines*) has the prints of each statement's runs, each with its own: "
+            "``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm prints ``nRow`` at 4092, the count of ``sqlTUU``'s "
+            "run at 4090, not of ``sqlTU``'s at 4075.  0 on a record made before it was kept."
+        ),
+    )
     frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
     rows: str = Field(
         description=(
             f"What its printing says of the rows the run changed: {ROWS_NONE!r}, {ROWS_SOME!r}, {ROWS_ONE!r} or "
             f"{ROWS_NOT_ONE!r}.  The body of an ``and`` holds its count comparison's reading; an ``else`` holds the "
             "opposite only where the test is the comparison alone."
+        )
+    )
+
+
+class PrintedCount(BaseModel):
+    """A line the function prints with the row count of the run of the statement a branch's write lands at in a hole
+    (:attr:`Branch.printed_counts`, :func:`bamboo.codemap.panda.rowcounts.count_of_run`).
+
+    ``updateJobStatus`` runs its ``UPDATE`` at 241, reads ``nUp = self.cur.rowcount`` and prints ``attemptNr={}
+    nUp={} old={} new={}`` at 243: the record's second hole is how many rows the run changed, 0 where the write did
+    not land.
+    """
+
+    line: int = Field(description="The print's line in the owner.")
+    run: int = Field(
+        default=0,
+        description=(
+            "The line the run it is of runs on (:attr:`KeyFrom.statement`).  A branch whose write lands at several "
+            "statements (*other_lines*) has the prints of each statement's runs, each with its own: "
+            "``prepareTasksToBeFinished_JEDI``'s ``lockedBy`` arm prints ``nRow`` at 4092, the count of ``sqlTUU``'s "
+            "run at 4090, not of ``sqlTU``'s at 4075.  0 on a record made before it was kept."
+        ),
+    )
+    frame: str = Field(description="What it prints, holes open, as :attr:`Branch.messages` spells frames.")
+    holes: list[int] = Field(
+        description=(
+            "The holes holding the count, counted from 0 as :attr:`SkeletonHole` lists a rendered message's "
+            "(each ``{...}`` of its f-string)."
         )
     )
 
@@ -1209,6 +1318,16 @@ class Branch(BaseModel):
             "the same run prints after its ``sqlTO`` arms.  Sorted by line."
         ),
     )
+    printed_counts: list["PrintedCount"] = Field(
+        default_factory=list,
+        description=(
+            "The lines the owner prints with the row count of a run of the statement this branch's write lands at "
+            "in a hole, under a test of it or not: ``updateJobStatus`` prints ``nUp={nUp}`` after ``nUp = "
+            "self.cur.rowcount``, so the record says how many rows the run changed.  Only the lines this branch's "
+            "own way can be followed by, as *count_prints*.  Apart from *count_prints*, whose readers take its "
+            "*rows* as said there.  Sorted by line."
+        ),
+    )
     must_prints: Optional[list[int]] = Field(
         default=None,
         description=(
@@ -1263,6 +1382,13 @@ class Branch(BaseModel):
             ":mod:`bamboo.codemap.panda.mustprints`."
         ),
     )
+    taken_back: Optional[TakenBack] = Field(
+        default=None,
+        description=(
+            "Where a call a way from the arm reaches takes the change back out of what its object writes as changed "
+            "(:class:`TakenBack`); None where none does.  Read by :mod:`bamboo.codemap.panda.mustprints`."
+        ),
+    )
     after_prints: Optional[list[AfterPrint]] = Field(
         default=None,
         description=(
@@ -1312,6 +1438,27 @@ class Branch(BaseModel):
     rewrites_open: list[RewriteOpen] = Field(
         default_factory=list,
         description="Where the later writes were not read, so ``rewrites`` may hold less than every one.",
+    )
+    copied_from: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "On a passthrough arm copying an attribute of an object the function names -- ``updateJob``'s "
+            "``job.stateChangeTime = job.modificationTime`` at 509 --: the lines of the function's assignments of "
+            "that attribute on that object the copy can read (:func:`bamboo.codemap.objects.assigns_reaching`, by "
+            "the object's records, not its spelling), the copied subject's arms where they are one -- 506's "
+            "``job.modificationTime = naive_utcnow()``; a copy through a name, the attribute its binding reads, at "
+            "the binding.  ``[]`` where none can be; ``None`` on any other arm, or where not read (*copied_open*)."
+        ),
+    )
+    copied_open: str = Field(
+        default="",
+        description=(
+            f"Empty where every way to the copy passes one of *copied_from* (:func:`bamboo.codemap.panda.flow."
+            f"passes_before`): the copy is a value its pass wrote.  ``{COPY_BEFORE}``: a way passes none, so the copy "
+            f"may be what the object held before the function (its caller's, a row read); ``{COPY_PERHAPS}``: one is "
+            f"on the object only through a hole; ``{COPY_ROW}``: a statement's ``SET a=b``, the row's column as it "
+            f"was before the statement; ``{COPY_UNREAD}``: the copy's value is not an attribute the records place."
+        ),
     )
     off_row: Optional[OffRow] = Field(
         default=None,
@@ -2183,8 +2330,10 @@ class ConditionValue(BaseModel):
             "and nothing settled beside it: a bind amount the statement adds to a database clock -- "
             "``CURRENT_DATE-:days`` is ``-86400`` times the bind's value -- or Python's clock less a ``timedelta`` "
             "of a parameter -- ``naive_utcnow() - datetime.timedelta(minutes=timeLimit)`` is ``-60`` times "
-            "``timeLimit`` (``needs``).  ``None`` for any other amount: ``2 * timeLimit`` minutes, or an hour "
-            "beside it."
+            "``timeLimit`` (``needs``) -- or of one expression the map does not settle, the amount itself: "
+            "``naive_utcnow() - datetime.timedelta(hours=workflow_timeout_map['analysis'])`` is ``-3600`` times "
+            "it, with *base* ``naive_utcnow`` and the whole in ``said``.  ``None`` for any other amount: "
+            "``2 * timeLimit`` minutes of a parameter, an hour beside it, or two amounts."
         ),
     )
     subject: str = Field(default="", description="A ``column`` side's subject, spelled as ``ConditionNode.subject``.")
@@ -2197,7 +2346,8 @@ class ConditionValue(BaseModel):
         description=(
             "``<expression>@<line>`` where the source does not settle the value: "
             "a configuration lookup, several writes reaching the bind, a bind "
-            "nothing in the map fills."
+            "nothing in the map fills.  With a *base* and *scale_seconds*, the "
+            "clock less a duration of one value it does not settle."
         ),
     )
     rows: Optional[RowsTerm] = Field(
@@ -2575,6 +2725,62 @@ class HandOnPrint(BaseModel):
             "else the value put -- spelled so, with nothing binding it between the two in the turn, as "
             ":attr:`SkeletonHole.expression` spells them: ``jediTaskID`` of ``got jediTaskID={jediTaskID} ...``."
         ),
+    )
+
+
+class RowLoop(BaseModel):
+    """One loop over a read site's rows (:attr:`ReadSiteNode.row_loops`): over a name they land in, the cursor, or a
+    list a loop over them copies each row into.
+
+    ``getTasksToBeFinished_JEDI``'s statement at 1644 copies its rows into ``taskStatList`` at 1649 and works them
+    through in ``for ... in taskStatList`` at 1654, printing per row there; ``copyArchive.py::main``'s at 871 copies
+    each ``PandaID`` into ``jobs`` at 878 and walks ``jobs`` by slices of 100 in a ``while`` at 884.
+    """
+
+    lines: list[int] = Field(description="``[first, last]`` of the loop.")
+    over: str = Field(
+        default="",
+        description="The name its header reads that holds the rows or a copy of them; empty for a loop over the cursor.",
+    )
+    copy_of: int = Field(
+        default=0,
+        description="Where it walks a copy: the line of the put filling the copy in an earlier row loop.  0 for the rows.",
+    )
+    each_row: bool = Field(
+        default=False,
+        description=(
+            "Whether each turn takes one row and every row has a turn: a ``for`` whose iterable is the cursor, a name "
+            "the rows land in, or a copy every row is put into -- by a row loop taking each row, on every way through "
+            "its turn, the copy bound again nowhere and changed in place nowhere between.  False for a walk by index "
+            "or slices (``while i < len(jobs)``), a ``for`` over anything else, and a copy some rows skip: a reader "
+            "may take a print in the body of a loop with it as printed once per row."
+        ),
+    )
+
+
+class ListPrint(BaseModel):
+    """A print after a statement's first row loop that prints every element of a list the loop puts each row into
+    (:attr:`ReadSiteNode.list_prints`), read for a run that entered no handler.
+
+    The first row loop takes each row (:attr:`RowLoop.each_row`) and puts it, on every way through its turn, into the
+    list; nothing binds the list again or changes it in place between the loop and the print.  And either the print
+    holds the list whole -- ``C``, ``str(C)``, ``repr(C)``, a ``join`` over ``C`` -- and every way on from the loop
+    passes it, a test of the list being empty taken as false (``if len(jobs):``: an empty list has no row to name);
+    or it holds a slice ``C[i : i + n]`` in a loop walking the whole list by that slice (``i = 0`` before it, ``while
+    i < len(C)`` or ``for i in range(0, len(C), n)``, ``i += n``), every way through the loop's body passes it, and
+    every way on from the row loop enters the walk, the same tests taken as false.  ``copyArchive.py::main`` prints
+    ``str(jobs)`` at 864 under ``if len(jobs):`` and ``str(jobs[iJob : iJob + nJob])`` at 885.
+    """
+
+    line: int = Field(description="The print's line: a statement of the owner's :class:`FunctionPrintsNode`.")
+    holes: list[str] = Field(
+        default_factory=list,
+        description="Its holes holding the list or the slice, as :attr:`SkeletonHole.expression` spells them.",
+    )
+    into: str = Field(description="The list's name.")
+    put: int = Field(description="The line of the put into it in the first row loop.")
+    loop: list[int] = Field(
+        default_factory=list, description="``[first, last]`` of the walk by slices; empty where it prints the list whole."
     )
 
 
@@ -3009,11 +3215,32 @@ class ReadSiteNode(BaseNode):
             "every ``sure_prints`` empty.  Sorted by line."
         ),
     )
+    row_loops: list[RowLoop] = Field(
+        default_factory=list,
+        description=(
+            "Each loop over this statement's rows (:class:`RowLoop`), sorted by line: the loop over them, and a later "
+            "one over a list the rows were copied into -- ``getTasksToBeFinished_JEDI`` copies its rows into "
+            "``taskStatList``, commits, and works them through in a second loop.  *rows_handled* spans them all."
+        ),
+    )
+    list_prints: list[ListPrint] = Field(
+        default_factory=list,
+        description=(
+            "The owner's prints after its first row loop that print every element of a list the loop puts each row "
+            "into (:class:`ListPrint`), sorted by line: ``copyArchive.py::main`` puts each ``PandaID`` of 871's rows "
+            "into ``jobs`` and prints it in slices of 100 at 885."
+        ),
+    )
+    #: ``(list name, the put statement)`` of each list the first row loop puts every row into, kept by
+    #: :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_key_sources` for ``attach_list_prints``.
+    _list_puts: list = PrivateAttr(default_factory=list)
     rows_handled: list[int] = Field(
         default_factory=list,
         description=(
             "``[first, last]`` -- the stretch where this statement's rows are "
-            "worked through, which is the loop over them. Empty where "
+            "worked through: from the first loop over them to the end of the "
+            "last (:attr:`row_loops`), a loop over a list the rows were copied "
+            "into among them, and the lines between the loops. Empty where "
             "nothing loops over them; 151 of the corpus's 264 statements "
             "have one, a median of 11 lines and 238 at worst.\n\n"
             "**Not a second ``region``, and it can outlive one.** ``region`` "
@@ -3574,7 +3801,11 @@ KEY_OBJECT = "object"
 KEY_GLOBAL = "global"
 KEY_CALL = "call"
 KEY_DATABASE = "database"
-HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
+#: And a container the code spells with its elements -- a list, tuple, set or dict literal holding values: the value
+#: itself, *name* the literal as written; its elements' ways sit beside it at their places (:attr:`KeySource.paths`),
+#: so a part is always a part of a value some source on its way is.
+KEY_CONTAINER = "container"
+HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE, KEY_CONTAINER)
 #: How a :class:`HeldChange` changes the object a way holds in place: an item or attribute stored or deleted, one
 #: changed inside (``m["a"]["b"] = v`` changes the item ``"a"``), a method of a builtin container changing it, the
 #: object put where the reading does not follow it, a call the reading cannot follow -- and ``row``: a spec's row
@@ -3627,6 +3858,13 @@ KEY_BOUND = "bound in a statement"
 KEY_RETURNED = "returned"
 KEY_KEPT = "kept in what it was handed"
 KEY_NO_USE = "no use found"
+#: Why a :class:`KeptHop` is not read on (:attr:`KeptHop.open`): no call the corpus places runs the function, the
+#: call hands the object's holder as no name or field of one, or the way up is longer than six calls.
+KEPT_NO_CALL = "no call placed"
+KEPT_NOT_A_NAME = "not a name"
+KEPT_TOO_DEEP = "too deep"
+#: How many calls up a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
+KEPT_DEPTH = 6
 #: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
 #: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
 #: one carried from something not of the table's class (a scalar handed in, a parent's row).
@@ -3988,6 +4226,21 @@ class HeldSource(KeySource):
             "any other end."
         ),
     )
+    elements: list["HeldSource"] = Field(
+        default_factory=list,
+        description=(
+            "Where the way ends at an object a class of the corpus builds (``object``, no *steps* taken of it there) "
+            "whose class hands out what one of its fields holds -- the field or a part of it is what its ``get`` "
+            "returns, or its ``__next__`` where its ``__iter__`` returns the object -- and whose ``__init__`` binds "
+            "that field to a parameter: the ways of what the construction hands the parameter, read at the "
+            "construction (``ListWithLock(tmpList)``: ``tmpList``'s).  The object's elements are that value's "
+            "elements.  What the class's methods put into the field afterwards (its ``append``) is not read.  Empty "
+            "for any other end."
+        ),
+    )
+    elements_stops: list["KeyStop"] = Field(
+        default_factory=list, description="Where reading *elements* stopped."
+    )
     at: list[str] = Field(
         default_factory=list,
         description=(
@@ -4039,6 +4292,10 @@ class HeldSource(KeySource):
     )
 
 
+#: :attr:`HeldChange.value_text` is cut at this many characters.
+VALUE_TEXT_CUT = 120
+
+
 class HeldChange(BaseModel):
     """One place the object a :class:`HeldSource`'s way holds may be changed in place before the read
     (:func:`bamboo.codemap.panda.changes.object_changes`): ``taskParamMap["transPath"] = ...`` at
@@ -4068,6 +4325,14 @@ class HeldChange(BaseModel):
         ),
     )
     value_stops: list["KeyStop"] = Field(default_factory=list, description="Where reading *value* stopped.")
+    value_text: str = Field(
+        default="",
+        description=(
+            "The value a store stores or a method puts as the source spells it, whether or not *value* reads it -- "
+            "``tmpJob`` for ``actJobs.append(tmpJob)``, ``vs`` for ``xs.extend(vs)`` (its elements put) --; empty "
+            f"where the change puts no value.  Cut at {VALUE_TEXT_CUT} characters, ``...`` ending it."
+        ),
+    )
 
 
 class AfterChange(HeldChange):
@@ -4093,6 +4358,56 @@ class AfterChange(HeldChange):
     either: list[str] = Field(
         default_factory=list,
         description="Those of *before* it can also run after: a loop's later pass, with no new value of the name.",
+    )
+
+
+class KeptWrite(BaseModel):
+    """One write of a :class:`KeptHop`'s caller that persists the kept object: the caller's :class:`KeyFrom` s of
+    *statement* whose *object* is *object* (a flush's call, a statement run with the object's ``valuesMap()``)."""
+
+    statement: int = Field(description="The write's :attr:`KeyFrom.statement` in the caller.")
+    object: str = Field(description="Its :attr:`KeyFrom.object`, as the caller's record spells it.")
+
+
+class KeptHop(BaseModel):
+    """Where an object a function keeps in what it was handed (:data:`KEY_KEPT`) goes next: one caller, reached by the
+    calls *via*, holding it after them -- read by the carry from the call, not by how the caller spells it.
+
+    ``TaskRefinerBase.extractCommon`` makes ``taskSpec`` and keeps it as ``self.taskSpec``: after
+    ``TaskRefiner.runImpl``'s ``impl.extractCommon(...)`` at 211, ``impl.taskSpec`` holds it, and runImpl's flushes of
+    it (``updateTask_JEDI`` at 226, ..., ``registerTaskInOneShot_JEDI`` at 602) persist it -- *persisted*; a subclass's
+    ``extractCommon`` calling the base keeps it in its own ``self`` again, so its hop goes one call further up.  A
+    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer."""
+
+    via: list[str] = Field(
+        default_factory=list,
+        description="The calls, ``file:line``, from the call into the record's function up to *owner*'s.",
+    )
+    owner: str = Field(default="", description="The caller the hop ends in (``file::name``); empty where *open*.")
+    held: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the caller's names hold the object after the call, as spelled from the carry's paths "
+            "(``impl.taskSpec``); for display, not a key."
+        ),
+    )
+    persisted: list[KeptWrite] = Field(
+        default_factory=list,
+        description=(
+            "The caller's writes persisting the object: a :class:`KeyFrom` with an *object* whose object, where the "
+            "write takes it, holds one of the fields the record assigns as its own field."
+        ),
+    )
+    handed_to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions of the corpus (``file::name``) the caller's other calls handed the object, or a part of "
+            "it, land in -- where it may be persisted a call away, as :attr:`KeyFrom.handed_to`."
+        ),
+    )
+    open: str = Field(
+        default="",
+        description=f"Why the hop is not read: ``{KEPT_NO_CALL}``, ``{KEPT_NOT_A_NAME}``, ``{KEPT_TOO_DEEP}``.",
     )
 
 
@@ -4128,8 +4443,11 @@ class KeyFrom(BaseModel):
     ``WHERE`` in a loop over a dict parameter's items (``updateTask_JEDI``'s *criteria*), one per key of the dict the
     call hands it, ``jediTaskID=criteria["jediTaskID"]``.  And an object no write here persists gets one record per
     what its assigned fields reach next (*unread*: :data:`KEY_HANDED`, :data:`KEY_BOUND`, :data:`KEY_RETURNED`,
-    :data:`KEY_KEPT`, :data:`KEY_NO_USE`), of no term and no source: with none, its arms would read as known not to be
-    on a statement's rows.
+    :data:`KEY_KEPT`, :data:`KEY_NO_USE`), of no term: with none, its arms would read as known not to be on a
+    statement's rows.  Its *sources* are those of the value the function gives the object's key field
+    (:data:`bamboo.codemap.panda.runs.ROW_KEYS`, *attr*), read as a bind's value is: ``extractCommon``'s
+    ``taskSpec.jediTaskID = jediTaskID`` at 124 is its parameter; ``storeJobs``' ``job.PandaID = new_panda_ids[...]``
+    a call's value.  None where the function gives it none.
     """
 
     owner: str
@@ -4187,6 +4505,35 @@ class KeyFrom(BaseModel):
         ),
     )
     sources: list[KeySource] = Field(default_factory=list)
+    each_element: bool = Field(
+        default=False,
+        description=(
+            "The term compares its column with each element of its bind's value, not the value: an ``IN`` list the "
+            "corpus's helper spells as one placeholder from a sequence (``status IN (:old___in)`` from "
+            "``oldStatus``).  *sources* say where each sits in that sequence (:attr:`KeySource.paths`), so the "
+            "element is the sequence's ``[*]``.  False where each bind is one value -- a flush's, a list literal "
+            "the call hands split into its elements."
+        ),
+    )
+    flushed_in: str = Field(
+        default="",
+        description=(
+            "A flush's (a write at a call): the method whose statement persists the object (``file::name``), its "
+            "own KeyFroms the terms were read from -- the call may reach it through forwarders.  Empty for any "
+            "other record."
+        ),
+    )
+    flushed_lines: list[int] = Field(
+        default_factory=list,
+        description="A flush's: the lines of the statements of *flushed_in* whose records the term was read from.",
+    )
+    kept_hops: list[KeptHop] = Field(
+        default_factory=list,
+        description=(
+            f"Where *unread* is ``{KEY_KEPT}``: where the object goes in the callers (:class:`KeptHop`), one per "
+            "caller reached; empty for any other record."
+        ),
+    )
     reads: bool = Field(
         default=False,
         description=(
@@ -4204,7 +4551,10 @@ class KeyFrom(BaseModel):
     )
     attr: str = Field(
         default="",
-        description="The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it.",
+        description=(
+            "The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it; for an "
+            "object no write here persists, its key field the function gives a value (the *sources*)."
+        ),
     )
     object: str = Field(
         default="",
@@ -4296,6 +4646,9 @@ class KeyFrom(BaseModel):
     #: attributes the write takes back out)`` where a write persists *object*: the step after the reach record adds to
     #: *writes* the subjects the function assigns on it that reach one of those calls.
     _object: Optional[tuple] = PrivateAttr(default=None)
+    #: Where *unread* is :data:`KEY_KEPT`: ``{parameter: paths}`` where its assigned fields sit in what the function
+    #: was handed, as the carry's ``kept()`` reads them -- the start of *kept_hops*.
+    _kept: Optional[dict] = PrivateAttr(default=None)
 
 
 class TableRecord(BaseModel):
@@ -4365,6 +4718,37 @@ class TableRecord(BaseModel):
             "``JobSpec.jobStatus``), as :data:`bamboo.codemap.panda.runs.HISTORY_TABLES` names them; empty for "
             "another table."
         ),
+    )
+    references: list["TableReference"] = Field(
+        default_factory=list,
+        description=(
+            "The foreign keys the schema declares on it (:func:`bamboo.codemap.panda.sqltext.read_references`), "
+            "sorted: ``jedi_datasets``' ``jeditaskid`` holds a ``jedi_tasks`` row's ``jeditaskid``.  Not the joins "
+            "the corpus writes."
+        ),
+    )
+
+
+class TableReference(BaseModel):
+    """One foreign key of a table (:attr:`TableRecord.references`): its *columns* hold the values of *table*'s
+    *table_columns*, ``columns[i]`` that of ``table_columns[i]`` and ``attrs[i]`` that of ``table_attrs[i]`` -- so a
+    composite one is followed a column at a time: ``jedi_dataset_contents``' ``(jeditaskid, datasetid)`` reference
+    ``jedi_datasets``', whose ``jeditaskid`` references ``jedi_tasks``'.  The referenced columns are as declared;
+    whether they are the referenced table's identity is the reader's to compare (:attr:`TableRecord.identity`)."""
+
+    columns: list[str] = Field(..., description="This table's columns, lowered, in the order declared.")
+    attrs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Each of *columns* as :attr:`TableRecord.rows_of`'s attribute (``JediDatasetSpec.jediTaskID``), ``\"\"`` "
+            "where it has none; empty where the table holds no class's rows."
+        ),
+    )
+    table: str = Field(..., description="The table referenced, lowered: ``jedi_tasks``.")
+    table_columns: list[str] = Field(..., description="Its columns, lowered, in the order declared.")
+    table_attrs: list[str] = Field(
+        default_factory=list,
+        description="Each of *table_columns* as the referenced table's rows' class's attribute, as *attrs*.",
     )
 
 
@@ -7868,6 +8252,15 @@ class ReachNode(BaseNode):
     map_id: str
     derived_from: str
     owner: str = Field(..., description="``file::qualified.name``, ``#n`` after a repeated one.")
+    named_as: str = Field(
+        default="",
+        description=(
+            "The owner the other records name the function by (:func:`bamboo.codemap.calls.def_name`): "
+            "``file::name`` where its module defines one function of that name, an ``@overload`` stub not counted, "
+            "else *owner* (``datasetManager.py::main.FinisherThr.run``).  A reader keyed on the definition finds it "
+            "by its file and its ``def`` line, *anchor*'s ``line_start``."
+        ),
+    )
     cls: str = Field(default="", description="``file::Class`` holding the method; empty for a function.")
     function: str = Field(..., description="The function's own name.")
     classes: list[str] = Field(
@@ -8410,9 +8803,10 @@ class StatementReading(BaseModel):
     rows_handled: list[int] = Field(
         default_factory=list,
         description=(
-            "``[first, last]`` where the rows are worked through -- the loop "
-            "over them, which can run past ``region``. Empty where nothing "
-            "loops over them."
+            "``[first, last]`` where the rows are worked through -- from the "
+            "first loop over them to the end of the last, a loop over a list "
+            "they were copied into among them (:attr:`ReadSiteNode.row_loops`), "
+            "which can run past ``region``. Empty where nothing loops over them."
         ),
     )
     trace: list[TraceStep] = Field(

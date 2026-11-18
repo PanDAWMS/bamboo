@@ -55,6 +55,7 @@ from typing import Iterator, Optional
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import Anchor, LoopCutNode, SourceModule
 from bamboo.codemap.panda.recognizers.selection import _TAG, _identifiers, _rendered
 from bamboo.codemap.pathcond import (
@@ -284,7 +285,7 @@ def extract(
     for module in modules:
         attach_parents(module.tree)
         for func, _owner in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             # Keyed by message, so several sites wording a cut alike are one
             # node: production cannot tell them apart either, and a reader who
             # greps the sentence gets all of them.  Their guards pool, which is

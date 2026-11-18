@@ -56,6 +56,27 @@ class DBProxy:
         names, held_map = get_sql_IN_bind_variables(held.keys(), prefix=":cmd")
         var_map = {":owner": "DEFT", **held_map}
         self.cur.execute(f"SELECT TASK FROM ATLAS_DEFT.QUEUE WHERE OWNER=:owner AND CMD IN ({names})", var_map)
+
+
+class CommandProxy:
+    def external(self):
+        held = TaskSpec.commands()
+        external = [c for c in held if c not in internal_commands()]
+        names, held_map = get_sql_IN_bind_variables(external, prefix=":cmd")
+        var_map = {":owner": "DEFT", **held_map}
+        self.cur.execute(f"SELECT TASK FROM ATLAS_DEFT.QUEUE WHERE OWNER=:owner AND CMD IN ({names})", var_map)
+
+    def handed(self, internal):
+        held = TaskSpec.commands()
+        names, held_map = get_sql_IN_bind_variables([c for c in held if c not in internal], prefix=":cmd")
+        self.cur.execute(f"SELECT TASK FROM ATLAS_DEFT.QUEUE WHERE CMD IN ({names})", held_map)
+
+    def caller(self):
+        self.handed(["kill"])
+
+
+def internal_commands():
+    return ["kill"]
 """
 
 HELPER = """\
@@ -124,6 +145,20 @@ def test_an_in_lists_map_spread_into_a_bind_map_holds_the_dicts_keys(
     assert sorted(one.value for one in held) == ["finish", "kill"]
 
 
+def test_an_in_list_made_by_a_comprehension_holds_the_values_its_tests_keep(tmp_path: Path) -> None:
+    """getTasksToExecCommand_JEDI's ``[c for c in commandStatusMap if c not in JediTaskSpec.internal_commands()]``:
+    the dict's keys the test keeps -- read where the test's values are the function's own, and not where a caller
+    hands them (each caller's list would keep other keys)."""
+    modules, calls = _corpus(tmp_path)
+    found = {}
+    for name, varmap in (("external", "var_map"), ("handed", "held_map")):
+        func = _function(modules, name)
+        with sql.across_calls(calls):
+            (bind,) = sql.bound_values(func, varmap, ":cmd__in")
+            found[name] = sorted(one.value for one in values.handed(values.resolver(), calls)(bind.value, func, REL))
+    assert found == {"external": ["finish"], "handed": []}
+
+
 QUEUE = ReadSiteNode(
     name=ReadSiteNode.make_name("m", f"{REL}::commanded", 25),
     map_id="m",
@@ -179,6 +214,7 @@ def _fragment() -> MapFragment:
         map_id="m",
         derived_from="v",
         owner=f"{REL}::DBProxy.send",
+        named_as=f"{REL}::send",
         cls=f"{REL}::DBProxy",
         function="send",
         anchor=Anchor(package=PACKAGE, file=REL, line_start=_def_line("send")),

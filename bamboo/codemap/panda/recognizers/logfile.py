@@ -879,13 +879,12 @@ def _caller_files(
 ) -> list[str]:
     """Files belonging to the modules that reach *owner*, minus its own.
 
-    One reading for the two nodes that carry it.  The enclosing class is part
-    of ``owner`` but not of the call graph's keys, which are bare method names
-    -- the same last-segment rule the attribution slice uses to name a
-    function.
+    One reading for the two nodes that carry it.  The call graph's keys are
+    the definitions as ``owner`` spells them
+    (:func:`~bamboo.codemap.calls.def_name`), so a module defining a name twice
+    gives each its own callers.
     """
-    where, _, method = owner.partition("::")
-    reached = inward.get(where, {}).get(method.split(".")[-1], ())
+    reached = inward.get(owner.partition("::")[0], {}).get(owner.partition("::")[2], ())
     return sorted(
         {file for entry, _door, _call in reached for file in files_of(entry, declared, inherited)}
         - set(mine)

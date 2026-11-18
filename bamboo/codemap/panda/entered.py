@@ -454,7 +454,7 @@ def entered_froms(
         opened = _open(row, func, file, record, taken, run_time, stops, served, handed, edges)
         found.append(
             EnteredFrom(
-                owner=f"{file}::{row.function}",
+                owner=row.named_as,
                 line=func.lineno,
                 arms=sorted(lines),
                 sites=sorted(sites, key=lambda one: (one.owner, one.line, one.how)),
@@ -466,7 +466,7 @@ def entered_froms(
 
 def _site(trees: dict[str, ast.AST], caller: ReachNode, call: ReachCall, line: int) -> EnteredSite:
     func = _definition(trees, caller)
-    owner = f"{_file(caller.owner)}::{caller.function}"
+    owner = caller.named_as
     if func is None:
         return EnteredSite(owner=owner, owner_line=0, line=line, how=call.how, unread=UNREAD_NO_CALLER)
     node = _site_node(func, call, line)
@@ -517,8 +517,7 @@ def _open(
             or (isinstance(scope, frozenset) and scope & classes)
         ):
             found.append(EnteredOpen(kind=ENTERED_NAMED_AT_RUN_TIME, at=at, text=text))
-    bare = f"{file}::{name}"
     for route, owner, kind in served:
-        if owner in (bare, row.owner):
+        if owner in (row.named_as, row.owner):
             found.append(EnteredOpen(kind=kind, at=f"{file}:{func.lineno}", text=route))
     return found

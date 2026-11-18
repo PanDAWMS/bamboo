@@ -13,12 +13,14 @@ import functools
 from typing import Callable, Iterable, Optional
 
 from bamboo.codemap import values
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     EntityNode,
     KeyFrom,
     ReadSiteNode,
     SourceModule,
     TableRecord,
+    TableReference,
 )
 from bamboo.codemap.panda import sql, sqltext
 from bamboo.codemap.panda.attribution import SpecAttributor
@@ -40,10 +42,12 @@ def records(
     keys: dict[str, frozenset[str]],
     partitions: dict[str, tuple[str, tuple[str, ...]]],
     declaring: dict[str, tuple[str, ...]],
+    references: Optional[dict[str, list[sqltext.Reference]]] = None,
 ) -> list[TableRecord]:
     """One :class:`TableRecord` per table an entity, a read site, a write record or a family names, by its name
     lowered.  Read inside :func:`sql.across_calls` and :func:`sqltext.with_schema`, as the read sites were: a
-    family is read off the texts each read site's run has."""
+    family is read off the texts each read site's run has.  *references* are the schema's foreign keys
+    (:func:`sqltext.read_references`)."""
     modules, read_sites, key_froms = list(modules), list(read_sites), list(key_froms)
     spellings: dict[str, set[str]] = {}
 
@@ -75,6 +79,13 @@ def records(
     created = _creation(key_froms, classes)
     found = []
     lowered = lowered_classes(attributor)
+
+    def as_attrs(table: str, listed: tuple[str, ...]) -> list[str]:
+        # Each column as the table's rows' class's attribute, "" where it has none; none where no class's rows.
+        cls = rows_of(columns.get(table, frozenset()), lowered)
+        spelled = {n.lower(): n for n in classes.get(cls, ())}
+        return [f"{cls}.{spelled[c]}" if c in spelled else "" for c in listed] if cls else []
+
     for table in sorted(spellings):
         cls = rows_of(columns.get(table, frozenset()), lowered)
         spelled = {n.lower(): n for n in classes.get(cls, ())}
@@ -105,6 +116,16 @@ def records(
                 family=sorted(families.get(table, set()) - {table}),
                 creation=created.get(cls, []) if cls else [],
                 history_of=HISTORY_TABLES.get(table, ""),
+                references=[
+                    TableReference(
+                        columns=list(mine),
+                        attrs=as_attrs(table, mine),
+                        table=other,
+                        table_columns=list(theirs),
+                        table_attrs=as_attrs(other, theirs),
+                    )
+                    for mine, other, theirs in (references or {}).get(table, ())
+                ],
             )
         )
     return found
@@ -137,7 +158,7 @@ def _families(
     functions: dict[tuple[str, str], list[ast.AST]] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            functions.setdefault((module.rel_path, func.name), []).append(func)
+            functions.setdefault((module.rel_path, def_name(func)), []).append(func)
     parent: dict[str, str] = {}
 
     def root(table: str) -> str:

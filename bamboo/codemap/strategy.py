@@ -2536,7 +2536,7 @@ def attach_mover_gaps(strategy: Strategy, roots: dict) -> None:
 def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[ReaderGap]:
     """Every statement of one function the map could not read on these rows, or the function itself not read."""
     from bamboo.codemap import gates
-    from bamboo.codemap.calls import Calls, Types, parsed
+    from bamboo.codemap.calls import Calls, Types, parsed, spells
     from bamboo.codemap.gitsource import blob_sha
     from bamboo.codemap.panda import sql
     from bamboo.codemap.panda.recognizers import sqlwrite
@@ -2561,7 +2561,7 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[ReaderGap]:
     verbs: dict[int, set[tuple[str, str]]] = {}
     with sql.across_calls(calls):
         for func, _cls in functions_with_owner(tree):
-            if func.name != name:
+            if func.name != name and not spells(func, name):
                 continue
             stops += sqlwrite.statement_stops(func, file)
             for run in sql.executions(func):

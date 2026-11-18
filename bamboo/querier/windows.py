@@ -131,6 +131,21 @@ def near_value(column: str, value: str, strings: tuple[str, ...]) -> Asking | No
                                                         "lo": lo, "hi": hi, "strings": list(strings)}), strings)
 
 
+def near_ran(column: str, value: str, offset: datetime.timedelta) -> Asking | None:
+    """H2 for a writer on no history row of the object whose write of *column* is its clock plus *offset* (Q3's P42,
+    ``rerun._written_offset``; out/gm/qk-design.md, the H2-2 bundle, tmaeno's OK 2026-11-17 09:3x): if it wrote *value*,
+    it ran at the value less the offset, on its own clock -- so it is asked from that time less SLACK to it plus SLACK,
+    on every machine, for the key, as :func:`near_value` asks one writing the time it runs.  None where the value is
+    not a time."""
+    try:
+        t = when(value) - offset
+    except ValueError:
+        return None
+    lo, hi = _down(t - SLACK), _down(t + SLACK)
+    return Asking((lo, hi), None, T.Said("near-ran", {"column": column, "value": value, "offset": int(offset.total_seconds()),
+                                                      "ran": _down(t), "slack": _minutes(SLACK), "lo": lo, "hi": hi}))
+
+
 def lifetime(made: str | None, read: str | None, strings: tuple[str, ...]) -> Asking:
     """H2's F3, for an attribute's writer on no history row of the object that marks its runs by the object's key
     (``attr_time``, KNOWN_ISSUES.md K37): from the row's creation *made* to when the value was read *read*, on every

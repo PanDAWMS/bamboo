@@ -107,8 +107,14 @@ class Timeline:
     #: the row's value of the column as the rows file read it, where every arm of the column writes the clock with one
     #: offset: ``(written at, the value, the arms, when it was read)`` -- the last write was then, and none since
     #: (bundle A, A-4: P24, NT-scouting-late's assessmentTime 19:53:41 by prepareTasksToBeFinished_JEDI:3744 or
-    #: getAchievedTasks_JEDI:3283)
-    row_value: tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str] | None = None
+    #: getAchievedTasks_JEDI:3283); bundle F, F-3 adds the arms put apart, each with why M3(a)-1 left it out of the
+    #: stay (getAchievedTasks_JEDI:3283's statement takes running and pending rows only); K-1, where the arms write
+    #: other values too, the write the records show whose clock is the value, with the arms writing another value
+    #: named as having not written it again after them (NJ-holding-late's endTime by updateJobStatus:233)
+    row_value: tuple[Any, ...] | None = None
+    #: K-2 (a): writes a print reached, read as run, the statuslog showing their statement's own status value then:
+    #: ``(at, "func:line", what showed it)`` each (prepareTasksToBeFinished_JEDI's 4075, lockedBy NULL with 'tobroken')
+    confirmed: tuple[tuple[datetime.datetime, str, Any], ...] = ()
 
     def read(self) -> bool:
         """Whether the records or the row read anything of the column: a write, an arm shown not to, the row's value."""

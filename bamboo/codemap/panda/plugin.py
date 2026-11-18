@@ -253,6 +253,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._dated: Optional[dict[str, frozenset[str]]] = None
         self._partitions: dict[str, tuple[str, tuple[str, ...]]] = {}
         self._declaring: dict[str, tuple[str, ...]] = {}
+        self._references: dict[str, list[sqltext.Reference]] = {}
         self._schema_stamp = "none"
         self._recorded: Optional[calls_mod.Recorded] = None
         self._record_stamp = "none"
@@ -274,6 +275,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._dated = sqltext.read_dated(schema_root)
             self._partitions = sqltext.read_partitions(schema_root)
             self._declaring = sqltext.read_declaring(schema_root)
+            self._references = sqltext.read_references(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema, self._keys)
         if instance_record is not None:
             self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
@@ -904,6 +906,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._keys or {},
             self._partitions,
             self._declaring,
+            self._references,
         )
         lap("tables")
         # Which classes a run-time dispatch could have picked.  A candidate
@@ -946,6 +949,8 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # Which of those prints every way through a row loop's hand-on passes: what a run's lines name each row
         # a statement handed on by.
         sqlwrite.attach_hand_on_prints(fragment.read_sites, fragment.function_prints, self._modules)
+        # And which print, after a row loop, every element of a list the loop puts each row into.
+        sqlwrite.attach_list_prints(fragment.read_sites, fragment.function_prints, self._modules)
         # Which of those prints every path to an arm passes, and which of their
         # holes hold a column of the row the arm writes: what tells the run that
         # wrote a value from the runs that only printed the same lines.
@@ -1622,7 +1627,7 @@ def _attach_called_from(junctions, calls) -> None:
             tree = calls.types.tree(file)
             found: list[str] = []
             for func in walk(tree) if tree is not None else ():
-                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or func.name != name:
+                if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or not calls_mod.spells(func, name):
                     continue
                 if junction.anchor is not None and not (
                     func.lineno <= junction.anchor.line_start <= (func.end_lineno or func.lineno)
@@ -1647,7 +1652,7 @@ def _attach_not_run_on(junctions, calls) -> None:
             named[(file, name)] = [
                 one
                 for one in (walk(tree) if tree is not None else ())
-                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and one.name == name
+                if isinstance(one, (ast.FunctionDef, ast.AsyncFunctionDef)) and calls_mod.spells(one, name)
             ]
         candidates = named[(file, name)]
         anchor = junction.anchor
@@ -1692,7 +1697,7 @@ def _stops_read_again(modules, roots, stops) -> list[str]:
         calls = Calls(Types(roots, {module.rel_path: (module.blob_sha, module.tree)}))
         with sql.across_calls(calls):
             for func, _cls in functions_with_owner(module.tree):
-                owner = f"{module.rel_path}::{func.name}"
+                owner = f"{module.rel_path}::{calls_mod.def_name(func)}"
                 again = {
                     (stop.reason, stop.detail, stop.line)
                     for stop in sqlwrite.statement_stops(func, module.rel_path)

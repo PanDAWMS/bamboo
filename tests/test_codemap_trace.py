@@ -978,6 +978,78 @@ class Adder:
     assert not row.keyed
 
 
+def test_a_local_text_the_function_builds_with_spaces_is_no_token(tmp_path):
+    """``updateTask_JEDI`` prints ``sqlU + sql + comment`` with ``sql`` built of ``"WHERE "``, an f-string added in
+    a loop and a slice, inside a ``try`` as there: closed at the first space, the hole stopped inside the ``WHERE``
+    and no line of the run matched.  Every binding of ``sql`` builds a text holding a space, so it prints as text; ``table``, a parameter,
+    is the caller's to say and stays a token."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def update(self, criteria, status, old_status, table):
+        comment = " /* Proxy.update */"
+        try:
+            sql = "WHERE "
+            for key in criteria:
+                sql += f"{key}=:cr_{key} AND "
+            if old_status is not None:
+                sql += "status=:old_status AND "
+            sql = sql[:-4]
+            self.status = status
+            sqlU = f"UPDATE {table}.JEDI_Tasks SET status=:status "
+            tmpLog.debug(sqlU + sql + comment)
+        except Exception:
+            pass
+''',
+    )
+
+    (found,) = trace_mod.function_prints(roots, [f"{PACKAGE}/proxy"])
+    ((row,),) = [statement.rows for statement in found.statements]
+
+    line = "UPDATE ATLAS_PANDA.JEDI_Tasks SET status=:status WHERE a=:cr_a AND b=:cr_b  /* Proxy.update */"
+    assert {hole.expression: hole.prints for hole in row.holes} == {"sql": "text", "table": "token"}
+    assert re.search(row.pattern, line)
+
+
+def test_a_local_text_written_out_as_its_slice_is_no_token(tmp_path):
+    """``setScoutJobData_JEDI`` prints ``sqlTSD + comment + str(varMap)``; read through its bindings, the ``+=`` after
+    the slice is literal and the hole left is ``sqlTSD[:-1]``, no name.  The slice of a text the function builds with
+    spaces prints as text as the name does; the slice of a parameter, ``prefix[:-1]``, stays a token."""
+    roots = _tree(
+        tmp_path,
+        proxy='''\
+class Proxy:
+    def scout(self, scoutData, schema, prefix):
+        comment = " /* Proxy.scout */"
+        if scoutData != {}:
+            varMap = {}
+            sqlTSD = f"UPDATE {schema}.JEDI_Tasks SET "
+            for scoutKey, scoutVal in scoutData.items():
+                if scoutKey in ["newNG"]:
+                    continue
+                varMap[f":{scoutKey}"] = scoutVal
+                sqlTSD += f"{scoutKey}=:{scoutKey},"
+            sqlTSD = sqlTSD[:-1]
+            sqlTSD += " WHERE jediTaskID=:jediTaskID "
+            tmpLog.debug(sqlTSD + comment + str(varMap))
+            tmpLog.debug(f"{prefix[:-1]} done")
+''',
+    )
+
+    (found,) = trace_mod.function_prints(roots, [f"{PACKAGE}/proxy"])
+    rows = [row for statement in found.statements for row in statement.rows]
+    prints = {hole.expression: hole.prints for row in rows for hole in row.holes}
+
+    assert prints["sqlTSD[:-1]"] == "text"
+    assert prints["prefix[:-1]"] == "token"
+    line = (
+        "UPDATE ATLAS_PANDA.JEDI_Tasks SET walltime=:walltime,ramCount=:ramCount WHERE jediTaskID=:jediTaskID "
+        " /* Proxy.scout */{':jediTaskID': 1}"
+    )
+    assert any(re.fullmatch(row.capture, line) for row in rows if "sqlTSD[:-1]" in {h.expression for h in row.holes})
+
+
 def test_a_number_and_a_fragment_the_function_wrote_out_are_matched(tmp_path):
     """``reg_msg_str`` is one of two f-strings and the line prints either.
     Written out, each is a variant; the ``:03d`` hole is a number."""

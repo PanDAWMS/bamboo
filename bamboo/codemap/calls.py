@@ -36,6 +36,7 @@ import hashlib
 import json
 import re
 import weakref
+from collections import Counter
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, NamedTuple, Optional
 
@@ -301,7 +302,7 @@ class Target(NamedTuple):
 
     @property
     def owner(self) -> str:
-        return f"{self.file}::{self.func.name}"  # type: ignore[attr-defined]
+        return f"{self.file}::{def_name(self.func)}"
 
 
 class Placed(NamedTuple):
@@ -398,7 +399,7 @@ class CallSite(NamedTuple):
 
     @property
     def owner(self) -> str:
-        return f"{self.file}::{MODULE_SCOPE if self.in_module else self.func.name}"  # type: ignore[attr-defined]
+        return f"{self.file}::{MODULE_SCOPE if self.in_module else def_name(self.func)}"
 
 
 _NESTED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
@@ -548,6 +549,108 @@ def _function_binding(defs: Iterable[ast.stmt], name: str) -> Optional[ast.Funct
     """:func:`binding` among the function definitions of *defs*."""
     found = binding((node for node in defs if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), name)
     return found if isinstance(found, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+
+
+#: :func:`def_ids`, :func:`def_name` and :func:`def_named` of each module, kept while its tree is.
+_DEF_IDS: "weakref.WeakKeyDictionary[ast.AST, dict[int, str]]" = weakref.WeakKeyDictionary()
+_DEF_NAMES: "weakref.WeakKeyDictionary[ast.AST, dict[int, str]]" = weakref.WeakKeyDictionary()
+_DEFS_NAMED: "weakref.WeakKeyDictionary[ast.AST, dict[str, ast.FunctionDef | ast.AsyncFunctionDef]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def def_ids(module: ast.AST) -> dict[int, str]:
+    """Each ``def`` and ``class`` of *module*, by its ``id()``: its name with the names of what encloses it,
+    ``Outer.inner``, and ``#n`` after one its scope repeats.  Of the definitions one scope repeats a name with, the one
+    the name is bound to -- the one the calls resolve it to (:func:`binding`) -- is spelled without ``#n``, the others
+    ``#2``, ``#3`` in source order: ``CoreUtils.clean_user_id``'s ``@overload`` stubs come before the body that runs,
+    and a property's setter after its getter.  The functions' ids of the reach record, after ``file::``."""
+    found = _DEF_IDS.get(module)
+    if found is None:
+        found = _DEF_IDS[module] = {}
+        _def_ids(module, [], Counter(), found)
+    return found
+
+
+def _def_ids(scope: ast.AST, names: list[str], seen: Counter, into: dict[int, str]) -> None:
+    defs = list(bound_defs(scope))
+    bound = {name: binding(defs, name) for name in {node.name for node in defs}}
+    for node in sorted(defs, key=lambda one: one is not bound[one.name]):
+        spelled = ".".join([*names, node.name])
+        seen[spelled] += 1
+        into[id(node)] = spelled if seen[spelled] == 1 else f"{spelled}#{seen[spelled]}"
+    for node in defs:
+        _def_ids(node, [*names, node.name], seen, into)
+
+
+def def_name(func: ast.AST) -> str:
+    """How an owner names the function *func* after ``file::``: by its bare name where its module defines one function
+    of that name -- an ``@overload`` stub not counted --, else by its id there (:func:`def_ids`).
+    ``datasetManager.py``'s seven methods named ``run`` are ``main.FinisherThr.run`` and the like, its one
+    ``setTobeDeletedToDis`` is ``setTobeDeletedToDis``.  Anything but a function, by its ``name`` (``""`` where it has
+    none).  Read off ``parent`` links; where they do not reach a module, the bare name."""
+    name = getattr(func, "name", "")
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return name
+    module = next((one for one in pathcond.ancestors(func) if isinstance(one, ast.Module)), None)
+    if module is None:
+        return name
+    return def_names(module).get(id(func), name)
+
+
+def def_names(module: ast.Module) -> dict[int, str]:
+    found = _DEF_NAMES.get(module)
+    if found is None:
+        functions = [node for node in walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        counts = Counter(node.name for node in functions if not _is_overload(node))
+        ids = def_ids(module)
+        found = _DEF_NAMES[module] = {
+            id(node): node.name if counts[node.name] <= 1 else ids.get(id(node), node.name) for node in functions
+        }
+    return found
+
+
+def def_named(module: ast.AST, name: str) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The function of *module* an owner names *name* after ``file::``, in either of the map's spellings of it
+    (:func:`spells`); for a bare name an ``@overload`` stub shares, the body that runs.  None where no function is so
+    named: the module's scope, a class."""
+    found = _DEFS_NAMED.get(module)
+    if found is None:
+        if not isinstance(module, ast.Module):
+            return None
+        names, ids = def_names(module), def_ids(module)
+        functions = [node for node in walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        found = _DEFS_NAMED[module] = {}
+        for node in sorted(functions, key=_is_overload):
+            found.setdefault(names[id(node)], node)
+        for node in functions:
+            found.setdefault(ids.get(id(node), node.name), node)
+    return found.get(name)
+
+
+def spells(func: ast.AST, name: str) -> bool:
+    """Whether *name*, after ``file::``, is one of the map's spellings of the function *func*: the one the records
+    name it by (:func:`def_name`), or its id (:func:`def_ids`), the reach record's and the prints' owner.  Either
+    names one definition."""
+    if name == def_name(func):
+        return True
+    module = next((one for one in pathcond.ancestors(func) if isinstance(one, ast.Module)), None)
+    return module is not None and def_ids(module).get(id(func)) == name
+
+
+def _is_overload(func: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    return any(
+        (isinstance(decorator, ast.Name) and decorator.id == "overload")
+        or (isinstance(decorator, ast.Attribute) and decorator.attr == "overload")
+        for decorator in func.decorator_list
+    )
+
+
+def bare_name(owner: str) -> str:
+    """The function's own name *owner* -- ``file::name``, or ``file::Outer.inner`` with ``#n`` after a repeated one
+    (:func:`def_name`, :func:`def_ids`) -- ends in: ``run`` of ``datasetManager.py::main.FinisherThr.run``, for a
+    reader keyed on the names calls are made by."""
+    return owner.rpartition("::")[2].rpartition(".")[2].partition("#")[0]
 
 
 def module_of(file: str) -> str:
@@ -3282,16 +3385,52 @@ class Types:
         held = self.imports(file).get(annotation.id)
         if annotation.id == "Any":
             return held is None or held[0] == "typing"
-        where, alias = file, annotation.id
+        found = self._module_alias(file, annotation.id)
+        return found is not None and self.states_any(found[0], found[1], depth + 1)
+
+    def states_immutable(
+        self, file: str, annotation: Optional[ast.expr], binds: Optional[Bound] = None, depth: int = 0
+    ) -> bool:
+        """Whether *annotation* states only values no change in place can touch (:func:`callfacts.immutable_annotation`),
+        read through what the corpus defines: a field declared with a descriptor class by what the class's ``__get__``
+        returns, its type parameters bound -- ``PandaID: SpecColumn[int]`` is ``_T | Null``, ``_T`` the ``int`` and
+        ``Null`` the ``Literal["NULL"]`` ``spec_column.py`` binds it to --, a type parameter by what *binds* binds it to,
+        and a module's alias by its value."""
+        if annotation is None or depth > 4:
+            return False
+        annotation = _unquoted(annotation)
+        members = _union_members(annotation)
+        if members is not None:
+            return all(self.states_immutable(file, one, binds, depth) for one in members)
+        if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, (ast.Name, ast.Attribute)):
+            named = self.class_named(file, annotation.value)
+            getter = self._method_in(*named, "__get__") if named is not None else None
+            if getter is not None:
+                return self.states_immutable(getter[0], getter[2].returns, self._binds(file, annotation), depth + 1)
+        if isinstance(annotation, ast.Name) and annotation.id not in callfacts.IMMUTABLE_ANNOTATIONS:
+            holder = self._parameters_of(file).get(annotation.id)
+            if holder is not None:
+                given = (binds or {}).get((id(holder), annotation.id))
+                return given is not None and self.states_immutable(given[0], given[1], None, depth + 1)
+            found = self._module_alias(file, annotation.id)
+            if found is not None:
+                return self.states_immutable(found[0], found[1], binds, depth + 1)
+        return callfacts.immutable_annotation(annotation)
+
+    def _module_alias(self, file: str, name: str) -> Optional[tuple[str, ast.expr]]:
+        """What a module-level name of *file* is bound to, followed through an import: ``Null = Literal["NULL"]`` in
+        ``spec_column.py``, ``TaskBufferLike: TypeAlias = Any``; ``None`` where the module binds it to nothing."""
+        held = self.imports(file).get(name)
+        where, alias = file, name
         if held is not None:
-            where, alias = self.module_file(held[0]) or "", held[1] or annotation.id
+            where, alias = self.module_file(held[0]) or "", held[1] or name
         tree = self.tree(where) if where else None
         for node in tree.body if tree is not None else ():
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == alias:
-                return node.value is not None and self.states_any(where, node.value, depth + 1)
+                return (where, node.value) if node.value is not None else None
             if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == alias for t in node.targets):
-                return self.states_any(where, node.value, depth + 1)
-        return False
+                return where, node.value
+        return None
 
     def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its bases, nearest first, followed across files through imports."""

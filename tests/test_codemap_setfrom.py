@@ -397,7 +397,8 @@ def test_the_changes_after_the_read_are_of_the_object_the_write_gives_back(
     built: MapFragment,
 ) -> None:
     """checkPart's guard reads an item of the task's parameters: its store on the item and its store on the
-    parameters, each with the name it is read on, the item's key the guard's value's.  checkSpec's guard reads a map
+    parameters, each with the name it is read on, the item's key the guard's value's -- the store on the item read
+    on the parameters' name too, a change inside their ``'job'``.  checkSpec's guard reads a map
     built of a part of the parameters: its store on that map is not one the write gives back, its store on the
     parameters is.  checkStatus's and keepJob's guards read a job's status no way decodes: a value not changed in
     place, nothing after it -- not the map it is put in."""
@@ -412,6 +413,7 @@ def test_the_changes_after_the_read_are_of_the_object_the_write_gives_back(
     ref = f"{PROXY}::refinePart:{_line('W10')}:jedi_taskparams.taskparams"
     assert [(one.kind, one.key, one.name, one.before) for one in way.after] == [
         ("store", "'type'", "job", [ref]),
+        ("inner", "'job'", "taskParams", [ref]),
         ("store", "'partChecked'", "taskParams", [ref]),
     ]
     (guard,) = [one for one in built.guard_froms if one.owner.endswith("::checkSpec")]

@@ -53,6 +53,7 @@ from typing import NamedTuple, Optional
 
 from bamboo.codemap import values
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     REPORTS_DECISION,
     REPORTS_ROWS_CHANGED,
@@ -472,7 +473,7 @@ def attach(
         attach_parents(module.tree)
         files = logfile.files_of(module.rel_path, declared, inherited)
         for func, owner in functions_with_owner(module.tree):
-            here = by_owner.get(f"{module.rel_path}::{func.name}")
+            here = by_owner.get(f"{module.rel_path}::{def_name(func)}")
             if not here:
                 continue
             logged = _logged_arguments(func)

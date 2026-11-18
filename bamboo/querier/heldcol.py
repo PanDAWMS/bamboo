@@ -179,7 +179,7 @@ def _place(at: str) -> tuple[str, ast.AST, ast.stmt] | None:
     node = R.statement_at(func, int(line))
     if node is None:
         return None
-    return f"{rel}::{func.name}", func, node
+    return R.owner_of(rel, func), func, node
 
 
 def _owner_at(at: str) -> str:

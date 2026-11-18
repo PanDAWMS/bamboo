@@ -199,13 +199,8 @@ def _cut(node: ast.AST) -> str:
 
 
 class _Names:
-    """The id of every function and class of the corpus: ``file::Outer.inner``, ``#n`` after a repeated one.
-
-    Of the definitions one scope repeats a name with, the one the name is bound to -- the one the calls resolve it to
-    (:func:`calls.binding`) -- is spelled without ``#n``, as every reader spelling an owner by its qualified name
-    means it, and the others ``#2``, ``#3`` in source order: ``CoreUtils.clean_user_id``'s ``@overload`` stubs come
-    before the body that runs, and a property's setter after its getter.
-    """
+    """The id of every function and class of the corpus: ``file::Outer.inner``, ``#n`` after a repeated one
+    (:func:`calls.def_ids`).  Each in source order, a definition before the ones inside it."""
 
     def __init__(self, types: C.Types):
         self.functions: list[tuple[str, ast.AST, str]] = []
@@ -215,38 +210,19 @@ class _Names:
             tree = types.tree(file)
             if tree is None:
                 continue
-            seen: Counter = Counter()
-            self._walk(file, tree, [], seen)
+            self._walk(file, tree, C.def_ids(tree))
 
-    def _walk(self, file: str, scope: ast.AST, names: list[str], seen: Counter) -> None:
-        defs = list(_scope_definitions(scope))
-        bound = {name: C.binding(defs, name) for name in {node.name for node in defs}}
-        spelled_as: dict[int, str] = {}
-        for node in sorted(defs, key=lambda one: one is not bound[one.name]):
-            spelled = f"{file}::{'.'.join([*names, node.name])}"
-            seen[spelled] += 1
-            if seen[spelled] > 1:
-                spelled = f"{spelled}#{seen[spelled]}"
-            spelled_as[id(node)] = spelled
-        for node in defs:
-            self._of[id(node)] = spelled_as[id(node)]
+    def _walk(self, file: str, scope: ast.AST, ids: dict[int, str]) -> None:
+        for node in C.bound_defs(scope):
+            spelled = f"{file}::{ids[id(node)]}"
+            self._of[id(node)] = spelled
             self._keep.append(node)
             if not isinstance(node, ast.ClassDef):
-                self.functions.append((file, node, spelled_as[id(node)]))
-            self._walk(file, node, [*names, node.name], seen)
+                self.functions.append((file, node, spelled))
+            self._walk(file, node, ids)
 
     def of(self, node: ast.AST) -> Optional[str]:
         return self._of.get(id(node))
-
-
-def _scope_definitions(scope: ast.AST) -> Iterator[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
-    """The ``def`` and ``class`` statements of *scope* itself, in source order: inside its ``if`` and ``try`` blocks
-    too, not inside another definition."""
-    for node in ast.iter_child_nodes(scope):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            yield node
-        else:
-            yield from _scope_definitions(node)
 
 
 def _annotation_parts(annotation: ast.expr) -> Iterator[ast.expr]:
@@ -2842,6 +2818,7 @@ def graph(
                 map_id=map_id,
                 derived_from=derived_from,
                 owner=owner,
+                named_as=f"{file}::{C.def_name(func)}",
                 cls=(names.of(owned[1]) or "") if owned is not None else "",
                 function=func.name,  # type: ignore[attr-defined]
                 classes=classes,
@@ -3168,11 +3145,15 @@ class ReachGraph:
         return row is not None and call.lineno in row.database
 
     def named(self, owner: str) -> list[str]:
-        """Every function a junction owner's ``file::name`` can mean: each definition of that name in the file."""
-        file, _, name = owner.partition("::")
-        bare = name.rsplit(".", 1)[-1]
+        """Every function *owner* names, as the map spells one -- the other records' :func:`calls.def_name`
+        (:attr:`ReachNode.named_as`) or the record's own id --: that one; in a record written before *named_as*,
+        each definition of its bare name in the file."""
+        file = owner.partition("::")[0]
+        bare = C.bare_name(owner)
         return [
-            row.owner for row in self._by_file.get(file, ()) if row.function == bare
+            row.owner
+            for row in self._by_file.get(file, ())
+            if owner in (row.owner, row.named_as) or (not row.named_as and row.function == bare)
         ]
 
     def functions_named(self, name: str) -> list[str]:

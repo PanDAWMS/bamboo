@@ -123,11 +123,10 @@ class _Reader:
                 cls, _sep, attr = one.rpartition(".")
                 if cls == table.spec_class:
                     self.keys[cls].add(attr)
-        #: ``(file, function name)`` -> its KeyFroms: how the corpus's KeyFroms name their function.
-        self.key_froms: dict[tuple[str, str], list] = defaultdict(list)
+        #: Each function's KeyFroms, by the owner they name it by -- a reach row's :attr:`ReachNode.named_as`.
+        self.key_froms: dict[str, list] = defaultdict(list)
         for key_from in fragment.key_froms:
-            file, _sep, name = key_from.owner.partition("::")
-            self.key_froms[(file, name.rpartition(".")[2])].append(key_from)
+            self.key_froms[key_from.owner].append(key_from)
         self._broken: dict[str, list[str]] = {}
         #: sqlwrite's ``_Filled`` per function and its ``_Reading``, made on the first sequence asked.
         self._filled: dict[int, Any] = {}
@@ -356,10 +355,10 @@ class _Reader:
 
     def _new_key(self, owner: str, row, path: str, site, cls: str) -> bool:
         """Whether the key the statement of *site* sets on *path* is a new one."""
-        file, _sep, qual = owner.partition("::")
+        file = owner.partition("::")[0]
         root = objects._root(path).partition("@")[0]
         tables = self.tables_of(cls)
-        for one in self.key_froms.get((file, qual.rpartition(".")[2]), []):
+        for one in self.key_froms.get(row.named_as, []):
             if (
                 one.new_row
                 and one.table.rpartition(".")[2].lower() in tables
@@ -429,8 +428,7 @@ class _Reader:
         found = []
         tables = self.tables_of(cls)
         for owner, row in self.rows.items():
-            file, _sep, qual = owner.partition("::")
-            froms = self.key_froms.get((file, qual.rpartition(".")[2]), [])
+            froms = self.key_froms.get(row.named_as, [])
             for write in row.writes:
                 if (
                     write.kind != "update"

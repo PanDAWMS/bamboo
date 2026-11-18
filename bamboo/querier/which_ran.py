@@ -48,9 +48,10 @@ from __future__ import annotations
 
 import ast
 import datetime
+import functools
 import itertools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -62,6 +63,11 @@ from bamboo.codemap import (  # noqa: E402
     trace,  # noqa: E402
 )
 from bamboo.codemap.calls import Target  # noqa: E402
+from bamboo.codemap.models import (  # noqa: E402
+    MUST_PART_BIND,
+    MUST_PART_MARK,
+    MUST_ROW_WRITTEN,
+)
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
@@ -72,7 +78,7 @@ from bamboo.querier import printed as PR  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
 from bamboo.querier import windows as W  # noqa: E402
 from bamboo.querier.recorded import EDGE  # noqa: E402
-from bamboo.querier.records import Run  # noqa: E402
+from bamboo.querier.records import LEADING_HOLE, Run  # noqa: E402
 
 
 def once_loops_of(fn, sn, run: Run, mode: str) -> dict[int, str]:
@@ -140,8 +146,64 @@ def of_mover(run: Run, owner: str) -> bool:
     return m is None or m[1] == owner.split("::")[-1]
 
 
+def turn_parts(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
+    """*run* cut at the turns of *fn*'s loop over objects whose rows print the run's mark as the element's
+    (:func:`keyed_loops`), with a word on how; ``([run], '')`` where no one such loop is, or the run holds one turn.
+
+    A record starts a turn where its row cannot run after the row of the record before it in one turn of that loop
+    (the map's ``flow.runs_after``, the loop gone round once).  A record of no row of *fn*, or of several, starts none,
+    and the row before it stays the one read.  A run of a key's records holds one turn per call of a worker that takes
+    the object once in what it goes over: datasetManager's FinisherThr.run prints ``{job.PandaID} Cloud:`` at 696 and
+    four rows after it in each turn of 662, and NJ-transferring-stuck's run of the job on one machine holds three rounds
+    of the Finisher in 15 records.  A turn that leaves before 696 (675's error, then ``continue``) is a turn too: 675
+    cannot run after 734 in one turn.  Bundle D, D-2 (P30; out/gm/qk-design.md, tmaeno's OK 2026-11-17)."""
+    sn = R.seen(fn, run, mode)
+    keyed = keyed_loops(fn, sn, run)
+    loops = [node for node in R.own_nodes(fn.node) if isinstance(node, (ast.For, ast.AsyncFor)) and id(node) in keyed]
+    if len(loops) != 1:
+        return [run], ""
+    loop = loops[0]
+    stmt_of = {row.line: row.stmt for row in fn.rows}
+    lines_of: dict[int, set[int]] = {}
+    for line, found in sn.hits.items():
+        for i, _, _ in found:
+            lines_of.setdefault(i, set()).add(line)
+    starts = [0]
+    before: ast.stmt | None = None
+    for i in range(len(run.records)):
+        lines = lines_of.get(i, set())
+        if len(lines) != 1:
+            continue
+        stmt = stmt_of[next(iter(lines))]
+        if before is not None:
+            try:
+                follows = flow.runs_after(before, stmt, once=[loop], printed=True)
+            except ValueError:
+                follows = True
+            if not follows:
+                starts.append(i)
+        before = stmt
+    if len(starts) < 2:
+        return [run], ""
+    cuts = starts + [len(run.records)]
+    parts = [run.part(a, b) for a, b in zip(cuts, cuts[1:], strict=False)]
+    return parts, (f"cut at the turns of the loop at {loop.lineno}, whose rows print the run's mark as its element's: "
+                   f"{len(parts)} pass(es), one starting where a record's row cannot run after the one before it in a turn")
+
+
+def cut_passes(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
+    """*run* cut into *fn*'s passes: at its entry row (``rows.passes``), else at the turns of its loop over the run's
+    object (:func:`turn_parts`); with a word on how."""
+    parts, how = R.passes(fn, run, mode)
+    if parts == [run]:
+        turns, said = turn_parts(fn, run, mode)
+        if len(turns) > 1:
+            return turns, f"{how}; {said}"
+    return parts, how
+
+
 def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
-    """*run* cut into *fn*'s passes (``rows.passes``), with a word on how.  A run kept whole that holds no record only
+    """*run* cut into *fn*'s passes (:func:`cut_passes`), with a word on how.  A run kept whole that holds no record only
     *fn*'s rows can have printed (:func:`_rows_shown`), under a mark that does not name *fn*, is *fn*'s pass only where
     it shows *fn* was called (:func:`called_in`); otherwise it is not shown to be one, and is set aside.  Another
     function shares the mark -- TaskBrokerThread's runImpl prints under the same time token as TaskCheckerThread's --
@@ -149,7 +211,7 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     doBasicPostProcess.  Kept whole, judge read the absent rows as the way the pass went and chose an exit by
     elimination (KNOWN_ISSUES.md K69).  Set aside is not shown not to be: a caller's row after the call that another
     class's method prints alike does not show it (AtlasAnal.doRefine's "done", AtlasProd.doRefine's too)."""
-    parts, how = R.passes(fn, run, mode)
+    parts, how = cut_passes(fn, run, mode)
     if parts != [run]:
         return parts, how
     m = re.match(r"([A-Za-z_]\w*) <", run.token)
@@ -159,8 +221,8 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
         return parts, how
     shown = called_in(fn, run, mode)
     if shown:
-        return parts, f"{how}; no record only {fn.name} prints, its call shown by {shown}"
-    return [], f"{how}; no record only {fn.name} prints, nor a caller's row after its call: not shown to be a pass of it"
+        return parts, f"{how}; no record only {fn.shown} prints, its call shown by {shown}"
+    return [], f"{how}; no record only {fn.shown} prints, nor a caller's row after its call: not shown to be a pass of it"
 
 
 def called_in(fn: R.Function, run: Run, mode: str) -> str:
@@ -236,6 +298,18 @@ def at_window(run: Run, window: tuple[str, str]) -> bool:
     lo, hi = (datetime.datetime.fromisoformat(window[0][:19]) - EDGE).isoformat(" "), (
         datetime.datetime.fromisoformat(window[1][:19]) + EDGE).isoformat(" ")
     return any(lo <= r.stamp[:19] <= hi for r in run.records)
+
+
+def ends_before(run: Run, window: tuple[str, str], since: str) -> bool:
+    """Whether *run*, or a pass of one, can have written a statuslog row at *window* after its last record: it began
+    after *since* (the time of the row before; "" where none) and by the window's end, and its last record lies before
+    the window, within EDGE of it.  Read for a writer whose pass writes the row by a call after its write
+    (:attr:`Candidate.row_after`), and only where no pass of it is at the window (:func:`at_window`): its last print
+    can come before the row -- insertNewJob in a bulk insert queues its job's statuslog row for bulk_insert_new_jobs'
+    executemany, which wrote 'pending' at 21:02:38.14, 2.5 s after the pass's last record at 21:02:35.684
+    (NR-J-7424719827-prodUserName, P37).  A pass that began by the row before can have written that row instead."""
+    lo, _ = before_stretch(window, since)
+    return since[:19] < run.first[:19] <= window[1] and lo <= run.last[:19] < window[0]
 
 
 def _key_through_call(fn: R.Function, part: Run, logs: dict[str, list[Run]], mode: str,
@@ -400,7 +474,30 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
     does, or where a run of the key ran inside one of its calls (:func:`_key_through_call`).  A mark that names no key
     spans every pass of a worker:
     rescueUnLockedTasksWithPicked_JEDI's ``< vo=atlas label=user >`` on aipanda081 held 155 passes, the key in one at
-    19:11, and was read for a write at 13:09:14 that aipanda082's pass made."""
+    19:11, and was read for a write at 13:09:14 that aipanda082's pass made.
+
+    Where no pass is at the window and *c* writes its row by a call after its write (:attr:`Candidate.row_after`), the
+    passes that ended before the row, from the row before on, are read instead (:func:`ends_before`, P37): *found*
+    holds the runs meeting that stretch too (:func:`before_stretch`)."""
+    kept, why = _passes(c, [r for r in found if spans(r, window)], window, logs, mode, called_at,
+                        lambda p: at_window(p, window))
+    if kept or c.row_after is None:
+        return kept, why
+    since = c.row_after
+    before, _ = _passes(c, found, window, logs, mode, called_at, lambda p: ends_before(p, window, since))
+    return (before, why) if before else (kept, why)
+
+
+def before_stretch(window: tuple[str, str], since: str) -> tuple[str, str]:
+    """The stretch a pass :func:`ends_before` *window* lies in: from the row before (*since*), or from EDGE before the
+    window where that is later, to the window's end."""
+    lo = (datetime.datetime.fromisoformat(window[0][:19]) - EDGE).isoformat(" ")
+    return max(lo, since[:19]), window[1]
+
+
+def _passes(c: Candidate, found: list[Run], window: tuple[str, str], logs: dict[str, list[Run]], mode: str,
+            called_at: Callable[[R.Function, Candidate], list[str]] | None, near: Callable[[Run], bool]) -> tuple[list[Run], list[str]]:
+    """:func:`passes_at`'s reading, a pass taken where *near* holds of it."""
     fn = R.function(c.rel, c.func, c.lines)
     kept: list[Run] = []
     why: list[str] = []
@@ -413,10 +510,10 @@ def passes_at(c: Candidate, found: list[Run], window: tuple[str, str], logs: dic
             continue
         by = cutter(fn, run, mode, called_at)
         parts = _cut(run, sorted({0, *R.entries(by, run, mode), len(run.records)}))
-        at = [p for p in parts if at_window(p, window)]
+        at = [p for p in parts if near(p)]
         if not at:
             far = sum(1 for p in parts if spans(p, window))
-            of = fn.name if by is fn else f"{by.name} (calling {fn.name})"
+            of = fn.shown if by is fn else f"{by.shown} (calling {fn.shown})"
             why.append(f"{where}: none of its {len(parts)} pass(es) of {of} is at the window"
                        + (f" ({far} span(s) it with no record within {EDGE.seconds // 60} min of it)" if far else ""))
             continue
@@ -438,6 +535,10 @@ class Candidate:
     log_files: list[str] = field(default_factory=list)
     run: Run | None = None  # set when the caller already knows which run it belongs to
     note: str = ""
+    #: where the window is a statuslog row every way of the function writes by a call after its write (the map's
+    #: history pairs, order ``after``): the time of the row before ("" where none), from which a pass that ended
+    #: before the row is read where none is at it (:func:`ends_before`); None for any other candidate
+    row_after: str | None = None
 
     @property
     def owner(self) -> str:
@@ -453,6 +554,8 @@ class Verdict:
     #: the must rows a positive verdict was shown by (``rows.implying_rows`` printed), none for another proof: a reader
     #: that reads a caller's rows on the side of a send its code puts them on asks where they lie (HOP (a'))
     proven: list[int] = field(default_factory=list)
+    #: D-4: why the call arm hands no element of the key's turn (:func:`turn_left_before_append`), empty otherwise
+    unhanded: str = ""
 
     def describe(self) -> str:
         return f"{self.kind:10s} {Path(self.candidate.rel).name}::{self.candidate.func}:{self.line}  " + "; ".join(self.reasons)
@@ -507,7 +610,7 @@ def subject_values(seens: list[R.Seen], attr: str) -> list[tuple[int, str, str]]
             for i, _, _ in sn.hits.get(row.line, ()):
                 for expr, value in row.capture(sn.run.records[i]).items():
                     if re.fullmatch(rf"[\w.]+\.{re.escape(attr)}", expr):
-                        found.append((i, value.strip(), f"{sn.fn.name}:{row.line}"))
+                        found.append((i, value.strip(), f"{sn.fn.shown}:{row.line}"))
     return sorted(set(found))
 
 
@@ -543,7 +646,7 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
                     if not (about_row or of_class or own_local):
                         continue
                     seen_values.setdefault(expr, set()).add(value.strip())
-                    where.setdefault(expr, f"hole of {sn.fn.name}:{row.line} at {sn.run.records[i].span}")
+                    where.setdefault(expr, f"hole of {sn.fn.shown}:{row.line} at {sn.run.records[i].span}")
                     printers.setdefault(expr, set()).add(sn.fn.owner)
     put = {}
     for expr, values in seen_values.items():
@@ -555,6 +658,59 @@ def stable_holes(seens: list[R.Seen], env: E.Env, cls: str | None = None, local_
             env.put_hole(expr, next(iter(values)), where[expr], printers[expr])
             put[expr] = next(iter(values))
     return put
+
+
+def constant_on_way(fn: R.Function, printed: list[int], test_line: int,
+                    bindings: dict[int, Any]) -> tuple[Any, int, int] | None:
+    """Bundle F, F-2 (out/gm/qk-design.md, tmaeno's OK 2026-11-17 15:2x): what a name the test at *test_line* of *fn*
+    reads holds there in one turn of a pass, where the map's GuardFrom reads it back to more than one literal -- its
+    *bindings*, by line -- prepareTasksToBeFinished_JEDI's ``toSkip``, False at 3861 and True at 3939, which 4068's
+    ``not toSkip`` reads.  A row the pass printed in that turn (*printed*: the lines whose records there hold the key)
+    that every way reaches through one binding (``flow.passes_before``) with no other binding between them, and from
+    which the test is reached with no other binding between (``flow.runs_between``), says that binding's value is what
+    the test read: 3940's ``done set only scout data for jediTaskID=...`` comes only past 3939, and no binding of
+    ``toSkip`` runs from it to 4068.  The turn is the innermost loop holding the print and the test, gone round once.
+    ``(value, binding line, print line)``; None where no printed row says, or two say different bindings."""
+    node = fn.node
+    test = R.statement_at(node, test_line)
+    sites: dict[int, ast.stmt] = {}
+    for line in bindings:
+        if (site := R.statement_at(node, line)) is None:
+            return None
+        sites[line] = site
+    if test is None:
+        return None
+    holding_test = {id(a) for a in pathcond.ancestors(test)}
+    by_value: dict[str, list[int]] = {}
+    for b, v in bindings.items():
+        by_value.setdefault(repr(v), []).append(b)
+    found: dict[str, list[tuple[int, int]]] = {}
+    for line in sorted(set(printed)):
+        p = R.statement_at(node, line)
+        if p is None or p is test or any(p is s for s in sites.values()):
+            continue
+        once = [a for a in pathcond.ancestors(p) if isinstance(a, R.LOOPS) and id(a) in holding_test][:1]
+        try:
+            if not flow.runs_after(p, test, once=once, printed=True) or not flow.passes_before(p, list(sites.values()), once=once):
+                continue
+            for value, lines in by_value.items():
+                same = [sites[b] for b in lines]
+                other = [s for b, s in sites.items() if b not in lines]
+                # every way to the print passed a binding of this value last, and none of another runs on to the test
+                if (flow.passes_before(p, same, once=once)
+                        and not any(flow.runs_after(o, p, same, once=once) for o in other)
+                        and not any(flow.runs_between(p, test, o, [], once=once) for o in other)):
+                    found.setdefault(value, []).extend((b, line) for b in lines
+                                                       if flow.runs_after(sites[b], p, [], once=once))
+        except ValueError:
+            continue
+    if len(found) != 1:
+        return None
+    pairs = next(iter(found.values()))
+    if not pairs:
+        return None
+    b = min(b for b, _ in pairs)
+    return bindings[b], b, min(line for _, line in pairs)
 
 
 def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.stmt], env: E.Env,
@@ -598,7 +754,7 @@ def printed_before(fn: R.Function, sn: R.Seen, stmt: ast.stmt, before: list[ast.
                 # every record the row reads counts against one value, the placed ones name the source
                 values.setdefault(name, set()).add(value.strip())
                 if i in placed and (name not in last or last[name][0].lineno < s.lineno):
-                    last[name] = (s, expr, f"hole of {fn.name}:{row.line} at {sn.run.records[i].span}")
+                    last[name] = (s, expr, f"hole of {fn.shown}:{row.line} at {sn.run.records[i].span}")
     put: dict[str, str] = {}
     for name, seen_values in values.items():
         if len(seen_values) != 1 or name not in last:
@@ -1189,8 +1345,7 @@ def write_prints(owner: str) -> list:
 
 
 def _bare_owner(owner: str) -> str:
-    rel, _, qual = owner.partition("::")
-    return f"{rel}::{qual.rpartition('.')[2]}"
+    return R.named(owner)
 
 
 class PrintedBinds(NamedTuple):
@@ -1385,6 +1540,78 @@ def printed_write_arms(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subj
             left[0].reasons.append(
                 f"P35: row {shown.row.line} printed the map {wp.statement}'s statement ran with {shown.where}, "
                 f"{bind}={observed!r}; of its arms of {subject}, the others ({out}) did not give it there")
+
+
+def branches_at(subject: str, owner: str, line: int, fragment: Any = None) -> list:
+    """The map's branches of *subject* at *owner*'s *line*, in *fragment* (the installed dump's where None).  A
+    reading's owner is ``file::function``, a junction's ``file::Class.function``: matched by the file, the function's
+    name and the line."""
+    fragment = mapdump.fragment() if fragment is None else fragment
+    file, _, qual = owner.partition("::")
+    name = qual.rpartition(".")[2]
+    return [b for j in (getattr(fragment, "junctions", None) or []) if j.subject == subject
+            and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
+            for b in j.branches if b.line == line]
+
+
+def hole_values(row: R.Row, record: Any, name: Any) -> list[str]:
+    """What *record*, a line of the print *row*, holds in the hole the map's name *name* reads (``MustName``): an
+    entry of its printed bind map (``sqltext.cut``: ``str(var_map)`` after the statement), or a hole of its logger's
+    mark or of its message as the map's rows read them back (``trace.hole_values``, the record whole first), each
+    stripped of its quotes -- ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID``."""
+    if name.part == MUST_PART_BIND:
+        got = sqltext.cut(record.text)
+        values = [got[1].get(name.bind)] if got is not None else []
+    else:
+        values = []
+        for m in row.map_rows:
+            for whole in (True, False):
+                read = trace.hole_values(m, record.text, record.token, whole=whole)
+                if read is None:
+                    continue
+                holes, printed = (m.prefix_holes, read[1]) if name.part == MUST_PART_MARK else (m.holes, read[0])
+                values += [v for h, v in zip(holes, printed, strict=False) if h.expression == name.expression]
+                break
+    return [str(v).strip().strip("'\"") for v in values if v is not None]
+
+
+def after_key_others(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subject: str, env: E.Env) -> None:
+    """B-5 (P36, out/gm/qk-design.md's bundle B, tmaeno's OK 2026-11-16 21:40) on *verdicts*, kept arms of *fn* writing
+    *subject* in the run *sn*: an arm is excluded where a print the map says runs after its write on every way, the
+    object not bound again between (``Branch.after_prints``: ``every_way``, not ``rebound``), holds the written row's
+    key column (a name with ``row`` written, a column of the question's key), every loop holding the arm holds the print
+    too (a print after the loop shows its last object only), and each of its records in the run -- one at least -- holds
+    a value of that hole other than the question's key: no turn of the arm wrote the key's row.  Not where a traceback
+    in the run names *fn* (a raise may end a way before the print).  updateUnmergedJobs's 1236 ``umJob.jobStatus =
+    job.jobStatus`` runs 50 times in NJ-holding-late's run, each turn's 1252 ``update unmerged PandaID={umJob.PandaID}``
+    printing another job's ID.  K64 (:func:`other_objects`) reads such a print the same way where it is one of the
+    arm's own must rows, for rule 4; 1252 is not one, and the map says it runs after 1236 on every way."""
+    keys = _key_values(env)
+    if not keys or R.raised_in(fn, sn.run)[0]:
+        return
+    # the key's columns under the class the map names them by (env.subject holds the row's name, "<job>.jobStatus")
+    columns = {f"{subject.partition('.')[0]}.{k}" for k in env.keys}
+    for v in verdicts:
+        stmt = R.statement_at(fn.node, v.line) if v.kind == "kept" else None
+        if stmt is None:
+            continue
+        for b in branches_at(subject, fn.owner, v.line):
+            for p in getattr(b, "after_prints", None) or ():
+                names = [n for n in p.names if n.row == MUST_ROW_WRITTEN and n.column in columns]
+                row = next((r for r in fn.rows if r.line == p.line), None)
+                if (not p.every_way or p.rebound or not names or row is None
+                        or not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node)):
+                    continue
+                at = [i for i, _, _ in sn.hits.get(row.line, ())]
+                held = [hole_values(row, sn.run.records[i], n) for i in at for n in names]
+                if held and all(vals and not keys & set(vals) for vals in held):
+                    v.kind = "excluded"
+                    v.reasons.append(f"P36: row {p.line} prints the written row's {names[0].column} after it on every way, "
+                                     f"and its {len(at)} record(s) in the run hold another than the key's: it wrote no "
+                                     f"row of the key")
+                    break
+            if v.kind == "excluded":
+                break
 
 
 #: the installed dump's handler records by owner and ``except`` line (:func:`_handler_marks`), with the fragment read
@@ -1716,6 +1943,111 @@ def callee_values(fn: R.Function, run: Run, mode: str) -> dict[str, tuple[str, s
     return out
 
 
+@functools.cache
+def _handed_in(fragment_id: int) -> dict[tuple[str, int], list]:
+    """``(file, line) -> [HeldSource]``: the ways the map reads into a callee's parameter (``ParameterFrom.sources``)
+    by the call they end at, the last of each ``route`` (*fragment_id* keys the cache to the dump)."""
+    out: dict[tuple[str, int], list] = {}
+    for p in getattr(mapdump.fragment(), "parameter_froms", None) or []:
+        for s in p.sources:
+            file, _, at = (s.route[-1] if s.route else "").rpartition(":")
+            if at.isdigit():
+                out.setdefault((file, int(at)), []).append(s)
+    return out
+
+
+def appended_turns(fn: R.Function, line: int) -> list[tuple[ast.For | ast.AsyncFor, int, str]]:
+    """``(loop, append line, element)`` for each list the call at *line* hands its callee that *fn* makes empty and
+    fills only by appending the element of one of its loops the call is not in, each turn its own -- the map's
+    ``HeldSource`` of the callee's parameter: its ``route`` the call alone, ``made_empty``, each of its ``changes`` a
+    ``method`` ``append`` *fn* runs itself, its ``value_text`` the loop's target.  ActivatorWithRuleThr.run makes
+    ``actJobs = []`` at 929, appends ``tmpJob`` at 969 in its loop over the jobs at 931, and hands the list to
+    ``activateJobs`` at 973 (D-4).  Empty where the map reads no such way."""
+    fragment = mapdump.fragment()
+    call = R.statement_at(fn.node, line)
+    if fragment is None or call is None:
+        return []
+    lo, hi = fn.node.lineno, getattr(fn.node, "end_lineno", None) or fn.node.lineno
+    out: list[tuple[ast.For | ast.AsyncFor, int, str]] = []
+    for s in _handed_in(id(fragment)).get((fn.rel, line), []):
+        if not getattr(s, "made_empty", "") or len(s.route) != 1 or not lo <= (s.line or 0) <= hi or not s.changes:
+            continue
+        sites: list[tuple[ast.For | ast.AsyncFor, int, str]] = []
+        for ch in s.changes:
+            file, _, at = ch.at.rpartition(":")
+            stmt = R.statement_at(fn.node, int(at)) if file == fn.rel and at.isdigit() else None
+            loop = next((a for a in pathcond.ancestors(stmt) if isinstance(a, (ast.For, ast.AsyncFor))), None) if stmt else None
+            if (loop is None or ch.kind != "method" or ch.what != "append" or ch.via or not lo <= loop.lineno <= hi
+                    or not isinstance(loop.target, ast.Name) or loop.target.id != ch.value_text
+                    or any(a is loop for a in pathcond.ancestors(call))):
+                break
+            sites.append((loop, int(at), ch.value_text))
+        else:
+            if len({id(loop) for loop, _, _ in sites}) == 1:
+                out.extend(sites)
+    return out
+
+
+def _turn_hole(row: R.Row, element: str) -> str:
+    """The hole a print of *row* begins with, where it is an attribute of the loop's *element* (``tmpJob.PandaID``):
+    a logger with no mark writes its value first, the line's mark (:data:`records.LEADING_HOLE`); empty otherwise."""
+    m = LEADING_HOLE.match(row.text or "")
+    hole = m["hole"].strip() if m else ""
+    return hole if hole.partition(".")[0] == element and not row.map_prefixes else ""
+
+
+def turn_left_before_append(sn: R.Seen, line: int, mode: str) -> str:
+    """D-4 (I-1, out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x): why the call at *line*
+    hands no element of the key's turn, or empty.  Its list is filled only by appending each turn's element
+    (:func:`appended_turns`); a row of the loop the pass printed begins with a hole of the element (963's
+    ``{tmpJob.PandaID} skip since ...``), so the pass's run, marked by that value, is the key's turn; another row of
+    the loop beginning with the same hole that every way to the append prints (968's ``{tmpJob.PandaID} to activate
+    with rule``) is missing from the run where its absence counts: the key's turn did not reach the append, and the
+    list the call hands holds no element of it.  Not where the turn's rows are read in no such run."""
+    fn, run = sn.fn, sn.run
+    for loop, at, element, rows in _turn_rows(fn, line):
+        inside = {id(n) for n in ast.walk(loop)}
+        for row, hole in rows:
+            if sn.present(row):
+                continue
+            shown = [r for r in fn.rows if id(r.stmt) in inside and sn.present(r) and _turn_hole(r, element) == hole]
+            if shown and R.absence_trusted(row, run.log, mode)[0] and run.would_print(row.level, row.func, row):
+                return (f"the key's turn of the loop at {loop.lineno} printed {shown[0].line} and not {row.line}, which every "
+                        f"way to the append at {at} prints: the call at {line} hands no {element} of the key's turn (D-4)")
+    return ""
+
+
+def _turn_rows(fn: R.Function, line: int) -> list[tuple[ast.For | ast.AsyncFor, int, str, list[tuple[R.Row, str]]]]:
+    """``(loop, append line, element, [(row, hole)])`` for each append filling the list the call at *line* hands
+    (:func:`appended_turns`): the rows of the loop every way to the append prints that begin with a hole of the
+    element (968's ``{tmpJob.PandaID} to activate with rule`` before 969)."""
+    out = []
+    for loop, at, element in appended_turns(fn, line):
+        append = R.statement_at(fn.node, at)
+        if append is None:
+            continue
+        inside = {id(n) for n in ast.walk(loop)}
+        before, _ = R.must_rows(fn.node, append, set())
+        rows = [(row, hole) for s in before if id(s) in inside and (row := fn.row_at(s)) is not None
+                and (hole := _turn_hole(row, element))]
+        out.append((loop, at, element, rows))
+    return out
+
+
+def handing_rows(fn: R.Function, lines: Iterable[int]) -> list[int]:
+    """I-2's premise for a caller's passes read by D-4 (:func:`turn_left_before_append`): the rows that every way to
+    an append filling a list one of the calls at *lines* hands prints, each beginning with a hole of the appended
+    element -- so a pass that handed an element prints a record of it.  Empty where a call hands a list the map reads
+    no such append for, or an append has no such row."""
+    found: list[int] = []
+    for line in lines:
+        turns = _turn_rows(fn, line)
+        if not turns or any(not rows for *_, rows in turns):
+            return []
+        found += [row.line for *_, rows in turns for row, _ in rows]
+    return sorted(set(found))
+
+
 def empty_loops(fn: R.Function, stmt: ast.stmt, callee: dict[str, tuple[str, str]]) -> str:
     for it in R.iterables_over(fn.node, stmt):
         base = it
@@ -1738,27 +2070,73 @@ def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.S
     ``update unmerged PandaID={umJob.PandaID}`` at 1252 printed the unmerged jobs' keys under the merge job's mark,
     so 1236, which writes umJob, did not write the merge job.  Only the key, which no pass changes; not where the
     map records nothing the arm writes, nor for a name whose value a record does not show.
+
+    Bundle G, G-1 (P53, out/gm/qk-design.md, tmaeno's OK 2026-11-17 16:0x): a bare name whose hole the map's prints
+    name the written class's key column (``function_prints``' hole columns) is read the same way, bound alike at the
+    row and at the arm: AtlasAnalWatchDog's 195 ``action=release_... jediTaskID={taskID}`` before 196 printed other
+    tasks' IDs only, so no turn of 196 in the pass wrote the key's task.
+
+    A hole that another hole follows with no literal between captures nothing (:func:`rows._regex` takes it lazily):
+    an empty value is no key, and the hole is not read.  prepareTasksToBeFinished_JEDI's 4074 ``... for
+    jediTaskID={jediTaskID}{f' since {errorDialog}' if errorDialog else ''}`` printed the key's task, read empty.
     """
     m = re.fullmatch(r"<(\w+)>\.\w+", env.subject) if env is not None else None
     if env is None or m is None or not env.keys or not env.written:
         return ""
     entity = m[1]
-    bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
-    if not bound or not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node):
+    if not R.loops_over(stmt, fn.node) <= R.loops_over(row.stmt, fn.node):
         return ""
+    bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
     captures = [row.capture(sn.run.records[i]) for i, _, _ in sn.hits.get(row.line, ())]
+    keyed = _bare_key_holes(row, env.written.partition(".")[0], env.keys)
+    turns = _turn_elements(stmt, fn.node) if keyed else set()
     for expr in sorted({e for c in captures for e in c}):
         name, _, column = expr.rpartition(".")
+        if not name and expr in keyed and expr in turns:
+            name, column = expr, keyed[expr]
+        elif not bound or bound.get(name) != entity:
+            continue
         held = env.table.get(entity, {}).get(column)
-        if column not in env.keys or bound.get(name) != entity or held is None:
+        if column not in env.keys or held is None:
             continue
         values = [c.get(expr) for c in captures]
-        if any(v is None for v in values) or not row_names.same_binding(fn.node, name, [row.line], line):
+        if (any(v is None or not str(v).strip() for v in values)
+                or not row_names.same_binding(fn.node, name, [row.line], line)):
             continue
         wanted = str(held.value)
         if wanted not in [str(v).strip() for v in values]:
             return f"row {row.line} printed only for other values of {expr} ({len(values)} time(s)), not {wanted!r}"
     return ""
+
+
+def _turn_elements(stmt: ast.AST, func: ast.AST) -> set[str]:
+    """G-1 narrowed (T 7292cc2's MT-rerefine-late): the names a loop holding *stmt* binds each element to whole
+    (:func:`loop_elements`: ``for taskID in taskIDs``), a turn's own object.  A bare key hole is read as the arm's
+    object only where its name is one: TaskRefiner.runImpl's ``for jediTaskID, splitRule, taskStatus, parent_tid in
+    taskList`` binds parent_tid to a part of the element, and 262's ``pending until parent task {parent_tid} is done``
+    names the parent task by its jediTaskID in the turn of this task, not another task's turn."""
+    out: set[str] = set()
+    previous = stmt
+    for ancestor in pathcond.ancestors(stmt):
+        if ancestor is func:
+            break
+        if isinstance(ancestor, R.LOOPS) and previous in getattr(ancestor, "body", []):
+            out |= set(loop_elements(ancestor))
+        previous = ancestor
+    return out
+
+
+def _bare_key_holes(row: R.Row, cls: str, keys: frozenset[str]) -> dict[str, str]:
+    """G-1: the bare names among *row*'s holes the map's prints name a key column of *cls* by (``columns``), each with
+    the column: ``taskID`` -> ``jediTaskID``.  A name the map names two columns by is left out."""
+    out: dict[str, str] = {}
+    for mr in getattr(row, "map_rows", None) or []:
+        for h in getattr(mr, "holes", None) or []:
+            expr = getattr(h, "expression", "") or ""
+            cols = {c.partition(".")[2] for c in getattr(h, "columns", None) or [] if c.partition(".")[0] == cls} & keys
+            if expr.isidentifier() and len(cols) == 1:
+                out.setdefault(expr, cols.pop())
+    return out
 
 
 #: the calls a ``while`` takes its next element by (Q5): ``self.job_output_reports.pop()``, ``queue.get()``
@@ -1910,7 +2288,7 @@ def rewriter(fn: R.Function, stmt: ast.stmt, attr: str, observed: str, env: E.En
     guards are the statement's and its callers' ``pathcond.arm_condition``; one read at another line
     (``E.read_elsewhere``) is not solved here.
     """
-    guards = [(g, f"{fn.name}:{stmt.lineno}") for g in pathcond.arm_condition(stmt)] + callers_guards(fn)
+    guards = [(g, f"{fn.shown}:{stmt.lineno}") for g in pathcond.arm_condition(stmt)] + callers_guards(fn)
     for guard, where in guards:
         if E.read_elsewhere(guard):
             continue
@@ -1974,7 +2352,8 @@ def judge(
             # every log handed says why it holds no run of the candidate, in the candidate's order of its logs
             reasons: list[str] = []
             for name in to_hand:
-                found = [r for r in logs[name] if window is None or spans(r, window)]
+                stretch = before_stretch(window, c.row_after) if window is not None and c.row_after is not None else None
+                found = [r for r in logs[name] if window is None or spans(r, window) or (stretch and spans(r, stretch))]
                 if found and window is not None:
                     found, dropped = passes_at(c, found, window, logs, mode, called_at)
                     if not found:
@@ -1983,6 +2362,10 @@ def judge(
                 if found:
                     run = run_holding(c, found, mode)
                     if run is not None:
+                        if window is not None and not spans(run, window):
+                            p_notes.append(f"ROW AFTER: {c.func}'s pass {run.first}..{run.last} ended before the row at "
+                                           f"{window[0]}: the map has its history call after its write, and no pass of "
+                                           f"it is at the row (P37)")
                         break
                     reasons.append(f"none of the key's {len(found)} runs in {name} at {window[0] if window else 'any time'} holds a row of it")
                     continue
@@ -2180,7 +2563,7 @@ def judge(
             if named:
                 v.reasons.append(
                     f"a traceback frame raised at {sorted(raised)}" if raised is not None
-                    else f"a traceback frame of {fn.name} cannot be placed in the corpus: no row after {line} is required"
+                    else f"a traceback frame of {fn.shown} cannot be placed in the corpus: no row after {line} is required"
                 )
             where = f"{Path(c.rel).name}::{c.func}:{line}"
             if proof.kind == "positive" and v.kind == "excluded":
@@ -2188,6 +2571,16 @@ def judge(
             elif proof.kind == "inconsistent":
                 p_notes.append(f"P inconsistent: {where}: {proof.reason}")
             verdicts.append(v)
+
+    # D-4 on each kept call arm: the list it hands holds no element of the key's turn where that turn did not reach
+    # the append filling it (turn_left_before_append)
+    for v in verdicts:
+        if v.kind == "kept" and v.candidate.owner in seens:
+            if unhanded := turn_left_before_append(arm_seen.get((v.candidate.owner, v.line), seens[v.candidate.owner]),
+                                                   v.line, mode):
+                v.kind = "excluded"
+                v.reasons.append(unhanded)
+                v.unhanded = unhanded
 
     # P again on each kept candidate, with the other verdicts: a call changes the subject to the observed value only
     # where the map reaches, from it, a writer of that value not excluded (printed.Reaching)
@@ -2206,6 +2599,13 @@ def judge(
             if proof.kind == "positive":
                 v.kind = "positive"
                 v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
+
+    # P36 on each kept arm: a print after its write on every way holds the written row's key, and every record of it in
+    # the run holds another key (after_key_others)
+    if env is not None and env.written:
+        for owner, sn in seens.items():
+            if arms_kept := [v for v in verdicts if v.candidate.owner == owner and v.kind == "kept"]:
+                after_key_others(sn.fn, sn, arms_kept, env.written, env)
 
     # P35 on the arms of one write statement: its print in the key's turn shows the bind map it ran with, and the arms
     # that did not give the bind its value there are out (printed_write_arms)

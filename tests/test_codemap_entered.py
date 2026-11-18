@@ -441,14 +441,14 @@ FACTORY_SOURCES = {
 
 
 def test_a_plugin_factory_builds_only_a_subclass_of_what_it_says_its_type_parameter_is(tmp_path: Path) -> None:
-    arms = ((UTILS, "setMerge", "M1"), (KNIGHT, "__init__", "I1"), (KNIGHT, "__init__", "O1"))
+    # The module defines two ``__init__``: each is owned by its class's (:func:`calls.def_name`).
+    arms = ((UTILS, "setMerge", "M1"), (KNIGHT, "TaskRefinerBase.__init__", "I1"), (KNIGHT, "Other.__init__", "O1"))
     sources = {SPEC: SOURCES[SPEC], UTILS: MODULE_SOURCES[UTILS], **FACTORY_SOURCES}
     fragment = _build(tmp_path, sources, arms)
     # Nor does the server's dispatch, which takes an endpoint's function: setMerge is no endpoint.
     assert _way(fragment, UTILS, "setMerge").open == []
-    (base, other) = sorted(
-        (one for one in fragment.entered_froms if one.owner == f"{KNIGHT}::__init__"), key=lambda one: one.line
-    )
+    (base,) = [one for one in fragment.entered_froms if one.owner == f"{KNIGHT}::TaskRefinerBase.__init__"]
+    (other,) = [one for one in fragment.entered_froms if one.owner == f"{KNIGHT}::Other.__init__"]
     assert [(one.kind, one.at) for one in base.open] == [
         (ENTERED_NAMED_AT_RUN_TIME, f"{FACTORY}:{_line(FACTORY_SOURCES, FACTORY, 'LOAD')}")
     ]

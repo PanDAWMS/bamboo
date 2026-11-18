@@ -21,6 +21,7 @@ says:
 from __future__ import annotations
 
 import ast
+import datetime
 import re
 import sys
 from collections.abc import Callable, Iterable
@@ -63,6 +64,20 @@ def _pure() -> dict[str, Any]:
 
 
 PURE: dict[str, Any] = {}
+
+#: a naive datetime's ``str``: what ``str(datetime)`` prints
+_DATETIME_TEXT = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(\.\d{6})?")
+
+
+def datetime_text(printed: str) -> datetime.datetime | None:
+    """The datetime *printed* is ``str()`` of, or None where it is not so spelled."""
+    text = printed.strip()
+    if not _DATETIME_TEXT.fullmatch(text):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def pure(name: str) -> Callable[..., Any] | None:
@@ -113,6 +128,19 @@ class Env(shared.Env):
     #: the rows file's statuslog rows of the question's key (``Rerun.base_env``): the state the question's column was in
     #: when a pass read it (``which_ran.row_state``, H2 step 2 (iii)); empty where none is read
     statuslog: list[dict] = field(default_factory=list)
+
+    def put_printed(self, text: str, printed: str, source: str) -> None:
+        """The map's reading of a value out of a log line (``shared.Env.put_printed``), and a hole ``{str(x)}`` whose
+        text is a datetime's ``str`` (``YYYY-MM-DD HH:MM:SS[.ffffff]``) read as that datetime for ``x``: datasetManager's
+        FinisherThr prints ``Limit:{str(timeOut)} End:{str(endTime)}`` at 727 before ``if endTime < timeOut:``.  A
+        premise, said in the source: a string spelled so reads the same (bundle D, D-3; out/gm/qk-design.md)."""
+        super().put_printed(text, printed, source)
+        inner = re.fullmatch(r"str\((.+)\)", text)
+        if inner is None or self.canonical(inner[1]) in self.values:
+            return
+        when = datetime_text(printed)
+        if when is not None:
+            self.put(inner[1], when, f"{source}, printed as str() of a datetime (read as one)")
 
     def put_hole(self, text: str, printed: str, source: str, owners: Iterable[str]) -> None:
         """:meth:`put_printed`, with the functions that printed it where it is about a row."""

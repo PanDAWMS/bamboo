@@ -12,6 +12,9 @@ from bamboo.codemap import pathcond, reach, trace
 from bamboo.codemap.gates import history_pairs_resolve
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    COPY_BEFORE,
+    COPY_ROW,
+    COPY_UNREAD,
     HISTORY_AFTER,
     HISTORY_BEFORE,
     HISTORY_CARRIES_OWN,
@@ -2890,6 +2893,61 @@ def test_an_sql_arm_s_same_pass_is_another_column_its_statement_sets_and_its_lat
     ]
     assert branch.rewrites is None
     assert [one.why for one in branch.rewrites_open] == [REWRITE_NOT_ATTRIBUTE]
+
+
+COPY_SPEC = """\
+class JobSpec:
+    _attributes = ("PandaID", "jobStatus", "modificationTime", "stateChangeTime", "endTime")
+"""
+
+COPIES = """\
+from pkg.spec import JobSpec
+
+
+def naive_utcnow():
+    return 0
+
+
+class Proxy:
+    def updateJob(self, job: JobSpec, inJobsDefined):
+        job.modificationTime = naive_utcnow()  # M1
+        if inJobsDefined:
+            job.stateChangeTime = job.modificationTime  # passthrough(JobSpec.modificationTime) T1
+
+    def finish(self, job: JobSpec, ok):
+        if ok:
+            job.modificationTime = naive_utcnow()  # M2
+        job.endTime = job.modificationTime  # passthrough(JobSpec.modificationTime) T2
+
+    def other(self, job: JobSpec, old: JobSpec):
+        job.endTime = old.modificationTime  # passthrough(JobSpec.modificationTime) T3
+
+    def reset(self, pandaID):
+        self.cur.execute(  # passthrough(JobSpec.modificationTime) T4
+            "UPDATE ATLAS_PANDA.jobsActive4 SET stateChangeTime=modificationTime WHERE PandaID=:PandaID",
+            {":PandaID": pandaID},
+        )
+"""
+
+
+def test_a_copy_names_the_writes_of_its_pass_it_copies(tmp_path: Path) -> None:
+    """``updateJob``'s ``job.stateChangeTime = job.modificationTime`` under ``if inJobsDefined:`` copies 506's
+    ``naive_utcnow()`` on every way, though the two are not one block (``same_pass``); a copy whose write runs on some
+    ways only may copy what the object held before; a copy of another object's field no record here places, and a
+    statement's ``SET stateChangeTime=modificationTime`` the row's column as it was."""
+    markers = [f"passthrough(JobSpec.modificationTime) T{n}" for n in range(1, 5)]
+    owners = ["Proxy.updateJob", "Proxy.finish", "Proxy.other", "Proxy.reset"]
+    subjects = ["JobSpec.stateChangeTime", "JobSpec.endTime", "JobSpec.endTime", "JobSpec.stateChangeTime"]
+    arms = [("copies", owner, marker, subject) for owner, marker, subject in zip(owners, markers, subjects)]
+    fragment = _build(tmp_path, arms, spec=COPY_SPEC, copies=COPIES)
+    line = lambda marker: _line(COPIES, marker)  # noqa: E731
+    read = [(_branch(fragment, marker).copied_from, _branch(fragment, marker).copied_open) for marker in markers]
+    assert read == [
+        ([line("M1")], ""),
+        ([line("M2")], COPY_BEFORE),
+        (None, COPY_UNREAD),
+        ([], COPY_ROW),
+    ]
 
 
 def test_a_column_the_reach_record_keeps_no_assignment_of_is_said_not_read(

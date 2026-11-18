@@ -290,7 +290,7 @@ class _Inserts:
         out = []
         for table in self.tables.get(cls) or {cls.lower()}:
             for node, write, column in self.columns.get((table, attr.lower()), []):
-                owner = f"{node.owner.split('::')[0]}::{node.function}"
+                owner = node.named_as
                 if column.path:
                     found = self._handing(node, column.path, value)
                     if found is None:

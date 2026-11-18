@@ -2071,6 +2071,38 @@ def test_a_statement_says_its_conditions_as_trees_and_the_prints_of_its_text(tmp
     ]
 
 
+def test_a_bind_of_the_clock_less_hours_of_a_value_not_settled_is_the_clock_and_seconds_per_unit_of_it(tmp_path):
+    """copyArchive's ``naive_utcnow() - datetime.timedelta(hours=workflow_timeout_map['analysis'])``: the clock, -3600
+    times the value the map does not settle, the whole said."""
+    from bamboo.codemap.gitsource import blob_sha
+    from bamboo.codemap.models import SourceModule
+    from bamboo.codemap.panda import attribution, sql
+    from bamboo.codemap.panda.recognizers import progress, sqlwrite
+
+    db = (
+        "class Jobs:\n"
+        "    def pick(self, timeout_map):\n"
+        "        comment = ' /* DBProxy.pick */'\n"
+        "        varMap = {}\n"
+        "        varMap[':st'] = 'activated'\n"
+        "        varMap[':c'] = naive_utcnow() - datetime.timedelta(hours=timeout_map['analysis'])\n"
+        "        sql = 'SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:st AND modificationTime<:c'\n"
+        "        self.cur.execute(sql + comment, varMap)\n"
+    )
+    roots = _tree(tmp_path, db=db)
+    modules = [SourceModule(package=PACKAGE, rel_path=f"{PACKAGE}/db.py", tree=ast.parse(db), source=db, blob_sha=blob_sha(db))]
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    calls = sqlwrite.corpus_calls(modules, roots)
+    with sql.across_calls(calls):
+        side = sqlwrite.read_side(modules, attributor, calls)
+    (statement,) = side.statements.values()
+    trees = {one.entry.split("@")[0]: one.tree for one in statement.condition_trees}
+    (limit,) = trees["modificationTime<:c"].items[0].items
+    (value,) = limit.values
+    assert (value.base, value.offset_seconds, value.needs, value.scale_seconds) == ("naive_utcnow", None, [], -3600.0)
+    assert value.said == "naive_utcnow() - datetime.timedelta(hours=timeout_map['analysis'])@6"
+
+
 def test_a_term_about_other_rows_carries_them_with_its_binds_settled_by_the_same_run(tmp_path):
     """``NOT EXISTS`` over the task's datasets: the term stays ``other``, and says the rows, the correlation by
     subject, and the subquery's clause with its bind read off the run as a statement's own clause is."""
@@ -4023,3 +4055,84 @@ def test_a_scopes_own_nodes_and_defs_read_once_are_what_walking_it_gives_in_its_
     if source == _NESTED_SCOPES:
         (outer,) = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "outer"]
         assert [one.name for one in calls_mod.bound_defs(outer)] == ["inner", "Inner", "inner"]
+
+
+_OWNERS = """\
+from typing import overload
+
+
+def solo():
+    def inner():
+        pass
+
+
+def run():
+    pass
+
+
+class A:
+    def run(self):
+        pass
+
+
+class B:
+    def run(self):
+        pass
+
+
+class C:
+    @property
+    def value(self):
+        return 1
+
+    @value.setter
+    def value(self, given):
+        pass
+
+
+@overload
+def clean(x: int) -> int: ...
+@overload
+def clean(x: str) -> str: ...
+def clean(x):
+    return x
+"""
+
+
+def test_an_owner_names_a_function_bare_where_its_module_defines_the_name_once_else_by_its_id() -> None:
+    """``run`` is defined three times in the module, so each is named by its id -- the top-level one ``run``, the
+    methods ``A.run`` and ``B.run`` --; ``solo`` and the nested ``inner`` once, so bare.  A property's setter repeats
+    its getter's name in one scope: ``C.value`` and ``C.value#2``.  ``clean``'s ``@overload`` stubs do not count, so
+    it is bare, and the name finds the body that runs.  The id spells a function too (``solo.inner``), not the bare name of a repeated one.  An owner's bare name drops the nesting and the ``#n``."""
+    tree = ast.parse(_OWNERS)
+    pathcond.attach_parents(tree)
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    named = sorted((node.lineno, calls_mod.def_name(node)) for node in functions)
+    assert named == [
+        (4, "solo"),
+        (5, "inner"),
+        (9, "run"),
+        (14, "A.run"),
+        (19, "B.run"),
+        (25, "C.value"),
+        (29, "C.value#2"),
+        (34, "clean"),
+        (36, "clean"),
+        (37, "clean"),
+    ]
+    for line, spelled in named:
+        if spelled != "clean":
+            assert calls_mod.def_named(tree, spelled).lineno == line  # type: ignore[union-attr]
+    assert calls_mod.def_named(tree, "clean").lineno == 37  # type: ignore[union-attr]
+    assert calls_mod.def_named(tree, "C") is None
+    inner = calls_mod.def_named(tree, "solo.inner")
+    assert inner is calls_mod.def_named(tree, "inner") and inner is not None
+    assert calls_mod.spells(inner, "inner") and calls_mod.spells(inner, "solo.inner")
+    method = calls_mod.def_named(tree, "A.run")
+    assert method is not None and not calls_mod.spells(method, "run")
+    assert calls_mod.def_name(ast.parse("def loose(): pass").body[0]) == "loose"
+    assert [calls_mod.bare_name(f"f.py::{spelled}") for spelled in ("A.run", "C.value#2", "solo")] == [
+        "run",
+        "value",
+        "solo",
+    ]

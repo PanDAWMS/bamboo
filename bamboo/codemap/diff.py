@@ -115,6 +115,8 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
         "exits",
         "falls",
         "hand_ons",
+        "row_loops",
+        "list_prints",
         "crosses_to",
         "crosses_open",
         "crossing_selects",
@@ -199,6 +201,7 @@ CONTENT_FIELDS: dict[str, tuple[str, ...]] = {
     # hold lines, as ``statements`` does above: between two builds of one tree
     # they do not move.
     NodeType.REACH.value: (
+        "named_as",
         "cls",
         "function",
         "classes",
@@ -277,7 +280,8 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: ``value_cuts`` which lengths of it are read as a frame's head,
 #: ``off_row`` and ``unchanged`` whether a reader of the row's value skips the branch,
 #: ``after_made`` whether it can change a row made before it, and
-#: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's.
+#: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's,
+#: ``copied_from`` which writes of the same pass a copy takes its value from.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
@@ -297,6 +301,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "must_names_whole",
     "must_hole",
     "made_before",
+    "taken_back",
     "after_prints",
     "history",
     "history_hole",
@@ -306,11 +311,14 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "same_pass",
     "rewrites",
     "rewrites_open",
+    "copied_from",
+    "copied_open",
     "unset_default",
     "amount",
     "handed",
     "not_run_on",
     "count_prints",
+    "printed_counts",
 )
 BRANCH_NOT_COMPARED: dict[str, str] = {
     "outcome": "the key branches are matched on",

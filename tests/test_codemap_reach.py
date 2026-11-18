@@ -929,6 +929,34 @@ def test_a_repeated_name_in_a_file_is_told_apart(tmp_path):
     ]
 
 
+def test_a_row_says_the_owner_the_other_records_name_its_function_by(tmp_path):
+    """:attr:`ReachNode.named_as`: the bare name where the module defines one function of it -- ``helper``, not the
+    row's ``Box.helper`` --, else the row's own id (``Spec.status#2``); ``named`` finds the row by it exactly."""
+    record = _record(
+        tmp_path,
+        mod=(
+            "class Spec:\n"
+            "    @property\n"
+            "    def status(self):\n"
+            "        return 1\n\n"
+            "    @status.setter\n"
+            "    def status(self, value):\n"
+            "        pass\n\n"
+            "class Box:\n"
+            "    def helper(self):\n"
+            "        pass\n"
+        ),
+    )
+
+    assert {owner: row.named_as for owner, row in record.rows.items()} == {
+        "pkg/mod.py::Spec.status": "pkg/mod.py::Spec.status",
+        "pkg/mod.py::Spec.status#2": "pkg/mod.py::Spec.status#2",
+        "pkg/mod.py::Box.helper": "pkg/mod.py::helper",
+    }
+    assert record.named("pkg/mod.py::Spec.status#2") == ["pkg/mod.py::Spec.status#2"]
+    assert record.named("pkg/mod.py::helper") == ["pkg/mod.py::Box.helper"]
+
+
 def test_an_overloaded_name_is_its_body_and_its_stubs_are_told_apart(tmp_path):
     """``CoreUtils.clean_user_id``'s ``@overload`` stubs come before the body: the body, which the calls resolve the
     name to, is spelled without ``#n`` and holds its calls, as the readers spelling an owner by its name mean it."""

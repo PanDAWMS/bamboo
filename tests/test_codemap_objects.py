@@ -2426,3 +2426,49 @@ class Runner:
     assert plain.capped
     for _ in range(2):
         assert objects.follow(rows, "pkg/owned.py::Runner.run", "job", kept=kept) == plain
+
+
+def test_bindings_read_against_the_newer_paths_reach_what_reading_every_path_again_reached(tmp_path):
+    """A chain bound against the bindings' order (``c = b``, ``b = a``, ``a = jobs`` in a loop) takes a pass per link;
+    each pass reads a binding against the paths reached since its last one, and reaches what reading them all reached
+    (the steps as the reading before gave them), the element through the chain to the fill at the end."""
+    batch = """\
+from pkg.spec import JobSpec
+
+
+class Batch:
+    def run(self, jobs: list[JobSpec]):
+        a = None
+        b = None
+        while jobs:
+            c = b
+            b = a
+            a = jobs
+            first = c[0]
+            first.jobStatus = "failed"
+            self.kept = [first]
+"""
+    fragment = _build(tmp_path, spec=SPEC, batch=batch)
+    rows = {row.owner: row for row in fragment.reach_graph}
+    run = "pkg/batch.py::Batch.run"
+    assert objects._held_steps(rows[run], {"jobs"}) == (
+        {
+            "jobs": None,
+            "a@11": ("jobs", 11, "alias"),
+            "b@10": ("a@11", 10, "alias"),
+            "c": ("b@10", 9, "alias"),
+        },
+        False,
+    )
+    assert objects._held_steps(rows[run], {"jobs[]"}) == (
+        {
+            "jobs[]": None,
+            "a@11[]": ("jobs[]", 11, "alias"),
+            "b@10[]": ("a@11[]", 10, "alias"),
+            "c[]": ("b@10[]", 9, "alias"),
+            "first": ("c[]", 12, "alias"),
+            "self.kept[0]": ("first", 14, "fill"),
+        },
+        False,
+    )
+    assert objects.follow(rows, run, "jobs[]").assigned.keys() == {"jobStatus"}

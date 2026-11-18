@@ -48,7 +48,7 @@ import weakref
 from typing import Callable, Iterable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts
-from bamboo.codemap.calls import Calls, Target, own_nodes
+from bamboo.codemap.calls import Calls, Target, def_name, own_nodes, spells
 from bamboo.codemap.models import (
     CALL_CHANGES,
     CALL_CORPUS,
@@ -140,7 +140,7 @@ def _key(target: Target) -> tuple:
 
 
 def _owner(target: Target) -> str:
-    return f"{target.file}::{getattr(target.func, 'name', '<lambda>')}"
+    return f"{target.file}::{def_name(target.func) or '<lambda>'}"
 
 
 class CallRead(NamedTuple):
@@ -672,7 +672,7 @@ def asked(
                 (
                     node
                     for node in (ast.walk(caller_tree) if caller_tree is not None else ())
-                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                    if isinstance(node, _FUNCTIONS) and spells(node, name) and node.lineno == site.owner_line
                 ),
                 None,
             )

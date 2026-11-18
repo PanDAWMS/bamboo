@@ -66,7 +66,9 @@ from pydantic import BaseModel, Field
 from bamboo.codemap import pathcond
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.callfacts import LOG_METHODS
+from bamboo.codemap.calls import spells
 from bamboo.codemap.models import (
+    EXIT_LINE,
     LOG_FILES_FOLLOWED,
     MUST_PART_BIND,
     MUST_PART_MARK,
@@ -82,10 +84,11 @@ from bamboo.codemap.models import (
     PrintRow,
     SourceModule,
     TableRecord,
+    TakenBack,
 )
-from bamboo.codemap.panda import changes, flow, mapentries
+from bamboo.codemap.panda import changes, flow, mapentries, order
 from bamboo.codemap.panda.recognizers import progress
-from bamboo.codemap.reaching import reaching
+from bamboo.codemap.reaching import reaching, reaching_end
 
 if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
@@ -173,6 +176,9 @@ def attach(
         if isinstance(node, _FUNCTIONS)
     }
     _ACROSS = (calls, files) if calls is not None else None
+    # What was kept outside an attach was read without the corpus's calls.
+    for kept in _KEPT:
+        kept.clear()
     try:
         return _attach(
             junctions, function_prints, modules, declarations, key_froms, tables
@@ -181,6 +187,8 @@ def attach(
         _ACROSS = None
         _ASSIGNMENTS.clear()
         _SINGLES.clear()
+        for kept in _KEPT:
+            kept.clear()
 
 
 def _attach(
@@ -235,6 +243,7 @@ def _attach(
             branch.must_names = None
             branch.after_prints = None
             branch.made_before = None
+            branch.taken_back = None
             branch.must_hole = ""
             sites = _sites(junction, branch, trees)
             if isinstance(sites, str):
@@ -268,6 +277,10 @@ def _attach(
                 if held is not None and not reaching(arm, entry, [statement]):
                     held.append(line)
     found = 0
+    # Each junction's own arms, for what may run between an object's construction and an arm of it (made_before).
+    own_arms: dict[int, list[ast.stmt]] = {}
+    for junction, _branch, sites in located:
+        own_arms.setdefault(id(junction), []).extend(site.statement for site in sites)
     for junction, branch, sites in located:
         reached = [site for site in sites if must[id(site.statement)] is not None]
         if not reached:
@@ -305,7 +318,29 @@ def _attach(
             for written in [_written_object(site.statement, junction.subject)]
         ]
         if made and made[0] is not None and all(one == made[0] for one in made[1:]):
-            branch.made_before = made[0]
+            kept = [
+                _made_held(site, written, junction.subject, own_arms[id(junction)])
+                for site in reached
+                for written in [_written_object(site.statement, junction.subject)]
+            ]
+            branch.made_before = made[0].model_copy(
+                update={
+                    "held": all(one[0] for one in kept),
+                    "arms_between": sorted({line for one in kept for line in one[1]}),
+                }
+            )
+        backs = [
+            _taken_back(site, written, junction.subject, statements[id(site.func)])
+            for site in reached
+            for written in [_written_object(site.statement, junction.subject)]
+        ]
+        if backs and all(one is not None for one in backs):
+            opened = {line for one in backs for line in one[1]}  # type: ignore[index]
+            branch.taken_back = TakenBack(
+                resets=sorted({line for one in backs for line in one[0]}),  # type: ignore[index]
+                open=sorted(opened),
+                open_prints=sorted(set.intersection(*(set(one[2]) for one in backs))) if opened else [],  # type: ignore[index]
+            )
         each: list[list[MustName]] = []
         afters: list[dict[int, AfterPrint]] = []
         counted: dict[int, str] = {}
@@ -439,6 +474,18 @@ def _made_before(
     """The construction making the object *written* that is the only binding of its name reaching the arm --
     ``tmpTaskSpec = JediTaskSpec()``, a class called with nothing -- and the written field's value as its constructor
     left it (*initial*, :func:`progress.spec_initial_values`); None otherwise."""
+    made = _construction(site, written)
+    if made is None:
+        return None
+    called = made.value.func  # type: ignore[attr-defined]
+    cls = called.id if isinstance(called, ast.Name) else called.attr if isinstance(called, ast.Attribute) else ""
+    left = initial.get((cls, subject.rpartition(".")[2]))
+    return MadeBefore(line=made.lineno, cls=cls, value=left) if left is not None else None
+
+
+def _construction(site: _Site, written: Optional[ast.expr]) -> Optional[ast.Assign]:
+    """``tmpTaskSpec = JediTaskSpec()``: the assignment of a class called with nothing to the name *written*, where it
+    is the only binding of the name reaching the arm; None otherwise."""
     if not isinstance(written, ast.Name) or not isinstance(site.func, _FUNCTIONS):
         return None
     held = pathcond.held_at(site.func, written.id, site.statement)
@@ -446,7 +493,7 @@ def _made_before(
         return None
     (made,) = held.sites
     value = getattr(made, "value", None)
-    if not (
+    if (
         isinstance(made, ast.Assign)
         and len(made.targets) == 1
         and isinstance(made.targets[0], ast.Name)
@@ -455,11 +502,97 @@ def _made_before(
         and not value.args
         and not value.keywords
     ):
+        return made
+    return None
+
+
+def _made_held(
+    site: _Site, written: Optional[ast.expr], subject: str, own: list[ast.stmt]
+) -> tuple[bool, list[int]]:
+    """Whether the field the arm writes holds what its construction left up to the arm but for the junction's own
+    arms (*own*), and the lines of those that can run between: nothing else that may change it
+    (:func:`_changes_of`) runs on a way from the construction to the arm in one turn (:func:`flow.changed_between`)."""
+    made = _construction(site, written)
+    if made is None or written is None:
+        return False, []
+    attribute = subject.rpartition(".")[2]
+    sites = _changes_of(site.func, written, attribute)
+    if sites is None:
+        return False, []
+    spelled = ast.unparse(written)
+    same = [
+        one
+        for one in own
+        if one is not site.statement
+        and pathcond.enclosing_function(one) is site.func
+        and (object_ := _written_object(one, subject)) is not None
+        and ast.unparse(object_) == spelled
+    ]
+    mine = {id(one) for one in same}
+    others = [one for one in sites if one is not made and id(one) not in mine]
+    between = sorted({one.lineno for one in same if flow.changed_between(made, site.statement, [one])})
+    return not flow.changed_between(made, site.statement, others), between
+
+
+def _taken_back(
+    site: _Site, written: Optional[ast.expr], subject: str, prints: dict[int, Optional[ast.stmt]]
+) -> Optional[tuple[list[int], list[int], list[int]]]:
+    """The lines of the calls taking the arm's change back on its object that a way from the arm reaches in one turn
+    (:func:`order.reset_columns`); the lines a way from the arm reaches without passing one: each ``return``, the
+    function's end (:data:`EXIT_LINE`), each call made on the object or handed it; and the lines of the *prints* every
+    such way passes first.  None where no reset is reached."""
+    if written is None or not isinstance(site.func, _FUNCTIONS):
         return None
-    called = value.func
-    cls = called.id if isinstance(called, ast.Name) else called.attr if isinstance(called, ast.Attribute) else ""
-    left = initial.get((cls, subject.rpartition(".")[2]))
-    return MadeBefore(line=made.lineno, cls=cls, value=left) if left is not None else None
+    arm = site.statement
+    attribute = subject.rpartition(".")[2]
+    spelled = ast.unparse(written)
+    resets: list[ast.stmt] = []
+    handing: list[ast.stmt] = []
+    returns: list[ast.stmt] = []
+    for node in walk(site.func):
+        if isinstance(node, ast.Return) and pathcond.enclosing_function(node) is site.func:
+            returns.append(node)
+            continue
+        if not isinstance(node, ast.Call) or pathcond.enclosing_function(node) is not site.func:
+            continue
+        statement = _statement_of(node)
+        if statement is None or statement is arm:
+            continue
+        called = node.func
+        if isinstance(called, ast.Attribute) and ast.unparse(called.value) == spelled:
+            columns = order.reset_columns(node)
+            if columns is not None and (attribute in columns or "*" in columns):
+                resets.append(statement)
+                continue
+        if _given(node, {spelled}):
+            handing.append(statement)
+    resets = [one for one in resets if reaching(one, [arm], entered=[arm], once=flow.turn_loops(arm, one))]
+    if not resets:
+        return None
+    targets = [
+        one
+        for one in [*returns, *handing]
+        if all(one is not reset for reset in resets) and reaching(one, [arm], resets, entered=[arm, *resets])
+    ]
+    ends = bool(reaching_end(site.func, [arm], resets, entered=[arm, *resets]))
+    open_ = {one.lineno for one in targets} | ({EXIT_LINE} if ends else set())
+
+    def covers(printed: ast.stmt) -> bool:
+        killers = [*resets, printed]
+        return all(not reaching(one, [arm], killers, entered=[arm, *killers]) for one in targets) and not (
+            ends and reaching_end(site.func, [arm], killers, entered=[arm, *killers])
+        )
+
+    covering = sorted(
+        line
+        for line, printed in prints.items()
+        if printed is not None
+        and printed is not arm
+        and open_
+        and reaching(printed, [arm], entered=[arm])
+        and covers(printed)
+    )
+    return sorted({one.lineno for one in resets}), sorted(open_), covering
 
 
 def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
@@ -478,9 +611,23 @@ def _runs_after(site: _Site, terms: Sequence[KeyFrom]) -> list[ast.stmt]:
     return runs
 
 
+#: :func:`_object_sites`' answers while :func:`attach` runs, by the function's id and the object as spelled -- 573
+#: objects asked 100124 times on pin s; each with its function, as :data:`_ASSIGNMENTS` keeps it.
+_OBJECT_SITES: dict[tuple[int, str], tuple[ast.AST, tuple[ast.AST, ...]]] = {}
+
+
 def _object_sites(func: ast.AST, held: ast.expr) -> list[ast.AST]:
     """Where the object *held* -- a name, ``tmpTaskSpec``, or an attribute chain, ``self.job`` -- can be bound again
-    in *func*: the bindings of the chain's root name, every store to the chain."""
+    in *func*: the bindings of the chain's root name, every store to the chain.  Read once for each function and
+    object while :func:`attach` runs: the answer is the chain's, by its names, not the node's."""
+    key = (id(func), ast.unparse(held))
+    kept = _OBJECT_SITES.get(key)
+    if kept is None:
+        kept = _OBJECT_SITES[key] = (func, tuple(_read_object_sites(func, held)))
+    return list(kept[1])
+
+
+def _read_object_sites(func: ast.AST, held: ast.expr) -> list[ast.AST]:
     chain: set[str] = set()
     root: ast.expr = held
     while isinstance(root, ast.Attribute):
@@ -662,10 +809,10 @@ def _sites(
         func = _function_at(tree, line)
         if func is None:
             return HOLE_MODULE_BODY
-        # A junction's owner need not spell the nesting -- ``datasetManager.py::run``
-        # is any of seven -- and the prints' owner does: ``main.FinisherThr.run``.
+        # A junction's owner spells the nesting only where the module repeats the name
+        # (:func:`calls.spells`), and the prints' owner always does: ``main.FinisherThr.run``.
         nested = pathcond.qualified_name(func)
-        if nested != qualname and not nested.endswith("." + qualname):
+        if not spells(func, qualname):
             return f"line {line} is in {nested}, not {qualname}"
         statement = _statement_at(func, line)
         if statement is None:
@@ -1197,10 +1344,28 @@ def _logger_made(
     return None
 
 
+#: :func:`_holds_key`'s answers while :func:`attach` runs, by the function, the key's expression as spelled, where it
+#: counts and the statements filling it, the statement read at and the expression read -- 12092 asked 218634 times
+#: on pin s; each with the nodes its ids are of, so that no id is reused while the entry lives.
+_HOLDS_KEY: dict[tuple, tuple[tuple[ast.AST, ...], bool]] = {}
+
+
 def _holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
     """Whether *expression*, read at *at*, holds what *key*'s expression holds where the write counts -- and so
     does every statement filling an SQL arm's bind with it: the key itself, a name bound to it once
-    (:func:`_bound_to`), or what the key, a name or an attribute chain, is bound to once (:func:`_bound_from`)."""
+    (:func:`_bound_to`), or what the key, a name or an attribute chain, is bound to once (:func:`_bound_from`).
+    Read once for each such question while :func:`attach` runs: of the key, only its expression's spelling, where
+    it counts and its fills are read."""
+    asked = (
+        id(func), ast.unparse(key.expression), id(key.at), tuple(id(one) for one in key.filled), id(at), expression
+    )
+    kept = _HOLDS_KEY.get(asked)
+    if kept is None:
+        kept = _HOLDS_KEY[asked] = ((func, key.at, *key.filled, at), _read_holds_key(func, key, at, expression))
+    return kept[1]
+
+
+def _read_holds_key(func: ast.AST, key: _Key, at: ast.stmt, expression: str) -> bool:
     try:
         read = ast.parse(expression, mode="eval").body
     except SyntaxError:
@@ -1355,10 +1520,25 @@ def _unbound_since(
     return not reaching(arm, [site for site in sites if site is not printed], [printed])
 
 
+#: :func:`_changes_of`'s answers while :func:`attach` runs, by the function's id, the chain as spelled and the
+#: attribute -- 744 chains asked 32340 times on pin s; each with its function, as :data:`_ASSIGNMENTS` keeps it.
+_CHANGES: dict[tuple[int, str, str], tuple[ast.AST, Optional[tuple[ast.AST, ...]]]] = {}
+
+
 def _changes_of(func: ast.AST, written: ast.expr, attribute: str) -> Optional[list[ast.AST]]:
     """Where *written*'s *attribute* can change in *func*, as :func:`_unbound_since` reads it: the bindings of the
     chain's root name, every store to the chain, every call on an object of the chain or handed one that may change
-    the value.  None where the chain's root is no name."""
+    the value.  None where the chain's root is no name.  Read once for each function, chain and attribute while
+    :func:`attach` runs: the answer is the chain's, by its names -- :func:`changes.may_change` reads it so too."""
+    key = (id(func), ast.unparse(written), attribute)
+    kept = _CHANGES.get(key)
+    if kept is None:
+        found = _read_changes(func, written, attribute)
+        kept = _CHANGES[key] = (func, None if found is None else tuple(found))
+    return None if kept[1] is None else list(kept[1])
+
+
+def _read_changes(func: ast.AST, written: ast.expr, attribute: str) -> Optional[list[ast.AST]]:
     chain = [ast.unparse(written) + "." + attribute]
     value = ast.Attribute(value=written, attr=attribute, ctx=ast.Load())
     root: ast.expr = written
@@ -1425,14 +1605,22 @@ def _written_object(statement: ast.stmt, subject: str) -> Optional[ast.expr]:
     """``job`` for ``job.jobStatus = ...`` when *subject* is ``JobSpec.jobStatus``: the object the arm writes to."""
     attribute = subject.rpartition(".")[2]
     if isinstance(statement, ast.Assign):
-        targets = statement.targets
+        targets = list(statement.targets)
     elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
         targets = [statement.target]
     else:
         return None
+    # ``(original_task_spec.userName,) = tmp_res``: each element of a tuple or list target is a target.
+    flat: list[ast.expr] = []
+    while targets:
+        target = targets.pop(0)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            targets[:0] = target.elts
+        else:
+            flat.append(target)
     found = [
         target.value
-        for target in targets
+        for target in flat
         if isinstance(target, ast.Attribute)
         and target.attr == attribute
         and _chain(target.value)
@@ -1608,3 +1796,8 @@ def _printing(
             name="", map_id="", derived_from="", owner="", function="", count=0
         )
     return max(holding, key=lambda node: node.anchor.line_start)  # type: ignore[union-attr]
+
+
+#: The answers :func:`attach` keeps while it runs (:data:`_CHANGES`, :data:`_OBJECT_SITES`, :data:`_HOLDS_KEY`),
+#: emptied as it starts and ends: :func:`_changes_of` reads the corpus's calls only inside it.
+_KEPT: tuple[dict, ...] = (_CHANGES, _OBJECT_SITES, _HOLDS_KEY)

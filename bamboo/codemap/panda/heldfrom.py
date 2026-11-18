@@ -58,9 +58,11 @@ from bamboo.codemap.calls import (
     Target,
     _rebinds,
     bind,
+    def_name,
     keyed_setattr,
     own_nodes,
     returns,
+    spells,
 )
 from bamboo.codemap.lowlink import Lowlink
 from bamboo.codemap.models import (
@@ -78,6 +80,7 @@ from bamboo.codemap.models import (
     KEY_ATTRIBUTE,
     KEY_CALL,
     KEY_CONSTANT,
+    KEY_CONTAINER,
     KEY_DATABASE,
     KEY_GLOBAL,
     KEY_OBJECT,
@@ -93,6 +96,7 @@ from bamboo.codemap.models import (
     THROUGH_DECODED,
     THROUGH_TEXT,
     THROUGH_UNKNOWN,
+    VALUE_TEXT_CUT,
     WRITE_OBJECT,
     WRITE_VALUE,
     AfterChange,
@@ -159,6 +163,9 @@ class _Way(NamedTuple):
     changes: tuple["_Change", ...] = ()
     #: Where the end is a container made empty: what it holds (:data:`callfacts.COLLECTION`, :data:`callfacts.MAPPING`).
     made_empty: str = ""
+    #: Where the end is an object built: the ways of what its class hands out, as the construction gives it
+    #: (:attr:`HeldSource.elements`, :meth:`_Reader._handed_elements`).
+    elements: tuple["_Way", ...] = ()
     #: The *paths* are the path carry's (:attr:`KeySource.paths`): the source or a part of it sits there, which one
     #: not known -- not where the reader placed the source itself (:func:`_at`).
     loose: bool = False
@@ -281,6 +288,8 @@ class _Change(NamedTuple):
     what: str
     via: tuple[str, ...]
     value: tuple[_Way, ...]
+    #: :attr:`HeldChange.value_text`.
+    value_text: str = ""
 
 
 def _stop(stop: str, name: str = "", what: str = "", at: str = "") -> _Way:
@@ -380,7 +389,8 @@ def _step(
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
     value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
-    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's.
+    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's.  A
+    literal container's own way (:data:`KEY_CONTAINER`) takes no step: its elements' ways beside it answer it.
 
     *select*: the step ``[*]`` is a selection by a key computed at run time, ``(at, by)`` (:class:`HeldKeyed`): a part
     the reader placed under a key is taken with that key kept (:func:`_selected`)."""
@@ -391,6 +401,9 @@ def _step(
         if element_of is None:
             return []
         way = element_of
+    if way.kind == KEY_CONTAINER and not way.paths and step != _ENTER:
+        # The literal's own way: its elements' ways sit beside it at their places and answer the step.
+        return []
     if (
         step.startswith("[")
         and not way.paths
@@ -934,7 +947,7 @@ def _called_at(ways: list[_Way], here: str) -> list[_Way]:
 
 
 def owner_of(file: str, func: ast.AST) -> str:
-    return f"{file}::{getattr(func, 'name', '<module>')}"
+    return f"{file}::{def_name(func) or '<module>'}"
 
 
 def _class_key(file: str, cls: ast.ClassDef) -> str:
@@ -1148,6 +1161,8 @@ class _Reader:
         #: What a callee returns or yields, by the function and the classes ``self`` is there (:data:`_Selves`).
         self._returns: dict[tuple[int, tuple, Optional[str]], list[_Way]] = {}
         self._returns_at: dict[tuple[int, tuple, int, Optional[str]], list[_Way]] = {}
+        #: The field whose elements an object of a class hands out, by the class (:meth:`_element_field`).
+        self._element_fields: dict[str, Optional[str]] = {}
         #: The prints holding what a ``return`` gives, by the statement, the element and the classes ``self`` is in.
         self._printed_at: dict[tuple[int, Optional[int], tuple], tuple[_Printed, ...]] = {}
         self._yields: dict[tuple[int, tuple], list[_Way]] = {}
@@ -1325,7 +1340,7 @@ class _Reader:
         a call's value -- where the same value is the select item a guard's way names (``for (id,) in res``).  A way
         through a call or an operator that makes another value of the item -- a text holding it, a sum -- is not the
         item whole; a copy and the same value as another type (``int(row[0])``) are (:data:`_SAME_VALUE`)."""
-        ways = self._bound(expr, expr, site, file, func)
+        ways = [one for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
         items = []
         for one in ways:
             if one.kind != KEY_ROWS:
@@ -1445,7 +1460,8 @@ class _Reader:
         no ``*`` or ``**`` among them -- or of an ``if`` expression or an ``or`` / ``and``, read here, not asked of the
         carry, which says only where a source or a part of it sits: each element's ways at its place (:func:`_at`) --
         ``[i]`` of a list or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key
-        at ``[key]`` --; either branch's of an ``if`` expression; each operand's of an ``or`` or an ``and``, whose
+        at ``[key]`` --, after the literal's own way, the value itself (:data:`KEY_CONTAINER`); either branch's of an
+        ``if`` expression; each operand's of an ``or`` or an ``and``, whose
         value is one of them (``spec.nFiles or 0`` holds ``spec.nFiles`` or ``0``).  ``[taskSpec.site]`` holds
         ``taskSpec.site``, not ``taskSpec``.  ``None`` for another expression, an empty literal too
         (:func:`_empty_literal`)."""
@@ -1474,7 +1490,10 @@ class _Reader:
                 spots += [(_key_spot(key), value), (KEY_STEP, key)]
         else:
             return None
-        return [placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func, selves=selves))]
+        built = _Way(KEY_CONTAINER, ast.unparse(expr), getattr(expr, "lineno", None))
+        return [built] + [
+            placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func, selves=selves))
+        ]
 
     def _added(
         self, sides: Iterable[ast.expr], at: ast.AST, place: str, file: str, func: ast.AST, selves: _Selves = ()
@@ -1916,6 +1935,7 @@ class _Reader:
                     one.what,
                     one.via,
                     value,
+                    _value_text(one.value),
                 )
             )
         return tuple(made)
@@ -2014,56 +2034,42 @@ class _Reader:
                     # its base's ``__init__``), else the one defining it.
                     steps = ((f"[{index!r}]",) if index is not None else ()) + ((f".{field}",) if field else ())
                     if target.bound:
-                        builds = [(name.name, _class_key(where, name)) for where, name in target.bound]
+                        classes = list(target.bound)
                     elif target.cls is not None:
-                        builds = [(target.cls.name, _class_key(target.file, target.cls))]
+                        classes = [(target.file, target.cls)]
                     else:
-                        builds = [(owner_of(target.file, target.func), "")]
-                    for built, key in builds:
-                        found.append(_Way(KEY_OBJECT, built, call.lineno, site_owner=key, steps=steps))
+                        classes = []
+                    for where, built in classes:
+                        elements = (
+                            ()
+                            if steps or placed.thread
+                            else self._handed_elements(call, target, placed.on_class, where, built, file, func, selves)
+                        )
+                        found.append(
+                            _Way(
+                                KEY_OBJECT,
+                                built.name,
+                                call.lineno,
+                                site_owner=_class_key(where, built),
+                                steps=steps,
+                                elements=elements,
+                            )
+                        )
+                    if not classes:
+                        found.append(_Way(KEY_OBJECT, owner_of(target.file, target.func), call.lineno, steps=steps))
                     continue
                 generator = self._is_generator(target)
                 if generator and not yielded:
                     found.append(_stop("generator", owner_of(target.file, target.func), at=here))
                     continue
                 handed = bind(call, target, placed.on_class)
-                callee = (owner_of(target.file, target.func), target.func.lineno)  # type: ignore[attr-defined]
-                receiver: Optional[list[_Way]] = None
                 if generator:
                     returned = self._of_field(self._yielded(target), field)
                 elif index is not None:
                     returned = self._returned_at(target, index, field)
                 else:
                     returned = self._returned(target, field)
-                for inner in returned:
-                    if (
-                        inner.kind == KEY_PARAMETER
-                        and (inner.site_owner, inner.site_line) == callee
-                    ):
-                        given = handed.get(inner.name)
-                        if given is None:
-                            found.append(_stop("handed_spread", inner.name, at=here))
-                            continue
-                        read_at, read_file, read_func = _where_read(given, call, file, func, target.file, target.func)
-                        # A default is read in the callee, ``self`` its classes there; a value handed, in the caller.
-                        read_selves = target.bound if read_func is target.func else selves
-                        found += _onto_each(
-                            self.read(given, read_at, read_file, read_func, selves=read_selves),
-                            inner,
-                            (),
-                            (here,) + inner.route,
-                        )
-                    elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
-                        # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
-                        if receiver is None:
-                            receiver = self._receiver(call, target, placed.on_class, handed, file, func, selves=selves)
-                        if not receiver:
-                            found.append(_stop("receiver", owner_of(target.file, target.func), at=here))
-                            continue
-                        fields = tuple(f".{part}" for part in inner.name.split(".")[1:])
-                        found += _onto_each(receiver, inner, fields, (here,) + inner.route)
-                    else:
-                        found.append(inner._replace(route=(here,) + inner.route))
+                found += self._at_call(returned, call, target, placed.on_class, handed, file, func, selves=selves)
             if placed.unplaced:
                 found.append(
                     _stop("open", ast.unparse(call.func), what=placed.unplaced, at=here)
@@ -2093,6 +2099,132 @@ class _Reader:
                 )
             ]
         return self._of_field(ways, field)
+
+    def _at_call(
+        self,
+        inner_ways: list[_Way],
+        call: ast.Call,
+        target: Target,
+        on_class: bool,
+        handed: dict[str, Optional[ast.expr]],
+        file: str,
+        func: ast.AST,
+        selves: _Selves = (),
+    ) -> list[_Way]:
+        """*inner_ways*, read in *target*, as ways at *call* in *func* of *file*, the call first on each route: a
+        parameter of *target* is what the call hands it (*handed*, :func:`calls.bind`), read in the caller -- a
+        default, in the callee --; a field of the callee's ``self``, that field of the call's receiver; any other
+        end, itself."""
+        here = f"{file}:{call.lineno}"
+        callee = (owner_of(target.file, target.func), target.func.lineno)  # type: ignore[attr-defined]
+        receiver: Optional[list[_Way]] = None
+        found: list[_Way] = []
+        for inner in inner_ways:
+            if inner.kind == KEY_PARAMETER and (inner.site_owner, inner.site_line) == callee:
+                given = handed.get(inner.name)
+                if given is None:
+                    found.append(_stop("handed_spread", inner.name, at=here))
+                    continue
+                read_at, read_file, read_func = _where_read(given, call, file, func, target.file, target.func)
+                # A default is read in the callee, ``self`` its classes there; a value handed, in the caller.
+                read_selves = target.bound if read_func is target.func else selves
+                found += _onto_each(
+                    self.read(given, read_at, read_file, read_func, selves=read_selves),
+                    inner,
+                    (),
+                    (here,) + inner.route,
+                )
+            elif inner.kind == KEY_SELF_FIELD and inner.name.split(".")[0] == "self":
+                # The callee's ``self`` is what the call hands it, as a parameter is: its receiver.
+                if receiver is None:
+                    receiver = self._receiver(call, target, on_class, handed, file, func, selves=selves)
+                if not receiver:
+                    found.append(_stop("receiver", owner_of(target.file, target.func), at=here))
+                    continue
+                fields = tuple(f".{part}" for part in inner.name.split(".")[1:])
+                found += _onto_each(receiver, inner, fields, (here,) + inner.route)
+            else:
+                found.append(inner._replace(route=(here,) + inner.route))
+        return found
+
+    def _handed_elements(
+        self,
+        call: ast.Call,
+        target: Target,
+        on_class: bool,
+        where: str,
+        cls: ast.ClassDef,
+        file: str,
+        func: ast.AST,
+        selves: _Selves = (),
+    ) -> tuple[_Way, ...]:
+        """:attr:`HeldSource.elements` of the object *call* builds of *cls* (of *where*), *target* the ``__init__``
+        it runs: each value that ``__init__`` binds the field the class hands out to (:meth:`_element_field`), read
+        there and taken to the call as a return is (:meth:`_at_call`) -- ``ListWithLock(tmpList)``'s
+        ``self.dataList = dataList`` is ``tmpList``.  None where the class hands out no field or the ``__init__``
+        binds none."""
+        me = _first_positional(target.func)
+        field = self._element_field(where, cls) if me is not None else None
+        if field is None:
+            return ()
+        inner: list[_Way] = []
+        for node, inside in _with_functions(target.func):
+            if inside is not target.func or not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            for bound, value in pathcond.assigned_targets(node):
+                if not _is_field(bound, me, field):  # type: ignore[arg-type]
+                    continue
+                if value is None:
+                    inner.append(_stop("element", field, what="a starred unpacking", at=f"{target.file}:{node.lineno}"))
+                else:
+                    inner += self._safely(value, value, target.file, target.func, selves=target.bound)
+        if not inner:
+            return ()
+        handed = bind(call, target, on_class)
+        return tuple(
+            _called_at(
+                self._at_call(inner, call, target, on_class, handed, file, func, selves=selves),
+                f"{file}:{call.lineno}",
+            )
+        )
+
+    def _element_field(self, file: str, cls: ast.ClassDef) -> Optional[str]:
+        """The field whose elements an object of *cls* (of *file*) hands out: the one field that what its ``get``
+        returns -- and what its ``__next__`` returns, where its ``__iter__`` returns the object itself -- is, or is
+        a part of by its items (``self.dataList[self.dataIndex]``, a slice of it, a copy); ``None`` where they name
+        no field or several.  The other values they may return (``get``'s ``0`` for a key not held) name none."""
+        key = _class_key(file, cls)
+        if key not in self._element_fields:
+            iterated = self._returned_of(file, cls, "__iter__")
+            itself = bool(iterated) and all(
+                one.kind == KEY_SELF_FIELD and one.name == "self" and not one.steps and not one.paths
+                for one in iterated
+            )
+            fields = {
+                one.name.split(".")[1]
+                for name in ("get", "__next__") if itself or name == "get"
+                for one in self._returned_of(file, cls, name)
+                if one.kind == KEY_SELF_FIELD
+                and one.name.split(".")[0] == "self"
+                and len(one.name.split(".")) == 2
+                and all(step.startswith("[") for step in one.steps)
+                and not one.paths
+                and all(made.gives in _SAME_VALUE for made in one.through)
+            }
+            self._element_fields[key] = fields.pop() if len(fields) == 1 else None
+        return self._element_fields[key]
+
+    def _returned_of(self, file: str, cls: ast.ClassDef, name: str) -> list[_Way]:
+        """What *cls*'s method *name* returns, read as a call of it on an object of *cls* reads it; none where the
+        class and its bases define no such method."""
+        found = self.calls.types.method(file, cls, name)
+        if found is None:
+            return []
+        where, method = found
+        tree = self.trees.get(where)
+        return self._returned(
+            Target(where, method, pathcond.class_of(tree, method) if tree is not None else None, ((file, cls),))
+        )
 
     def _taken(self, call: ast.Call, placed, file: str, func: ast.AST, selves: _Selves = ()) -> Optional[list[_Way]]:
         """The ways of what a container's method outside the corpus hands back of its receiver, as callfacts says
@@ -3018,7 +3150,7 @@ class _Reader:
             self._routes = {}
             for _version, route, owner in endpoints.routes_in(self.trees):
                 self._routes.setdefault(owner, set()).add(route)
-        routes = self._routes.get(f"{file}::{getattr(func, 'name', '')}")
+        routes = self._routes.get(f"{file}::{def_name(func)}")
         if not routes:
             return []
         default = _default_of(func, name)
@@ -3146,6 +3278,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
         # paths it went through with.
         unmarked = tuple(call._replace(drops=False, held=()) for call in one.through)
         key = (one._replace(line=None, end_file="", through=unmarked, puts=(), chosen=(), printed=()), tuple(route))
+        elements, elements_stops = _said(list(one.elements)) if one.elements else ([], [])
         held = sources.setdefault(
             key,
             HeldSource(
@@ -3172,6 +3305,8 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 route=route,
                 changes=[_change_said(change) for change in one.changes],
                 made_empty=one.made_empty,
+                elements=elements,
+                elements_stops=elements_stops,
                 sent=one.sent,
                 keyed=[HeldKeyed(at=at, by=by, key=key) for at, by, key in one.keyed],
             ),
@@ -3366,7 +3501,16 @@ def _change_said(change: _Change) -> HeldChange:
         via=list(change.via),
         value=value,
         value_stops=stops,
+        value_text=change.value_text,
     )
+
+
+def _value_text(value: Optional[ast.expr]) -> str:
+    """*value* as the source spells it (:attr:`HeldChange.value_text`), cut at :data:`VALUE_TEXT_CUT` characters."""
+    if value is None:
+        return ""
+    text = ast.unparse(value)
+    return text if len(text) <= VALUE_TEXT_CUT else text[: VALUE_TEXT_CUT - 3] + "..."
 
 
 def _statement_of(node: ast.AST) -> Optional[ast.stmt]:
@@ -3410,7 +3554,7 @@ def _function_at(tree: ast.AST, name: str, line: int) -> Optional[ast.AST]:
     for node in walk(tree):
         if (
             isinstance(node, _FUNCTIONS)
-            and node.name == name
+            and spells(node, name)
             and node.lineno <= line <= (node.end_lineno or node.lineno)
         ):
             return node
@@ -3692,7 +3836,7 @@ def guard_froms(
                 (
                     node
                     for node in (walk(tree) if tree is not None else ())
-                    if isinstance(node, _FUNCTIONS) and node.name == name and node.lineno == site.owner_line
+                    if isinstance(node, _FUNCTIONS) and spells(node, name) and node.lineno == site.owner_line
                 ),
                 None,
             )

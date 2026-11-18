@@ -78,11 +78,11 @@ module's function.  The database's driver -- the cursor, or a method of PanDA's 
 (:data:`callfacts.DRIVER_CLASSES`), a leaf not read through -- running a statement on a map it is handed writes the
 keys a ``RETURNING ... INTO`` names (:func:`sql.written_back`), and any key where the statement is not read.  A name
 bound to the object -- ``j = job``, a library function's value that may be it, a call of the corpus returning a
-parameter it is handed -- is read as the object.  An object put in a local container that hands nothing out -- it
+parameter it is handed -- is read as the object; a name bound once to a part of it -- ``sub = m["sub"]``, then
+``sub["k"] = v`` -- as that part (:class:`_Holds`).  An object put in a local container that hands nothing out -- it
 only takes things in and goes to the driver, a logger or a library (``varMap[":id"] = v`` then
 ``self.cur.execute(sql, varMap)``) -- is not changed through it.  Not read: an object reached through a loop over a
-container holding it, handed back in a ``return``'s tuple, or a part of it bound to a name (``sub = m["sub"]``,
-then ``sub["k"] = v``).
+container holding it, or handed back in a ``return``'s tuple.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ import ast
 import builtins
 import weakref
 from collections import deque
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.calls import BUILTIN as BUILTIN_CLASS
@@ -577,7 +577,7 @@ class _Reading:
             given = [
                 (name, rest)
                 for name, value in parameters.items()
-                if value is not None and (rest := held_by(value))
+                if value is not None and (rest := held_by(value)) and not self._takes_a_value(target, name)
             ]
             if sum(
                 1
@@ -1036,6 +1036,7 @@ class _Reading:
             return of_field[id(expression)]
 
         held |= self._aliases(file, func, nodes, holds, bound)
+        holding = _Holds(holds, dict(_part_aliases(func, nodes, holds)))
         found: list[tuple[Optional[ast.stmt], ObjectChange]] = []
 
         def add(node: ast.AST, change: ObjectChange) -> None:
@@ -1054,7 +1055,7 @@ class _Reading:
                     else [node.target]
                 )
                 for target, alone in _flat_targets(direct):
-                    change = _target_change(file, func, node, target, alone, holds)
+                    change = _target_change(file, func, node, target, alone, holding)
                     if change is not None:
                         add(node, change)
                 value = (
@@ -1064,12 +1065,12 @@ class _Reading:
                 )
                 if value is None:
                     continue
-                if _is_object(value, holds):
+                if _is_object(value, holding):
                     for target, _alone in _flat_targets(direct):
                         if (
                             isinstance(target, ast.Name)
-                            or holds(target)
-                            or _part_of(target, holds)
+                            or holding(target)
+                            or _part_of(target, holding)
                         ):
                             # A name bound to it, an attribute it is read by, a part of it: read as the object.
                             continue
@@ -1082,28 +1083,28 @@ class _Reading:
                             file, func, nodes, _root_name(target)
                         ):
                             escaped(node, ast.unparse(target))
-                elif _inside(value, holds):
+                elif _inside(value, holding):
                     escaped(node, ast.unparse(direct[0]))
             elif isinstance(node, ast.Call):
-                for change in self._call_changes(file, func, node, holds, bound):
+                for change in self._call_changes(file, func, node, holding, bound):
                     add(node, change)
             elif (
                 isinstance(node, (ast.Yield, ast.YieldFrom)) and node.value is not None
             ):
-                if _is_object(node.value, holds) or _inside(node.value, holds):
+                if _is_object(node.value, holding) or _inside(node.value, holding):
                     escaped(node, "yielded")
             elif isinstance(node, ast.Lambda):
                 for inner in ast.walk(node.body):
                     if isinstance(inner, ast.Call):
                         for change in self._call_changes(
-                            file, func, inner, holds, bound
+                            file, func, inner, holding, bound
                         ):
                             add(node, change)
         for inner in ast.walk(func):
             if (
                 inner is not func
                 and isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and any(holds(one) for one in ast.walk(inner))
+                and any(holding(one) or _as_part(one, holding) is not None for one in ast.walk(inner))
             ):
                 escaped(inner, f"read in {inner.name}")
         return found
@@ -1314,7 +1315,7 @@ class _Reading:
                 func=func,
             )
             for one in parts_inside
-            if not self._unchanging(file, func, one)
+            if not self._unchanging(file, func, _as_part(one, holds) or one)
         ]
         for target in targets:
             if not isinstance(target.func, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1325,15 +1326,17 @@ class _Reading:
             except Exception:  # noqa: BLE001
                 found += unread("not bound")
                 continue
+            # A parameter declared a value no change in place can touch -- ``getWorkersForJob(self, PandaID: int)``
+            # -- is changed nothing inside by the definition, whatever the argument is declared (:meth:`_takes_a_value`).
             whole = {
                 name
                 for name, one in parameters.items()
-                if one is not None and _is_object(one, holds)
+                if one is not None and _is_object(one, holds) and not self._takes_a_value(target, name)
             }
             pieces = [
                 (name, one)
                 for name, one in parameters.items()
-                if one is not None and _part_of(one, holds)
+                if one is not None and _part_of(one, holds) and not self._takes_a_value(target, name)
             ]
             # A static or class method called on it, or a method read off its class, is not handed it as its
             # first parameter: what it is handed is bound above.  Nor is a class's __init__ a call builds an object
@@ -1353,7 +1356,7 @@ class _Reading:
                     for change in self.handed_changes(target, frozenset(whole))
                 ]
             for name, one in pieces:
-                if not self._unchanging(file, func, one) and self.handed_changes(
+                if not self._unchanging(file, func, _as_part(one, holds) or one) and self.handed_changes(
                     target, frozenset({name})
                 ):
                     found.append(
@@ -1369,13 +1372,24 @@ class _Reading:
         return _once(found)
 
     def _unchanging(self, file: str, func: ast.AST, part: ast.AST) -> bool:
-        """Whether *part* is declared a value no change in place can touch -- ``jediTaskID: int | None``
-        (:func:`callfacts.immutable_annotation`) --, on the premise that a declaration holds: nothing a call does
-        changes inside it."""
+        """Whether *part* is declared a value no change in place can touch -- ``jediTaskID: int | None``, a spec's
+        column ``PandaID: SpecColumn[int]`` read through its descriptor (:meth:`Types.states_immutable`) --, on the
+        premise that a declaration holds: nothing a call does changes inside it."""
         if not isinstance(part, ast.expr):
             return False
         declared = self.types._annotation_of(file, func, part)
-        return declared is not None and callfacts.immutable_annotation(declared[1])
+        return declared is not None and self.types.states_immutable(*declared)
+
+    def _takes_a_value(self, target: Target, parameter: str) -> bool:
+        """Whether *target* declares its *parameter* a value no change in place can touch -- ``getWorkersForJob(self,
+        PandaID: int)`` in ``Watcher.run``, handed ``job.PandaID`` of a ``job`` whose class no declaration says --
+        (:meth:`Types.states_immutable`): what the parameter is handed, the definition changes nothing inside and
+        sets no attribute of, on the premise that a declaration holds.  A ``*args`` or ``**kwargs`` is not read."""
+        args = getattr(target.func, "args", None)
+        for one in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args is not None else ():
+            if one.arg == parameter:
+                return one.annotation is not None and self.types.states_immutable(target.file, one.annotation)
+        return False
 
     def _driver_changes(
         self, file: str, func: ast.AST, call: ast.Call, handed: list, parts: list, holds
@@ -1778,10 +1792,20 @@ def _target_change(
 ) -> Optional[ObjectChange]:
     """A store or delete of *target* on the object or on a part of it."""
     here: ast.expr = target
-    while isinstance(here, (ast.Subscript, ast.Attribute)) and not holds(here.value):
+    while (
+        isinstance(here, (ast.Subscript, ast.Attribute))
+        and not holds(here.value)
+        and _as_part(here.value, holds) is None
+    ):
         here = here.value
     if not isinstance(here, (ast.Subscript, ast.Attribute)) or holds(here):
         return None
+    part = _as_part(here.value, holds)
+    if part is not None:
+        # Through a name bound to a part: inside that part, as ``impl.taskSpec.status = ...`` is.
+        return ObjectChange(
+            file, statement.lineno, CHANGE_INNER, _part_step(part, holds), ast.unparse(target), func=func
+        )
     key, line = _step(here), statement.lineno
     if here is not target:
         return ObjectChange(
@@ -1811,12 +1835,15 @@ def _is_object(value: Optional[ast.AST], holds) -> bool:
 
 
 def _part_of(value: ast.AST, holds) -> bool:
-    """Whether *value* is an item or attribute of the object, read: ``m["sub"]``, ``m.x.y``."""
+    """Whether *value* is an item or attribute of the object, read: ``m["sub"]``, ``m.x.y``; a name bound once to
+    one (:class:`_Holds`), or a part of what it holds."""
+    if _as_part(value, holds) is not None:
+        return True
     if not isinstance(value, (ast.Subscript, ast.Attribute)) or holds(value):
         return False
     here: ast.AST = value
     while isinstance(here, (ast.Subscript, ast.Attribute)):
-        if holds(here.value):
+        if holds(here.value) or _as_part(here.value, holds) is not None:
             return True
         here = here.value
     return False
@@ -1824,9 +1851,61 @@ def _part_of(value: ast.AST, holds) -> bool:
 
 def _first_step(value: ast.AST, holds) -> str:
     here = value
-    while isinstance(here, (ast.Subscript, ast.Attribute)) and not holds(here.value):
+    while (
+        (part := _as_part(here, holds)) is None
+        and isinstance(here, (ast.Subscript, ast.Attribute))
+        and not holds(here.value)
+    ):
         here = here.value
-    return _step(here)
+    return _step(here) if part is None else _part_step(part, holds)
+
+
+class _Holds:
+    """What a reading holds -- *test*: the object by a name, or a field of a name -- with *parts*, the names bound
+    once to a part of it (:func:`_part_aliases`), each read as that part where it is: ``tmpTaskSpec.status = ...``
+    after ``tmpTaskSpec = impl.taskSpec`` changes inside ``.taskSpec``, as ``impl.taskSpec.status = ...`` does, and
+    ``tmpTaskSpec`` handed on is ``impl.taskSpec`` handed on.  Where the name's object goes -- stored, put in a
+    container, handed back -- is where the part goes, as for the part itself: not a change of the object."""
+
+    def __init__(self, test: Callable[[ast.AST], bool], parts: dict[str, ast.expr]) -> None:
+        self.test = test
+        self.parts = parts
+
+    def __call__(self, expression: ast.AST) -> bool:
+        return self.test(expression)
+
+
+def _as_part(expression: ast.AST, holds) -> Optional[ast.expr]:
+    """The part of the object *expression* is read as, where it is a name bound once to one (:class:`_Holds`)."""
+    parts: Optional[dict[str, ast.expr]] = getattr(holds, "parts", None)
+    if parts and isinstance(expression, ast.Name):
+        return parts.get(expression.id)
+    return None
+
+
+def _part_aliases(func: ast.AST, nodes: list[ast.AST], holds) -> list[tuple[str, ast.expr]]:
+    """The names *func* binds, once and nowhere else, to a part of the object: ``tmpTaskSpec = impl.taskSpec``, or an
+    attribute read off it by a name written (:func:`_named_read`), ``k = getattr(self, "job")``."""
+    found: list[tuple[str, ast.expr]] = []
+    for node in nodes:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+            continue
+        value = node.value
+        named = _named_read(value)
+        if not (_part_of(value, holds) or (named is not None and named[1] is not None and holds(named[0]))):
+            continue
+        name = node.targets[0].id
+        if len(pathcond.bindings(func, name)) == 1:  # type: ignore[arg-type]
+            found.append((name, value))
+    return found
+
+
+def _part_step(part: ast.expr, holds) -> str:
+    """The first step from the object to *part*: ``.taskSpec``; ``.job`` for ``getattr(self, "job")``."""
+    named = _named_read(part)
+    if named is not None and named[1] is not None and holds(named[0]):
+        return f".{named[1]}"
+    return _first_step(part, holds)
 
 
 #: The builtin containers' methods that put in or take out and hand back nothing of what they hold.

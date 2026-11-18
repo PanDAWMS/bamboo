@@ -1001,7 +1001,12 @@ def handed(resolve, calls: Optional["Calls"]):
       every call, however many;
     * ``d.keys()`` of a dict display -- written there, held by a local or
       returned by the call -- key by key, where every key settles:
-      ``JediTaskSpec.commandStatusMap().keys()``, TaskCommando's commands.
+      ``JediTaskSpec.commandStatusMap().keys()``, TaskCommando's commands;
+    * a comprehension of the name it iterates over -- a dict's keys, as
+      ``d.keys()`` reads them, or what the iterable settles to -- kept where
+      each ``if`` comparing that name with values the function itself states
+      holds: ``[c for c in commandStatusMap if c not in
+      JediTaskSpec.internal_commands()]``, TaskCommando's external commands.
 
     Returns ``(expression, func, file) -> [Handed, ...]``.  Without *calls*
     only the function's own writes are read.
@@ -1136,6 +1141,8 @@ def handed(resolve, calls: Optional["Calls"]):
             keyed = keys_of(expression.func.value, func, file, depth, seen)
             if keyed:
                 return keyed
+        if isinstance(expression, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return comprehended(expression, func, file, depth, seen)
         if isinstance(expression, ast.Call):
             return returned(expression, func, file, depth, seen)
         if not isinstance(expression, ast.Name):
@@ -1200,6 +1207,48 @@ def handed(resolve, calls: Optional["Calls"]):
             via
             for via, constants in calls.handed_constants(target, {expression.id})
             if pathcond.ruled_out_by(expression, func, constants)
+        ]
+
+    def comprehended(
+        expression: ast.ListComp | ast.SetComp | ast.GeneratorExp, func: ast.AST, file: str, depth: int, seen: frozenset
+    ) -> list[Handed]:
+        """The values of a comprehension of the name its one ``for`` binds: the iterable's -- a dict's keys
+        (:func:`keys_of`), else what it settles to -- kept where each ``if`` holds, each an ``in`` / ``not in`` /
+        ``==`` / ``!=`` of the name and an expression that settles in the function itself (no call hands it, every
+        value known).  None where the element is not the name, another ``if`` is written, or a value does not
+        settle; a value not known stays, unfiltered."""
+        if len(expression.generators) != 1:
+            return []
+        generator = expression.generators[0]
+        target = generator.target
+        if (
+            generator.is_async
+            or not isinstance(target, ast.Name)
+            or not isinstance(expression.elt, ast.Name)
+            or expression.elt.id != target.id
+        ):
+            return []
+        tests: list[tuple[bool, set[str]]] = []
+        for test in generator.ifs:
+            if not (
+                isinstance(test, ast.Compare)
+                and len(test.ops) == 1
+                and isinstance(test.left, ast.Name)
+                and test.left.id == target.id
+                and isinstance(test.ops[0], (ast.In, ast.NotIn, ast.Eq, ast.NotEq))
+            ):
+                return []
+            other = settle(test.comparators[0], func, file, depth, seen)
+            if not other or any(one.unknown or one.via for one in other):
+                return []
+            tests.append((isinstance(test.ops[0], (ast.In, ast.Eq)), {one.value for one in other}))
+        items = keys_of(generator.iter, func, file, depth, seen) or settle(generator.iter, func, file, depth, seen)
+        if not _any_value(items):
+            return []
+        return [
+            one
+            for one in items
+            if one.unknown or all((one.value in values) == kept for kept, values in tests)
         ]
 
     def keys_of(expression: ast.expr, func: ast.AST, file: str, depth: int, seen: frozenset) -> list[Handed]:
@@ -1360,9 +1409,12 @@ class Stated(NamedTuple):
     duration: bool = False
     #: The value is a number (or a duration): an offset alone, no base and no constant.
     numeric: bool = False
-    #: Seconds per unit of the one parameter an unsettled offset waits for, where the offset is that parameter times
-    #: this and nothing settled beside it: ``timedelta(minutes=timeLimit)`` is 60, ``naive_utcnow() -
-    #: timedelta(minutes=timeLimit)`` -60.  ``None`` for any other value.
+    #: Seconds per unit of the one value an unsettled offset waits for, where the offset is that value times this
+    #: and nothing settled beside it: ``timedelta(minutes=timeLimit)`` is 60, ``naive_utcnow() -
+    #: timedelta(minutes=timeLimit)`` -60.  The value is a parameter (*needs*), or one expression the source does
+    #: not settle, the amount itself (*said*): ``timedelta(hours=workflow_timeout_map['analysis'])`` is 3600 and
+    #: said, and the clock less it is the clock (*base*), -3600 and said -- the one place *said* has a *base*
+    #: (:func:`_sum`); any other use of it is said as a whole.  ``None`` for any other value.
     scale: Optional[float] = None
 
 
@@ -1393,6 +1445,17 @@ def _needed(value: Stated) -> tuple[str, ...]:
 
 def _sum(left: Stated, right: Stated, sign: float, node: ast.AST) -> Stated:
     """``left + right`` or ``left - right``."""
+    clock = _clock_alone(left) if left.base else _clock_alone(right) and sign > 0
+    other = right if left.base else left
+    if clock and other.said and other.duration and other.scale is not None:
+        # The clock and a duration of one value the source does not settle: so many seconds per unit of that value,
+        # the whole said.  The clock on the right is only ever added to.
+        return Stated(
+            base=(left if left.base else right).base,
+            offset=None,
+            said=_said(node).said,
+            scale=(sign if other is right else 1.0) * other.scale,
+        )
     if left.said or right.said or left.constant or right.constant:
         return _said(node)
     if (left.base and right.base) or (right.base and sign < 0):
@@ -1418,6 +1481,11 @@ def _sum(left: Stated, right: Stated, sign: float, node: ast.AST) -> Stated:
         numeric=not base,
         scale=scale,
     )
+
+
+def _clock_alone(value: Stated) -> bool:
+    """Whether *value* is a clock itself: nothing added, nothing waited for, nothing said."""
+    return bool(value.base) and _clock(value.base) and value.offset == 0 and not value.needs and not value.said
 
 
 def _scaled(left: Stated, right: Stated, op: ast.operator, node: ast.AST) -> Stated:
@@ -1451,6 +1519,9 @@ def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
         if unit not in TIMEDELTA_UNITS:
             return _said(call)
         value = stated(amount, func, at, depth + 1, handed)
+        if value.said and len(amounts) == 1 and not value.duration:
+            # One amount the source does not settle, alone: so many seconds per unit of it, the whole said.
+            return _said(call)._replace(duration=True, numeric=True, scale=TIMEDELTA_UNITS[unit])
         if value.said or value.constant or value.duration or (value.base and _clock(value.base)):
             return _said(call)
         if value.base or value.offset is None:

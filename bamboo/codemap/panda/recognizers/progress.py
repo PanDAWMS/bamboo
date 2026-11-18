@@ -41,6 +41,7 @@ from typing import Iterator, NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond, values
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -51,6 +52,7 @@ from bamboo.codemap.models import (
     EnumerationWrite,
     HandedParameter,
     JunctionNode,
+    PrintedCount,
     SourceModule,
     SubjectNode,
 )
@@ -509,6 +511,34 @@ def count_prints(
     return [found[key] for key in sorted(found)]
 
 
+def printed_counts(
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.AST,
+    setters: dict[str, _Setter],
+) -> list[PrintedCount]:
+    """What *func* records with the row count of the run *call* makes in a hole (:func:`rowcounts.count_of_run`),
+    under a test of it or not -- ``nUp={nUp}`` --, frames read as :func:`count_prints` reads them, each at the line
+    recording it, with the holes holding the count."""
+    found: dict[tuple[int, str], PrintedCount] = {}
+    for statement in func.body:
+        for argument in _recorded_in(statement, setters, None):
+            if argument is None:
+                continue
+            at = pathcond.site_of(argument)
+            if not isinstance(at, ast.stmt):
+                continue
+            held = _reaching(argument.id, at, func) if isinstance(argument, ast.Name) else [argument]
+            for expression in held:
+                if not isinstance(expression, ast.JoinedStr):
+                    continue
+                parts = [part for part in expression.values if isinstance(part, ast.FormattedValue)]
+                holes = [number for number, part in enumerate(parts) if rowcounts.count_of_run(part.value, func, call)]
+                text = values.rendered_text(expression)
+                if holes and text and values.has_literal_text(text):
+                    found.setdefault((at.lineno, text), PrintedCount(line=at.lineno, frame=text, holes=holes))
+    return [found[key] for key in sorted(found)]
+
+
 def _persisted_templates(
     module: SourceModule,
     setters: dict[str, _Setter],
@@ -588,7 +618,7 @@ def unclaimed_tags(
     seen: set[tuple[str, tuple[str, ...]]] = set()
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
-            owner = f"{module.rel_path}::{func.name}"
+            owner = f"{module.rel_path}::{def_name(func)}"
             if owner not in claimed:
                 continue
             # A literal piece of an f-string renders as itself and the whole
@@ -1257,7 +1287,7 @@ def extract(
                 explained += 1
                 attributed.add((spec_class, target.attr))
 
-            qualname = func.name if func is not None else "<module>"
+            qualname = def_name(func) if func is not None else "<module>"
             owner = f"{module.rel_path}::{qualname}"
             subject = SubjectNode.make_name(spec_class or UNRESOLVED_CLASS, target.attr)
             name = JunctionNode.make_name(map_id, subject, owner)

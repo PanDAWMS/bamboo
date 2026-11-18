@@ -52,6 +52,7 @@ import ast
 from typing import Callable, Optional
 
 from bamboo.codemap.astwalk import walk
+from bamboo.codemap.calls import def_name
 from bamboo.codemap.models import (
     Anchor,
     Branch,
@@ -342,7 +343,7 @@ def extract_producers(
                         derived_from=derived_from,
                         module=module,
                         node=call,
-                        owner=f"{module.rel_path}::{func.name if func else '<module>'}",
+                        owner=f"{module.rel_path}::{def_name(func) if func else '<module>'}",
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=f"runtime({call.func.attr}())",
@@ -359,7 +360,7 @@ def extract_producers(
                         derived_from=derived_from,
                         module=module,
                         node=call,
-                        owner=f"{module.rel_path}::{func.name if func else '<module>'}",
+                        owner=f"{module.rel_path}::{def_name(func) if func else '<module>'}",
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=literal,
@@ -374,7 +375,7 @@ def extract_producers(
                         derived_from=derived_from,
                         module=module,
                         node=call,
-                        owner=f"{module.rel_path}::{func.name if func else '<module>'}",
+                        owner=f"{module.rel_path}::{def_name(func) if func else '<module>'}",
                         spec_class=spec_class,
                         attribute=target.attr,
                         literal=f"runtime({call.func.attr}())",
@@ -498,7 +499,7 @@ def extract(
                     derived_from=derived_from,
                     module=module,
                     node=node,
-                    owner=f"{module.rel_path}::{func.name if func else '<module>'}",
+                    owner=f"{module.rel_path}::{def_name(func) if func else '<module>'}",
                     spec_class=alias.spec_class,
                     attribute=attribute,
                     literal=value,
