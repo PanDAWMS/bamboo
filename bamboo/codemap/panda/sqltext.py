@@ -1733,6 +1733,40 @@ def read_dated(directory: Path) -> dict[str, frozenset[str]]:
     return {table: frozenset(columns) for table, columns in found.items()}
 
 
+_DEFAULT = re.compile(r"\bDEFAULT\s+(.+?)\s*(?:\bNOT\s+NULL\b|\bNULL\b\s*$|\bCONSTRAINT\b|\bENABLE\b|$)", re.IGNORECASE)
+_BEFORE_INSERT = re.compile(
+    # The trigger's head only -- up to FOR EACH ROW, a DECLARE or BEGIN --: a body's own INSERT is not the event.
+    r'CREATE\s+(?:OR\s+REPLACE\s+)?TRIGGER\s+\S+\s+BEFORE\s+(?:(?!\b(?:FOR|DECLARE|BEGIN)\b)[^;])*?\bINSERT\b'
+    r'(?:(?!\b(?:FOR|DECLARE|BEGIN)\b)[^;])*?\bON\s+"?(?:\w+"?\.)?"?(\w+)"?'
+    r"(.*?)\bEND\s*;",
+    re.IGNORECASE | re.DOTALL,
+)
+_NEW_COLUMN = re.compile(r':new\."?(\w+)"?\s*:=', re.IGNORECASE)
+
+
+def read_defaults(directory: Path) -> dict[str, dict[str, Optional[str]]]:
+    """``{table: {column: its DEFAULT as the DDL writes it}}``, names lowered, from the DDL :func:`read_schema` reads:
+    what a column an ``INSERT`` does not name holds in the new row -- ``NULL`` where the DDL gives none, and such a
+    column is absent.  ``None`` for a column a ``BEFORE INSERT`` trigger's body assigns (``:NEW.col := ...``), whose
+    value in the new row the DDL does not say: JEDI_Tasks' ``realModificationTime``, ATLAS_PANDAMETA's
+    ``users.id``."""
+    found: dict[str, dict[str, Optional[str]]] = {}
+    for path in sorted(Path(directory).glob("*.sql")):
+        text = path.read_text()
+        for match in _CREATE_TABLE.finditer(text):
+            defaults = found.setdefault(match.group(2).lower(), {})
+            for part in _top_level_parts(text, match.end()):
+                column = _COLUMN_DEFINITION.match(part)
+                given = _DEFAULT.search(part) if column is not None else None
+                if column is not None and given is not None:
+                    defaults[column.group(1).lower()] = given.group(1).strip().rstrip(",").strip()
+        for match in _BEFORE_INSERT.finditer(text):
+            filled = found.setdefault(match.group(1).lower(), {})
+            for assigned in _NEW_COLUMN.finditer(match.group(2)):
+                filled[assigned.group(1).lower()] = None
+    return found
+
+
 _PARTITION_BY = re.compile(r'PARTITION\s+BY\s+(RANGE|LIST|HASH)\s*\(([^)]*)\)', re.IGNORECASE)
 
 

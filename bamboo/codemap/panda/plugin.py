@@ -254,6 +254,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._partitions: dict[str, tuple[str, tuple[str, ...]]] = {}
         self._declaring: dict[str, tuple[str, ...]] = {}
         self._references: dict[str, list[sqltext.Reference]] = {}
+        self._defaults: Optional[dict[str, dict[str, Optional[str]]]] = None
         self._schema_stamp = "none"
         self._recorded: Optional[calls_mod.Recorded] = None
         self._record_stamp = "none"
@@ -276,6 +277,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             self._partitions = sqltext.read_partitions(schema_root)
             self._declaring = sqltext.read_declaring(schema_root)
             self._references = sqltext.read_references(schema_root)
+            self._defaults = sqltext.read_defaults(schema_root)
             self._schema_stamp = _schema_stamp(Path(schema_root), self._schema, self._keys)
         if instance_record is not None:
             self._recorded, self._record_stamp = calls_mod.read_recorded(Path(instance_record))
@@ -1019,7 +1021,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
 
         # What a row a statement selects waits on besides the mover: the writes its terms on other columns ask for,
         # joined from the junctions and the key sources once the arms off their row are marked.
-        woken = wakers.attach(fragment, self._calls)
+        woken = wakers.attach(fragment, self._calls, self._defaults)
         logger.info("PandaCodeMapPlugin: %d read site(s) with a waker", woken)
         lap("objects and runs")
         logger.info(

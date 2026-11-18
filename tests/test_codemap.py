@@ -22415,6 +22415,25 @@ def test_the_ddl_says_a_tables_partition_and_the_schema_creating_it(tmp_path):
     }
 
 
+def test_the_ddl_says_what_a_column_an_insert_leaves_out_holds(tmp_path):
+    """A column's DEFAULT as written, none where it gives none (NULL); a column a BEFORE INSERT trigger's body
+    assigns is not said -- JEDI_TASKS' realModificationTime --, an UPDATE-only trigger's is."""
+    (tmp_path / "ATLAS_PANDA.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDA"."JOB_OUTPUT_REPORT"\n(\n    "PANDAID" NUMBER(11) NOT NULL,\n'
+        '    "TIMESTAMP" DATE NOT NULL,\n    "LOCKEDBY" VARCHAR2(40),\n    "ATTEMPTNR" NUMBER(3) DEFAULT \'0\' NOT NULL,\n'
+        '    "STATUS" VARCHAR2(20) DEFAULT NULL,\n    "CREATED" DATE DEFAULT sysdate\n);\n'
+        'CREATE TABLE "ATLAS_PANDA"."JEDI_TASKS"\n(\n    "JEDITASKID" NUMBER(11),\n    "REALMODIFICATIONTIME" TIMESTAMP\n);\n'
+        'CREATE OR REPLACE TRIGGER "ATLAS_PANDA"."T1"\nBEFORE UPDATE OR INSERT OF MODIFICATIONTIME ON "ATLAS_PANDA"."JEDI_TASKS"\n'
+        'FOR EACH ROW\nBEGIN\n    :NEW."REALMODIFICATIONTIME" := SYS_EXTRACT_UTC(systimestamp);\nEND;\n/\n'
+        'CREATE OR REPLACE TRIGGER "ATLAS_PANDA"."T2"\nBEFORE UPDATE OF PANDAID ON "ATLAS_PANDA"."JOB_OUTPUT_REPORT"\n'
+        'FOR EACH ROW\nBEGIN\n    :NEW."LOCKEDBY" := NULL;\nEND;\n/\n'
+    )
+    assert sqltext.read_defaults(tmp_path) == {
+        "job_output_report": {"attemptnr": "\'0\'", "status": "NULL", "created": "sysdate"},
+        "jedi_tasks": {"realmodificationtime": None},
+    }
+
+
 def test_a_union_pairs_the_tables_its_arms_read_in_one_place():
     """The arms' one sources, or the sources of one alias -- not every table of a joined arm with every other, not
     a WITH name."""

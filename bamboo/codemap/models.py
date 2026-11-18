@@ -2650,6 +2650,54 @@ RESULT_AGGREGATE = "aggregate"
 RESULT_VARIES = "varies"
 
 
+#: :attr:`BornTerm.holds`: how a term holds on the row an ``INSERT`` makes.
+BORN_WRITTEN = "written"
+BORN_DEFAULT = "default"
+BORN_AFTER = "after"
+BORN_UNTIL = "until"
+BORN_OPEN = "open"
+BORN_NOT = "not"
+BORN_UNDECIDED = "undecided"
+
+
+class BornTerm(BaseModel):
+    """One term of a statement read on the new row an ``INSERT`` makes (:attr:`Waker.born`)."""
+
+    term: str = Field(description="The term as the statement writes it: ``lockedBy IS NULL``.")
+    subject: str = Field(description="The column it tests, as :attr:`ConditionNode.subject` spells it.")
+    holds: str = Field(
+        description=(
+            "``written`` -- by the value the ``INSERT`` writes there, a literal; ``default`` -- by the column's DDL "
+            "default, the ``INSERT`` not naming it (``NULL`` where the DDL gives none); ``after`` / ``until`` -- the "
+            "column stamped with the clock the term's value counts from, compared with that clock less an offset: "
+            "it holds once the offset has passed since the stamp, or until it has; ``open`` -- the column takes a "
+            "parameter or an expression, and the row's own value decides.  In an entry ``added`` on some routes "
+            "only, also ``not`` -- the new row fails it -- and ``undecided``."
+        )
+    )
+    value: str = Field(
+        default="",
+        description=(
+            "The new row's value as spelled: the literal, the default (``NULL``), the clock (``naive_utcnow``); the "
+            "parameter or expression where ``open``."
+        ),
+    )
+    offset_seconds: Optional[float] = Field(
+        default=None, description="``after`` / ``until``: the term's value's offset from the clock, where settled."
+    )
+    scale_seconds: Optional[float] = Field(
+        default=None,
+        description="``after`` / ``until``: seconds per unit of the one value the offset waits for (``needs``).",
+    )
+    needs: list[str] = Field(
+        default_factory=list,
+        description="``after`` / ``until``: ``<function>.<parameter>`` the offset waits for: ``listJobOutputReport.grace_period``.",
+    )
+    added: bool = Field(
+        default=False, description="In an entry the statement adds under a test, on the routes that add it only."
+    )
+
+
 class Waker(BaseModel):
     """A branch whose write can make a row a statement selects meet one of its terms on another column.
 
@@ -2684,7 +2732,10 @@ class Waker(BaseModel):
         default="branch",
         description=(
             "``branch`` -- a junction's branch writes the value; ``insert`` -- a reach record's ``INSERT`` gives a new "
-            "row the value (:attr:`ReachNode.writes`): sendCommandTaskPanda's 4038, the commands 4339 selects."
+            "row the value (:attr:`ReachNode.writes`): sendCommandTaskPanda's 4038, the commands 4339 selects; "
+            "``born`` -- an ``INSERT`` makes a row the statement's terms take, every one of a conjunction holding on "
+            "the new row or left to its own values (:attr:`born`): updateWorkers' 1016 a job output report "
+            "listJobOutputReport's 2401 takes once its grace has passed."
         ),
     )
     routes: list[list[str]] = Field(
@@ -2711,6 +2762,14 @@ class Waker(BaseModel):
             "handed rows at the value a reader asks about -- 1830 selects ``JediTaskSpec.status=defined``, so 1844 "
             "wakes the tasks 130 would take at ``defined``.  Not this statement: a write its own rows key is its "
             "mover's, on rows it took."
+        ),
+    )
+    born: list[BornTerm] = Field(
+        default_factory=list,
+        description=(
+            "A ``born`` waker's terms on the new row: the conjunction it meets, then the entries added on some routes "
+            "(``added``).  Its ``term`` is the conjunction, ``subject`` the table, ``value`` empty, ``stated`` that no "
+            "term is ``open``, ``routes`` every route into the ``INSERT``'s function."
         ),
     )
 
