@@ -20534,6 +20534,23 @@ def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_
     ]
 
 
+_FILE_PROXY = '''
+_logger = PandaLogger().getLogger("DBProxy")
+
+
+class FileModule:
+    def updateFile_JEDI(self, fileSpec: JediFileSpec, criteria):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Dataset_Contents SET {fileSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in criteria.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+
 _HOPPED = '''
 class Maker:
     def gen(self, jediTaskID):
@@ -20550,6 +20567,9 @@ class Maker:
 
     def store(self, spec: JediTaskSpec, jediTaskID):
         self.taskBufferIF.setTaskStatus_JEDI(spec, {"jediTaskID": jediTaskID}, ["registered"])
+        fileSpec: JediFileSpec = JediFileSpec()
+        fileSpec.status = spec.status
+        self.taskBufferIF.updateFile_JEDI(fileSpec, {"jediTaskID": jediTaskID})
 
 
 class Runner:
@@ -20564,10 +20584,17 @@ def test_an_object_returned_or_handed_on_names_the_writes_persisting_it_up_and_d
     """``JobGenerator.doGenerate`` sets ``prodSourceLabel`` on the jobs it makes and returns them, and its caller hands
     them on to be inserted: the object a function returns is followed to each caller holding the call's value, and
     the object a function -- or a caller a hop reaches -- hands to a call into each function the call lands in, its
-    parameter holding it, where the writes persisting it are read as a caller's are."""
+    parameter holding it, where the writes persisting it are read as a caller's are: a file given the task's status
+    is another class's object, no write of the task."""
     rel = "pandajedi/jediorder/Runner.py"
     froms, _keys = _flushed(
-        tmp_path, _HOPPED, rel, more={"pandaserver/taskbuffer/db_proxy_mods/status_module.py": _KEPT_PROXY}
+        tmp_path,
+        _HOPPED,
+        rel,
+        more={
+            "pandaserver/taskbuffer/db_proxy_mods/status_module.py": _KEPT_PROXY,
+            "pandaserver/taskbuffer/db_proxy_mods/file_module.py": _FILE_PROXY,
+        },
     )
     lines = _HOPPED.split("\n")
     at = {

@@ -9296,12 +9296,15 @@ def _attach_kept_hops(made: list[KeyFrom], froms: list[KeyFrom], reading: _Readi
             continue
         func = record._runs[0]
         fields = frozenset(("." + subject.rpartition(".")[2],) for subject in record.writes)
+        classes = frozenset(subject.rpartition(".")[0] for subject in record.writes)
         up: list[KeptHop] = []
         starts: list[tuple[list[str], str, _PathCarry, list[tuple[ast.Call, Placed]]]] = []
         if record.unread == KEY_KEPT:
             if not record._kept:
                 continue
-            up = _kept_hops(reading, record.file, func, record._kept, _NOTHING, fields, writers, KEPT_DEPTH, done)
+            up = _kept_hops(
+                reading, record.file, func, record._kept, _NOTHING, fields, classes, writers, KEPT_DEPTH, done
+            )
         else:
             lines = {line for written in record.writes.values() for line in written}
             assignments = [
@@ -9313,13 +9316,13 @@ def _attach_kept_hops(made: list[KeyFrom], froms: list[KeyFrom], reading: _Readi
             if record.unread == KEY_RETURNED:
                 back = carry.returns()
                 if back:
-                    up = _kept_hops(reading, record.file, func, {}, back, fields, writers, KEPT_DEPTH, done)
+                    up = _kept_hops(reading, record.file, func, {}, back, fields, classes, writers, KEPT_DEPTH, done)
             else:
                 starts.append(([], record.file, carry, _handed_on(reading, record.file, func, carry, set())))
         for hop in up:
             if hop._down is not None:
                 starts.append((hop.via, *hop._down))
-        record.kept_hops = up + _down_hops(reading, starts, fields, writers, into)
+        record.kept_hops = up + _down_hops(reading, starts, fields, classes, writers, into)
 
 
 def _kept_hops(
@@ -9329,6 +9332,7 @@ def _kept_hops(
     kept: dict[str, _Paths],
     returned: _Paths,
     fields: frozenset[tuple[str, ...]],
+    classes: frozenset[str],
     writers: dict[int, list[KeyFrom]],
     depth: int,
     done: dict[tuple, list[KeptHop]],
@@ -9339,7 +9343,7 @@ def _kept_hops(
     it land in -- and, where the caller keeps or returns it again, its callers' hops, the call put first in their
     *via*, up to *depth* calls.  Read by the carry from the call (:class:`_PathCarry`'s *kept_values* and
     *call_values*), not by how the caller spells the object."""
-    key = (file, getattr(func, "lineno", 0), frozenset(kept.items()), returned, fields, depth)
+    key = (file, getattr(func, "lineno", 0), frozenset(kept.items()), returned, fields, classes, depth)
     if key in done:
         return done[key]
     done[key] = []
@@ -9395,7 +9399,7 @@ def _kept_hops(
                 if path and (path[-1],) in fields
             }
         )
-        persisted, taken = _persisting(writers, site.func, carry, fields)
+        persisted, taken = _persisting(writers, site.func, carry, fields, classes)
         calls = _handed_on(reading, site.file, site.func, carry, taken | {id(site.call)})
         hop = KeptHop(
             way=HOP_KEPT if values else HOP_RETURNED,
@@ -9417,7 +9421,9 @@ def _kept_hops(
         again = {name: paths for name, paths in carry.kept().items() if name in parameters}
         back = carry.returns()
         if again or back:
-            for further in _kept_hops(reading, site.file, site.func, again, back, fields, writers, depth - 1, done):
+            for further in _kept_hops(
+                reading, site.file, site.func, again, back, fields, classes, writers, depth - 1, done
+            ):
                 copied = further.model_copy(update={"via": [at, *further.via]})
                 copied._down = further._down
                 hops.append(copied)
@@ -9426,14 +9432,22 @@ def _kept_hops(
 
 
 def _persisting(
-    writers: dict[int, list[KeyFrom]], func: ast.AST, carry: _PathCarry, fields: frozenset[tuple[str, ...]]
+    writers: dict[int, list[KeyFrom]],
+    func: ast.AST,
+    carry: _PathCarry,
+    fields: frozenset[tuple[str, ...]],
+    classes: frozenset[str],
 ) -> tuple[list[KeptWrite], set[int]]:
     """*func*'s writes persisting the object (:attr:`KeptHop.persisted`): those of *writers* whose object, where its
-    call takes it, holds one of *fields* as its own field by *carry* -- and the ids of those calls."""
+    call takes it, holds one of *fields* as its own field by *carry*, and is of one of the object's *classes* where
+    the write says its object's class -- a dataset given the value of a task's field is no write of the task -- and
+    the ids of those calls."""
     persisted: dict[tuple[int, str], KeptWrite] = {}
     taken: set[int] = set()
     for writer in writers.get(id(func), ()):
-        spelled, _class, takers, _excluded = writer._object  # type: ignore[misc]
+        spelled, written, takers, _excluded = writer._object  # type: ignore[misc]
+        if written and classes and written not in classes:
+            continue
         for taker in takers:
             objects = [
                 one
@@ -9469,6 +9483,7 @@ def _down_hops(
     reading: _Reading,
     starts: list[tuple[list[str], str, _PathCarry, list[tuple[ast.Call, Placed]]]],
     fields: frozenset[tuple[str, ...]],
+    classes: frozenset[str],
     writers: dict[int, list[KeyFrom]],
     into: dict[tuple, tuple],
 ) -> list[KeptHop]:
@@ -9498,10 +9513,10 @@ def _down_hops(
                         )
                     )
                     continue
-                read = into.get((key, fields))
+                read = into.get((key, fields, classes))
                 if read is None:
                     inner = _PathCarry(reading, target.file, target.func, (), seeds=given)
-                    persisted, taken = _persisting(writers, target.func, inner, fields)
+                    persisted, taken = _persisting(writers, target.func, inner, fields, classes)
                     held = sorted(
                         {
                             name + "".join(path[:-1])
@@ -9510,7 +9525,7 @@ def _down_hops(
                             if path and (path[-1],) in fields
                         }
                     )
-                    read = into[(key, fields)] = (
+                    read = into[(key, fields, classes)] = (
                         inner,
                         persisted,
                         held,
