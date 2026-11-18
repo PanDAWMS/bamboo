@@ -501,3 +501,76 @@ def test_the_rows_steps_statuslogs_are_laid_over_the_fetchs_by_class_and_key():
     }
     # the fetch's is not changed in place
     assert fetched["JediTaskSpec"]["by_key"] == {"1": {"states": ["a"]}}
+
+
+# ------------------------------------------------------------------ a task's datasets through task/get_dataset_rows
+
+
+def _dataset_rows(rows: list[dict], truncated: bool = False):
+    """task/get_dataset_rows (panda-server 80134dc2): the columns as JediDatasetSpec spells them."""
+
+    async def dataset_rows(task_id):
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "rows": rows,
+                "truncated": truncated,
+                "max_rows": 1000,
+                "as_of": T(AS_OF),
+            },
+        }
+
+    return dataset_rows
+
+
+def test_by_the_endpoint_a_tasks_datasets_by_its_key_are_read_by_task_get_dataset_rows():
+    line = _line(S1_ASK)
+    got = RA.plan(line, TABLES, SITES, "endpoint")
+    assert [(c.part, c.role, c.request) for c in got.calls] == [
+        (FE.TASK_DATASET_ROWS, "collection", {"task_id": TID})
+    ]
+    assert got.histories is None and not got.why
+    # db_read by default, as before
+    assert [c.part for c in RA.plan(line, TABLES, SITES).calls] == ["db_read"]
+    # rows selected by another column stay db_read's
+    via = [{"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.masterID"}]
+    other = RA.plan(
+        _line({**S1_ASK, "where": {"masterID": 9}, "via": via}), TABLES, SITES, "endpoint"
+    )
+    assert [c.part for c in other.calls] == ["db_read"]
+
+
+async def _endpoint_answer(rows: list[dict], truncated: bool = False) -> dict:
+    line = _line(S1_ASK)
+    p = RA.plan(line, TABLES, SITES, "endpoint")
+    parts = FE.Parts(dataset_rows=_dataset_rows(rows, truncated))
+    return await RA.answer(line, p, parts, TABLES)
+
+
+async def test_by_the_endpoint_a_tasks_datasets_lay_out_as_rs():
+    by_r = await _joined_answer(
+        {"JEDI_Datasets": [{"datasetid": 11, "jeditaskid": TID, "type": "input"}]}
+    )
+    by_e = await _endpoint_answer([{"datasetID": 11, "jediTaskID": TID, "type": "input"}])
+    assert [s["part"] for s in by_e["steps"]] == [FE.TASK_DATASET_ROWS]
+    (r_entry,) = RB.answered([_doc(by_r)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)[0]["linked"]
+    (e_entry,) = RB.answered([_doc(by_e)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)[0]["linked"]
+    assert e_entry["source"] == f"task/get_dataset_rows as of 2026-10-13 10:00:00, where {{'jediTaskID': {TID}}}"
+    assert {k: v for k, v in e_entry.items() if k != "source"} == {
+        k: v for k, v in r_entry.items() if k != "source"
+    }
+    assert e_entry["table"] == "JEDI_Datasets"
+
+
+async def test_by_the_endpoint_a_task_with_no_dataset_is_an_entry_too():
+    sections, _ = RB.answered(
+        [_doc(await _endpoint_answer([]))], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES
+    )
+    assert [(e["table"], e["rows"]) for e in sections["linked"]] == [("JEDI_Datasets", [])]
+
+
+async def test_by_the_endpoint_a_cut_answer_is_left_out_and_said():
+    got = await _endpoint_answer([{"datasetID": 11, "jediTaskID": TID}], truncated=True)
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)
+    assert "linked" not in sections and left_out == ["collection JediDatasetSpec: truncated"]

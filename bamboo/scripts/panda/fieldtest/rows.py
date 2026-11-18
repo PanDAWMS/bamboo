@@ -59,6 +59,11 @@ on the clock of its own times, so the querier can compare them as text too.
 A task's ``counts`` and ``job_rows`` say the moment R read them as ``as_of``,
 cut down to its second: R runs a batch's queries in one read-only transaction
 and gives its moment, on the database's clock in UTC (``db_read_handlers``).
+Read through task/get_job_rows instead (fetch ``--via endpoint``), the counts
+are the first page's moment and the rows the last page's, and neither names a
+table (a final job is in jobsArchived4 or the archive, any other in
+jobsDefined4 or jobsActive4); the source says so.  task/get_dataset_rows'
+rows are laid as R's of JEDI_Datasets.
 
 **What is left out.**  A section whose answer is not complete -- rejected,
 failed, past its deadline, truncated -- is left out, and ``about`` says why: a
@@ -79,6 +84,9 @@ from typing import Any
 
 from bamboo.scripts.panda.fieldtest.fetch import (
     FILES,
+    TASK_DATASET_ROWS,
+    TASK_DATASET_TABLE,
+    TASK_JOB_ROWS,
     Tables,
     held_rows,
     job_of,
@@ -171,16 +179,46 @@ def stamp(t: datetime.datetime | None) -> str:
     return f"{t:%Y-%m-%d %H:%M:%S.%f}" if t else ""
 
 
+def _why(response: dict) -> str:
+    """Why an endpoint's response holds no rows: its refusal or error, else its message."""
+    data = response.get("data")
+    said = data if isinstance(data, dict) else {}
+    return str(
+        said.get("rejected")
+        or said.get("error")
+        or response.get("message")
+        or "no answer"
+    )
+
+
+def _lowered(row: dict) -> dict:
+    """An endpoint's row, keyed as the class spells its columns, in R's lower case."""
+    return {k.lower(): v for k, v in row.items()}
+
+
 class Laid:
-    """R's answers by role and why any is incomplete, and every other part's response."""
+    """R's answers by role and why any is incomplete, and every other part's response.
+
+    The endpoints that replace R (:data:`~bamboo.scripts.panda.fieldtest.fetch.TASK_JOB_ROWS`,
+    :data:`~bamboo.scripts.panda.fieldtest.fetch.TASK_DATASET_ROWS`) are laid as R's answers of the roles
+    they fill, in R's row form; ``via`` names the endpoint by role (R's roles have none), and a table it does
+    not name is None.
+    """
 
     def __init__(self, record: dict) -> None:
-        self.rows: dict[str, list[tuple[str, dict]]] = {}
+        self.rows: dict[str, list[tuple[str | None, dict]]] = {}
         self.incomplete: dict[str, list[str]] = {}
         self.as_of: dict[str, str] = {}
+        self.via: dict[str, str] = {}
         self.responses: dict[str, dict] = {}
         self.requests: dict[str, dict] = {}
         for step in record["steps"]:
+            if step["part"] == TASK_JOB_ROWS:
+                self._job_rows(step["response"])
+                continue
+            if step["part"] == TASK_DATASET_ROWS:
+                self._dataset_rows(step["response"])
+                continue
             if step["part"] != "db_read":
                 self.responses[step["part"]] = step["response"]
                 self.requests[step["part"]] = step["request"]
@@ -211,6 +249,51 @@ class Laid:
                     self.rows[role] += got
                 else:
                     self.rows[role] += got
+
+    def _job_rows(self, response: dict) -> None:
+        """task/get_job_rows' pages as R's ``job_rows`` and ``job_counts``, no table: the counts are the first
+        call's (every job of the window by jobStatus), as of its moment; the rows every page's, as of the last."""
+        for role in ("job_rows", "job_counts"):
+            self.rows.setdefault(role, [])
+        if not response.get("success"):
+            for role in ("job_rows", "job_counts"):
+                self.incomplete.setdefault(role, []).append(_why(response))
+            return
+        pages = [c["data"] for c in response["calls"]]
+        first, last = text(pages[0]["as_of"]), text(pages[-1]["as_of"])
+        self.via["job_counts"] = "task/get_job_rows"
+        self.via["job_rows"] = (
+            "task/get_job_rows"
+            if len(pages) == 1
+            else f"task/get_job_rows in {len(pages)} pages from {first}"
+        )
+        self.as_of["job_counts"], self.as_of["job_rows"] = first, last
+        self.rows["job_rows"] += [(None, _lowered(r)) for r in response["rows"]]
+        self.rows["job_counts"] += [
+            (None, {"jobstatus": status, "count(*)": n})
+            for status, n in sorted(response["counts"].items())
+        ]
+        if response.get("truncated"):
+            self.incomplete.setdefault("job_rows", []).append("truncated")
+
+    def _dataset_rows(self, response: dict) -> None:
+        """task/get_dataset_rows' answer as R's ``collection`` answer of its one table."""
+        self.rows.setdefault("collection", [])
+        self.via["collection"] = "task/get_dataset_rows"
+        data = response.get("data") if response.get("success") else None
+        if not isinstance(data, dict) or "rows" not in data:
+            self.incomplete.setdefault("collection", []).append(_why(response))
+            return
+        self.as_of["collection"] = text(data["as_of"])
+        self.rows["collection"] += [
+            (TASK_DATASET_TABLE, _lowered(r)) for r in data["rows"]
+        ]
+        if data.get("truncated"):
+            self.incomplete.setdefault("collection", []).append("truncated")
+
+    def read_by(self, role: str) -> str:
+        """What read *role*'s rows, for a source line: R, or the endpoint that replaced it."""
+        return self.via.get(role, "R")
 
     def complete(self, role: str) -> bool:
         return role in self.rows and role not in self.incomplete
@@ -526,11 +609,11 @@ def joined(
         return [], f"no column list of {element} was read from the pin"
     (pair,) = via
     read = {
-        "source": f"R as of {laid.as_of.get('collection')}, where {ask['where']}",
+        "source": f"{laid.read_by('collection')} as of {laid.as_of.get('collection')}, where {ask['where']}",
         "as_of": down_to_second(laid.as_of.get("collection")),
         "clock": DATABASE,
     }
-    by_table: dict[str, list[dict]] = {
+    by_table: dict[str | None, list[dict]] = {
         t: [] for t in tables_answered(steps, "collection")
     }
     for table, r in laid.rows["collection"]:
@@ -550,11 +633,16 @@ def joined(
 
 
 def tables_answered(steps: list[dict], role: str) -> list[str]:
-    """The tables a done db_read answer of *role* holds, those with no row too."""
+    """The tables a done db_read answer of *role* holds, those with no row too; task/get_dataset_rows' one table
+    for ``collection``."""
     out = []
     for step in steps:
         response = step["response"]
         data = response.get("data") if response.get("success") else None
+        if step["part"] == TASK_DATASET_ROWS:
+            if role == "collection" and isinstance(data, dict) and "rows" in data:
+                out.append(TASK_DATASET_TABLE)
+            continue
         if (
             step["part"] != "db_read"
             or not isinstance(data, dict)
@@ -585,15 +673,31 @@ def lay_linked(built: list[dict], entries: list[dict]) -> list[dict]:
     return list(by.values())
 
 
+#: what a task's jobs read through task/get_job_rows say of the table each is in, which the endpoint does not name
+NO_TABLE = (
+    "no table named: a final job is in jobsArchived4 or the archive, "
+    "any other in jobsDefined4 or jobsActive4"
+)
+
+
 def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
     # the counts are read apart from the rows, so neither waits on the other
     if laid.complete("job_counts"):
+        by = (
+            "table and jobStatus"
+            if "job_counts" not in laid.via
+            else f"jobStatus ({NO_TABLE})"
+        )
         out["counts"] = {
-            "source": f"R as of {laid.as_of.get('job_counts')}, every job of the task by table and jobStatus",
+            "source": f"{laid.read_by('job_counts')} as of {laid.as_of.get('job_counts')}, every job of the task by {by}",
             "as_of": down_to_second(laid.as_of.get("job_counts")),
             "clock": DATABASE,
             "rows": [
-                {"table": t, "jobStatus": r["jobstatus"], "n": r["count(*)"]}
+                {
+                    **({"table": t} if t else {}),
+                    "jobStatus": r["jobstatus"],
+                    "n": r["count(*)"],
+                }
                 for t, r in laid.rows["job_counts"]
             ],
         }
@@ -622,11 +726,19 @@ def _task_sections(out: dict, laid: Laid, left_out: list[str]) -> None:
         history = by_pandaid.get(str(r["pandaid"]), [])
         final = next((h["time"] for h in history if h["status"] in FINAL_STATES), None)
         rows.append(
-            {"tbl": table, **{c: text(v) for c, v in r.items()}, "t_final": final}
+            {
+                **({"tbl": table} if table else {}),
+                **{c: text(v) for c, v in r.items()},
+                "t_final": final,
+            }
         )
+    where = (
+        f"in {sorted({t for t, _ in laid.rows['job_rows'] if t})}; a PandaID in two tables is two rows"
+        if "job_rows" not in laid.via
+        else f"in every table, a row the same in two tables once; {NO_TABLE}"
+    )
     out["job_rows"] = {
-        "source": f"R as of {laid.as_of.get('job_rows')}, the jobs of the task in {sorted({t for t, _ in laid.rows['job_rows']})}; "
-        "a PandaID in two tables is two rows",
+        "source": f"{laid.read_by('job_rows')} as of {laid.as_of.get('job_rows')}, the jobs of the task {where}",
         "as_of": down_to_second(laid.as_of.get("job_rows")),
         "clock": DATABASE,
         "rows": rows,
@@ -645,11 +757,11 @@ def _task_jobs_read(laid: Laid, spellings: dict[str, dict[str, str]]) -> Answer 
     if not laid.complete("job_rows"):
         return None
     read = {
-        "source": f"R as of {laid.as_of.get('job_rows')}",
+        "source": f"{laid.read_by('job_rows')} as of {laid.as_of.get('job_rows')}",
         "as_of": down_to_second(laid.as_of.get("job_rows")),
         "clock": DATABASE,
     }
-    by_table: dict[str, list[dict]] = {}
+    by_table: dict[str | None, list[dict]] = {}
     for table, r in laid.rows["job_rows"]:
         by_table.setdefault(table, []).append(columns(r, spellings["JobSpec"], set()))
     return [(t, read, None, rows) for t, rows in by_table.items()]

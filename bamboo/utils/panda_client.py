@@ -24,13 +24,14 @@ import json
 import logging
 import os
 import re
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from bamboo.utils.narrator import say, thinking
 
-import warnings
 from urllib3.exceptions import InsecureRequestWarning
+
+from bamboo.utils.narrator import say, thinking
 
 warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 
@@ -622,6 +623,20 @@ async def get_task_status_history(task_id: int) -> dict[str, Any]:
     )
 
 
+async def get_task_command_history(task_id: int) -> dict[str, Any]:
+    """The task commands TASKS_COMMANDLOG holds for one task: the whole response.
+
+    task/get_command_history (panda-server c41d36d, in production since
+    2026-11-18): a row per command a task_api endpoint received for the task,
+    written before the command ran, with its status (received, responded,
+    error, queued, accepted, rejected, superseded).  On success ``data`` holds
+    the rows with ``as_of`` and ``retained_from``.
+    """
+    return await asyncio.to_thread(
+        _call_api_full, "get", "task/get_command_history", {"task_id": int(task_id)}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rows read by key, without the async daemon
 # ---------------------------------------------------------------------------
@@ -725,6 +740,88 @@ async def get_task_detailed_info(task_id: int) -> dict[str, Any]:
         _call_api_full, "get", "task/get_detailed_info", {"task_id": int(task_id)}
     )
     return {**response, "asked_at": asked_at}
+
+
+#: most pages one read of a task's jobs takes (task/get_job_rows gives at most
+#: 1000 rows a page); a task with more is left truncated
+TASK_JOB_PAGES = 50
+
+
+async def get_task_job_rows(task_id: int, since: str | None = None) -> dict[str, Any]:
+    """A task's jobs and their number by jobStatus: task/get_job_rows, page by page.
+
+    The endpoint (panda-server 80134dc2, pages from 2c915d4e) reads
+    jobsDefined4, jobsActive4, jobsArchived4 and ATLAS_PANDAARCH.jobsArchived
+    in one UNION, a row the same in two tables once (two copies of a job that
+    differ in a column are two rows), and names no table:
+    a job in a final state is in jobsArchived4 or the archive, any other in
+    jobsDefined4 or jobsActive4 (tmaeno, 2026-11-18).  jobsArchived4 and the
+    archive are read from *since* (the task's creation without it), widened by
+    the server to whole UTC days.  A call gives at most ``max_rows`` rows in
+    PandaID order and ``truncated`` when there are more; the next page is asked
+    with ``after_panda_id``, the last PandaID before.  Every call counts every
+    job of the window by jobStatus.
+
+    Args:
+        task_id: the JEDI task ID.
+        since: the start of the window, in UTC (``2026-10-12 14:30:45``).
+
+    Returns:
+        On success ``{"success": True, "rows", "truncated", "counts", "as_of",
+        "since", "until", "retained_from", "pages", "calls"}``: the rows of
+        every page in order; counts and as_of the first call's, which read its
+        rows and counts in one transaction; since, until and retained_from the
+        first call's too; truncated whether the last page read was cut (after
+        :data:`TASK_JOB_PAGES` pages, or a cut page with no row).  Otherwise
+        the first response that failed, as it came, with ``calls`` added.
+        ``calls`` holds every response, for the record.
+    """
+    request: dict[str, Any] = {"task_id": int(task_id)}
+    if since is not None:
+        request["since"] = since
+    calls: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    after: int | None = None
+    data: dict[str, Any] = {}
+    while len(calls) < TASK_JOB_PAGES:
+        page = {**request, **({"after_panda_id": after} if after is not None else {})}
+        response = await asyncio.to_thread(
+            _call_api_full, "get", "task/get_job_rows", page
+        )
+        calls.append(response)
+        got = response.get("data") if response.get("success") else None
+        if not isinstance(got, dict) or "rows" not in got:
+            return {**response, "calls": calls}
+        data = got
+        rows += data["rows"]
+        if not data.get("truncated") or not data["rows"]:
+            break
+        after = int(data["rows"][-1]["PandaID"])
+    first = calls[0]["data"]
+    return {
+        "success": True,
+        "rows": rows,
+        "truncated": bool(data.get("truncated")),
+        "counts": first["counts"],
+        "as_of": first["as_of"],
+        "since": first.get("since"),
+        "until": first.get("until"),
+        "retained_from": first.get("retained_from"),
+        "pages": len(calls),
+        "calls": calls,
+    }
+
+
+async def get_task_dataset_rows(task_id: int) -> dict[str, Any]:
+    """Every JEDI_Datasets column of one task's datasets: the whole response of task/get_dataset_rows.
+
+    panda-server 80134dc2.  On success ``data`` is ``{"rows", "truncated",
+    "max_rows", "as_of"}``: the rows keyed as JediDatasetSpec spells its
+    columns, None for NULL, ordered by datasetID, at most ``max_rows``.
+    """
+    return await asyncio.to_thread(
+        _call_api_full, "get", "task/get_dataset_rows", {"task_id": int(task_id)}
+    )
 
 
 async def db_read(

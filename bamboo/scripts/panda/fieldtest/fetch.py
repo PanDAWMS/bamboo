@@ -20,6 +20,9 @@ class is written here (:data:`LINKS`) until the map exports it.
 comes from a plain endpoint, answered at once.  The task's jobs and
 their counts are read through ``db_read``, which runs in the async daemon's
 cycle and may wait behind its greps; one batch holds all four of its queries.
+With ``--via endpoint`` they are read through task/get_job_rows instead
+(panda-server 80134dc2, :data:`TASK_JOB_ROWS`): every table in one UNION, page
+by page, no table named, counts by jobStatus alone.
 
 **The archive.**  ``job/get_description_incl_archive`` looks in the archive
 for the last 90 days only.  The task's jobs are asked of ATLAS_PANDAARCH with
@@ -184,6 +187,8 @@ class Parts:
     task: Callable[[int], Awaitable[dict]] = PC.get_task_detailed_info
     job_history: Callable[..., Awaitable[dict]] = PC.get_job_status_history
     task_history: Callable[[int], Awaitable[dict]] = PC.get_task_status_history
+    job_rows: Callable[..., Awaitable[dict]] = PC.get_task_job_rows
+    dataset_rows: Callable[[int], Awaitable[dict]] = PC.get_task_dataset_rows
 
 
 @dataclass
@@ -335,6 +340,30 @@ async def _task_jobs(
     return [r for _, r in (rows_of(live_rows) or []) + (rows_of(arch_rows) or [])]
 
 
+#: the part reading a task's jobs and their number through task/get_job_rows (``--via endpoint``)
+TASK_JOB_ROWS = "task_job_rows"
+#: the part reading a task's datasets through task/get_dataset_rows (rowsask), and the one table it reads
+TASK_DATASET_ROWS = "task_dataset_rows"
+TASK_DATASET_TABLE = "JEDI_Datasets"
+
+
+async def _task_job_rows(
+    values: list, asked: Asked, rec: Record, parts: Parts, tables: Tables
+) -> list[dict]:
+    """A task's jobs and their number by jobStatus through task/get_job_rows, every page, from the task's creation.
+
+    One UNION over every table and no table named (a final job is in jobsArchived4 or the archive, any other
+    in jobsDefined4 or jobsActive4); the server widens the start to the UTC day, as the history's.
+    """
+    (key,) = values
+    created = when(asked.row.get(tables.created[asked.cls])) if asked.row else None
+    window = {"since": f"{created:%Y-%m-%d %H:%M:%S}"} if created else {}
+    response = await rec.call(
+        TASK_JOB_ROWS, parts.job_rows(key, **window), {"task_id": key, **window}
+    )
+    return list(response.get("rows") or []) if response.get("success") else []
+
+
 async def _job_history(
     ids: list[int], made: datetime.datetime | None, rec: Record, parts: Parts
 ) -> None:
@@ -356,6 +385,9 @@ async def _task_history(
 KEY_ROW = {"JobSpec": _job_row, "JediTaskSpec": _task_row}
 #: the call reading the rows a link names, by where it leads: the rows found
 LINK_ROWS = {"JobSpec.jediTaskID": _task_jobs}
+#: the calls reading a link's rows by the way a fetch reads them: db_read (the async daemon), or the endpoints
+#: that replace it (panda-server 80134dc2; ``--via endpoint``)
+VIA = {"db_read": LINK_ROWS, "endpoint": {"JobSpec.jediTaskID": _task_job_rows}}
 #: the call reading the status histories of a class's rows, from the first one's creation where it takes a bound
 HISTORY = {"JobSpec": _job_history, "JediTaskSpec": _task_history}
 
@@ -401,13 +433,18 @@ def link_values(
 
 
 async def fetch_key(
-    cls: str, key: int, rec: Record, parts: Parts, tables: Tables
+    cls: str,
+    key: int,
+    rec: Record,
+    parts: Parts,
+    tables: Tables,
+    via: str = "db_read",
 ) -> None:
     """The key's row, the rows its links name one step on, then the histories of the key and of the rows found.
 
     The rows one step on are named by the key's row and the rows its answer
     holds (a job's files); all the values of the links leading to one place
-    are asked in one call.
+    are asked in one call, the way *via* names (:data:`VIA`).
     """
     row, response = await KEY_ROW[cls](key, rec, parts)
     asked = Asked(cls, key, row, response)
@@ -417,7 +454,7 @@ async def fetch_key(
         link.dst for c in rows for link in links_from(c) if not link.held
     ):
         if values := link_values(rows, dst, asked, tables):
-            got = await LINK_ROWS[dst](values, asked, rec, parts, tables)
+            got = await VIA[via][dst](values, asked, rec, parts, tables)
             found.setdefault(dst.partition(".")[0], []).extend(got)
     await HISTORY[cls]([key], made(tables.created[cls], rows[cls]), rec, parts)
     for c, got in found.items():
@@ -431,19 +468,25 @@ def key_class(question: dict) -> str:
     return question["subject"].partition(".")[0]
 
 
-async def fetch(question: dict, tables: Tables, parts: Parts | None = None) -> dict:
-    """The record of everything asked for *question*'s key, by the dump's *tables*."""
+async def fetch(
+    question: dict,
+    tables: Tables,
+    parts: Parts | None = None,
+    via: str = "db_read",
+) -> dict:
+    """The record of everything asked for *question*'s key, by the dump's *tables*, a link's rows read *via* (:data:`VIA`)."""
     parts = parts or Parts()
     cls = key_class(question)
     rec = Record(question)
     started = datetime.datetime.now(datetime.timezone.utc)
     if cls not in KEY_ROW:
         raise FieldTestError(f"no plan yet for a key of {cls}")
-    await fetch_key(cls, int(question["key"]), rec, parts, tables)
+    await fetch_key(cls, int(question["key"]), rec, parts, tables, via)
     return {
         "about": "Every request this fetch made and every response as it came, in order (bamboo.scripts.panda.fieldtest.fetch).",
         "question": question,
         "key_class": cls,
+        "via": via,
         "server": os.environ.get("PANDA_API_URL_SSL", ""),
         "started": started.isoformat(),
         "finished": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -464,9 +507,16 @@ def main(argv: list[str] | None = None) -> int:
         help="the map's dump whose tables name each class's key and tables (the case's pair's MAP_DUMP)",
     )
     ap.add_argument("--out", required=True, help="where to write the record")
+    ap.add_argument(
+        "--via",
+        choices=sorted(VIA),
+        default="db_read",
+        help="how a task's jobs are read: db_read (the async daemon; the default) or endpoint "
+        "(task/get_job_rows, panda-server 80134dc2: use it once that version runs)",
+    )
     a = ap.parse_args(argv)
     case = load_case(Path(a.case))
-    record = asyncio.run(fetch(case["question"], Tables.read(a.dump)))
+    record = asyncio.run(fetch(case["question"], Tables.read(a.dump), via=a.via))
     record["tables_from"] = {"dump": str(a.dump), "sha256": sha256(a.dump)}
     Path(a.out).write_text(json.dumps(record, indent=1) + "\n")
     print(

@@ -66,6 +66,8 @@ class FakePanda:
         )
         self.jobs, self.task_row = jobs or {}, task
         self.calls: list[tuple[str, object]] = []
+        #: task/get_job_rows: rows a page, and an answer given instead (a refusal)
+        self.page_rows, self.job_rows_answer = 1000, None
 
     def parts(self) -> FE.Parts:
         return FE.Parts(
@@ -74,7 +76,61 @@ class FakePanda:
             task=self.get_task,
             job_history=self.job_history,
             task_history=self.task_history,
+            job_rows=self.job_rows,
         )
+
+    async def job_rows(self, task_id, since=None):
+        """task/get_job_rows read whole by the client (PC.get_task_job_rows): one UNION over the four tables, a row
+        the same in two tables once, the columns as JobSpec spells them, PandaID order, pages of page_rows, each
+        page its own moment, every job counted once by jobStatus on every page."""
+        self.calls.append(("job_rows", {"task_id": task_id, "since": since}))
+        if self.job_rows_answer is not None:
+            return self.job_rows_answer
+        spelled = {c.lower(): c for c in FE.JOB_ROW_COLUMNS}
+        union: list[dict] = []
+        for t in ("jobsDefined4", "jobsActive4", "jobsArchived4", "jobsArchived"):
+            for r in self.tables.get(t, []):
+                row = {spelled[k]: v for k, v in r.items() if k in spelled}
+                if row not in union:
+                    union.append(row)
+        union.sort(key=lambda r: r["PandaID"])
+        counts: dict = {}
+        for _pid, status in {(r["PandaID"], r["jobStatus"]) for r in union}:
+            counts[status] = counts.get(status, 0) + 1
+        pages = [
+            union[i : i + self.page_rows]
+            for i in range(0, max(len(union), 1), self.page_rows)
+        ]
+        calls = [
+            {
+                "success": True,
+                "message": "",
+                "data": {
+                    "rows": page,
+                    "truncated": n + 1 < len(pages),
+                    "max_rows": self.page_rows,
+                    "counts": counts,
+                    "as_of": T(f"2026-10-13T10:00:0{n}.500000"),
+                    "since": T("2026-09-27T00:00:00") if since else None,
+                    "until": T("2026-10-14T00:00:00"),
+                    "retained_from": None,
+                },
+            }
+            for n, page in enumerate(pages)
+        ]
+        first = calls[0]["data"]
+        return {
+            "success": True,
+            "rows": union,
+            "truncated": False,
+            "counts": counts,
+            "as_of": first["as_of"],
+            "since": first["since"],
+            "until": first["until"],
+            "retained_from": None,
+            "pages": len(calls),
+            "calls": calls,
+        }
 
     async def get_jobs(self, job_ids):
         self.calls.append(("jobs", job_ids))
@@ -861,3 +917,113 @@ async def test_a_tasks_rows_file_says_its_jobs_again_by_link_and_table_and_each_
         "11": ["running", "finished"],
         "12": ["running", "failed"],
     }
+
+
+# ------------------------------------------------------------------ a task's jobs through task/get_job_rows
+
+JOBS_VIA = {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}
+
+
+async def _fetch_by_endpoint(panda: FakePanda) -> dict:
+    return await FE.fetch(TASK_Q, TABLES, panda.parts(), via="endpoint")
+
+
+async def test_by_the_endpoint_a_tasks_jobs_are_one_read_from_its_creation_then_their_histories():
+    panda = _task_panda()
+    record = await _fetch_by_endpoint(panda)
+    assert [c[0] for c in panda.calls] == [
+        "task",
+        "job_rows",
+        "task_history",
+        "job_history",
+    ]
+    # the task's creation as it is: the server widens it to the UTC day
+    assert panda.calls[1][1] == {"task_id": TID, "since": "2026-09-27 06:50:00"}
+    assert panda.calls[3][1] == {"job_ids": [11, 12], "since": "2026-09-27 07:08:32"}
+    assert record["via"] == "endpoint"
+    assert [s["part"] for s in record["steps"]] == [
+        "task",
+        FE.TASK_JOB_ROWS,
+        "task_history",
+        "job_history",
+    ]
+
+
+async def test_by_the_endpoint_a_task_not_answered_is_read_with_no_start():
+    panda = _task_panda(task=None)
+    await _fetch_by_endpoint(panda)
+    assert panda.calls[1] == ("job_rows", {"task_id": TID, "since": None})
+
+
+async def test_by_the_endpoint_a_tasks_rows_file_holds_rs_rows_with_no_table():
+    by_r = RB.build(await _fetch(_task_panda(), TASK_Q), SPELLINGS, TABLES)
+    by_e = RB.build(await _fetch_by_endpoint(_task_panda()), SPELLINGS, TABLES)
+
+    def but_table(rows):
+        return sorted(
+            json.dumps({k: v for k, v in r.items() if k != "tbl"}, sort_keys=True)
+            for r in rows
+        )
+
+    # R's lower-case columns, times as text, t_final: the same rows but the table
+    assert but_table(by_e["job_rows"]["rows"]) == but_table(by_r["job_rows"]["rows"])
+    assert all("tbl" not in r for r in by_e["job_rows"]["rows"])
+    # every job once by jobStatus, no table
+    assert by_e["counts"]["rows"] == [
+        {"jobStatus": "failed", "n": 1},
+        {"jobStatus": "finished", "n": 1},
+    ]
+    assert by_e["counts"]["source"] == (
+        "task/get_job_rows as of 2026-10-13 10:00:00.500000, every job of the task by "
+        f"jobStatus ({RB.NO_TABLE})"
+    )
+    assert by_e["job_rows"]["source"] == (
+        "task/get_job_rows as of 2026-10-13 10:00:00.500000, the jobs of the task in every table, "
+        f"a row the same in two tables once; {RB.NO_TABLE}"
+    )
+    # one page: the rows and the counts are of one moment, as R's batch
+    assert by_e["counts"]["as_of"] == by_e["job_rows"]["as_of"] == "2026-10-13 10:00:00"
+    assert by_e["job_statuslog"] == by_r["job_statuslog"]
+    jobs = [e for e in by_e["linked"] if e["via"] == JOBS_VIA]
+    assert [("table" in e, [r["PandaID"] for r in e["rows"]]) for e in jobs] == [
+        (False, [11, 11, 12])
+    ]
+    assert jobs[0]["source"] == "task/get_job_rows as of 2026-10-13 10:00:00.500000"
+    assert jobs[0]["rows"][0]["jobStatus"] == "finished"
+
+
+async def test_by_the_endpoint_pages_put_the_rows_at_the_last_pages_moment_and_the_counts_at_the_first():
+    panda = _task_panda()
+    panda.page_rows = 2
+    out = RB.build(await _fetch_by_endpoint(panda), SPELLINGS, TABLES)
+    assert out["counts"]["as_of"] == "2026-10-13 10:00:00"
+    assert out["job_rows"]["as_of"] == "2026-10-13 10:00:01"
+    assert out["job_rows"]["source"].startswith(
+        "task/get_job_rows in 2 pages from 2026-10-13 10:00:00.500000 as of 2026-10-13 10:00:01.500000, "
+    )
+    assert len(out["job_rows"]["rows"]) == 3
+
+
+async def test_by_the_endpoint_a_cut_read_leaves_the_rows_out_and_keeps_the_counts():
+    panda = _task_panda()
+    panda.job_rows_answer = {**(await panda.job_rows(TID)), "truncated": True}
+    out = RB.build(await _fetch_by_endpoint(panda), SPELLINGS, TABLES)
+    assert "job_rows" not in out and "job_statuslog" not in out
+    assert "job_rows, job_statuslog: ['truncated']" in out["about"]
+    assert [c["n"] for c in out["counts"]["rows"]] == [1, 1]
+
+
+async def test_by_the_endpoint_a_refused_read_leaves_the_rows_and_counts_out_with_why():
+    panda = _task_panda()
+    panda.job_rows_answer = {
+        "success": False,
+        "message": "",
+        "data": {"rejected": "probe_budget", "probes": 2000, "budget": 1000},
+        "calls": [],
+    }
+    out = RB.build(await _fetch_by_endpoint(panda), SPELLINGS, TABLES)
+    assert "job_rows" not in out and "counts" not in out
+    assert "counts: ['probe_budget']" in out["about"]
+    assert "job_rows, job_statuslog: ['probe_budget']" in out["about"]
+    # no job to follow: no job history is asked
+    assert [c[0] for c in panda.calls] == ["task", "job_rows", "task_history"]

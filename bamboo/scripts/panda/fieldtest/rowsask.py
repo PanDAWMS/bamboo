@@ -56,6 +56,8 @@ from bamboo.scripts.panda.fieldtest.fetch import (
     JOB_ROW_COLUMNS,
     KEY_REQUEST,
     NO_CREATION,
+    TASK_DATASET_ROWS,
+    TASK_DATASET_TABLE,
     Parts,
     Record,
     Tables,
@@ -79,7 +81,11 @@ PASS_TIME = "%Y-%m-%d %H:%M:%S,%f"
 CALLS = {
     "jobs": lambda parts, request: parts.jobs(request["job_ids"]),
     "task": lambda parts, request: parts.task(request["task_id"]),
+    TASK_DATASET_ROWS: lambda parts, request: parts.dataset_rows(request["task_id"]),
 }
+#: the ways a plan reads rows: db_read (the async daemon), or the endpoints that replace it where one reads the
+#: rows asked (panda-server 80134dc2: task/get_dataset_rows, a task's datasets by jediTaskID)
+VIAS = ("db_read", "endpoint")
 #: a round's answers in a records directory
 ROUND = re.compile(r"^rows-r(\d+)\.json$")
 
@@ -116,12 +122,12 @@ class Sites:
         }
 
 
-def plan(line: dict, tables: Tables, sites: Sites) -> Plan:
-    """The plan for one line of a rows-asks file."""
+def plan(line: dict, tables: Tables, sites: Sites, via: str = "db_read") -> Plan:
+    """The plan for one line of a rows-asks file, its rows read *via* (:data:`VIAS`)."""
     ask = line["rows"]
     kind = ask.get("kind")
     if kind == "collection":
-        return _collection(ask, tables)
+        return _collection(ask, tables, via)
     if kind == "statement":
         return _statement(ask, tables, sites)
     if kind == "sql":
@@ -129,7 +135,7 @@ def plan(line: dict, tables: Tables, sites: Sites) -> Plan:
     return Plan(ask, why=f"no rule for an ask of kind {kind!r}")
 
 
-def _collection(ask: dict, tables: Tables) -> Plan:
+def _collection(ask: dict, tables: Tables, way: str = "db_read") -> Plan:
     cls, attr, element = ask["row"]["entity"], ask["attr"], ask.get("entity")
     key = ask["row"]["key"]
     via = ask.get("via") or []
@@ -151,16 +157,23 @@ def _collection(ask: dict, tables: Tables) -> Plan:
     if element not in tables.live:
         return Plan(ask, why=f"the dump gives no tables of {element}")
     if "where" in ask:
-        return _joined(ask, cls, element, via, tables)
+        return _joined(ask, cls, element, via, tables, way)
     if not set(key) <= set(tables.identity.get(element, ())):
         return Plan(
             ask,
             why=f"{element}'s tables name a row by {list(tables.identity.get(element, ()))}, not by {sorted(key)}",
         )
-    return _read(ask, element, key, tables)
+    return _read(ask, element, key, tables, way)
 
 
-def _joined(ask: dict, cls: str, element: str, via: list[dict], tables: Tables) -> Plan:
+def _joined(
+    ask: dict,
+    cls: str,
+    element: str,
+    via: list[dict],
+    tables: Tables,
+    way: str = "db_read",
+) -> Plan:
     """The rows of *element* a statement's joins name from the row: where the joins' ``to`` columns hold the row's
     values (the ask's ``where``), each join named in ``via`` from the row's class to *element*."""
     where = ask["where"]
@@ -172,14 +185,29 @@ def _joined(ask: dict, cls: str, element: str, via: list[dict], tables: Tables) 
             ask,
             why=f"the ask's via {via} does not join {cls} to {element} by its where's columns {sorted(where)}",
         )
-    return _read(ask, element, where, tables)
+    return _read(ask, element, where, tables, way)
 
 
-def _read(ask: dict, element: str, by: dict, tables: Tables) -> Plan:
+def _read(
+    ask: dict, element: str, by: dict, tables: Tables, way: str = "db_read"
+) -> Plan:
     """The rows of *element* where the columns of *by* hold its values, in every table of the class: the ask's
-    ``columns`` with the ones it selects by, or every column; then their histories where a call reads a class's."""
-    terms = [[c, "=", v] for c, v in sorted(by.items())]
+    ``columns`` with the ones it selects by, or every column; then their histories where a call reads a class's.
+
+    Read *way* ``endpoint``, a class whose one table is the one task/get_dataset_rows reads, asked by
+    ``jediTaskID`` alone, is read by that endpoint (every column, whatever the ask names)."""
     read = tables.live[element] + tables.archive.get(element, ())
+    if (
+        way == "endpoint"
+        and read == (TASK_DATASET_TABLE,)
+        and set(by) == {"jediTaskID"}
+        and element not in HISTORY
+    ):
+        return Plan(
+            ask,
+            [Call(TASK_DATASET_ROWS, "collection", {"task_id": int(by["jediTaskID"])})],
+        )
+    terms = [[c, "=", v] for c, v in sorted(by.items())]
     histories = element if element in HISTORY else None
     named = ask.get("columns")
     if named:
@@ -348,11 +376,18 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="ask PanDA, and write the answers to rows-r<n>.json in this directory",
     )
+    ap.add_argument(
+        "--via",
+        choices=VIAS,
+        default="db_read",
+        help="how rows are read: db_read (the async daemon; the default) or endpoint (the endpoints that replace "
+        "it where one reads the rows asked, panda-server 80134dc2: use it once that version runs)",
+    )
     a = ap.parse_args(argv)
     dump = json.loads(a.dump.read_text())
     tables, sites = Tables.of(dump), Sites(dump)
     lines = [json.loads(x) for x in a.asks.read_text().splitlines() if x.strip()]
-    plans = [plan(line, tables, sites) for line in lines]
+    plans = [plan(line, tables, sites, a.via) for line in lines]
     for p in plans:
         what = f"{len(p.calls)} call(s)" + (
             f", then {p.histories}'s histories" if p.histories else ""

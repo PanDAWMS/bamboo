@@ -238,6 +238,105 @@ async def test_task_history_returns_the_whole_response():
     assert got == {"success": False, "message": "db", "data": {"error": "ORA-01013"}}
 
 
+async def test_task_command_history_returns_the_whole_response():
+    answer = {
+        "success": True,
+        "message": "",
+        "data": {"rows": [], "as_of": _when("2026-11-18T21:00:00"), "retained_from": None},
+    }
+
+    def route(endpoint, data):
+        assert (endpoint, data) == ("task/get_command_history", {"task_id": 40000001})
+        return answer
+
+    ctx, _ = _patched(route)
+    with ctx:
+        assert await PC.get_task_command_history("40000001") == answer
+
+
+def _job_rows_server(n_jobs: int, max_rows: int):
+    """task/get_job_rows as panda-server 2c915d4e answers: PandaID order, at most max_rows a call, after_panda_id
+    for the next page, every job counted on every call, each call its own moment."""
+    jobs = [{"PandaID": 100 + i, "jobStatus": "finished"} for i in range(n_jobs)]
+    moments = iter(f"2026-11-18T21:00:0{i}" for i in range(10))
+
+    def route(endpoint, data):
+        assert endpoint == "task/get_job_rows"
+        after = data.get("after_panda_id")
+        left = [j for j in jobs if after is None or j["PandaID"] > after]
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "rows": left[:max_rows],
+                "truncated": len(left) > max_rows,
+                "max_rows": max_rows,
+                "counts": {"finished": n_jobs},
+                "as_of": _when(next(moments)),
+                "since": _when("2026-11-17T00:00:00"),
+                "until": _when("2026-11-19T00:00:00"),
+                "retained_from": None,
+                "after_panda_id": after,
+            },
+        }
+
+    return route
+
+
+async def test_task_job_rows_reads_every_page_by_the_last_pandaid():
+    ctx, calls = _patched(_job_rows_server(5, 2))
+    with ctx:
+        got = await PC.get_task_job_rows("40000001", since="2026-11-17 08:00:00")
+    assert [d.get("after_panda_id") for _, d in calls] == [None, 101, 103]
+    assert all(
+        d["task_id"] == 40000001 and d["since"] == "2026-11-17 08:00:00" for _, d in calls
+    )
+    assert [r["PandaID"] for r in got["rows"]] == [100, 101, 102, 103, 104]
+    assert got["success"] and not got["truncated"] and got["pages"] == 3
+    # the counts and the moment are the first call's; every response is kept
+    assert got["counts"] == {"finished": 5}
+    assert got["as_of"] == _when("2026-11-18T21:00:00")
+    assert len(got["calls"]) == 3
+
+
+async def test_task_job_rows_stops_at_its_page_limit_and_says_truncated(monkeypatch):
+    monkeypatch.setattr(PC, "TASK_JOB_PAGES", 2)
+    ctx, calls = _patched(_job_rows_server(5, 2))
+    with ctx:
+        got = await PC.get_task_job_rows(40000001)
+    assert "since" not in calls[0][1]
+    assert len(calls) == 2 and got["truncated"]
+    assert [r["PandaID"] for r in got["rows"]] == [100, 101, 102, 103]
+
+
+async def test_task_job_rows_returns_a_refusal_as_it_came_with_the_calls():
+    refusal = {
+        "success": False,
+        "message": "",
+        "data": {"rejected": "probe_budget", "probes": 2000, "partitions": 998, "budget": 1000},
+    }
+    ctx, _ = _patched(lambda endpoint, data: refusal)
+    with ctx:
+        got = await PC.get_task_job_rows(40000001)
+    assert got == {**refusal, "calls": [refusal]}
+
+
+async def test_task_dataset_rows_returns_the_whole_response():
+    answer = {
+        "success": True,
+        "message": "",
+        "data": {"rows": [{"datasetID": 1}], "truncated": False, "max_rows": 1000, "as_of": _when("2026-11-18T21:00:00")},
+    }
+
+    def route(endpoint, data):
+        assert (endpoint, data) == ("task/get_dataset_rows", {"task_id": 40000001})
+        return answer
+
+    ctx, _ = _patched(route)
+    with ctx:
+        assert await PC.get_task_dataset_rows("40000001") == answer
+
+
 def _per_machine_poll(expected, rows):
     complete = {
         r["machine_name"] for r in rows if r["status"] in ("done", "failed")
