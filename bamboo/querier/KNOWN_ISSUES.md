@@ -898,6 +898,19 @@ of them does (`rerun._copied_offset`).  updateJob's 509 `job.stateChangeTime = j
 `naive_utcnow()`, so NJ-starting-late's open stateChangeTime arms all write the clock.  A copy on some ways only
 (`before`), of another object's field, or of a row's column in SQL (`SET a=b`) stays a value not read.
 
+*Changed (P10, the investigator's u9/u10, 2026-11-18; the map's 3d30ddc, `KeptHop.way` returned / handed):* late's
+`after` is read as held all the stay where every arm writing the column is a birth (`_born_only`), now also one that
+sets it on an object its function returns or hands on whose kept hops persist it by a statement the map marks as making
+a new row (`made_then_born`): JobGenerator's doGenerate:1227 / doGenerateBuild:1983 / doGeneratePrePro:2165 set a job's
+prodSourceLabel before TaskBuffer.storeJobs hands it to insertNewJob's INSERT at 3200, so NJ-merging-late's
+copyArchive main@170 (`prodSourceLabel='managed'`) compares the row's value.  One way of the object to a birth is
+enough (doGenerate also hands the job to helpers at 1277, which persist nothing).  A way persisting it by a write of a
+row of the class that is no birth may write a row that existed (the map's caution): it counts only where it leaves the
+birth's way, in the function both pass, at a later call line (`_after_on_its_way`: setupper's activateJobs, keepJobs,
+updateJobs and archiveJob from storeJobs' 540, after its INSERT at 455/510) -- read by the lines' order, a premise.
+Those later writes persist the value the row was born with, no other arm writing the column; hops the map leaves open
+(too deep) are not read.
+
 ### K79. A write a print reached is read as run where the statuslog shows its statement's status, and as none of the row's where its key's selection takes other states
 
 A timeline (Q1) reads a write of a lock or time column as `reached` where a print shows the pass reached it but not its
@@ -1070,9 +1083,18 @@ guards in (by elimination; its conditions: ...)".  A status's arm its run shows 
 its guards held on come from, its run showing it ran (...)" (K54; "the values its guard reads at its run" for one no
 run of its own shows), and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'"
 (both "a method the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
-*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
-marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
-row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+P43 (the investigator's u10; 2026-11-18): the map now follows the object (codemap-xliv's ``KeptHop.way`` returned and
+handed), and an arm that sets the value on an object a birth then persists is a birth too (``rerun.birth_arm``: born,
+or P10's made then born) -- JobGenerator's doGenerate:1248/1250 (cloud), 1301 (gshare) on the job insertNewJob's
+INSERT at 3200 makes.  On a subject no history records as its own, such arms on no history row leave the statuslog
+row's try for a birth's try at the row's making (``_births_apart``): the row shows the value, not their write.  A
+birth's try now asks the run that made the row: the logs of the INSERTs' functions (``birth_statements``), for the key,
+over the making less and plus EDGE, on every machine, whole; a run there is said ("the run that made it: ...") and
+which arm wrote is still not read; an ask no record answers is kept, with no stop.  *Premise:* the making's time is the
+row's creation column, and the INSERT's function prints the key in its run (insertNewJob's ``inserted <PandaID>``).
+*Revisit:* when F3 is to read a writer marking its runs by another object's key (the job's jediTaskID, which its row
+holds; the birth's run's mark holds it too); when a writer only reads the row into its spec (getTasksToRefine_JEDI and
+the like) is told apart.
 
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and each walks on where none is the one
 

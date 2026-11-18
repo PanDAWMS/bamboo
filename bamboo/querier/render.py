@@ -367,6 +367,11 @@ TEMPLATES: dict[str, str] = {
     "functions-between-not-read": "the {n} function(s) between the call and it not read",
     "its-run-does-not-show": "its run does not show the line ran ({reason})",
     "a-birth-no-run": "a birth: it wrote as the row was made, at {time}; no run is read",
+    # P43: the run that made the row (rerun._birth_said)
+    "a-birth-its-run": "a birth: it wrote as the row was made, at {time}; the run that made it: {runs:join=; }{more} "
+                       "({funcs:join=, }, the INSERT its write is born by); whether the arm ran in that pass is not read",
+    "more-runs": " and {n} more",
+    "for-the-birth": "the run of {funcs:join=, } that made the row at {time}, on every machine",
     "logs-not-searched-whole-over": "its logs were not searched whole over {why}: it may have written in what was not",
     "no-line-holds-the-key": "no line of {logs:join=, } in the records holds {key}: its runs are not shown to name it",
     # the run that recorded the row (rerun._recorder_read, KNOWN_ISSUES.md K67)

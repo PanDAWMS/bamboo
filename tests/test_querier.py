@@ -19198,7 +19198,8 @@ def test_k4b_the_writes_persisting_a_kept_object_read_by_their_status_terms_at_a
     """K-4b (the map's (A)(B)(C)): extractCommon sets goal on an object it keeps (KEY_KEPT); the map's kept_hops name
     runImpl's flush at 602, read in registerTaskInOneShot_JEDI's 5831 (``status=:preStatus``).  On the call's ways the
     value is 'registered' (getTasksToRefine_JEDI's 1340) or the rows of @1369 (registered, staged); a way of another
-    caller is not the call's.  The task pending: no write lands.  Registered or staged, an open hop, or a write with no
+    caller is not the call's.  The task pending: no write lands.  A hop persisting another class's row (appendDatasets_JEDI's
+    dataset, the map's handed hops) is not one of its writes.  Registered or staged, an open hop, or a write with no
     status term: not read."""
     out = _ok(_run(tmp_path, """
         import datetime
@@ -19231,11 +19232,16 @@ def test_k4b_the_writes_persisting_a_kept_object_read_by_their_status_terms_at_a
         got = {s: read(s) for s in ("pending", "registered", "staged")}
         got["open"] = read("pending", (N(**{**vars(kept), "kept_hops": [N(owner="", open="no call placed", persisted=[])]}), flush, term))
         got["no term"] = read("pending", (kept, flush))
+        ds_hop = N(owner="m.py::appendDatasets_JEDI", open="", persisted=[N(statement=3776, object="datasetSpec")])
+        ds = N(owner="m.py::appendDatasets_JEDI", statement=3776, object="datasetSpec", term="jediTaskID=:jediTaskID",
+               attr="JediDatasetSpec.jediTaskID", writes={"JediDatasetSpec.creationTime": [3770]}, sources=[])
+        got["other class"] = read("pending", (N(**{**vars(kept), "kept_hops": [hop, ds_hop]}), flush, term, ds))
         print(json.dumps(got))
         """))
     got = json.loads(out.splitlines()[-1])
     assert got["pending"] == ("the 1 write(s) persisting it (runImpl) take the row in 'registered', "
                               "getTasksToRefine_JEDI@1369 (registered, staged) only, the statuslog holding 'pending' then"), got
+    assert got["other class"] == got["pending"], got
     assert got["registered"] is None and got["staged"] is None, got
     assert got["open"] is None and got["no term"] is None, got
 
@@ -19901,3 +19907,101 @@ def test_p67_a_flushs_printed_binds_are_the_writes_of_the_caller_arm_setting_the
     assert got["941"] == [["2026-11-15 06:07:06.797000", "ran", [None]], True], got
     assert got["946"] == [["2026-11-15 06:26:44.318000", "ran", ["a-pid"]], True], got
     assert got["no flush"] == [[], None], got
+
+
+def test_p10_an_arm_writing_on_an_object_a_birth_persists_counts_as_a_birth(tmp_path):
+    """P10 (the investigator's u9/u10; the map's ``KeptHop.way``): JobGenerator's doGenerate sets prodSourceLabel on the
+    job it returns, which insertNewJob's INSERT at 3200 (``new_row``) persists: the arm writes as a birth does, so
+    copyArchive's ``prodSourceLabel='managed'`` reads the row's value as held all the stay.  An object no birth persists,
+    or an arm whose statement writes the row itself, is not one."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        hop = lambda owner, *stmts, via=(): N(owner=owner, persisted=[N(statement=s, object="job") for s in stmts], via=list(via))
+        born_way = ["j.py:771", "t.py:455"]
+        RR.key_froms = lambda: [
+            N(owner="j.py::doGenerate", writes={"J.prodSourceLabel": [1227]}, unread="returned",
+              kept_hops=[hop("t.py::storeJobs"), hop("d.py::insertNewJob", 3200, via=born_way),
+                         hop("d.py::activateJobs", 803, via=["j.py:771", "t.py:540", "s.py:187"])]),
+            N(owner="j.py::doEarly", writes={"J.prodSourceLabel": [30]}, unread="returned",
+              kept_hops=[hop("d.py::insertNewJob", 3200, via=born_way), hop("d.py::activateJobs", 803, via=["j.py:771", "t.py:400"])]),
+            N(owner="d.py::activateJobs", statement=803, writes={"J.jobStatus": [790]}, new_row=None),
+            N(owner="j.py::doGenerate", writes={"J.prodSourceLabel": [1227]}, unread="handed to a call", kept_hops=[hop("h.py::helper")]),
+            N(owner="j.py::doOther", writes={"J.prodSourceLabel": [10]}, unread="returned", kept_hops=[hop("d.py::updateJob", 400)]),
+            N(owner="j.py::doSql", writes={"J.prodSourceLabel": [20]}, unread="", kept_hops=[]),
+            N(owner="d.py::insertNewJob", statement=3200, writes={"J.PandaID": [3190]}, new_row=True),
+            N(owner="d.py::updateJob", statement=400, writes={"J.jobStatus": [390]}, new_row=None)]
+        print(json.dumps([RR.made_then_born("j.py::doGenerate", N(line=1227), "J.prodSourceLabel"),
+                          RR.made_then_born("j.py::doOther", N(line=10), "J.prodSourceLabel"),
+                          RR.made_then_born("j.py::doSql", N(line=20), "J.prodSourceLabel"),
+                          RR.made_then_born("j.py::doEarly", N(line=30), "J.prodSourceLabel")]))
+        """))
+    # the map's caution: a way persisting the object by a write no birth makes counts only where it leaves the birth's
+    # way at a later call (t.py:540 after 455); doEarly's leaves it before (t.py:400), so it may write a row that existed
+    assert json.loads(out.splitlines()[-1]) == [True, False, False, False]
+
+
+def test_p43_an_arm_writing_as_the_row_is_made_is_read_at_the_birth_with_the_run_that_made_it(tmp_path):
+    """P43 (the investigator's u10): JobGenerator's doGenerate sets cloud on the job insertNewJob's INSERT at 3200 then
+    makes (P10's made then born); a value its rows hold beside the status (NR-J cloud) is not written at the statuslog
+    row that shows it.  H2 reads such arms at the row's making, a try of its own after the rows, the others at the row;
+    the birth's try asks the INSERT's function's log for the key around the making, and a run of it there is said as the
+    run that made the row.  A birth's own statement is its INSERT; an arm neither born nor made then born has none.  An
+    ask no record answers is kept, the birth said as before."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        hop = lambda owner, *stmts, via=(): N(owner=owner, persisted=[N(statement=s, object="job") for s in stmts], via=list(via))
+        RR.key_froms = lambda: [
+            N(owner="j.py::doGenerate", writes={"J.cloud": [1250]}, unread="returned",
+              kept_hops=[hop("d.py::insertNewJob", 3200, via=["j.py:771", "t.py:455"])]),
+            N(owner="d.py::insertNewJob", statement=3200, writes={"J.PandaID": [3190], "J.cloud": [3195]}, new_row=True),
+            N(owner="s.py::setup", statement=50, writes={"J.cloud": [40]}, new_row=None)]
+        statements = [RR.birth_statements("j.py::doGenerate", N(line=1250), "J.cloud"),
+                      RR.birth_statements("d.py::insertNewJob", N(line=3195), "J.cloud"),
+                      RR.birth_statements("s.py::setup", N(line=40), "J.cloud")]
+
+        reading = lambda owner, line: N(owner=owner, file=owner.partition("::")[0], lines=[line])
+        jg, st = reading("j.py::doGenerate", 1250), reading("s.py::setup", 40)
+        RR.PT.history = lambda subject: None
+        RR.mapdump.fragment = lambda: None
+        RR.AT.arms = lambda fragment, subject, readings, born=None: [
+            N(owner=r.owner, line=line, born=bool(born and born(r.owner, N(line=line))), unplaced="on no history row")
+            for r in readings for line in r.lines]
+        RR.AT.readings_of = lambda readings, arms: [r for r in readings if any(a.owner == r.owner for a in arms)]
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.say = lambda text: None
+        r._made_at = lambda cls: "2026-11-14 09:10:22"
+        closing = {"status": "pending", "time": "2026-11-14 09:10:23"}
+        apart = r._births_apart("J.cloud", [jg, st], [(closing, "asking", None)])
+        tries = [(s, a, [x.owner for x in own] if own is not None else None) for s, a, own in apart]
+
+        run = N(first="2026-11-14 09:10:22,500", last="2026-11-14 09:10:22,700", machine="m081", said=lambda: "the run R")
+        r.files_of = lambda owner, today, lines: ["panda-JediDBProxy.log"]
+        r._other_of = lambda key, log: None
+        RR.runs_for = lambda log, key, other: [run]
+        RR.of_mover = lambda run, owner: owner.endswith("insertNewJob")
+        RR.owners_of = lambda ids: {}
+        kept = []
+        r._keep_unanswered = lambda asks: kept.extend(asks)
+        made = apart[-1][0]
+        r._logs_at = lambda key, files, ask, owners: ({"panda-JediDBProxy.log": N()}, [])
+        shown = str(r._birth_said("J.cloud", "7", made, [jg]))
+        r._logs_at = lambda key, files, ask, owners: ({}, [("ask", "why")])
+        unasked = str(r._birth_said("J.cloud", "7", made, [jg]))
+        none = str(r._birth_said("J.cloud", "7", made, [st]))
+        print(json.dumps({"statements": statements, "tries": tries, "shown": shown, "unasked": unasked, "none": none,
+                          "kept": len(kept)}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["statements"] == [[["d.py::insertNewJob", 3200]], [["d.py::insertNewJob", 3200]], []], got
+    assert got["tries"] == [[{"status": "pending", "time": "2026-11-14 09:10:23"}, "asking", ["s.py::setup"]],
+                            [{"status": None, "time": "2026-11-14 09:10:22", "f3": "made"}, None, ["j.py::doGenerate"]]], got
+    assert got["shown"] == ("a birth: it wrote as the row was made, at 2026-11-14 09:10:22; the run that made it: the run R "
+                            "(insertNewJob, the INSERT its write is born by); whether the arm ran in that pass is not read"), got
+    assert got["unasked"] == got["none"] == "a birth: it wrote as the row was made, at 2026-11-14 09:10:22; no run is read", got
+    assert got["kept"] == 1, got

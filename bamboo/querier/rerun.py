@@ -1049,6 +1049,97 @@ def born(branch, marks: dict[int, list]) -> bool:
     return all(marks.get(line) and all(is_birth(kf) for kf in marks[line]) for line in lines)
 
 
+def made_then_born(owner: str, branch, subject: str) -> bool:
+    """P10 (the investigator's u9/u10; the map's 3d30ddc, ``KeptHop.way`` returned / handed): whether the arm *branch* of
+    *owner* sets *subject* on an object the function hands on or returns (the map's ``KeyFrom.unread``) that a write the
+    map marks as making a new row of the class persists (``kept_hops``' ``persisted``, a statement whose KeyFrom
+    :func:`is_birth`) on one of its ways: the value is set before the row is born, as a birth writes it.  JobGenerator's
+    doGenerate:1227 ``jobSpec.prodSourceLabel = ...`` on the job it returns (1887), which TaskBuffer.storeJobs hands to
+    insertNewJob's INSERT at 3200; the job handed to helpers at 1277 reaches no birth, and no write of the row itself.  Writes persisting the object after the birth write the same value where no other arm writes the column
+    (:meth:`Rerun._born_only` asks that of every arm)."""
+    return bool(_made_births(owner, branch, subject))
+
+
+_MADE: list = [None, {}]
+
+
+def _made_births(owner: str, branch, subject: str) -> tuple[tuple[str, int], ...]:
+    """:func:`made_then_born`'s births: the INSERTs (``(function, statement)``) persisting the object *owner*'s arm
+    *branch* sets *subject* on, where it is made then born; ``()`` where it is not.  Kept per key_froms."""
+    kfs = key_froms()
+    if _MADE[0] is not kfs:
+        _MADE[:] = [kfs, {}]
+    k = (_bare(owner), branch.line, subject)
+    if k not in _MADE[1]:
+        _MADE[1][k] = _made_births_read(owner, branch, subject, kfs)
+    got: tuple[tuple[str, int], ...] = _MADE[1][k]
+    return got
+
+
+def _made_births_read(owner: str, branch, subject: str, kfs: list) -> tuple[tuple[str, int], ...]:
+    cls = subject.partition(".")[0]
+    mine = [kf for kf in kfs if _bare(kf.owner) == _bare(owner) and branch.line in (kf.writes.get(subject) or [])]
+    if not mine or any(getattr(kf, "unread", "") not in (KEY_HANDED, KEY_RETURNED, KEY_KEPT) for kf in mine):
+        return ()
+    by_statement = {(_bare(kf.owner), getattr(kf, "statement", None)): kf for kf in kfs}
+    births = {key for key, kf in by_statement.items() if is_birth(kf) and any(c.partition(".")[0] == cls for c in kf.writes)}
+    hops = [h for kf in mine for h in getattr(kf, "kept_hops", None) or []]
+    persisted = [(h, (_bare(h.owner), w.statement)) for h in hops for w in getattr(h, "persisted", None) or []]
+    born_ways = [list(getattr(h, "via", None) or []) for h, key in persisted if key in births]
+    # the object is handed to helpers too (doGenerate's 1277, 'handed to a call'): one way reaching the birth is enough
+    if not born_ways:
+        return ()
+    # the map's caution (2026-11-18): a way persisting the object by a write of a row of the class that is no birth may
+    # write a row that existed -- unless that way leaves the birth's way, in the function both pass, at a later call
+    # line (setupper's activateJobs/keepJobs/updateJobs/archiveJob from storeJobs' 540, after its INSERT at 455/510)
+    for h, key in persisted:
+        kf = by_statement.get(key)
+        if key in births or kf is None or not any(c.partition(".")[0] == cls for c in kf.writes):
+            continue
+        if not any(_after_on_its_way(list(getattr(h, "via", None) or []), way) for way in born_ways):
+            return ()
+    return tuple(sorted({key for _, key in persisted if key in births}, key=str))
+
+
+def birth_arm(owner: str, branch, subject: str) -> bool:
+    """P43: whether *owner*'s arm *branch* writes *subject* as the row is made -- a birth (:func:`born`), or a value set
+    on an object a birth then persists (:func:`made_then_born`).  One rule wherever H2 and L2 ask for a birth."""
+    return born(branch, birth_marks(owner, subject)) or made_then_born(owner, branch, subject)
+
+
+def birth_statements(owner: str, branch, subject: str) -> tuple[tuple[str, int], ...]:
+    """P43: the INSERTs (``(function, statement)``) that make the row *owner*'s birth arm *branch* writes *subject* in:
+    its own statement for a birth (:func:`born`), the persisting ones for a value made then born (insertNewJob's 3200
+    for JobGenerator's doGenerate:1250); ``()`` for an arm that is neither."""
+    marks = birth_marks(owner, subject)
+    if born(branch, marks):
+        lines = [branch.line, *(getattr(branch, "other_lines", None) or [])]
+        return tuple(sorted({(_bare(kf.owner), int(kf.statement)) for line in lines for kf in marks.get(line, ())
+                             if getattr(kf, "statement", None) is not None}, key=str))
+    return _made_births(owner, branch, subject)
+
+
+class _ArmLine(NamedTuple):
+    """An arm by its line alone, as :func:`born` and :func:`made_then_born` read a branch."""
+
+    line: int
+    other_lines: tuple = ()
+
+
+def _after_on_its_way(via: list[str], born: list[str]) -> bool:
+    """P10: whether the way *via* (``file:line`` calls from the arm's function on) leaves the way *born* in the function
+    both reach at a later call line than *born*'s: read by the lines' order in that function (a premise: no loop or
+    branch runs the later line first)."""
+    k = 0
+    while k < min(len(via), len(born)) and via[k] == born[k]:
+        k += 1
+    if k >= len(via) or k >= len(born):
+        return False
+    vf, _, vl = via[k].rpartition(":")
+    bf, _, bl = born[k].rpartition(":")
+    return vf == bf and vl.isdigit() and bl.isdigit() and int(bl) < int(vl)
+
+
 def birth_why(owner: str, subject: str, lines: list[int]) -> T.Said:
     """Why the map calls *owner*'s writes of *subject* at *lines* births: each statement's ``new_row_by`` and the line
     that decided it (``new_row_line``), e.g. "sequence at 623"."""
@@ -5818,9 +5909,11 @@ class Rerun:
         a writer is shown to write in ends the scan; one shown to have no writer's pass goes; one that may have stays.
         The answer is a writer that prints shown to write, with nothing newer that may have; else the arms left
         (:class:`OneOf`).  A row is read on the writers that can write it, where the try names them.  F3's life
-        is read run by run (:meth:`_runs_as_rows`); a birth's row asks nothing: its arms may have written there, as
-        the row was made, which no run shows (KNOWN_ISSUES.md K37)."""
+        is read run by run (:meth:`_runs_as_rows`); a birth's row asks the run that made the row (:meth:`_birth_said`):
+        its arms may have written there, as the row was made (KNOWN_ISSUES.md K37).  A row's arms that write as the row
+        is made are read at the birth (:meth:`_births_apart`)."""
         left: list[Possible] = []
+        tries = self._births_apart(subject, readings, tries)
         named = self._named(subject, key, readings, tries)
         tries = self._runs_as_rows(subject, key, tries)
         if not self._scan_tries(subject, attr, value, key, readings, tries, named, left) and (
@@ -5837,6 +5930,66 @@ class Rerun:
             self.question = answer.question
             return answer
         return OneOf(left, len(tries))
+
+    def _births_apart(self, subject: str, readings: list, tries: list) -> list:
+        """P43 (the investigator's u10): on a subject no history records as its own -- a value its rows hold beside the
+        status, or one none holds -- a row's arms on no history row that write it as the row is made
+        (:func:`birth_arm`) are read at the row's birth, a try of its own after the rows, as
+        :meth:`_attribute_tries` puts a birth's: the statuslog row shows the value, not their write.  JobGenerator's
+        doGenerate:1250 sets cloud on the job TaskBuffer.storeJobs hands to insertNewJob's INSERT (NR-J cloud).
+        *tries* as they were where the subject has a history, the row's making is not known, or a birth's try is
+        there already."""
+        if PT.history(subject) is not None or any(_f3(s) == "made" for s, _, _ in tries):
+            return tries
+        made = self._made_at(subject.partition(".")[0])
+        if made is None:
+            return tries
+        fragment = mapdump.fragment()
+        out, births = [], []
+        for state, asking, own in tries:
+            mine = readings if own is None else own
+            arms = AT.arms(fragment, subject, mine, born=lambda o, b: birth_arm(o, b, subject)) if not _f3(state) else []
+            moved = [a for a in arms if a.born and a.unplaced]
+            if not moved:
+                out.append((state, asking, own))
+                continue
+            births += [a for a in moved if a not in births]
+            if rest := [a for a in arms if a not in moved]:
+                out.append((state, asking, AT.readings_of(mine, rest)))
+        if not births:
+            return tries
+        names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
+        self.say(f"P43: {names} write it as the row is made: read at the row's making, {made}")
+        return out + [({"status": None, "time": made, "f3": "made"}, None, AT.readings_of(readings, births))]
+
+    def _birth_said(self, subject: str, key: str, state: dict, own: list) -> Premise:
+        """P43: a birth's try said with the run that made the row: the logs of the functions of the INSERTs the arms'
+        writes are born by (:func:`birth_statements`) asked for the key over the row's making less and plus EDGE, on
+        every machine, each whole; a run of theirs of the key there is that run (insertNewJob's ``inserted <PandaID>``
+        under its ``<JediTaskID=... idPool=...>``).  An ask no record answers is kept for the asks file, with no stop;
+        where none answers so, or the time is not known, the birth is said as before, no run read."""
+        plain = Premise(T.Said("a-birth-no-run", {"time": state["time"]}), NOT_READ)
+        inserts = sorted({s for r in own or [] for line in r.lines for s in birth_statements(r.owner, _ArmLine(line), subject)},
+                         key=str)
+        if not inserts or not state.get("time"):
+            return plain
+        at = W.when(state["time"])
+        names = list(dict.fromkeys(o.rpartition("::")[2] for o, _ in inserts))
+        lo, hi = (at - EDGE).isoformat(" "), (at + EDGE).isoformat(" ")
+        ask = W.Asking((lo, hi), None, T.Said("for-the-birth", {"funcs": names, "time": state["time"]}))
+        files = list(dict.fromkeys(f for o, line in inserts for f in self.files_of(o, [], [line])))
+        logs, unanswered = self._logs_at(key, files, ask, owners_of([o for o, _ in inserts]))
+        if unanswered:
+            self._keep_unanswered(unanswered)
+            return plain
+        runs = {(r.first, r.machine): r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+                if any(of_mover(r, o) for o, _ in inserts) and r.last[:19] >= lo[:19] and r.first[:19] <= hi[:19]}
+        if not runs:
+            return plain
+        shown = [runs[k].said() for k in sorted(runs)[:3]]
+        return Premise(T.Said("a-birth-its-run", {"time": state["time"], "funcs": names, "runs": shown,
+                                                  "more": T.Said("more-runs", {"n": len(runs) - 3}) if len(runs) > 3 else ""}),
+                       NOT_READ)
 
     def _placed_life(self, subject: str, key: str, readings: list) -> tuple[dict, W.Asking, list] | None:
         """Q2 (P38): where no statuslog row shows a pass of a writer of an attribute no history records, F3's life for
@@ -5884,7 +6037,7 @@ class Rerun:
         for n, (state, asking, own) in enumerate(tries, 1):
             kind = _f3(state)
             if kind in ("made", "open"):
-                why = (Premise(T.Said("a-birth-no-run", {"time": state["time"]}), NOT_READ) if kind == "made" else
+                why = (self._birth_said(subject, key, state, own) if kind == "made" else
                        Premise(T.Said("logs-not-searched-whole-over", {"why": asking.why}), NOT_RECORDED))
                 self.say(f"-- row {n} of {len(tries)}: {_row_said(state)}")
                 # walked on, if a fork does, on no run: H3 reads its guards in the rows' values at the row
@@ -6257,7 +6410,8 @@ class Rerun:
         (``windows.lifetime``, F3), a try before the rows that :meth:`_scan` reads run by run -- or, where its write is
         the time it runs (``attr_time.NOW``), around the value alone (``windows.near_value``).  Any other stops."""
         fragment = mapdump.fragment()
-        found = AT.arms(fragment, subject, readings, born=lambda owner, b: born(b, birth_marks(owner, subject)))
+        # P43: a value set on an object a birth then persists is a birth too (JobGenerator's gshare at 1301)
+        found = AT.arms(fragment, subject, readings, born=lambda owner, b: birth_arm(owner, b, subject))
         self.need(T.Said("a-writer-of-in-the-map-to", {"subject": subject, "value": value}), found)
         if AT.now_valued(found):
             asking = W.value_now(attr, value)
@@ -6628,6 +6782,18 @@ class Rerun:
         if not kept or not hops or any(getattr(h, "open", "") for h in hops):
             return None
         writes = list(dict.fromkeys((h.owner, w.statement, w.object) for h in hops for w in getattr(h, "persisted", None) or []))
+        # the map's 3d30ddc follows the kept object down into callees too (``KeptHop.way`` handed): a callee's write
+        # persisting another class's row there (appendDatasets_JEDI's 3776, a dataset: its terms' ``attr`` and its
+        # writes are JediDatasetSpec's) persists no column of this one
+        cls = subject.partition(".")[0]
+
+        def of_class(caller: str, statement, obj) -> bool:
+            own = [kf for kf in kfs if kf.owner == caller and getattr(kf, "statement", None) == statement
+                   and getattr(kf, "object", "") == obj]
+            return not own or any((getattr(kf, "attr", "") or "").partition(".")[0] == cls
+                                  or any(c.partition(".")[0] == cls for c in kf.writes) for kf in own)
+
+        writes = [w for w in writes if of_class(*w)]
         if not writes:
             return None
         sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
@@ -11503,7 +11669,8 @@ class Rerun:
         cache: dict[str, list[str]] = self.__dict__.setdefault("_born_only_of", {})
         if subject not in cache:
             arms = [(j.owner, b) for j in asyncio.run(self._writers_of(subject)) for b in j.branches]
-            every = bool(arms) and all(born(b, birth_marks(owner, subject)) for owner, b in arms)
+            # P10: an arm writing it on an object a birth persists counts as a birth (one rule, P43's birth_arm)
+            every = bool(arms) and all(birth_arm(owner, b, subject) for owner, b in arms)
             cache[subject] = [SV._name(owner, b.line) for owner, b in arms] if every else []
         return cache[subject]
 
