@@ -1736,9 +1736,14 @@ row's status as in the stay, and another column of the row only where no statusl
 rows file's read (K22).  The pass's own values (a rowcount, a container, a parameter) are put the way the print needs
 them, as premises.  Where the print would hold for every count of 1 or more of the name counting a value, that count
 was 0; else the condition and its open atoms are said.  NT-scouting-late: walltimeUnit was read after the move, so
-the count stays open.  The stuck side (MT-scouting-stuck's 13:54:18 take, read by its assessmentTime) needs F-4's
-timelines in the stuck flow and is not built.  F-4 also says a take once where the timeline cache keeps two readings
-of its column.
+the count stays open.  F-4 also says a take once where the timeline cache keeps two readings of its column.
+
+*Changed (P25 (i)'s rest, stuck side, 2026-11-18):* a stuck value's mover that judgement 3 found no run of an arm of the
+value for is read for a take the row's own time column names (`_stuck_value_takes`): M3(a)-1's timelines of the
+columns its statements compare with the clock, over the stay from the statuslog row that began it to the moment the
+rows file read the row, then F-4's reading of the take's pass and P25 (i)'s rest on it.  MT-scouting-stuck: sqlEA
+wrote assessmentTime at 13:54:18 (getAchievedTasks_JEDI's selection refuses 'scouting'); its pass is asked by its
+mark on every machine, 13:44:18 to 14:04:18 (28 asks).  The asks are kept for a records round; they do not stop S1.
 
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but

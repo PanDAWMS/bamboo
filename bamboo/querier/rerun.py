@@ -7571,6 +7571,13 @@ class Rerun:
             passes, missed = self._absence(owner, arms, files or follow.reader_log_files, entry, writers, q.subject, q.key,
                                            asking, rest, way, owners)
             unanswered += missed
+            if not passes and entry["verdict"] in ("did-not-run", "no-run-found"):
+                # P25 (i)'s rest, stuck side: no run of an arm of the value, but a pass that took the row the row's own
+                # time column names
+                for took in self._stuck_value_takes(q, owner, [rs for rs in follow.reader_statements
+                                                               if asked in rs.selects and rs.owner == owner], writers):
+                    self.say(f"  {owner.split('::')[-1]}: {T.text(took)}")
+                    entry["reasons"].append({"code": "takes-by-value", "record": took})
             if passes:
                 ran.append(passes)
             elif entry["verdict"] == "not-searched":
@@ -11276,6 +11283,40 @@ class Rerun:
         mine = [st for st in ordered if st.owner == q.mover]
         self.need(T.Said("the-statement-that-moved-the-value-on"), len(mine) == 1)
         return Ordered(mine[0], q.run, q)
+
+    def _stuck_value_takes(self, q: Stuck, owner: str, statements: list, writers: list) -> list[T.Said]:
+        """P25 (i)'s rest, stuck side (out/gm/qk-design.md, the section on P25 (i)'s rest; the investigator's u11
+        MT-scouting-stuck 2): a mover judgement 3 found no run of an arm of the value for may still have taken the row
+        in the window, by a statement whose time column only its own arms write there -- MT-scouting-stuck's sqlEA wrote
+        assessmentTime at 13:54:18.  Read as F-4 reads a late value's (:meth:`_row_value_takes`), over the stay from the
+        statuslog row that began it to the moment the rows file read the row (``_reading_moment``): M3(a)-1's
+        timelines of the columns the mover's *statements* compare with the clock (the other writers left out by the map
+        as there, getAchievedTasks_JEDI's selection refusing 'scouting'), and each take's pass with what it printed
+        (:meth:`_unprinted_take`); a pass the records lack is asked by its mark.  What is said; none where
+        nothing is read."""
+        states = self.data.get("statuslog", {}).get("states", [])
+        rows = [s for s in states if s["status"] == q.observed]
+        as_of = self.data.get("statuslog", {}).get("as_of")
+        if not rows or not as_of or not statements or not self.logs.needs_window:
+            return []
+        at, words, _ = self._reading_moment(q.subject, as_of)
+        since = _when(str(rows[-1].get("time_extended") or rows[-1]["time"]))
+        if since >= at:
+            return []
+        mq = Missed(q.subject, q.observed, "", since, at, statements, owner, None, end=words, start=words,
+                    writers=writers, began=since)
+        # the time columns its terms compare with the clock, as the late reading's (``_term_left``) read them
+        trees = [r.tree for st in statements for r in [*st.condition_trees, *(t for c in st.call_readings for t in c.condition_trees)]]
+        for column in sorted({leaf.subject for tree in trees for leaf in _tree_leaves(tree)
+                              if leaf.node == "compare" and leaf.settled and leaf.values
+                              and all(v.base in UTC_CLOCKS and v.offset_seconds is not None for v in leaf.values)}):
+            self._timeline(column, mq)
+        rel, _, func = owner.partition("::")
+        try:
+            fn = R.function(rel, func, [st.line for st in statements])
+        except (LookupError, ValueError, SyntaxError):
+            return []
+        return self._row_value_takes(mq, fn, at, [])
 
     def _read_at_as_of(self, q: Stuck, follow, writers: list, movers: dict) -> list[tuple[str, str, str]]:
         """M2, stuck: each mover's statements read at one moment, from the row's values then -- ``refused`` and the
