@@ -19537,3 +19537,31 @@ def test_i_an_element_of_an_objects_field_is_read_in_what_its_construction_hande
     # an object the map reads no elements of, or a read that takes no element of the field: the object, as before
     assert [w[0] for w in got["none_said"]] == ["stop"] and got["none_said"][0][3] == "", got
     assert [w[0] for w in got["no_element_step"]] == ["stop"] and got["no_element_step"][0][3] == "", got
+
+
+def test_k1b_a_copy_of_what_its_own_pass_wrote_writes_the_clock_as_that_write(tmp_path):
+    """K-1b (the map's (E)): updateJob's 509 ``job.stateChangeTime = job.modificationTime`` copies what 506
+    (``naive_utcnow()``) put on the job in the same pass, every way to the copy passing 506: it writes the clock too.
+    A way that may pass none (``copied_open``), a line of copied_from with no arm of the column there, or assignments
+    writing other values: not read."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+
+        arm = lambda line, outcome, **kw: N(line=line, outcome=outcome, other_lines=[], amount=None, **kw)
+        mod = N(owner="u.py::updateJob", subject="JobSpec.modificationTime",
+                branches=[arm(506, "runtime(naive_utcnow())"), arm(520, "runtime(param['x'])")])
+        copy = arm(509, "passthrough(JobSpec.modificationTime)", copied_from=[506], copied_open="")
+        before = arm(511, "passthrough(JobSpec.modificationTime)", copied_from=[506], copied_open="before")
+        missing = arm(512, "passthrough(JobSpec.modificationTime)", copied_from=[506, 600], copied_open="")
+        other = arm(513, "passthrough(JobSpec.modificationTime)", copied_from=[506, 520], copied_open="")
+        sct = N(owner="u.py::updateJob", subject="JobSpec.stateChangeTime", branches=[copy, before, missing, other])
+        frag = N(junctions=[mod, sct])
+        RR.mapdump.fragment = lambda: frag
+        print(json.dumps({str(b.line): (None if (o := RR._written_offset(b)) is None else o.total_seconds())
+                          for b in sct.branches}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"509": 0.0, "511": None, "512": None, "513": None}, got
+

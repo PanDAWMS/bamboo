@@ -891,6 +891,13 @@ endTime 15:35:35 was written by updateJobStatus:233 at 15:35:35.751 as the job w
 @405 (`modificationTime<now-3h OR (endTime IS NOT NULL AND endTime<now-3h)`) read as refusing the row all the stay.  A
 value no write in the window matches stays open (NJ-starting-late's columns over a 24 h stay).
 
+*Changed (K-1b, bundle L, 2026-11-18; the map's (E), codemap-xliii c34d245, x13zq):* a passthrough arm copying an
+attribute the same function's assignments put on the object in its pass, every way to the copy passing one of them
+(`Branch.copied_from`, `copied_open` empty), writes what they write: the clock with their one offset where every one
+of them does (`rerun._copied_offset`).  updateJob's 509 `job.stateChangeTime = job.modificationTime` follows 506's
+`naive_utcnow()`, so NJ-starting-late's open stateChangeTime arms all write the clock.  A copy on some ways only
+(`before`), of another object's field, or of a row's column in SQL (`SET a=b`) stays a value not read.
+
 ### K79. A write a print reached is read as run where the statuslog shows its statement's status, and as none of the row's where its key's selection takes other states
 
 A timeline (Q1) reads a write of a lock or time column as `reached` where a print shows the pass reached it but not its

@@ -428,7 +428,14 @@ def _hole_holds(row: R.Row, record, name, key: str) -> bool:
 def _written_offset(b) -> datetime.timedelta | None:
     """What the arm *b* writes, as an offset from the time it ran: the clock itself (``attr_time.NOW``), or a clock
     plus a settled offset (``Branch.amount``, the map's batch 2 W: updateTask_JEDI 1441's ``timeNow - 1 h``,
-    ``CURRENT_DATE-1``); None where it is no such value (a parameter, a bind's scale, a value only said)."""
+    ``CURRENT_DATE-1``); None where it is no such value (a parameter, a bind's scale, a value only said).  K-1b: a copy
+    of what its own pass wrote, as that write (:func:`_copied_offset`)."""
+    own = _own_offset(b)
+    return own if own is not None else _copied_offset(b)
+
+
+def _own_offset(b) -> datetime.timedelta | None:
+    """:func:`_written_offset` of the arm's own outcome: the clock, or the clock with a settled offset."""
     if b.outcome in AT.NOW:
         return datetime.timedelta(0)
     a = getattr(b, "amount", None)
@@ -436,6 +443,46 @@ def _written_offset(b) -> datetime.timedelta | None:
             or getattr(a, "needs", None)):
         return None
     return datetime.timedelta(seconds=a.offset_seconds)
+
+
+def _copied_offset(b) -> datetime.timedelta | None:
+    """K-1b (bundle L; the map's (E), ``Branch.copied_from`` and ``copied_open``): a passthrough arm copying an attribute
+    the same function's assignments put on the object in its pass, every way to the copy passing one of them
+    (``copied_open`` empty), writes what they write -- the clock with their one offset, where every one of them at the
+    lines ``copied_from`` names does: updateJob's 509 ``job.stateChangeTime = job.modificationTime`` after 506's
+    ``naive_utcnow()``.  None otherwise (a way passing none, a copy of another object's field, an assignment of
+    another value)."""
+    copied_open = str(getattr(b, "copied_open", None) or "")
+    if not str(getattr(b, "outcome", "") or "").startswith("passthrough(") or copied_open \
+            or not getattr(b, "copied_from", None):
+        return None
+    fragment = mapdump.fragment()
+    return _copied_offsets(id(fragment)).get(id(b)) if fragment is not None else None
+
+
+@functools.cache
+def _copied_offsets(fragment_id: int) -> dict[int, datetime.timedelta]:
+    """:func:`_copied_offset` for every arm of the installed dump it reads, by the arm's identity."""
+    fragment = mapdump.fragment()
+    junctions = getattr(fragment, "junctions", None) or []
+    by_column: dict[tuple[str, str], list] = {}
+    for j in junctions:
+        by_column.setdefault((j.owner, getattr(j, "subject", "")), []).extend(j.branches)
+    out: dict[int, datetime.timedelta] = {}
+    for j in junctions:
+        for b in j.branches:
+            outcome = str(getattr(b, "outcome", "") or "")
+            lines = set(getattr(b, "copied_from", None) or [])
+            if not outcome.startswith("passthrough(") or str(getattr(b, "copied_open", None) or "") or not lines:
+                continue
+            arms = [c for c in by_column.get((j.owner, outcome[len("passthrough("):-1]), [])
+                    if lines & {c.line, *(getattr(c, "other_lines", None) or [])}]
+            covered = {line for c in arms for line in lines & {c.line, *(getattr(c, "other_lines", None) or [])}}
+            offsets = {_own_offset(c) for c in arms}
+            off = next(iter(offsets)) if len(offsets) == 1 else None
+            if covered == lines and off is not None:
+                out[id(b)] = off
+    return out
 
 
 def _time_value(value: object) -> datetime.datetime | None:
