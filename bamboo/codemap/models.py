@@ -3863,8 +3863,14 @@ KEY_NO_USE = "no use found"
 KEPT_NO_CALL = "no call placed"
 KEPT_NOT_A_NAME = "not a name"
 KEPT_TOO_DEEP = "too deep"
-#: How many calls up a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
+#: How many calls up or down a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
 KEPT_DEPTH = 6
+#: How the object reached a :class:`KeptHop`'s owner (:attr:`KeptHop.way`): kept in what the call handed (the caller
+#: holds it after), returned by the call (the caller holds the call's value), or handed by the call (the callee holds
+#: it in a parameter).
+HOP_KEPT = "kept"
+HOP_RETURNED = "returned"
+HOP_HANDED = "handed"
 #: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
 #: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
 #: one carried from something not of the table's class (a scalar handed in, a parent's row).
@@ -4377,8 +4383,22 @@ class KeptHop(BaseModel):
     ``TaskRefiner.runImpl``'s ``impl.extractCommon(...)`` at 211, ``impl.taskSpec`` holds it, and runImpl's flushes of
     it (``updateTask_JEDI`` at 226, ..., ``registerTaskInOneShot_JEDI`` at 602) persist it -- *persisted*; a subclass's
     ``extractCommon`` calling the base keeps it in its own ``self`` again, so its hop goes one call further up.  A
-    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer."""
+    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer.
 
+    So for an object a function returns (:data:`KEY_RETURNED`): each caller holds the call's value.  And for one it,
+    or a caller a hop reaches, hands to a call (:data:`KEY_HANDED`): each function the call lands in holds it in a
+    parameter, its writes persisting it read as a caller's are, and a call it hands it to again one hop further
+    down.  ``JobGenerator.doGenerate`` makes the jobs it sets ``prodSourceLabel`` on and returns them; its caller hands
+    them to ``TaskBuffer.storeJobs``, which hands each to ``insertNewJob``, whose ``INSERT`` persists it."""
+
+    way: str = Field(
+        default="",
+        description=(
+            f"How the object reached *owner*: ``{HOP_KEPT}`` in what the last call of *via* handed, "
+            f"``{HOP_RETURNED}`` as its value, ``{HOP_HANDED}`` in a parameter of *owner* (the call into it); empty "
+            "where *open*."
+        ),
+    )
     via: list[str] = Field(
         default_factory=list,
         description="The calls, ``file:line``, from the call into the record's function up to *owner*'s.",
@@ -4409,6 +4429,9 @@ class KeptHop(BaseModel):
         default="",
         description=f"Why the hop is not read: ``{KEPT_NO_CALL}``, ``{KEPT_NOT_A_NAME}``, ``{KEPT_TOO_DEEP}``.",
     )
+    #: While the build reads it: ``(file, carry, calls)`` of a caller that hands the object on, where the hops down
+    #: start (:func:`bamboo.codemap.panda.recognizers.sqlwrite._down_hops`).  Not dumped.
+    _down: Optional[tuple] = PrivateAttr(default=None)
 
 
 class KeyFrom(BaseModel):
@@ -4530,8 +4553,9 @@ class KeyFrom(BaseModel):
     kept_hops: list[KeptHop] = Field(
         default_factory=list,
         description=(
-            f"Where *unread* is ``{KEY_KEPT}``: where the object goes in the callers (:class:`KeptHop`), one per "
-            "caller reached; empty for any other record."
+            f"Where *unread* is ``{KEY_KEPT}`` or ``{KEY_RETURNED}``: where the object goes in the callers, and where "
+            f"it is ``{KEY_HANDED}`` or a caller hands it on, in the functions the calls land in (:class:`KeptHop`), "
+            "one per function reached; empty for any other record."
         ),
     )
     reads: bool = Field(

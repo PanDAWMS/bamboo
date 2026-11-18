@@ -23,6 +23,9 @@ import pytest
 from bamboo.codemap import diff, evidence, gates, pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    HOP_HANDED,
+    HOP_KEPT,
+    HOP_RETURNED,
     KEY_BOUND,
     KEY_CONSTANT,
     KEY_HANDED,
@@ -20497,19 +20500,22 @@ def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_
     (kept,) = [one for one in froms if one.unread == KEY_KEPT and one.owner.endswith("::Refiner.extract")]
     assert kept.object == "taskSpec"
     hops = [
-        (hop.via, hop.owner.rpartition("::")[2], hop.held, [(w.statement, w.object) for w in hop.persisted], hop.open)
+        (
+            hop.way,
+            hop.via,
+            hop.owner.rpartition("::")[2],
+            hop.held,
+            [(w.statement, w.object) for w in hop.persisted],
+            hop.open,
+        )
         for hop in kept.kept_hops
     ]
-    # ``impl`` is a ``Prod``: its ``extract`` is the subclass's, which keeps the object in its ``self`` again.
+    # ``impl`` is a ``Prod``: its ``extract`` is the subclass's, which keeps the object in its ``self`` again; ``run``
+    # hands it to ``note``, which neither persists it nor hands it on: named, no hop of its own.
+    up = [f"{rel}:{at['Refiner.extract(self']}", f"{rel}:{at['impl.extract(']}"]
     assert hops == [
-        ([f"{rel}:{at['Refiner.extract(self']}"], "Prod.extract", ["self.taskSpec"], [], ""),
-        (
-            [f"{rel}:{at['Refiner.extract(self']}", f"{rel}:{at['impl.extract(']}"],
-            "run",
-            ["impl.taskSpec"],
-            [(at["(spec,"], "spec")],
-            "",
-        ),
+        (HOP_KEPT, up[:1], "Prod.extract", ["self.taskSpec"], [], ""),
+        (HOP_KEPT, up, "run", ["impl.taskSpec"], [(at["(spec,"], "spec")], ""),
     ]
     assert kept.kept_hops[1].handed_to == [f"{rel}::note"]
 
@@ -20525,6 +20531,64 @@ def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_
         (at["(spec,"], "status IN (:old___in)", False, method, [update]),
         (at["(other,"], 'jediTaskID=criteria["jediTaskID"]', False, method, [update]),
         (at["(other,"], "status IN (:old___in)", True, method, [update]),
+    ]
+
+
+_HOPPED = '''
+class Maker:
+    def gen(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "ready"
+        return taskSpec
+
+    def hand(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "pending"
+        self.store(taskSpec, jediTaskID)
+
+    def store(self, spec: JediTaskSpec, jediTaskID):
+        self.taskBufferIF.setTaskStatus_JEDI(spec, {"jediTaskID": jediTaskID}, ["registered"])
+
+
+class Runner:
+    def run(self, jediTaskID):
+        maker = Maker()
+        made = maker.gen(jediTaskID)
+        maker.store(made, jediTaskID)
+'''
+
+
+def test_an_object_returned_or_handed_on_names_the_writes_persisting_it_up_and_down_the_calls(tmp_path):
+    """``JobGenerator.doGenerate`` sets ``prodSourceLabel`` on the jobs it makes and returns them, and its caller hands
+    them on to be inserted: the object a function returns is followed to each caller holding the call's value, and
+    the object a function -- or a caller a hop reaches -- hands to a call into each function the call lands in, its
+    parameter holding it, where the writes persisting it are read as a caller's are."""
+    rel = "pandajedi/jediorder/Runner.py"
+    froms, _keys = _flushed(
+        tmp_path, _HOPPED, rel, more={"pandaserver/taskbuffer/db_proxy_mods/status_module.py": _KEPT_PROXY}
+    )
+    lines = _HOPPED.split("\n")
+    at = {
+        text: next(n for n, line in enumerate(lines, 1) if text in line)
+        for text in ("maker.gen(", "maker.store(", "self.store(", "setTaskStatus_JEDI(spec")
+    }
+
+    def hops(owner: str, unread: str) -> list:
+        (record,) = [one for one in froms if one.unread == unread and one.owner.endswith(f"::{owner}")]
+        return [
+            (hop.way, hop.via, hop.owner.rpartition("::")[2], hop.held, [(w.statement, w.object) for w in hop.persisted])
+            for hop in record.kept_hops
+        ]
+
+    flush = [(at["setTaskStatus_JEDI(spec"], "spec")]
+    assert hops("gen", KEY_RETURNED) == [
+        (HOP_RETURNED, [f"{rel}:{at['maker.gen(']}"], "run", [], []),
+        (HOP_HANDED, [f"{rel}:{at['maker.gen(']}", f"{rel}:{at['maker.store(']}"], "store", ["spec"], flush),
+    ]
+    assert hops("hand", KEY_HANDED) == [
+        (HOP_HANDED, [f"{rel}:{at['self.store(']}"], "store", ["spec"], flush),
     ]
 
 
