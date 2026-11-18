@@ -128,6 +128,37 @@ def _elements(s: Any, rest: tuple[str, ...]) -> tuple[list[Any], bool] | None:
     return heldfrom.held_elements(s, rest[0])
 
 
+def _placed(values: list[Any], rest: tuple[str, ...]) -> list[tuple[Any, tuple[str, ...], bool]]:
+    """K-0 (the map's ``KeySource.paths``, bundle K): ``(value, steps still to take, a part)`` for each value a
+    container's puts put (:func:`_elements`), *rest* being the read's steps from the element step on.  Where the step
+    after the element's is a constant index ``[i]`` and a value says where it sits in its put's value (*paths*), only
+    the values at ``[i]`` are kept: one exactly there with the steps after ``[i]``, one deeper in it as a part of what
+    the read takes.  A value saying no place is the put's value whole, read with the steps as before.
+    getTasksToRefine_JEDI's 1340 puts ``(jediTaskID, None, 'registered', parent_tid)``: its ``[0]`` is the rows'
+    jediTaskID alone, not the constants (I-4, NR-T-53646395-assessmentTime)."""
+    after = rest[1:]
+    index = after[0] if after else ""
+    if not re.fullmatch(r"\[\d+\]", index):
+        return [(v, after, False) for v in values]
+    out: list[tuple[Any, tuple[str, ...], bool]] = []
+    for v in values:
+        paths = [p for p in getattr(v, "paths", None) or [] if p not in ("", "()")]
+        if not paths:
+            out.append((v, after, False))
+        elif index in paths:
+            out.append((v, after[1:], False))
+        elif any(p.startswith(index) and p[len(index)] in ".[" for p in paths):
+            out.append((v, after[1:], True))
+    return out
+
+
+def _none_stepped(s: Any, rest: tuple[str, ...]) -> bool:
+    """K-0: whether *s* is the literal ``None`` with a step still to take off it (*rest*): an element or attribute of
+    None is no value -- the read raises -- so no value comes in that way.  getTasksToRefine_JEDI returns None on its
+    error path (1394), and its caller's ``taskList[*][0]`` takes no key from it."""
+    return s.kind == M.KEY_CONSTANT and (s.name or "") == "None" and bool(rest) and not getattr(s, "through", None)
+
+
 def _put_read(change: Any) -> bool:
     """Whether *change* is a put whose value the map reads: Q1 reads it as a way of the container's contents."""
     return bool(getattr(change, "value", None)) and getattr(change, "kind", "") in (M.CHANGE_METHOD, M.CHANGE_STORE)
@@ -853,7 +884,8 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
         # A put whose value is read is a way, not a change on one
         values, stays = elements
         left = tuple(c for c in on if c.record is None or not _put_read(c.record))
-        ways = [w for v in values for w in _binding_ways(v, b, rest[1:], seen, choose, read_at, keys, entered, level)]
+        ways = [w if not part else as_part(w) for v, steps_, part in _placed(values, rest)
+                for w in _binding_ways(v, b, steps_, seen, choose, read_at, keys, entered, level)]
         return (_with_changes(_start(s, (at,), rest), left) + (ways if rest else [as_part(w) for w in ways])
                 + ([Way(STOP, "", CONTAINER, (at,), changes=left, **back)] if stays else []))
     if (made := _returned_row(s, _keys_off(rest, keys))) is not None:
@@ -875,6 +907,8 @@ def _binding_ways(s: Any, b: Any, steps: tuple[str, ...], seen: frozenset, choos
     if s.kind == M.KEY_PARAMETER:
         return [Way(STOP, s.name, PARAMETER, (at,), of=getattr(s, "site_owner", "") or b.owner,
                     entered=() if route else entered, changes=on, steps=rest, **back)]
+    if _none_stepped(s, rest):
+        return []
     if s.kind == M.KEY_CONSTANT:
         return [Way(CONSTANT, "" if rest or getattr(s, "through", None) else s.name, THROUGH if rest else s.kind, (at,),
                     changes=on, **back)]
@@ -1193,7 +1227,8 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
     elements = _elements(s, rest)
     if elements is not None:
         values, stays = elements
-        held = [w for v in values for w in _param_source_ways(v, rest[1:], seen)]
+        held = [w if not part else as_part(w) for v, steps_, part in _placed(values, rest)
+                for w in _param_source_ways(v, steps_, seen)]
         return (_start(s, route, rest) + (held if rest else [as_part(w) for w in held])
                 + ([Way(STOP, "", CONTAINER, route, end_at=here)] if stays else []))
     if s.kind == M.KEY_PARAMETER and s.site_owner:
@@ -1211,6 +1246,8 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
             else:
                 out.append(replace(w, route=w.route + route))
         return out
+    if _none_stepped(s, rest):
+        return []
     if s.kind == M.KEY_CONSTANT and (getattr(s, "through", None) or rest):
         # a part of the literal, or what a call outside the corpus makes of it (an item of range(3)): it ends at the
         # constant, but its value is not the literal's

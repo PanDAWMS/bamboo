@@ -13638,10 +13638,10 @@ def test_q1_reads_a_container_made_empty_through_its_puts_and_q2_carries_the_rea
     got = json.loads(out.splitlines()[-1])
     back = ["p/t.py:2578", "p/m.py:199", "p/m.py:231"]
     # Q2 (a) and (c): the field read on with [*][2], its binding's parameter up T.__init__'s callers; Q1: the element is
-    # what add put -- a row's part, and a part of the None (no literal's value) -- each placed where it ends
-    assert got["attempt_nr"] == [["database", "", "rows", [*back, "p/m.py:88", "p/m.py:84", "p/m.py:136"], "p/j.py:2432"],
-                                 ["constant", "", "constant-through", [*back, "p/m.py:88", "p/m.py:84", "p/m.py:136"], "p/j.py:2371"]]
-    assert got["element"] == [["database", "", "rows", back, "p/j.py:2432"], ["constant", "", "constant-through", back, "p/j.py:2371"]]
+    # what add put -- a row's part, placed where it ends; the None with an element still to take gives no value, so no
+    # way (K-0)
+    assert got["attempt_nr"] == [["database", "", "rows", [*back, "p/m.py:88", "p/m.py:84", "p/m.py:136"], "p/j.py:2432"]]
+    assert got["element"] == [["database", "", "rows", back, "p/j.py:2432"]]
     assert got["unread"] == [*got["element"], ["stop", "", "container", ["p/m.py:231"], "p/m.py:196"]]
     # read whole: the empty start, each value put read whole in turn; a mapping stays (no put's value holds its keys),
     # a container nothing is done to holds only its start
@@ -13697,10 +13697,10 @@ def test_q2_a_parameter_with_no_literal_left_lists_each_way_and_a_splits_reading
     """))
     got = json.loads(out.splitlines()[-1])
     by = ["p/t.py:1", "pandaserver/a.py:10"]
+    # a part of a None gives no value (K-0): no way
     assert got["t"] == [["database", "rows", "p/j.py:9", by, ["pandaserver/g.py:30"]],
-                        ["constant", "constant-through", "p/j.py:3", by, ["pandaserver/g.py:30"]],
                         ["stop", "unknown", "p/j.py:7", by, ["pandaserver/g.py:30"]]]
-    assert any("t: 4 way(s) end at 3 place(s)" in line for line in got["lines"])
+    assert any("t: 3 way(s) end at 2 place(s)" in line for line in got["lines"]), got["lines"]
     # 'x' is a literal a caller's run could choose: not asked here (a split's terms), so it stops as before
     assert got["u"] == [["stop", "parameter-unchosen", "", [], []]]
 
@@ -18979,6 +18979,35 @@ def test_i_the_writers_of_a_line_read_a_print_beginning_with_a_hole_as_the_line_
     }, got
 
 
+def test_k0_an_index_after_an_element_step_keeps_the_put_value_parts_at_that_place(tmp_path):
+    """K-0 (the map's KeySource.paths): getTasksToRefine_JEDI puts ``(jediTaskID, None, 'registered', parent_tid)`` at
+    1340; extractCommon reads ``taskList[*][0]``.  At ``[0]`` only the part the map places at ``[0]`` is kept; one placed
+    deeper in it is a part; one saying no place is the put's value whole, as before; and a literal None with a step left
+    to take gives no way (getTasksToRefine_JEDI's ``return None`` on its error path)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import sources as SR
+
+        parts = [N(name="rows", paths=["[0]"]), N(name="None", paths=["[1]"]), N(name="'registered'", paths=["[2]"]),
+                 N(name="deeper", paths=["[0].site"]), N(name="whole", paths=[]), N(name="self", paths=["()"])]
+        placed = lambda rest: [[v.name, list(steps), part] for v, steps, part in SR._placed(parts, rest)]
+        print(json.dumps({
+            "index": placed(("[*]", "[0]")),
+            "index_then_more": placed(("[*]", "[0]", ".x")),
+            "no_index": placed(("[*]", ".x")),
+            "none_stepped": [SR._none_stepped(N(kind="constant", name="None"), ("[*]",)),
+                             SR._none_stepped(N(kind="constant", name="None"), ()),
+                             SR._none_stepped(N(kind="constant", name="'x'"), ("[*]",))],
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["index"] == [["rows", [], False], ["deeper", [], True], ["whole", ["[0]"], False], ["self", ["[0]"], False]], got
+    assert got["index_then_more"][0] == ["rows", [".x"], False], got
+    assert [name for name, _, _ in got["no_index"]] == ["rows", "None", "'registered'", "deeper", "whole", "self"], got
+    assert got["none_stepped"] == [True, False, False], got
+
+
 def test_p16_a_print_of_every_row_after_the_first_loop_tells_a_pass_reached_the_selection(tmp_path):
     """P16 (the map's HOA and RL): copyArchive main puts each selected PandaID into ``jobs`` and prints the list in
     slices of 100 in a ``while`` after the loop (885); getTasksToBeFinished_JEDI works a copy of its rows through in a
@@ -19299,9 +19328,9 @@ def test_i_an_element_of_an_objects_field_is_read_in_what_its_construction_hande
                                                                               steps=(".lock",))]}))
     """))
     got = json.loads(out.splitlines()[-1])
-    # the appended rows: the database; the None: a part of the literal; each by the construction at 72
-    assert got["elements"] == [["database", "rows", "p/t.py:1290", "p/r.py:72"],
-                               ["constant", "constant-through", "p/t.py:1394", "p/r.py:72"]], got
+    # the appended rows: the database, by the construction at 72; the None returned at 1394 with an element still to
+    # take gives no value, so no way (K-0)
+    assert got["elements"] == [["database", "rows", "p/t.py:1290", "p/r.py:72"]], got
     # an object the map reads no elements of, or a read that takes no element of the field: the object, as before
     assert [w[0] for w in got["none_said"]] == ["stop"] and got["none_said"][0][3] == "", got
     assert [w[0] for w in got["no_element_step"]] == ["stop"] and got["no_element_step"][0][3] == "", got

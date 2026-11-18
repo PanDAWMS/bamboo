@@ -840,10 +840,14 @@ the row by another column of the mark.
 is read over the window where every arm writing it takes the row by a key from selections that return no row of the
 object at the window's start nor at any statuslog row after it up to the reading (`Rerun._written_only_before`, through
 `_selection_false`, which follows the writer's parameter up its ways, `sources.Way.site`, where it has no rows
-source).  The reading is a try: it asks no log, reads no timeline, and leaves no line or ask behind.  It does not yet
-read NR-T-53646395-assessmentTime's goal: extractCommon's jediTaskID comes in through the tuple getTasksToRefine_JEDI
-puts at 1340, `(jediTaskID, None, 'registered', parent_tid)`, and the querier takes the read's `[0]` on every part, the
-constants among them, though the map gives each part its place (`KeySource.paths`).  Reading that place is next.
+source).  The reading is a try: it asks no log, reads no timeline, and leaves no line or ask behind.  extractCommon's
+jediTaskID comes in through the tuple getTasksToRefine_JEDI puts at 1340, `(jediTaskID, None, 'registered',
+parent_tid)`; since K-0 (bundle K) a read's constant index after an element step keeps only the parts the map places
+there (`KeySource.paths`, `sources._placed`), and a literal None with a step left gives no way (`_none_stepped`), so the
+key comes in from getTasksToRefine_JEDI's two selections alone.  It still does not read NR-T-53646395-assessmentTime's
+goal: the DEFT selection @1147 has no condition the map reads (another schema's table), so it is not shown to return no
+row of the task.  Revisit with the map's reading of that selection's terms, or a showing that its route's writes are
+the task's birth.
 
 ## H steps
 
