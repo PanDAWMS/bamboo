@@ -11637,6 +11637,11 @@ class Rerun:
                 missed: list = []
                 got, whole = self._column_writes(j, b, keys, (since, q.moved), writers, missed, subject, not_run_out=not_run,
                                                  seen_out=seen)
+                # P67: an arm whose every statement is a flush of the object it sets is read off the flush's printed
+                # binds (JobGenerator's runImpl unlocks, in updateTask_JEDI's 1483)
+                flushed, fwhole = self._flushed_writes(j, b, keys, (since, q.moved), subject)
+                if fwhole is not None:
+                    got, whole = [*got, *flushed], whole or fwhole
                 if not whole:
                     printed = any(n.row == MUST_ROW_WRITTEN and n.column in keys for n in getattr(b, "must_names", None) or [])
                     open_why[name] = "unprinted" if not printed else "unasked" if missed else "unread"
@@ -12237,6 +12242,89 @@ class Rerun:
         own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
         return (sorted(set(found), key=lambda f: f[:4]),
                 bool(shown) and all(p["held"] for p in premises.values()) and (bool(found) or unwritten or not own))
+
+    def _flushed_writes(self, j, b, keys: set[str], window: tuple[datetime.datetime, datetime.datetime],
+                        subject: str) -> tuple[list[tuple[datetime.datetime, str, str, str, tuple]], bool | None]:
+        """P67 (the investigator's u10; out/gm/qk-design.md, the W13/P67 section, the delegated design): the writes of the arm
+        *b* of *j* a flush of the object it sets shows, where every statement writing *subject* at *b* is a flush (the
+        map's ``KeyFrom.flushed_in`` and ``flushed_lines``).  The flush's WritePrint there (``object_map``: the object's
+        changed fields) prints the statement's text and bind map before it runs, in a run of the row's key; a record of
+        it over *window* whose bind map holds *subject*'s bind, with the value *b* writes (None for an arm writing None,
+        another for one writing a value), is a write of it then (``ran``), unless the statement's count print after it
+        says no row changed (:func:`_landed`, read on an arm of the flush's function counted at that statement).
+        ``(writes, whole)`` as :meth:`_column_writes` gives them, *whole* where those logs were searched whole over the
+        window with every log asked; ``([], None)`` where *b* is no flush's or the map gives no such print.  Which
+        caller's pass ran the flush is not read: every arm writing that value by a flush of the same statement reads the
+        record (JobGenerator's runImpl:941 and doPreCheck:299 alike for ``:lockedBy None``)."""
+        statements = [kf for kf in key_froms()
+                      if _bare(kf.owner) == _bare(j.owner) and b.line in (kf.writes.get(subject) or [])]
+        if not statements or not all(getattr(kf, "flushed_in", "") for kf in statements):
+            return [], None
+        states = _null_states(b)
+        key = self.args.key
+        lo, hi = W._down(window[0]), W._down(window[1])
+        found: list[tuple[datetime.datetime, str, str, str, tuple]] = []
+        whole = True
+        for flush, lines in sorted({(kf.flushed_in, tuple(getattr(kf, "flushed_lines", None) or ())) for kf in statements}):
+            wps = [wp for wp in write_prints(flush) if int(wp.statement) in lines and bool(getattr(wp, "object_map", None))]
+            if not wps:
+                return [], None
+            rel, _, func = _bare(flush).partition("::")
+            name = func.rpartition(".")[2]
+            for wp in wps:
+                binds = {w.bind for w in wp.binds if w.column == subject}
+                if len(binds) != 1:
+                    return [], None
+                bind = binds.pop()
+                counter = next((x for jj in self._subject_writers_any(flush) for x in jj.branches
+                                if any(getattr(c, "run", 0) == int(wp.statement)
+                                       for c in [*(getattr(x, "count_prints", None) or []),
+                                                 *(getattr(x, "printed_counts", None) or [])])), None)
+                for p in wp.printed_by:
+                    to_hand = self.logs.names(self.files_of(flush, [], [p.line]))
+                    if not to_hand:
+                        whole = False
+                        continue
+                    asking = W.Asking((lo, hi), None, T.Said("for-the-column-s-writes", {
+                        "start": lo, "end": hi, "where": f"{name}:{p.line}"}))
+                    runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
+                    self._keep_unanswered(missed)
+                    whole = whole and bool(self._searched_whole(to_hand, asking, asking, missed, holes, None)["held"]) \
+                        and bool(every_log_asked(flush, [p.line], to_hand)["held"])
+                    try:
+                        fn = R.function(rel, func, within=[p.line])
+                    except (LookupError, ValueError, SyntaxError):
+                        return [], None
+                    stmt = R.statement_at(fn.node, p.line)
+                    row = fn.row_at(stmt) if stmt is not None else None
+                    if row is None:
+                        return [], None
+                    for log in to_hand:
+                        for run in runs.get(log, []):
+                            sn = R.seen(fn, run, self.mode)
+                            for i, _, _ in sn.hits.get(row.line, ()):
+                                record = run.records[i]
+                                at = W.when(record.stamp)
+                                got = sqltext.cut(record.text, p.lead, p.gap) if window[0] <= at <= window[1] else None
+                                if got is None or bind not in got[1]:
+                                    continue
+                                value = got[1][bind]
+                                if (states == TL.NULL_ONLY and value is not None) or (states == TL.SET_ONLY and value is None):
+                                    continue
+                                if counter is not None and _landed(fn, sn, i, row.line, counter, flush,
+                                                                   self._subject_of_branch(flush, counter))[0] is False:
+                                    continue
+                                found.append((at, record.machine or "", f"{name}:{p.line}", TL.RAN, (value,)))
+        return found, whole
+
+    def _subject_writers_any(self, owner: str) -> list:
+        """The map's junctions of *owner* for any subject (P67: an arm of a flush's function counted at its statement)."""
+        fragment = mapdump.fragment()
+        return [j for j in getattr(fragment, "junctions", None) or [] if _bare(j.owner) == _bare(owner)]
+
+    def _subject_of_branch(self, owner: str, branch) -> str:
+        """The subject of the junction of *owner* holding *branch*."""
+        return next((j.subject for j in self._subject_writers_any(owner) if any(x is branch for x in j.branches)), "")
 
     def _judged_in_pass(self, fn: R.Function, j, b, run: Any, i: int) -> tuple[str, list[str], list[int]] | None:
         """K-3 (e) (bundle K, out/gm/qk-design.md, the delegated design): the judge's verdict on the arm *b* of *j* alone

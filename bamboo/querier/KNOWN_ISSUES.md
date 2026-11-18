@@ -954,8 +954,16 @@ rows'; NT-pending-late, NT-scouting-late): E-3 (`stay_value._moves_only`) had pu
 statement at 949 "writing the status too".  949 flushes taskSpec's changed fields (the map's `KeyFrom.flushed_in`),
 so an unlock pass writes no status.  A flush now puts an arm out that way only where the map ties it to a status arm
 (`_writes_status_with`, `stay_value.tied`: doBasicPostProcess's 76 with its 77, flushed together at 116); a SQL
-statement as before.  The unlocks stay open arms, named as premises; reading them off the flush's printed binds is
-P67's.
+statement as before.
+
+*Changed (P67, the investigator's u10, 2026-11-18):* an arm whose every statement is a flush is read off the flush's
+printed binds (`Rerun._flushed_writes`): the WritePrint of the flushed statement (`object_map`) prints the statement
+and its bind map in a run of the row's key; a record whose map holds the column's bind with the arm's value (None for
+an arm writing None, another for one writing a value) is its write then, `ran`, unless the statement's count print
+says no row changed; with the logs searched whole and every log asked, the arm is read whole.  NT-pending-late's
+lockedBy is NULL from each JobGenerator pass's unlock (updateTask_JEDI's 1483 at 06:07:06.797, 06:26:45.347,
+06:46:49.944) to the next lock; NT-scouting-late's from 17:45:58.478 to 20:03:00.  *Not read:* which caller's pass ran
+the flush -- every arm writing that value by a flush of the same statement reads the record.
 
 ## H steps
 

@@ -19849,3 +19849,55 @@ def test_w13_a_flush_of_an_objects_changed_fields_writes_the_status_only_where_i
         print(json.dumps(got))
         """))
     assert json.loads(out.splitlines()[-1]) == [False, True, True]
+
+
+def test_p67_a_flushs_printed_binds_are_the_writes_of_the_caller_arm_setting_the_object(tmp_path):
+    """P67 (the investigator's u10): JobGenerator's runImpl unlocks (941 ``taskSpec.lockedBy = None``) are written by
+    updateTask_JEDI's flush at 1484 (the map's ``KeyFrom.flushed_in``), whose 1483 prints the statement and its bind
+    map in a run of the row's key: a record whose map holds ``:lockedBy`` with the arm's value is its write then, and
+    one whose count print says no row changed is none; a record of another arm's value (a pid) is not this arm's."""
+    out = _ok(_run(tmp_path, """
+        import datetime as D, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import timeline as TL
+        import bamboo.querier.rerun as RR
+
+        RR.key_froms = lambda: [N(owner="j.py::runImpl", writes={"T.lockedBy": [941, 946]}, flushed_in="t.py::updateTask",
+                                  flushed_lines=[1484], term="")]
+        RR.write_prints = lambda owner: [N(statement="1484", object_map="taskSpec", binds=[N(column="T.lockedBy", bind=":lockedBy")],
+                                           printed_by=[N(line=1483, lead="", gap="")])] if owner == "t.py::updateTask" else []
+        texts = {0: {":lockedBy": None}, 1: {":lockedBy": "a-pid"}, 2: {":lockedBy": None}}
+        RR.sqltext = N(cut=lambda text, lead, gap: ("UPDATE", texts[text]))
+        recs = [N(stamp="2026-11-15 06:07:06,797", machine="m85.x", text=0), N(stamp="2026-11-15 06:26:44,318", machine="m82.x", text=1),
+                N(stamp="2026-11-15 06:46:49,944", machine="m82.x", text=2)]
+        run = N(records=recs)
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.args = N(key="7"); r.mode = "outside"; r.unanswered = []; r.hop = "L2"
+        r.logs = N(names=lambda files: ["j.log"])
+        r.files_of = lambda owner, logs, lines: ["j.log"]
+        r._ask = lambda key, names, asking, owners, quiet=False: ({"j.log": [run]}, [], {})
+        r._searched_whole = lambda *a: {"held": True}
+        RR.every_log_asked = lambda owner, lines, names: {"held": True}
+        row = N(line=1483)
+        RR.R = N(named=lambda owner: owner, function=lambda rel, func, within=(): N(node="u", row_at=lambda stmt: row),
+                 statement_at=lambda node, line: "s",
+                 seen=lambda fn, run, mode: N(hits={1483: [(0, None, None), (1, None, None), (2, None, None)]}))
+        counter = N(count_prints=[N(run=1484)], printed_counts=[])
+        r._subject_writers_any = lambda owner: [N(subject="T.modificationTime", branches=[counter])]
+        RR._landed = lambda fn, sn, i, line, b, owner, subject: (i != 2, 1581)
+        t = D.datetime.fromisoformat
+        window = (t("2026-11-15 05:37:37"), t("2026-11-15 07:07:11"))
+        j = N(owner="j.py::runImpl")
+        got = {}
+        for line, outcome in ((941, "None"), (946, "runtime(pid)")):
+            writes, whole = r._flushed_writes(j, N(line=line, outcome=outcome), {"T.jediTaskID"}, window, "T.lockedBy")
+            got[line] = [[str(w[0]), w[3], list(w[4])] for w in writes] + [whole]
+        writes, whole = r._flushed_writes(N(owner="j.py::other"), N(line=1, outcome="None"), set(), window, "T.lockedBy")
+        got["no flush"] = [writes, whole]
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    # 941 writes None: the first record; the third's count says no row changed; the pid's record is 946's
+    assert got["941"] == [["2026-11-15 06:07:06.797000", "ran", [None]], True], got
+    assert got["946"] == [["2026-11-15 06:26:44.318000", "ran", ["a-pid"]], True], got
+    assert got["no flush"] == [[], None], got
