@@ -700,6 +700,7 @@ def test_a_container_outside_the_corpus_holds_what_its_method_puts(
         (one.kind, one.name, tuple(one.steps), tuple(one.paths), tuple(one.route))
         for one in add.value
     } == {
+        ("container", "(1, 'finished')", (), (), (_at(QUEUE, "M1"),)),
         ("constant", "1", (), ("[0]",), (_at(QUEUE, "M1"),)),
         ("constant", "'finished'", (), ("[1]",), (_at(QUEUE, "M1"),)),
     }
@@ -710,6 +711,7 @@ def test_a_container_outside_the_corpus_holds_what_its_method_puts(
             (one.kind, one.name, tuple(one.steps), tuple(one.paths), tuple(one.route))
             for one in values
         } == {
+            ("container", "(1, 'finished')", (), (), (_at(QUEUE, "M1"), _at(QUEUE, "M3"))),
             ("constant", "1", (), ("[0]",), (_at(QUEUE, "M1"), _at(QUEUE, "M3"))),
             (
                 "constant",
@@ -720,7 +722,8 @@ def test_a_container_outside_the_corpus_holds_what_its_method_puts(
             ),
         }
         assert not stays
-    assert heldfrom.held_elements(add.value[0], "[0]") == ([], True)
+    (one,) = [one for one in add.value if one.name == "1"]
+    assert heldfrom.held_elements(one, "[0]") == ([], True)
 
 
 def test_a_field_every_binding_of_which_holds_an_immutable_value_has_no_changes(

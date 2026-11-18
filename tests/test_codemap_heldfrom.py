@@ -476,7 +476,8 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
 ) -> None:
     """The shapes the carry answered with a source or a part of it: a list, a tuple and a dict literal, an ``if``
     expression, an ``or`` and an ``and``, ``+=`` and ``+`` of sequences.  The reader reads them, each value where it
-    sits; what the carry alone says sits at a field's element (T7) is a value not read, not the task.  A field read
+    sits, and a literal holding values is also the value itself (``container``), so its parts are parts of a value
+    a source on the way is -- a step into it takes the parts, not the literal; what the carry alone says sits at a field's element (T7) is a value not read, not the task.  A field read
     as itself holds its own parts at its parts (T9, ``SiteMapper.siteSpecList``'s shape): its steps take them.  An
     ``or`` or an ``and`` is one of its operands (T10, T11), also where a ``+=`` adds it (T12,
     ``nFiles += datasetSpec.nFiles or 0``)."""
@@ -497,7 +498,9 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
         }
 
     assert held("T1", "site") == {("parameter", "taskSpec", (".site",), ())}
+    # A literal is the value itself too, its elements beside it where they sit.
     assert held("T2", "pair") == {
+        ("container", "(taskSpec.status, jobSpec)", (), ()),
         ("parameter", "taskSpec", (".status",), ("[0]",)),
         ("parameter", "jobSpec", (), ("[1]",)),
     }
@@ -507,6 +510,7 @@ def test_a_literal_a_conditional_and_a_sequence_joined_are_read_where_they_hold_
         ("parameter", "taskSpec", (".name",), ()),
     }
     assert held("T5", "labels") == {
+        ("container", "{'k': taskSpec.label}", (), ()),
         ("parameter", "taskSpec", (".label",), ("['k']",)),
         ("constant", "'k'", (), ("[key]",)),
     }
@@ -804,6 +808,7 @@ def test_an_operator_s_value_holds_both_operands_through_the_operator_not_either
     assert not [one for one in wall if one[:3] == ("parameter", "taskSpec", ())]
     assert _held_through(fragment, OPERATED, "T3", "message") == {
         ("constant", "'%s/%s'", (), (), (("%", "text"),)),
+        ("container", "(user, taskSpec.name)", (), (), (("%", "text"),)),
         ("parameter", "user", (), ("[0]",), (("%", "text"),)),
         ("parameter", "taskSpec", (".name",), ("[1]",), (("%", "text"),)),
     }

@@ -3770,7 +3770,11 @@ KEY_OBJECT = "object"
 KEY_GLOBAL = "global"
 KEY_CALL = "call"
 KEY_DATABASE = "database"
-HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE)
+#: And a container the code spells with its elements -- a list, tuple, set or dict literal holding values: the value
+#: itself, *name* the literal as written; its elements' ways sit beside it at their places (:attr:`KeySource.paths`),
+#: so a part is always a part of a value some source on its way is.
+KEY_CONTAINER = "container"
+HELD_KINDS = (*KEY_KINDS, KEY_OBJECT, KEY_GLOBAL, KEY_CALL, KEY_DATABASE, KEY_CONTAINER)
 #: How a :class:`HeldChange` changes the object a way holds in place: an item or attribute stored or deleted, one
 #: changed inside (``m["a"]["b"] = v`` changes the item ``"a"``), a method of a builtin container changing it, the
 #: object put where the reading does not follow it, a call the reading cannot follow -- and ``row``: a spec's row

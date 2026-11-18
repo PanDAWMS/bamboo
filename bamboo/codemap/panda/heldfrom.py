@@ -80,6 +80,7 @@ from bamboo.codemap.models import (
     KEY_ATTRIBUTE,
     KEY_CALL,
     KEY_CONSTANT,
+    KEY_CONTAINER,
     KEY_DATABASE,
     KEY_GLOBAL,
     KEY_OBJECT,
@@ -388,7 +389,8 @@ def _step(
     *unread*, else :func:`_unread_part` (``jobSpec.Files + pseudoFiles``, which the carry says holds ``jobSpec`` at
     ``[*]``, has files, not jobs).  *element*: the step is the element a loop takes, a dict's key too; *keys*: the
     value is known as a dict, so that element is its key alone (``for rse in info`` takes none of ``info``'s
-    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's.
+    values).  The puts the value had (:attr:`_Way.puts`) are left behind: they are the value's, not the part's.  A
+    literal container's own way (:data:`KEY_CONTAINER`) takes no step: its elements' ways beside it answer it.
 
     *select*: the step ``[*]`` is a selection by a key computed at run time, ``(at, by)`` (:class:`HeldKeyed`): a part
     the reader placed under a key is taken with that key kept (:func:`_selected`)."""
@@ -399,6 +401,9 @@ def _step(
         if element_of is None:
             return []
         way = element_of
+    if way.kind == KEY_CONTAINER and not way.paths and step != _ENTER:
+        # The literal's own way: its elements' ways sit beside it at their places and answer the step.
+        return []
     if (
         step.startswith("[")
         and not way.paths
@@ -1335,7 +1340,7 @@ class _Reader:
         a call's value -- where the same value is the select item a guard's way names (``for (id,) in res``).  A way
         through a call or an operator that makes another value of the item -- a text holding it, a sum -- is not the
         item whole; a copy and the same value as another type (``int(row[0])``) are (:data:`_SAME_VALUE`)."""
-        ways = self._bound(expr, expr, site, file, func)
+        ways = [one for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
         items = []
         for one in ways:
             if one.kind != KEY_ROWS:
@@ -1455,7 +1460,8 @@ class _Reader:
         no ``*`` or ``**`` among them -- or of an ``if`` expression or an ``or`` / ``and``, read here, not asked of the
         carry, which says only where a source or a part of it sits: each element's ways at its place (:func:`_at`) --
         ``[i]`` of a list or a tuple, ``[*]`` of a set, a dict's value at ``['k']`` (:func:`_key_spot`) and its key
-        at ``[key]`` --; either branch's of an ``if`` expression; each operand's of an ``or`` or an ``and``, whose
+        at ``[key]`` --, after the literal's own way, the value itself (:data:`KEY_CONTAINER`); either branch's of an
+        ``if`` expression; each operand's of an ``or`` or an ``and``, whose
         value is one of them (``spec.nFiles or 0`` holds ``spec.nFiles`` or ``0``).  ``[taskSpec.site]`` holds
         ``taskSpec.site``, not ``taskSpec``.  ``None`` for another expression, an empty literal too
         (:func:`_empty_literal`)."""
@@ -1484,7 +1490,10 @@ class _Reader:
                 spots += [(_key_spot(key), value), (KEY_STEP, key)]
         else:
             return None
-        return [placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func, selves=selves))]
+        built = _Way(KEY_CONTAINER, ast.unparse(expr), getattr(expr, "lineno", None))
+        return [built] + [
+            placed for spot, one in spots for placed in _at(spot, self.read(one, at, file, func, selves=selves))
+        ]
 
     def _added(
         self, sides: Iterable[ast.expr], at: ast.AST, place: str, file: str, func: ast.AST, selves: _Selves = ()
