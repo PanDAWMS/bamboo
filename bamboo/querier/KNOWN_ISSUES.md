@@ -793,6 +793,16 @@ f7bbf96 on (before it the guard reads unknown and nothing is said).
 *Revisit:* when the map's H-a lands (the shape read here is its proposal); when EXISTS or IN terms are met; when a
 next question is to be run in the same process.
 
+*Changed (P14's first form, 2026-11-18, the investigator's u11 NT-scouting-late 4, delegated design):* where the END's
+row was made inside the stay (the merge job JobGenerator made at 17:45:57), its birth and its life are said after the
+END (`_waited_birth`).  Its birth: the runs of the map's INSERTs making a row of its class (``KeyFrom.new_row``:
+insertNewJob, ppEventServiceJob, makeFakeCoJumbo) holding its key, over its creation less and plus EDGE on every
+machine, each whole.  They are asked by the value linking it to the asked row first (the task's ID: the maker's mark
+holds it, so the records the walk holds answer), then by its own key.  Its life: its history rows with their times
+and machines.  NT-scouting-late: made by insertNewJob's run at 17:45:57,966 on aipanda089; pending 17:45:58 on 089 ...
+finished 20:03:00 on 090.  Why its maker made it then (the maker's selection's wakers: updateUnmergedDatasets' 'ready'
+at 17:44:56 on aipanda099) is not read yet.
+
 ## Row values at a step's time (`held.py`)
 
 ### K49. A guard over a column the rows file holds is read in it, by the map's ways and the direction of their changes

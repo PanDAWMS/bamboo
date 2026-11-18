@@ -20219,3 +20219,57 @@ def test_p25_rest_a_take_that_printed_no_key_solves_the_print_s_condition_over_t
     assert got["unread"][0] is False and "walltimeUnit is None" in got["unread"][2]
     # walltimeUnit set: the count of 1 or more fails the print below half of totJobs, so it is not 0
     assert got["set"][0] is False
+
+
+def test_p14_a_row_the_stay_waited_on_made_inside_it_is_read_for_its_birth_run_and_its_life(tmp_path):
+    """P14's first form (the investigator's u11 NT-scouting-late 4): O1's END named the merge job JobGenerator made at
+    17:45:57, inside the stay.  Its birth: the run of the map's INSERT making a JobSpec (insertNewJob) holding its key,
+    asked by the value linking it to the asked task first (the maker's mark holds the task: the records answer), then
+    by its own key.  Its life: its history rows with their times and machines."""
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "O1", [], "outside"
+        rerun.mapdump.fragment = lambda: N(tables=[N(name="jobsDefined4", rows_of="JobSpec"), N(name="JEDI_Tasks", rows_of="JediTaskSpec")])
+        rerun.key_froms = lambda: [N(owner="panda:pandaserver/j.py::J.insertNewJob", new_row=True, table="ATLAS_PANDA.jobsDefined4",
+                                     new_row_line=3200),
+                                   N(owner="panda:pandaserver/t.py::T.updateTask", new_row=False, table="JEDI_Tasks", new_row_line=0)]
+        r.files_of = lambda owner, today, lines: ["panda-JediDBProxy.log"]
+        rerun.owners_of = lambda ids: {}
+        rerun.of_mover = lambda run, owner: owner.endswith("insertNewJob")
+        rerun.runs_for = lambda log, key, other=None: [x for x in log.runs if key in x.holds]
+        r._other_of = lambda key, log: None
+        asked = []
+
+        def logs_at(key, files, asking, owners):
+            asked.append(key)
+            if key not in held:
+                return {}, [(N(key=(files[0], key)), "")]
+            return {"panda-JediDBProxy.log": N(runs=held[key])}, []
+
+        r._logs_at = logs_at
+        run = N(first="2026-11-14 17:45:57,966", last="2026-11-14 17:45:58,006", machine="aipanda089.cern.ch", holds={"5", "9"})
+        states = [{"status": "pending", "time": "2026-11-14 17:45:58", "time_extended": "2026-11-14 17:45:58.015", "modificationhost": "aipanda089.cern.ch"},
+                  {"status": "finished", "time": "2026-11-14 20:03:00", "time_extended": "2026-11-14 20:03:00.020", "modificationhost": "aipanda090.cern.ch"}]
+        born = datetime.datetime(2026, 11, 14, 17, 45, 57)
+        got = {}
+        for name, h in {"by the link": {"5": [run]}, "by its key": {"5": [], "9": [run]}, "not recorded": {}}.items():
+            held, asked[:], r.unanswered = h, [], []
+            said = r._waited_birth("JobSpec", "9", born, states, "5")
+            got[name] = {"said": [T.text(x) for x in said], "asked": list(asked), "kept": len(r.unanswered)}
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    made = "JobSpec 9 was made by insertNewJob's run at 2026-11-14 17:45:57,966 on aipanda089"
+    life = "JobSpec 9's history: pending 2026-11-14 17:45:58.015 (aipanda089), finished 2026-11-14 20:03:00.020 (aipanda090)"
+    # asked by the task the maker's mark holds: answered, its run holding the row's key
+    assert got["by the link"] == {"said": [made, life], "asked": ["5"], "kept": 0}, got
+    # the link's runs hold no run of the row's key: asked by the row's own key
+    assert got["by its key"]["said"] == [made, life] and got["by its key"]["asked"] == ["5", "9"], got
+    # neither recorded: the asks kept, said as asked
+    assert got["not recorded"]["said"][0].startswith("JobSpec 9's birth: the runs of insertNewJob holding it are asked"), got
+    assert got["not recorded"]["kept"] == 1, got

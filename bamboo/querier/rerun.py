@@ -8341,8 +8341,64 @@ class Rerun:
                                                    if born is not None and born > start else ""})
                     if stay else T.Said("h-next-none", {"cls": cls, "key": key}),
                     "premises": premises}))
+                if born is not None and born > start:
+                    # P14's first form: the row it waited on, made inside the stay -- its birth and its life
+                    for said in self._waited_birth(cls, key, born, history.get(key, []), str(self._row_value(str(via["from"])))):
+                        self.say(f"  {T.text(said)}")
                 return True
         return False
+
+    def _waited_birth(self, cls: str, key: str, born: datetime.datetime, states: list[dict], link: str) -> list[T.Said]:
+        """P14, its first form (out/gm/qk-design.md, the section on P14's first form, delegated design; the
+        investigator's u11 NT-scouting-late 4): a row O1's END says the stay waited on, made inside the stay (the
+        merge job JobGenerator made at 17:45:57), read for its birth and its life.  Its birth: the runs of the map's
+        INSERTs making a row of its class (``KeyFrom.new_row``: insertNewJob) holding its key, over its creation less
+        and plus EDGE on every machine, each whole -- the first record's time and machine.  They are asked by the value
+        that links the row to the asked one (*link*, the task's ID) first, as the maker's mark holds it (insertNewJob's
+        ``<JediTaskID=... idPool=...>``: asked by the writer's mark, the records the walk already holds answer), then
+        by the row's own key where that finds none.  Its life: its own
+        history rows (*states*), each value with its time and machine.  What is said; an ask the records lack kept.
+        Why its maker made it then (the maker's selection's wakers: updateUnmergedDatasets' 'ready' at 17:44:56) is
+        not read here."""
+        fragment = mapdump.fragment()
+        tables = {str(t.name).lower() for t in getattr(fragment, "tables", None) or [] if getattr(t, "rows_of", "") == cls}
+        makers: dict[str, list[int]] = {}
+        for k in key_froms():
+            if getattr(k, "new_row", False) and str(getattr(k, "table", "")).lower().rpartition(".")[2] in tables:
+                makers.setdefault(_bare(k.owner), []).append(int(getattr(k, "new_row_line", 0) or 0))
+        out: list[T.Said] = []
+        if makers:
+            files = list(dict.fromkeys(f for o, lines in sorted(makers.items()) for f in self.files_of(o, [], lines)))
+            lo, hi = W._down(born - EDGE), W._down(born + EDGE)
+            names = [o.rpartition("::")[2] for o in sorted(makers)]
+            ask = W.Asking((lo, hi), None, T.Said("for-the-waited-rows-birth", {"cls": cls, "key": key, "makers": names,
+                                                                                "at": f"{born:%Y-%m-%d %H:%M:%S}"}))
+            runs: list = []
+            unanswered: list = []
+            for asked_by in dict.fromkeys(v for v in (link, key) if v and v != "None"):
+                logs, unanswered = self._logs_at(asked_by, files, ask, owners_of(sorted(makers)))
+                runs = sorted((r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+                               if any(of_mover(r, o) for o in makers) and r.last[:19] >= lo and r.first[:19] <= hi),
+                              key=lambda r: r.first) if not unanswered else []
+                if runs:
+                    break
+            if unanswered and not runs:
+                self._keep_unanswered(unanswered)
+                out.append(T.Said("waited-birth-asked", {"cls": cls, "key": key, "makers": names, "n": len({a.key for a, _ in unanswered})}))
+            else:
+                if runs:
+                    r = runs[0]
+                    out.append(T.Said("waited-birth-run", {"cls": cls, "key": key, "maker": next(
+                        o.rpartition("::")[2] for o in sorted(makers) if of_mover(r, o)), "first": r.first[:23],
+                        "machine": (r.machine or "").split(".")[0] or "an unnamed host"}))
+                else:
+                    out.append(T.Said("waited-birth-unread", {"cls": cls, "key": key, "makers": names}))
+        life = [f"{s.get('status')} {str(s.get('time_extended') or s.get('time'))[:23]}"
+                + (f" ({str(s.get('modificationhost') or s.get('host')).split('.')[0]})" if s.get("modificationhost") or s.get("host") else "")
+                for s in sorted(states, key=lambda s: str(s.get("time_extended") or s.get("time")))]
+        if life:
+            out.append(T.Said("waited-life", {"cls": cls, "key": key, "life": life}))
+        return out
 
     def _count_turn(self, owner: str, subject: str, since: str, before: str | None, func: str) -> bool:
         """P25 (i) (the investigator's u3/u10; the map's AGC, codemap-xliv bbc723f, and ``Branch.condition_atoms``):
