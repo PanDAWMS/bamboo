@@ -2597,6 +2597,22 @@ def _print_holes_of(fragment_id: int) -> dict[tuple[str, str, int], list[tuple[s
     return out
 
 
+@functools.cache
+def _key_hole_lines(fragment_id: int) -> dict[tuple[str, str], dict[int, set[str]]]:
+    """P9: the installed dump's prints by ``(file, function)``: each print's line with the columns its holes print,
+    a list of them (``listed``) too."""
+    out: dict[tuple[str, str], dict[int, set[str]]] = {}
+    for f in getattr(mapdump.fragment(), "function_prints", None) or []:
+        rel, _, func = _bare(f.owner).partition("::")
+        lines = out.setdefault((rel.rpartition(":")[2], func.rpartition(".")[2]), {})
+        for st in f.statements or []:
+            for r in st.rows or []:
+                for h in [*(r.holes or []), *(getattr(r, "prefix_holes", None) or [])]:
+                    if getattr(h, "columns", None):
+                        lines.setdefault(st.line, set()).update(h.columns)
+    return out
+
+
 def _printed_columns(owner: str, line: int, row, record, cls: str, keys: set[str]) -> list[tuple[str, str]]:
     """K-3 (b): ``(column, value)`` for each hole of *owner*'s print at *line* the map names a column of *cls* other
     than *keys* (the row's key), read off *record* -- the row's value of that column where the pass read it
@@ -8390,34 +8406,59 @@ class Rerun:
         printed (the map's ParameterFrom, :func:`sources.param_ways`, the way's route holding one of the caller's call
         lines) did not hand that run its value.  killJob prints ``code=51`` at 840 before any rebinding of ``code``:
         copyArchive's calls handing '10' or '2' are not the one.  A caller with a way the map does not end at a literal,
-        or at the value, stays; where every caller would go, none goes.  Only the mover's moving run of a late value."""
+        or at the value, stays; where every caller would go, none goes.  Only the mover's moving run of a late value.
+        P9: of a caller kept, the call lines read the same way one by one: those every way through which hands another
+        literal go, where one is left (copyArchive's main, 21 calls into killJobs, the rebrokerage's handing '51')."""
         q2 = getattr(self, "_missed_q", None)
-        if len(found) < 2 or q2 is None or q2.mover != q.mover or q2.run is None:
+        if q2 is None or q2.mover != q.mover or q2.run is None:
             return found
         printed = self._printed_parameters(q.mover, q2.run)
         if not printed:
             return found
         bare = _bare(q.mover)
         ways = {p: SR.param_ways(bare, p) for p in printed}
-        kept: list[tuple[Caller, str]] = []
-        dropped: list[tuple[Caller, str]] = []
-        for c in found:
-            rel = c.owner.partition("::")[0]
-            sites = {f"{Path(rel).name}:{line}" for line in c.lines}
-            why = ""
+
+        def other_value(rel: str, lines: list[int]) -> tuple[str, set[str]] | None:
+            # the parameter every way through *lines* hands another literal of, with those literals; None where none
+            sites = {f"{Path(rel).name}:{line}" for line in lines}
             for p, value in printed.items():
                 mine = [w for w in ways[p] if any(f"{Path(r.rpartition(':')[0]).name}:{r.rpartition(':')[2]}" in sites
                                                   for r in w.route)]
                 if mine and all(w.end == SR.CONSTANT and not w.steps and w.why not in SR.NO_LITERAL
                                 and not SR.same_value(w.value, value) for w in mine):
-                    why = f"its calls hand {p} {sorted({w.value for w in mine})}, none the value the run printed for it"
-                    break
-            (dropped if why else kept).append((c, why))
-        if not kept or not dropped:
-            return found
+                    return p, {str(w.value) for w in mine}
+            return None
+
+        def words(found: list[tuple[str, set[str]]]) -> str:
+            by: dict[str, set[str]] = {}
+            for p, values in found:
+                by.setdefault(p, set()).update(values)
+            return "; ".join(f"{p} {sorted(v)}, none the value the run printed for it" for p, v in sorted(by.items()))
+
+        kept: list[tuple[Caller, str]] = []
+        dropped: list[tuple[Caller, str]] = []
+        for c in found:
+            other = other_value(c.owner.partition("::")[0], c.lines) if len(found) > 1 else None
+            (dropped if other else kept).append((c, f"its calls hand {words([other])}" if other else ""))
+        if not kept:
+            kept, dropped = [(c, "") for c in found], []
         for c, why in dropped:
             self.say(f"  {c.owner.split('::')[-1]} at {c.lines}: not the caller of the run that moved it: {why} (G-5)")
-        return [c for c, _ in kept]
+        # P9 (the investigator's u9, NJ-defined-late and MJ-starting-late): of a caller's call lines, those every way
+        # through which hands another literal did not make the run -- copyArchive's main calls killJobs from 21 lines,
+        # the rebrokerage's handing code '51', the value killJob printed
+        out: list[Caller] = []
+        for c, _ in kept:
+            rel = c.owner.partition("::")[0]
+            off = {line: other for line in c.lines if (other := other_value(rel, [line]))} if len(c.lines) > 1 else {}
+            left = [line for line in c.lines if line not in off]
+            if off and left:
+                self.say(f"  {c.owner.split('::')[-1]} at {c.lines}: its calls at {sorted(off)} hand "
+                         f"{words(list(off.values()))}: the run's call is at {left} (P9, G-5)")
+                c = replace(c, lines=left, across=[line for line in c.across if line in left],
+                            outer=[(o, line) for o, line in c.outer if line in left])
+            out.append(c)
+        return out
 
     def _mark_key(self, q: Callers) -> str | None:
         """Bundle H, H-4 (P20, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): the one value the mover's
@@ -8906,6 +8947,15 @@ class Rerun:
                     "prints": {"held": True, "why": T.Said("caller-marks-hold-the-key", {"marks": list(c.marks)})} if c.marks
                     else {"held": None, "why": T.Said("caller-asked-by-the-key-alone")}}
         failing = [T.Said("premise-why", {"premise": k, "why": p["why"]}) for k, p in premises.items() if not p["held"]]
+        if premises["window"]["held"] and premises["logs"]["held"] and len(c.lines) > 1:
+            # P9 (the investigator's u9): a call every way to which prints the row's key, none of its lines holding the
+            # key in the window searched whole, was not the call -- copyArchive's 'reassignJobs for ... ([PandaIDs])'
+            # before its Client.kill_jobs calls, the rebrokerage's killJobs at 1179 printing none
+            off = self._calls_printing_key(c, self._key_columns(up.subject, up.key))
+            left = [line for line in c.lines if line not in off]
+            if off and left:
+                self.say(f"  {func}'s calls at {off} print the row's key on every way to them, and no line of its "
+                         f"holding the key is in the window searched whole: none of them is the call; it is at {left} (P9)")
         if [k for k, p in premises.items() if not p["held"]] == ["prints"] and self._keyed_turn(c, up, moving):
             return None
         self.need(T.Said("a-pass-of-the-caller-on-the-row", {"caller": func, "start": start, "end": end, "failing": failing}),
@@ -8921,6 +8971,28 @@ class Rerun:
             return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
                                                                  "hop": c.hop}), None, "K55")
+
+    def _calls_printing_key(self, c: Caller, keys: set[str]) -> list[int]:
+        """P9: the call lines of *c* every way to which prints a hole the map names a column of *keys* by (a list of
+        them too: ``listed``), as the judge reads a must row (:func:`rows.must_rows`, before the call)."""
+        fragment = mapdump.fragment()
+        rel, _, func = _bare(c.owner).partition("::")
+        if fragment is None or not keys:
+            return []
+        try:
+            fn = R.function(rel, func, c.lines)
+        except (LookupError, ValueError, SyntaxError):
+            return []
+        holes = _key_hole_lines(id(fragment)).get((rel.rpartition(":")[2], func.rpartition(".")[2]), {})
+        out = []
+        for line in c.lines:
+            stmt = R.statement_at(fn.node, line)
+            if stmt is None:
+                continue
+            before, _ = R.must_rows(fn.node, stmt, None)
+            if any(holes.get(row.lineno, set()) & keys for row in before):
+                out.append(line)
+        return out
 
     def _keyed_turn(self, c: Caller, up: Callers, moving: list | None) -> bool:
         """M3(a)-2 step 2 (out/gm/qk-design.md "M3(a)-2", tmaeno's OK 2026-11-15 09:34:56): where the caller *c* was

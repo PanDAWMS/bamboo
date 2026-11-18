@@ -948,6 +948,15 @@ the value is (a multi-row select's `lockedBy IS NOT NULL`); a printed value no w
 entry built under a test every route settles (`if not force_read:`), which `_false_between`/`_false_spans` still leave
 out (the notes read it).
 
+*Changed (W13, the investigator's u10, 2026-11-18):* the IS NULL notes said `lockedBy IS NULL` surely false over
+stretches where the records show JobGenerator's unlocks (updateTask_JEDI's printed binds `:lockedBy None`, 'updated 1
+rows'; NT-pending-late, NT-scouting-late): E-3 (`stay_value._moves_only`) had put runImpl:941/946 out of the stay, their
+statement at 949 "writing the status too".  949 flushes taskSpec's changed fields (the map's `KeyFrom.flushed_in`),
+so an unlock pass writes no status.  A flush now puts an arm out that way only where the map ties it to a status arm
+(`_writes_status_with`, `stay_value.tied`: doBasicPostProcess's 76 with its 77, flushed together at 116); a SQL
+statement as before.  The unlocks stay open arms, named as premises; reading them off the flush's printed binds is
+P67's.
+
 ## H steps
 
 ### K20. H2 asks a value the history's rows hold over a window, on every machine
@@ -1677,6 +1686,16 @@ both (the map's `flow.together`, the loops around both read as going round once:
 reactivatePendingTasks_JEDI's execute writes the status by 4715 or 4728 and modificationtime only by 4723, in 4715's
 arm of the `if`: 4728, which began NT-registered-late's stay of 'registered', wrote no modificationtime, and the term
 starts at the write's value plus 10 min again (03:16:37.913168).
+
+*Changed (P9, the investigator's u9, 2026-11-18):* U1 reads a caller's call lines one by one as G-5 reads callers: a
+line every way through which hands a parameter the mover's moving run printed another literal goes, where one is left
+(`Rerun._callers_by_printed`): copyArchive's main calls killJobs from 21 lines, and killJob printed `code=51`; 15 hand
+other codes.  And U2, where no pass of a caller holding the key is found in a window searched whole with every log
+asked, says its call lines every way to which prints the row's key first (a hole the map names a key column by, a list
+of them too) are none of the call (`_calls_printing_key`): copyArchive's 707 'reassignJobs for JEDI at inactive site
+... ([PandaIDs])' before its call at 708.  The prints at 739, 779, 810 and 842 list the same PandaIDs, but the map names
+no column for their holes (a list appended from a select's rows: stops `element`, `row_item`), so NJ-defined-late's
+call is said at [740, 780, 811, 843, 1179], not the rebrokerage's 1179 alone -- the map's part.
 
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 

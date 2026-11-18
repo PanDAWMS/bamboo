@@ -178,10 +178,12 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
     runtime_starts: list[str] = []
     runtime_offsets: list[tuple[str, float]] = []
     status_outcomes: dict[tuple[str, int], str] = {}
+    status_arms: dict[str, list] = {}
     for j in status_junctions:
         if j.subject != subject:
             continue
         for b in j.branches:
+            status_arms.setdefault(j.owner, []).append(b)
             outcome = b.outcome or ""
             for line in _lines(b):
                 status_outcomes[(j.owner, line)] = outcome
@@ -233,7 +235,9 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 out.append((name, "a birth: written as the row is made"))
             elif every and not statements:
                 out.append((name, f"its statement(s) {sorted({kf.statement for kf in every})} run from no placed caller"))
-            elif moves := _moves_only(statements, subject, status_outcomes):
+            elif (moves := _moves_only(statements, subject, status_outcomes)) and _writes_status_with(
+                    b, j.owner, statements, subject, column, status_arms.get(j.owner, []), column_arms.get(j.owner, []),
+                    key_froms, together):
                 out.append((name, f"its statement at {moves[0]} writes {attr} too, to {moves[1]}"))
             elif asked is not None and value not in asked:
                 out.append((name, f"its row precondition asks {attr} in {sorted(asked)}"))
@@ -270,6 +274,18 @@ def _moves_only(statements: list, subject: str, status_outcomes: dict[tuple[str,
                 return None
             literals.add(outcome.strip("'\""))
     return min(statement for _, statement in by), sorted(literals)
+
+
+def _writes_status_with(b, owner: str, statements: list, subject: str, column: str, status_arms: list, column_arms: list,
+                        key_froms: list, together: Callable[[str, int, int], bool] | None) -> bool:
+    """The investigator's u10 W13: whether *statements* (writing *column* at the arm *b* of *owner*) write *subject*
+    whenever *b* writes.  A SQL statement writes every column it names; a flush of an object's changed fields (the map's
+    ``KeyFrom.flushed_in``) writes *subject* only where a pass set it, so only where the map ties *b* to a status arm
+    of *owner* (:func:`tied`): doBasicPostProcess's 76 ``lockedBy=None`` with its 77 status, flushed by updateTask_JEDI
+    at 116; not JobGenerator's runImpl unlock at 941, flushed at 949 with no status in its SET."""
+    if not any(getattr(kf, "flushed_in", "") for kf in statements):
+        return True
+    return any(any(c is b for c in tied(sb, owner, subject, column, column_arms, key_froms, together)) for sb in status_arms)
 
 
 def _by_statement(key_froms: list) -> dict[tuple[str, int], list]:

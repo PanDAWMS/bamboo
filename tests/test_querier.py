@@ -18400,6 +18400,12 @@ def test_g1_g4_g5_a_bare_key_hole_printing_other_keys_a_key_marked_writer_and_ca
             got["g5"] = [c.lines for c in r._callers_by_printed(q, found)]
             r._printed_parameters = lambda mover, run: {"code": "99"}
             got["g5 all"] = len(r._callers_by_printed(q, found[:2]))
+            # P9: one caller's call lines, read one by one: the one handing '10' goes, the one handing '51' stays
+            r._printed_parameters = lambda mover, run: {"code": "51"}
+            got["p9"] = [c.lines for c in r._callers_by_printed(
+                q, [RR.Caller("pandaserver/daemons/scripts/copyArchive.py::main", [634, 1197], 2, "none", outer=[("x.py:1", 634), ("y.py:2", 1197)])])]
+            got["p9 outer"] = [c.outer for c in r._callers_by_printed(
+                q, [RR.Caller("pandaserver/daemons/scripts/copyArchive.py::main", [634, 1197], 2, "none", outer=[("x.py:1", 634), ("y.py:2", 1197)])])]
             # the printed parameters
             src2 = ("def killJob(self, pandaID, code, prodManager):\\n"
                     "    log(f'code={code} role={prodManager}')\\n"
@@ -18424,6 +18430,7 @@ def test_g1_g4_g5_a_bare_key_hole_printing_other_keys_a_key_marked_writer_and_ca
     assert got["part"] == "", got
     assert got["g4"] == [True, False, False, False], got
     assert got["g5"] == [[1197], [228]] and got["g5 all"] == 2, got
+    assert got["p9"] == [[1197]] and got["p9 outer"] == [[["y.py:2", 1197]]], got
     assert got["printed"] == {"code": "51", "prodManager": "True"}, got
 
 
@@ -19783,3 +19790,62 @@ def test_k3e_a_judged_run_is_a_write_only_of_a_statement_picking_its_row_by_the_
                           RR._picks_beyond_key("j.py::propagate", 4405, "T.walltimeUnit", keys)]))
         """))
     assert json.loads(out.splitlines()[-1]) == [True, False, False]
+
+
+def test_p9_a_call_every_way_to_which_prints_the_rows_key_is_none_of_a_caller_whose_lines_hold_no_key(tmp_path):
+    """P9 (the investigator's u9; NJ-defined-late, MJ-starting-late): copyArchive's main prints 'reassignJobs for ...
+    ([PandaIDs])' on every way to its Client.kill_jobs calls, and its rebrokerage's killJobs prints nothing first: where
+    no line of it holding the key is in the window searched whole, the calls printing the key first are none of the
+    one that moved the row (``_calls_printing_key``: a must row before the call whose holes the map names a key column
+    by, a list of them too)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        hole = lambda c, listed=False: N(columns=c, listed=listed)
+        RR.mapdump.fragment = lambda: N(function_prints=[N(owner="c.py::main", statements=[
+            N(line=707, rows=[N(holes=[hole(["JobSpec.PandaID"], True)], prefix_holes=[])]),
+            N(line=739, rows=[N(holes=[hole([])], prefix_holes=[])])])])
+        stmts = {708: N(lineno=708), 740: N(lineno=740), 1179: N(lineno=1179)}
+        befores = {708: [N(lineno=707)], 740: [N(lineno=739)], 1179: []}
+        RR.R.function = lambda rel, func, lines: N(node="main")
+        RR.R.statement_at = lambda node, line: stmts.get(line)
+        RR.R.must_rows = lambda node, site, raised: (befores[site.lineno], [])
+        r = RR.Rerun.__new__(RR.Rerun)
+        c = RR.Caller("c.py::main", [708, 740, 1179], 2, "key")
+        print(json.dumps([r._calls_printing_key(c, {"JobSpec.PandaID"}), r._calls_printing_key(c, {"JobSpec.jobStatus"}),
+                          r._calls_printing_key(c, set())]))
+        """))
+    # 739's hole the map names no column by: not read as printing the key (the map's part)
+    assert json.loads(out.splitlines()[-1]) == [[708], [], []]
+
+
+def test_w13_a_flush_of_an_objects_changed_fields_writes_the_status_only_where_its_pass_set_it(tmp_path):
+    """The investigator's u10 W13: E-3 put an arm out of the stay where every statement writing the column writes the
+    status too, to literals -- but JobGenerator's runImpl unlocks (941 ``lockedBy=None``) are flushed by updateTask_JEDI
+    at 949, whose SET holds only the fields the pass changed (the map's ``KeyFrom.flushed_in``): an unlock pass writes no
+    status, so the arm stays.  A flush whose column arm the map ties to a status arm (doBasicPostProcess's 76 with its 77,
+    one arm of the column at the statement) and a SQL statement still put it out."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import stay_value as SV
+
+        arm = lambda line, outcome: N(line=line, other_lines=[], outcome=outcome, same_pass=[])
+        unlock, lock = arm(941, "None"), arm(946, "runtime(pid)")
+        jg_status = [arm(810, "'running'"), arm(903, "'scouting'")]
+        jg = N(owner="j.py::runImpl", statement=949, flushed_in="t.py::updateTask",
+               writes={"T.lockedBy": [941, 946], "T.status": [810, 903]})
+        post_unlock, post_status = arm(76, "None"), arm(77, "'done'")
+        post = N(owner="p.py::basic", statement=116, flushed_in="t.py::updateTask", writes={"T.lockedBy": [76], "T.status": [77]})
+        prep_unlock, prep_status = arm(3839, "None"), arm(3971, "'tobroken'")
+        sql = N(owner="t.py::prepare", statement=4075, flushed_in="", writes={"T.lockedBy": [3839], "T.status": [3971]})
+        together = lambda owner, a, b: True
+        kfs = [jg, post, sql]
+        got = [SV._writes_status_with(unlock, "j.py::runImpl", [jg], "T.status", "T.lockedBy", jg_status, [unlock, lock], kfs, together),
+               SV._writes_status_with(post_unlock, "p.py::basic", [post], "T.status", "T.lockedBy", [post_status], [post_unlock], kfs, together),
+               SV._writes_status_with(prep_unlock, "t.py::prepare", [sql], "T.status", "T.lockedBy", [prep_status], [prep_unlock], kfs, together)]
+        print(json.dumps(got))
+        """))
+    assert json.loads(out.splitlines()[-1]) == [False, True, True]
