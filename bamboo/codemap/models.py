@@ -1105,6 +1105,30 @@ class HandedParameter(BaseModel):
     )
 
 
+class ConditionAtom(BaseModel):
+    """One comparison of an object's attribute with constants in a branch's path condition, the object placed in its
+    class: propagateResultToJEDI's ``jobSpec.jobStatus == 'finished'`` is ``JobSpec.jobStatus`` ``==``
+    ``'finished'``, ``jobSpec`` its parameter -- so a reader evaluates the condition way by way on the row's own
+    columns, not by the attribute's spelling."""
+
+    entry: int = Field(description="The index of the :attr:`Branch.path_condition` entry the comparison is in.")
+    text: str = Field(description="The comparison as the entry spells it: ``jobSpec.jobStatus == 'finished'``.")
+    subject: str = Field(
+        default="",
+        description="``Class.attr`` of the attribute compared; empty where the object's class, or its attribute, is "
+        "not one the map knows.",
+    )
+    op: str = Field(description="``==``, ``!=``, ``in``, ``not in``, ``is``, ``is not``, ``<``, ``<=``, ``>``, ``>=``.")
+    values: list[str] = Field(
+        default_factory=list, description="The constants compared with, as written: ``'finished'``, ``None``."
+    )
+    object: str = Field(description="The object whose attribute is compared, as spelled: ``jobSpec``, ``self.job``.")
+    parameter: str = Field(
+        default="",
+        description="Where the object is a parameter of the branch's function: its name (a caller hands it).",
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -1146,6 +1170,13 @@ class Branch(BaseModel):
         ),
     )
     path_condition: list[str] = Field(default_factory=list)
+    condition_atoms: list[ConditionAtom] = Field(
+        default_factory=list,
+        description=(
+            "Each comparison of an object's attribute with constants in *path_condition*, the object placed in its "
+            "class where the map can (:class:`ConditionAtom`); the arms the attribute slice reads."
+        ),
+    )
     row_precondition: list[str] = Field(
         default_factory=list,
         description=(

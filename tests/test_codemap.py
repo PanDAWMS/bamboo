@@ -23528,3 +23528,99 @@ def test_a_received_key_is_the_column_of_the_terms_the_receiver_names_rows_by_wi
 
     assert edge.received_as == {"taskid": ["JediTaskSpec.jediTaskID"]}
     assert elsewhere.received_as == {}
+
+
+_ATOMS = '''
+class Proxy:
+    def propagate(self, jobSpec: JobSpec, fileSpec: JediFileSpec, other):
+        if (jobSpec.jobStatus == "finished" or jobSpec.jobSubStatus == "fg_done") and fileSpec.status != "skipped":
+            fileSpec.status = "finished"
+        if "lost" == jobSpec.jobStatus and other.state in ("a", "b") and jobSpec.PandaID > len(other.ids):
+            fileSpec.status = "lost"
+'''
+
+
+def test_a_branch_names_each_attribute_its_path_condition_compares_with_constants_by_class():
+    """propagateResultToJEDI writes an input file ``finished`` under ``jobSpec.jobStatus == 'finished'``, ``jobSpec``
+    its parameter: each comparison of an object's attribute with constants in a branch's path condition is said as
+    ``Class.attr``, the operator and the constants -- either side of it --, with the parameter the object is, so a
+    reader evaluates the condition way by way on a row's columns.  An attribute the class does not declare, or an
+    object no class is known for, is said with no subject; a comparison with anything but constants is none."""
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ATOMS, "pandaserver/taskbuffer/Proxy.py")]
+    _subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms(
+        junctions, modules, progress.equipped_attributor(modules, declarations), declarations
+    )
+    (junction,) = [one for one in junctions if one.subject == "JediFileSpec.status"]
+    atoms = {
+        branch.outcome: [
+            (atom.subject, atom.op, atom.values, atom.object, atom.parameter) for atom in branch.condition_atoms
+        ]
+        for branch in junction.branches
+    }
+    lost = [
+        ("", "in", ["'a'", "'b'"], "other", "other"),
+        ("JobSpec.jobStatus", "==", ["'lost'"], "jobSpec", "jobSpec"),
+    ]
+    assert sorted(atoms["lost"]) == lost
+    # The first write's value stands where the second does not run: its condition holds the second's negated, whose
+    # comparisons are listed with the entry that negates them.
+    assert sorted(atoms["finished"]) == sorted(
+        [
+            ("", "==", ["'fg_done'"], "jobSpec", "jobSpec"),
+            ("JediFileSpec.status", "!=", ["'skipped'"], "fileSpec", "fileSpec"),
+            ("JobSpec.jobStatus", "==", ["'finished'"], "jobSpec", "jobSpec"),
+            *lost,
+        ]
+    )
+    for branch in junction.branches:
+        for atom in branch.condition_atoms:
+            assert atom.text in branch.path_condition[atom.entry]
+
+
+def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_constants():
+    """An SQL write's branch and an alias call site's carry their comparisons as an attribute write's do -- a signed
+    number a constant too --, the function their junction's owner names read; the callee's own test an alias's
+    branch holds (``[in setOnHold()]``) is the callee's ``self``, no atom of the caller's."""
+    writer = (
+        "class M:\n"
+        "    def f(self, taskSpec: JediTaskSpec, jediTaskID):\n"
+        "        if taskSpec.status == 'running' and taskSpec.jediTaskID != -1:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET oldStatus=:oldStatus WHERE jediTaskID=:jediTaskID '\n"
+        "            varMap = {}\n"
+        "            varMap[':jediTaskID'] = jediTaskID\n"
+        "            varMap[':oldStatus'] = 'paused'\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+    )
+    caller = (
+        "def generate(self, taskSpec: JediTaskSpec, inputChunk):\n"
+        "    if taskSpec.oldStatus is None and not inputChunk.hasCandidates():\n"
+        "        taskSpec.setOnHold()\n"
+    )
+    modules = [
+        _module(_ON_HOLD, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(writer, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(caller, "pandajedi/jediorder/JobGenerator.py"),
+    ]
+    declarations = progress.spec_attributes(modules)
+    attributor = progress.equipped_attributor(modules, declarations)
+    attributor.learn_table_classes(modules)
+    _s, written, _c, _u, _d, _x, _stops = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _subjects, called, _cov = alias.extract(modules, MAP_ID, VERSION, declarations, attributor)
+    junctions = [*written, *called]
+
+    assert progress.attach_condition_atoms(junctions, modules, attributor, declarations) == 2
+    atoms = {
+        junction.subject: [
+            (atom.subject, atom.op, atom.values, atom.parameter)
+            for branch in junction.branches
+            for atom in branch.condition_atoms
+        ]
+        for junction in junctions
+    }
+    assert sorted(atoms["JediTaskSpec.oldStatus"]) == [
+        ("JediTaskSpec.jediTaskID", "!=", ["-1"], "taskSpec"),
+        ("JediTaskSpec.status", "==", ["'running'"], "taskSpec"),
+    ]
+    assert atoms["JediTaskSpec.status"] == [("JediTaskSpec.oldStatus", "is", ["None"], "taskSpec")]

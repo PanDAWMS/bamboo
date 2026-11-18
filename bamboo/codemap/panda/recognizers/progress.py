@@ -39,12 +39,13 @@ from __future__ import annotations
 import ast
 from typing import Iterator, NamedTuple, Optional
 
-from bamboo.codemap import callfacts, pathcond, values
+from bamboo.codemap import callfacts, evaluate, pathcond, values
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import def_name
+from bamboo.codemap.calls import def_name, def_named
 from bamboo.codemap.models import (
     Anchor,
     Branch,
+    ConditionAtom,
     ConditionValue,
     CountPrint,
     CoverageStat,
@@ -1190,6 +1191,130 @@ def _named_constant(value: ast.expr) -> Optional[str]:
     return None
 
 
+#: A comparison's operator, as a :class:`ConditionAtom` spells it.
+_ATOM_OPS = {
+    ast.Eq: "==",
+    ast.NotEq: "!=",
+    ast.In: "in",
+    ast.NotIn: "not in",
+    ast.Is: "is",
+    ast.IsNot: "is not",
+    ast.Lt: "<",
+    ast.LtE: "<=",
+    ast.Gt: ">",
+    ast.GtE: ">=",
+}
+#: The operator a comparison read with its sides swapped has: ``'x' == a.b`` is ``a.b == 'x'``.
+_SWAPPED = {"==": "==", "!=": "!=", "is": "is", "is not": "is not", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+
+
+def _constant(node: ast.expr) -> bool:
+    """Whether *node* is a constant as written: a literal, or a signed number (``-1``)."""
+    return isinstance(node, ast.Constant) or (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.USub, ast.UAdd))
+        and isinstance(node.operand, ast.Constant)
+    )
+
+
+def _constants(node: ast.expr) -> Optional[list[str]]:
+    """*node* as constants written: one, or each of a tuple, list or set of them; ``None`` for anything else."""
+    if _constant(node):
+        return [ast.unparse(node)]
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)) and all(_constant(one) for one in node.elts):
+        return [ast.unparse(one) for one in node.elts]
+    return None
+
+
+def equipped_attributor(modules: list[SourceModule], declarations: dict[str, set[str]]) -> SpecAttributor:
+    """The attributor the progress slice places objects with: the corpus's element types, ``self`` attributes,
+    return types and import aliases learned."""
+    attributor = SpecAttributor(declarations, class_bases(modules))
+    attributor.learn_element_types(modules)
+    attributor.learn_self_attributes(modules)
+    attributor.learn_return_types(modules)
+    attributor.learn_import_aliases(modules)
+    return attributor
+
+
+def attach_condition_atoms(
+    junctions: list[JunctionNode],
+    modules: list[SourceModule],
+    attributor: SpecAttributor,
+    declarations: dict[str, set[str]],
+) -> int:
+    """Each branch's :attr:`Branch.condition_atoms` (:func:`condition_atoms`), whichever recognizer made it -- an
+    attribute's write, an SQL write, a producer's return, a field's unset default: the function its junction's owner
+    names, and the class enclosing that.  The branches given any atom."""
+    trees = {module.rel_path: module.tree for module in modules}
+    given = 0
+    for junction in junctions:
+        rel_path, _, name = junction.owner.partition("::")
+        tree = trees.get(rel_path)
+        func = def_named(tree, name) if tree is not None else None
+        owner_class = enclosing_class(func) if func is not None else None
+        for branch in junction.branches:
+            branch.condition_atoms = condition_atoms(branch.path_condition, func, attributor, owner_class, declarations)
+            given += bool(branch.condition_atoms)
+    return given
+
+
+def condition_atoms(
+    entries: list[str],
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    attributor: Optional[SpecAttributor],
+    owner_class: Optional[str],
+    declarations: dict[str, set[str]],
+) -> list[ConditionAtom]:
+    """:attr:`Branch.condition_atoms` of a branch of *func* whose path condition is *entries*: each comparison of an
+    object's attribute with constants, read again from the entry's text, the object placed in its class by
+    *attributor* where the class declares the attribute (*declarations*), and named as *func*'s parameter where it is
+    one.  A comparison of anything else -- a call's value, two attributes, a name -- is none, and so is an entry
+    read where *func*'s names are not its own (:func:`evaluate.read_elsewhere`: a callee's test, a later write's)."""
+    arguments = getattr(func, "args", None)
+    parameters = (
+        {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+        if arguments is not None
+        else set()
+    )
+    found: list[ConditionAtom] = []
+    for index, entry in enumerate(entries):
+        if evaluate.read_elsewhere(entry):
+            continue
+        try:
+            tree = ast.parse(evaluate.strip_annotation(entry), mode="eval")
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare) or len(node.ops) != 1:
+                continue
+            op = _ATOM_OPS.get(type(node.ops[0]))
+            left, right = node.left, node.comparators[0]
+            if op is None:
+                continue
+            if isinstance(left, ast.Attribute) and (constants := _constants(right)) is not None:
+                attribute = left
+            elif isinstance(right, ast.Attribute) and op in _SWAPPED and (constants := _constants(left)) is not None:
+                attribute, op = right, _SWAPPED[op]
+            else:
+                continue
+            cls = attributor.class_of(attribute.value, func, owner_class) if attributor is not None else None
+            found.append(
+                ConditionAtom(
+                    entry=index,
+                    text=ast.unparse(node),
+                    subject=f"{cls}.{attribute.attr}" if cls and attribute.attr in declarations.get(cls, ()) else "",
+                    op=op,
+                    values=constants,
+                    object=ast.unparse(attribute.value),
+                    parameter=attribute.value.id
+                    if isinstance(attribute.value, ast.Name) and attribute.value.id in parameters
+                    else "",
+                )
+            )
+    return found
+
+
 def extract(
     modules: list[SourceModule],
     map_id: str,
@@ -1228,11 +1353,7 @@ def extract(
     declarations = spec_attributes(modules)
     vocabularies = declared_vocabularies(modules, declarations)
     setters = spec_setters(modules, declarations)
-    attributor = SpecAttributor(declarations, class_bases(modules))
-    attributor.learn_element_types(modules)
-    attributor.learn_self_attributes(modules)
-    attributor.learn_return_types(modules)
-    attributor.learn_import_aliases(modules)
+    attributor = equipped_attributor(modules, declarations)
     settle = values.resolver(sql._CALLS)
     aliases = find_aliases(modules, declarations)
     memo: dict = {}

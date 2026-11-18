@@ -438,11 +438,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # attributor equipped the same way the progress slice's was, since both
         # readings are the ordinary resolution -- one of the annotated container,
         # one of what the code stores in it.
-        audited = SpecAttributor(declarations, class_bases(self._modules))
-        audited.learn_element_types(self._modules)
-        audited.learn_self_attributes(self._modules)
-        audited.learn_return_types(self._modules)
-        audited.learn_import_aliases(self._modules)
+        audited = progress.equipped_attributor(self._modules, declarations)
 
         # Writes the attribution drops for having a receiver whose class is a
         # run-time choice.  Collected here rather than counted inside the
@@ -864,6 +860,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             fragment.map_id,
             fragment.derived_from,
         )
+        # Each branch's comparisons of an object's attribute with constants, the object placed in its class, now that
+        # every recognizer has made its branches: read by the progress slice's own attributor.
+        atoms = progress.attach_condition_atoms(fragment.junctions, self._modules, audited, declarations)
+        logger.info("PandaCodeMapPlugin: %d branch(es) compare an attribute with constants", atoms)
         # What the function prints under a test of the row count of a run each write lands at: whether it landed.
         sqlwrite.attach_count_prints(
             fragment.key_froms,
