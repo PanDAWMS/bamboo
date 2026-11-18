@@ -1697,6 +1697,24 @@ reads is the table between the act and the mover (tmaeno, 2026-11-15).  A stuck 
 window's end, the statuslog's as_of: none in it stops the branch the same way (MT-exhausted-stuck: no command row for
 the task from 08:31:31 to 13:58:02); a write in it with the value not moved on is not read here (U1 as before).
 
+*Changed (P45, 2026-11-18, out/gm/qk-design.md "P45", delegated design):* A2 also reads a mover whose writes carry no key
+of their own -- no KeyFrom of them has a source, and one keeps the object it was handed -- by the selections on another
+table whose rows the map's `crosses_to` hands to the mover or a caller of it within two calls (`agents.crossed_readers`;
+a selection keyed by the object's identity reads by the key and gives none): listJobOutputReport@2401's rows reach
+process_job_report, whose AdderGen the Adder's parse_job_output_report keeps the job of.  The wakers read are the
+inserting ones, the map's `insert` and its new `born` (codemap-xliv: an INSERT whose new row a poll's terms take,
+Job_Output_Report's three).  The END names the premise: that the key is a row the selection gives is read from
+`crosses_to`, not from the arm's KeyFrom.  Every waker's logs are asked before the branch stops, so that one record
+round answers them all (before, A2 stopped at the first waker whose logs the records lacked: Job_Output_Report's
+three would have taken three rounds).
+
+*Changed (W14, 2026-11-18, the investigator's u11, P68):* where U2 reads a caller's passes by its callees' runs
+(`_call_tied`), a run of the mover inside the run that moved the row (L1's, `result["moved_by"]`), on its machine within a
+second, whose function is another caller of the mover one call up (the map's closure on the mover's own name), is that
+caller's call and is left out of this caller's passes, said: NJ-merging-late's archiveJob runs on aipanda099 at 05:05:11
+lie in updateUnmergedJobs' run and are not killJobs'.  The premise that a callee's run is the caller's call (how many
+other functions reach it) now covers the mover's own runs too.
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row

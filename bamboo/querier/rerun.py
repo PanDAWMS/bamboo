@@ -8008,13 +8008,25 @@ class Rerun:
         row_tables = {t.name.lower() for t in getattr(fragment, "tables", None) or [] if t.rows_of == cls}
         found = AG.waker_readers(getattr(fragment, "key_froms", None) or [], getattr(fragment, "read_sites", None) or [],
                                  row_tables, q.owner, subject, {a.line for a in q.arms}, KEY_ROWS)
+        via: list[str] = []
         if found is None:
-            return False
+            # P45: writes carrying no key of their own take it from the callers, whose rows a selection on another
+            # table hands on (the map's crosses_to)
+            crossed = AG.crossed_readers(getattr(fragment, "key_froms", None) or [], getattr(fragment, "read_sites", None) or [],
+                                         getattr(fragment, "reach_graph", None) or [], row_tables, q.owner, subject,
+                                         {a.line for a in q.arms}, KEY_KEPT,
+                                         {i.rpartition(".")[2].lower() for i in _identity_attrs(cls)})
+            if crossed is None:
+                return False
+            readers, wakers, via = crossed
+            found = (readers, wakers)
         readers, wakers = found
         reader, column = readers[0]
+        said_column: T.Said | str = (T.Said("handed-on-by", {"callers": [c.split("::")[-1] for c in via]}) if via else column)
         where = f"{reader.owner.split('::')[-1]}@{reader.anchor.line_start}"
         values = {w.value for w in wakers}
         writes = []
+        asked = []
         for owner in sorted({w.owner for w in wakers}):
             wlines = sorted({w.line for w in wakers if w.owner == owner})
             rel, wfunc = _bare(owner).split("::", 1)
@@ -8024,7 +8036,10 @@ class Rerun:
             asking = W.Asking((since, until), None, T.Said("over-the-stay-for-its-wakers", {"start": since, "end": until, "reader": where}))
             self.say(f"{wfunc}, a waker of {where}: logs {files}, asked {asking.why}")
             runs, missed, holes = self._ask(q.key, to_hand, asking)
-            self._stop_unanswered(missed)
+            asked.append((owner, wlines, rel, wfunc, to_hand, asking, runs, missed, holes))
+        # every waker's logs asked before the branch stops: one record round answers them all
+        self._stop_unanswered([m for a in asked for m in a[7]])
+        for owner, wlines, rel, wfunc, to_hand, asking, runs, _, holes in asked:
             whole = self._searched_whole(to_hand, asking, asking, [], holes, None)
             every = every_log_asked(owner, wlines, to_hand)
             if not whole["held"] or not every["held"]:
@@ -8082,8 +8097,10 @@ class Rerun:
             "mover": func, "after": f"{(moved - at).total_seconds():.0f}", "waker": owner.split("::")[-1].rpartition(".")[2],
             "line": line, "what": what, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
             "through": T.Said("through-the-entry", {"entries": entries}) if len(entries) == 1 else T.Said("through-no-one-entry"),
-            "reader": where, "column": column, "earlier": earlier,
-            "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func})]}))
+            "reader": where, "column": said_column, "earlier": earlier,
+            "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func}),
+                         *([T.Said("the-key-from-the-callers", {"reader": where, "callers": [c.split("::")[-1] for c in via]})]
+                           if via else [])]}))
         return True
 
     def _hop_turn(self, owner: str, subject: str, since: str, before: str | None, until: str | None, func: str) -> bool:
@@ -9122,6 +9139,26 @@ class Rerun:
                     stamps = sorted(r.stamp for r in run.found_by if lo <= W.when(r.stamp) <= hi)
                     for a, b in _bursts(stamps, datetime.timedelta(minutes=1)):
                         passes.append((a, b, run.machine, bare, lines, o))
+        # W14 (the investigator's u11, P68): a run of the mover inside the run that moved the row (L1's), whose function
+        # is another caller of the mover, is that caller's call, not this one's -- NJ-merging-late's archiveJob at
+        # 05:05:11 on aipanda099, inside updateUnmergedJobs's run, read for killJobs
+        moving = (self.result.get("moved_by") or {}) if isinstance(getattr(self, "result", None), dict) else {}
+        mrun = moving.get("run") or {}
+        mowner = _bare(str(moving.get("owner", "")))
+        if mrun.get("machine") and mowner and mowner != _bare(c.owner):
+            lo_m, hi_m = W.when(str(mrun["first"])), W.when(str(mrun["last"]))
+            # the mover's name as the map's closure keys it: the pass's own (its sixth item)
+            inside = [p for p in passes if p[3] == mover and p[2] == mrun["machine"]
+                      and mowner in {_bare(o) for o in MR.reaching(p[5], 1)}
+                      and W.when(p[0]) <= hi_m + datetime.timedelta(seconds=1)
+                      and W.when(p[1]) >= lo_m - datetime.timedelta(seconds=1)]
+            if inside:
+                passes = [p for p in passes if p not in inside]
+                shown = ", ".join(p[0][:23] for p in inside[:3]) + (f" and {len(inside) - 3} more" if len(inside) > 3 else "")
+                self.say(f"{len(inside)} run(s) of {mover.rpartition('::')[2]} on {mrun['machine'].split('.')[0]} at "
+                         f"{shown} lie in the run that moved the row, "
+                         f"{mowner.rpartition('::')[2]}'s ({mrun['first'][:23]} .. {mrun['last'][:23]}), another caller of "
+                         f"it: its calls, not {func}'s (W14)")
         # a callee reached through the calls into the mover and through others alike does not tell the way
         told = sorted((p for p in passes if p[3] == mover or not set(p[4]) & set(c.lines)), key=lambda p: (p[2], p[0]))
         # the caller's passes: a machine's runs of its callees a minute or less apart
@@ -9139,9 +9176,10 @@ class Rerun:
         mine = {qual, *reached}
 
         def callee_premises(groups: list[list]) -> list[T.Said]:
+            # the mover's own runs too (W14): another caller of it may have run it on the row then
             return [T.Said("a-callee-run-is-the-caller-s", {
                 "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine)})
-                for o in sorted({q[5] for g in groups for q in g if q[3] != mover})] + [
+                for o in sorted({q[5] for g in groups for q in g})] + [
                 T.Said("a-callee-marked-by-a-reference", {
                     "callee": b.rpartition("::")[2].rpartition(".")[2], "attr": referenced[b][0], "cls": cls,
                     "keys": referenced[b][1:]})

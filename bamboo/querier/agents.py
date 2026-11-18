@@ -449,8 +449,63 @@ def waker_readers(key_froms: list, read_sites: list, row_tables: set[str], owner
             readers.append((site, s.column))
     if not readers or any({t.lower() for t in r.tables} & row_tables for r, _ in readers):
         return None
-    wakers = [w for r, _ in readers for w in getattr(r, "wakers", None) or [] if w.kind == "insert"]
+    wakers = _inserting(readers)
     return (readers, wakers) if wakers else None
+
+
+#: the wakers that make a row: an insert of a value the selection asks for, or a new row its terms take (the map's
+#: ``born``, codemap-xliv's P45 part: Job_Output_Report's INSERTs for listJobOutputReport@2401)
+INSERTING = ("insert", "born")
+
+
+def _inserting(readers: list[tuple[Any, str]]) -> list:
+    """The inserting wakers of *readers*' selections, one per writer's line."""
+    out: dict[tuple, Any] = {}
+    for r, _ in readers:
+        for w in getattr(r, "wakers", None) or []:
+            if w.kind in INSERTING:
+                out.setdefault((w.owner, w.line, w.value), w)
+    return list(out.values())
+
+
+def crossed_readers(key_froms: list, read_sites: list, reach_graph: list, row_tables: set[str], owner: str, subject: str,
+                    lines: set[int], kept_kind: str, ident: set[str], depth: int = 2) -> tuple[list[tuple[Any, str]], list, list[str]] | None:
+    """P45 (the investigator's u10; A2 widened): where *owner*'s writes of *subject* at *lines* carry no key of their own
+    -- no KeyFrom of them has a source, and one keeps the object it was handed (*kept_kind*; another may hand it to a
+    helper, as P10 reads doGenerate's 1277) -- the key came with the object from its callers: the selections on another table (none of *row_tables*) whose rows the map's
+    ``crosses_to`` hands to *owner* or a caller of it within *depth* calls (the reach graph), with the inserts their
+    ``wakers`` name, and the callers reached.  A selection keyed by the object's identity (a key whose column is
+    one of *ident*, lower case: peekJob's files by ``FileSpec.PandaID``) reads by the key, so gives none.  The Adder's parse_job_output_report keeps the job its AdderGen was handed;
+    listJobOutputReport@2401's rows cross to process_job_report.  None where any write has a key of its own, no such
+    selection is found, or none has an inserting waker."""
+
+    def bare(o: str) -> str:
+        return R.named(o)
+
+    mine = [kf for kf in key_froms if bare(kf.owner) == bare(owner) and set(kf.writes.get(subject, [])) & lines]
+    if (not mine or any(getattr(kf, "sources", None) for kf in mine)
+            or not any(getattr(kf, "unread", "") == kept_kind for kf in mine)):
+        return None
+    callers: dict[str, set[str]] = {}
+    for node in reach_graph:
+        for c in getattr(node, "calls", None) or []:
+            callers.setdefault(bare(c.to), set()).add(bare(node.owner))
+    reach = level = {bare(owner)}
+    for _ in range(depth):
+        level = {c for f in level for c in callers.get(f, ())} - reach
+        reach = reach | level
+    readers: list[tuple[Any, str]] = []
+    via: set[str] = set()
+    for r in read_sites:
+        hit = {bare(c) for c in getattr(r, "crosses_to", None) or []} & reach
+        if not hit or {t.lower() for t in getattr(r, "tables", None) or []} & row_tables:
+            continue
+        if {str(k).rpartition(".")[2].lower() for k in getattr(r, "keys", None) or []} & ident:
+            continue
+        readers.append((r, ""))
+        via |= hit
+    wakers = _inserting(readers)
+    return (readers, wakers, sorted(via)) if readers and wakers else None
 
 
 def cap_rows(limits: list[str]) -> int | None:

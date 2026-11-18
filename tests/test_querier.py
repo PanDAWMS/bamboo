@@ -16990,6 +16990,15 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
             # with no row of the value at the window's start, nothing is cut
             r = rerun([early, runs[3]])
             got["edges-none"] = [RR.Rerun._call_tied(r, c, wide), T.text(r.ended[0])]
+            # W14: the mover's run inside the run that moved the row, another caller's of the mover, is that caller's
+            r = rerun(runs)
+            r.result = {"moved_by": {"owner": "s/x.py::other", "run": {"machine": "aipanda086.cern.ch",
+                                                                        "first": day + "14:35:06,000", "last": day + "14:35:07,000"}}}
+            reaching = RR.MR.reaching
+            RR.MR.reaching = lambda o, depth=3: {"s/x.py::other"} if o.endswith("getTasksToBeFinished_JEDI") else set()
+            got["w14"] = [RR.Rerun._call_tied(r, c, RR.replace(up, window=(day + "14:20:00", day + "14:35:06"))),
+                          T.text(r.ended[0]) if r.ended else "", r.said]
+            RR.MR.reaching = reaching
             print(json.dumps(got))
             """,
         )
@@ -17008,6 +17017,9 @@ def test_a_callers_passes_are_read_by_its_callees_runs(tmp_path):
         "to 2026-11-13 14:35:06,032, 64.0 s after"), said
     # the helper reached through both calls tells no way
     assert "update_task_queued_activated_times" not in said and "one process of start on aipanda086" in said, said
+    ok, said, notes = got["w14"]
+    assert ok and "getTasksToBeFinished_JEDI [80]" not in said and "setScoutJobData_JEDI [75]" in said, got["w14"]
+    assert any("lie in the run that moved the row, other's" in n and "not start's (W14)" in n for n in notes), notes
     ok, said = got["p22"]
     assert ok and said.startswith("start's passes on the row, read by its callees' runs: aipanda086 2026-11-13 14:34:02,001 "
                                   ".. 2026-11-13 14:34:02,138: setScoutJobData_JEDI [75], prepareTasksToBeFinished_JEDI [75] "
@@ -17557,6 +17569,52 @@ def test_waker_readers_take_a_movers_key_from_a_table_its_wakers_write(tmp_path)
     assert got["own_table"] is None, got
     assert got["no_insert"] is None, got
     assert got["none"] is None, got
+
+
+def test_crossed_readers_take_the_key_the_callers_hand_from_a_table_whose_rows_reach_them(tmp_path):
+    """P45 (agents.crossed_readers, A2 widened): the Adder's parse_job_output_report keeps the job its AdderGen was
+    handed (a KeyFrom kept, no source): the key came from the callers, and listJobOutputReport's rows cross to
+    process_job_report, a caller one call up, so its inserting wakers are read.  A write with a key of its own, a
+    selection on the subject's own table, one whose rows reach no caller within two calls, or no inserting waker: not."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import agents as AG
+
+        mover = "p/adder_gen.py::parse_job_output_report"
+        kept = N(owner=mover, writes={"JobSpec.jobStatus": [919]}, unread="kept in what it was handed", sources=[])
+        helper = N(owner=mover, writes={"JobSpec.jobStatus": [919]}, unread="handed to a call", sources=[])
+        own = N(owner=mover, writes={"JobSpec.jobStatus": [919]}, unread="", sources=[N(kind="parameter")])
+        # the map's born waker: a new row the poll's terms take (codemap-xliv's P45 part)
+        ins = N(kind="born", owner="p/worker_module.py::updateWorkers", line=1016, value="", subject="Job_Output_Report")
+        report = N(owner="p/job_standalone_module.py::listJobOutputReport", anchor=N(line_start=2401), tables=["Job_Output_Report"],
+                   crosses_to=["p/add_main.py::main", "p/adder_gen.py::process_job_report"], wakers=[ins])
+        jobs = N(owner="p/x.py::peekJob", anchor=N(line_start=10), tables=["jobsActive4"], crosses_to=["p/adder_gen.py::process_job_report"],
+                 wakers=[ins])
+        files = N(owner="p/x.py::peekJob", anchor=N(line_start=11), tables=["filesTable4"], keys=["FileSpec.PandaID"],
+                  crosses_to=["p/adder_gen.py::process_job_report"], wakers=[ins])
+        far = N(owner="p/y.py::listFar", anchor=N(line_start=20), tables=["Far"], crosses_to=["p/z.py::top"], wakers=[ins])
+        graph = [N(owner="p/adder_gen.py::process_job_report", calls=[N(to=mover)]),
+                 N(owner="p/adder_gen.py::run", calls=[N(to="p/adder_gen.py::process_job_report")]),
+                 N(owner="p/z.py::top", calls=[N(to="p/q.py::mid")]), N(owner="p/q.py::mid", calls=[N(to="p/adder_gen.py::run")])]
+
+        def read(froms, sites=(report, jobs, files, far), wake=None):
+            if wake is not None:
+                report.wakers = wake
+            found = AG.crossed_readers(froms, list(sites), graph, {"jobsactive4"}, mover, "JobSpec.jobStatus", {919},
+                                       "kept in what it was handed", {"pandaid"})
+            report.wakers = [ins]
+            return None if found is None else [[r.anchor.line_start for r, _ in found[0]], [w.line for w in found[1]], found[2]]
+        got = {"kept": read([kept]), "helper": read([kept, helper]), "only_helper": read([helper]), "own": read([kept, own]),
+               "none": read([]),
+               "no_insert": read([kept], wake=[N(kind="update", owner="u", line=1, value="x", subject="s")])}
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    # peekJob reads the subject's own table, and its files by the job's key; listFar's rows reach a caller three calls up
+    assert got["kept"] == [[2401], [1016], ["p/adder_gen.py::process_job_report"]], got
+    assert got["helper"] == got["kept"], got
+    assert got["own"] is None and got["none"] is None and got["no_insert"] is None and got["only_helper"] is None, got
 
 
 def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_pass_reached_the_selection(tmp_path):

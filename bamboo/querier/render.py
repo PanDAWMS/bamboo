@@ -504,6 +504,9 @@ TEMPLATES: dict[str, str] = {
     "another-width-another-label": "the {n} selection(s) of {agent}'s cycles of another width than {width} are another label's (one of the row's below its cap would have taken it)",
     # A2: a mover keyed only by rows another table's wakers write runs on the row when one is written for its key
     "over-the-stay-for-its-wakers": "over the stay from {start} to {end}, for the key: the writes of the rows {reader} selects (the map's wakers)",
+    # P45: the key handed in by the callers a selection's rows reach (rerun._waker_turn, agents.crossed_readers)
+    "handed-on-by": "handed on by {callers:join=, }, which its rows reach",
+    "the-key-from-the-callers": "its writes carry no key of their own (the object is handed in): that the key is a row {reader} selects is read from the map's crosses_to to {callers:join=, }",
     "ran-on-a-row-its-wakers-wrote": "{mover} moved it on {after} s after {waker}:{line} wrote {what} at {at} on {machine}{through}: it takes the row only by the rows {reader} selects ({column}); {earlier}; premises: {premises:join=; }",
     "a-row-holding": "a row for it holding {subject}={value}",
     "a-row-for-it": "a row for it",
