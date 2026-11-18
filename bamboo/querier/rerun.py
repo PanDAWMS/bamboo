@@ -2572,6 +2572,15 @@ def _clock_write(value: datetime.datetime, writes: Sequence[TL.Write],
     return None
 
 
+def _picks_beyond_key(owner: str, line: int, subject: str, keys: set[str]) -> bool:
+    """K-3 (e): whether a statement writing *subject* by *owner*'s arm at *line* picks its row by a term on another
+    column than the row's key (*keys*; the map's ``KeyFrom`` terms): its run is no write of the row unless the term held,
+    which the run alone does not show (lockTask_JEDI's 2766 ``WHERE jediTaskID=:jediTaskID AND lockedBy=:lockedBy``,
+    updateDatasetsToFinishTask_JEDI's release ``lockedBy=:lockedBy``)."""
+    return any(getattr(kf, "term", "") and getattr(kf, "attr", "") not in keys
+               for kf in key_froms() if _bare(kf.owner) == _bare(owner) and line in (kf.writes.get(subject) or []))
+
+
 @functools.cache
 def _print_holes_of(fragment_id: int) -> dict[tuple[str, str, int], list[tuple[str, tuple[str, ...]]]]:
     """K-3 (b): the holes of the installed dump's prints the map names columns for (``SkeletonHole.columns``), one value
@@ -12111,12 +12120,26 @@ class Rerun:
                                 if not_run_out is not None:
                                     not_run_out.append((at, SV._name(j.owner, b.line), (record.machine or "").split(".")[0], guard))
                                 continue
+                            # K-3 (e): the judge's rules on the pass: a must row of the arm not in it, it did not write
+                            # there; a row printing only on a path through it, it ran
+                            judged = self._judged_in_pass(fn, j, b, run, i)
+                            if judged is not None and judged[0] == "excluded":
+                                unwritten = True
+                                if not_run_out is not None:
+                                    not_run_out.append((at, SV._name(j.owner, b.line), (record.machine or "").split(".")[0],
+                                                        [T.Said("its-must-rows-not-in-the-pass", {"why": "; ".join(judged[1])})]))
+                                continue
                             if seen_out is not None and subject:
                                 # K-3 (b): the row's other columns the print shows, as the pass read them
                                 seen_out += [(c, v, at, record.machine or "", f"{func.rpartition('.')[2]}:{line}")
                                              for c, v in _printed_columns(j.owner, line, row, record,
                                                                           subject.partition(".")[0], keys)]
-                            how = TL.RAN if landed or any(n.part == MUST_PART_BIND for n in held) else TL.REACHED
+                            # the judge's positive shows the write at the rows it was shown by, not at the earlier ones,
+                            # and only of a statement picking its row by the key alone: one with a term on another column
+                            # (lockTask_JEDI's ``lockedBy=:lockedBy``) ran without the run showing it took the row
+                            how = (TL.RAN if landed or any(n.part == MUST_PART_BIND for n in held)
+                                   or (judged is not None and judged[0] == "positive" and line in judged[2]
+                                       and not _picks_beyond_key(j.owner, b.line, j.subject, keys)) else TL.REACHED)
                             # the bind-print part: the value its statement ran with, off the print of its bind map
                             printed = _printed_write(fn, sn, run, i, row.line, j.owner, b, subject) if subject else None
                             if printed is not None and printed[1] is UNWRITTEN:
@@ -12142,6 +12165,37 @@ class Rerun:
         own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
         return (sorted(set(found), key=lambda f: f[:4]),
                 bool(shown) and all(p["held"] for p in premises.values()) and (bool(found) or unwritten or not own))
+
+    def _judged_in_pass(self, fn: R.Function, j, b, run: Any, i: int) -> tuple[str, list[str], list[int]] | None:
+        """K-3 (e) (bundle K, out/gm/qk-design.md, the delegated design): the judge's verdict on the arm *b* of *j* alone
+        in the pass of *fn* that holds record *i* (:func:`which_ran.judge`, one candidate on that pass): ``("positive",
+        why, the rows it was shown by)`` where a row printing only on a path through the arm is in the pass,
+        ``("excluded", why, [])`` where a must row of it is not (rule 4); None otherwise -- a guard read false is A-1's,
+        read before (:meth:`_not_run_in_pass`) -- or where no pass holds *i*.  propagateResultToJEDI's 4404 ``SET
+        walltimeUnit=NULL`` under ``if numDone in [5, 100]:``: its 4406 'trigger recalculation' printed only in the
+        17:20:30 pass of NT-running-late's task, which ran it; the passes printing its 4390 without it did not."""
+        cache: dict[tuple[int, int], list] = self.__dict__.setdefault("_passes_cut", {})
+        if (id(fn), id(run)) not in cache:
+            cache[(id(fn), id(run))] = [fn, run, cut_passes(fn, run, self.mode)[0]]
+        record = run.records[i]
+        part = next((p for p in cache[(id(fn), id(run))][2] if any(r is record for r in p.records)), None)
+        if part is None:
+            return None
+        rel, _, func = _bare(j.owner).partition("::")
+        name = run.log.name
+        try:
+            got = judge([Candidate(rel, func, [b.line], log_files=[name], run=part)], {name: [part]}, mode=self.mode,
+                        decide="positive")
+        except (LookupError, ValueError, SyntaxError):
+            return None
+        v = next((v for v in got.verdicts if v.line == b.line), None)
+        if v is None:
+            return None
+        if v.kind == "positive":
+            return "positive", list(v.reasons), list(v.proven)
+        if v.kind == "excluded" and any(r.startswith("rule 4") for r in v.reasons):
+            return "excluded", [r for r in v.reasons if r.startswith("rule 4")], []
+        return None
 
     def _not_run_in_pass(self, fn: R.Function, j, b, run: Any, i: int) -> list[T.Said] | None:
         """Bundle A, A-1 (out/gm/qk-design.md, tmaeno's OK 2026-11-16): the guard of each statement the arm *b* of *j*

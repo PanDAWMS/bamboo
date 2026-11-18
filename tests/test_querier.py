@@ -19724,3 +19724,62 @@ def test_p66_a_printed_time_is_the_rows_value_at_the_second_it_keeps_where_cut_a
     assert got["whole second"] is True, got
     assert got["same"] == [True, False], got
     assert got["text"] == [True, False, False], got
+
+
+def test_k3e_a_timeline_write_is_judged_in_its_pass_as_the_judge_reads_a_run(tmp_path):
+    """K-3 (e) (bundle K, out/gm/qk-design.md, the delegated design; NT-running-late step 5): a write a print reached is
+    read in its pass as the judge reads a run (one candidate on that pass): a must row of the arm missing there, it did
+    not write (rule 4: propagateResultToJEDI's passes printing its 4390 but not the 4406 'trigger recalculation' under
+    ``if numDone in [5, 100]:``); a row printing only on a path through it, it ran -- at that row's record, not at the
+    pass's earlier prints."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.mode = "outside"
+        rec = [N(), N(), N()]
+        part_a = N(records=rec[:2], log=N(name="a.log"))
+        part_b = N(records=rec[2:], log=N(name="a.log"))
+        run = N(records=rec, log=N(name="a.log"))
+        RR.cut_passes = lambda fn, run, mode: ([part_a, part_b], None)
+        verdicts = {id(part_a): N(line=4404, kind="excluded", reasons=["rule 4: must row(s) [4406] not in the run", "other"], proven=[]),
+                    id(part_b): N(line=4404, kind="positive", reasons=["row(s) [4406] print only on a path through it"], proven=[4406])}
+        RR.judge = lambda cands, logs, **kw: N(verdicts=[verdicts[id(cands[0].run)]])
+        fn = N()
+        j = N(owner="m.py::Mod.propagate")
+        b = N(line=4404)
+        got = {"a": r._judged_in_pass(fn, j, b, run, 0), "b": r._judged_in_pass(fn, j, b, run, 2)}
+        verdicts[id(part_b)] = N(line=4404, kind="excluded", reasons=["step 5: guard false"], proven=[])
+        r.__dict__.pop("_passes_cut", None)
+        got["guard only"] = r._judged_in_pass(fn, j, b, run, 2)
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["a"] == ["excluded", ["rule 4: must row(s) [4406] not in the run"], []], got
+    assert got["b"] == ["positive", ["row(s) [4406] print only on a path through it"], [4406]], got
+    # a guard read false is A-1's, read before: the judge's other exclusions say nothing here
+    assert got["guard only"] is None, got
+
+
+def test_k3e_a_judged_run_is_a_write_only_of_a_statement_picking_its_row_by_the_key_alone(tmp_path):
+    """K-3 (e): the judge's positive says the statement ran; one picking its row by a term on another column than the
+    key (lockTask_JEDI's 2766 ``WHERE jediTaskID=:jediTaskID AND lockedBy=:lockedBy``) ran without the run showing it
+    took the row, so the write stays reached; propagateResultToJEDI's 4404 (``WHERE jediTaskId=:jediTaskID``) does not."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        RR.key_froms = lambda: [
+            N(owner="t.py::lockTask", term="jediTaskID=:jediTaskID", attr="T.jediTaskID", writes={"T.lockedTime": [2755]}),
+            N(owner="t.py::lockTask", term="lockedBy=:lockedBy", attr="T.lockedBy", writes={"T.lockedTime": [2755]}),
+            N(owner="j.py::propagate", term="jediTaskId=:jediTaskID", attr="T.jediTaskID", writes={"T.walltimeUnit": [4404]}),
+            N(owner="j.py::propagate", term="", attr="", writes={"T.walltimeUnit": [4404]})]
+        keys = {"T.jediTaskID"}
+        print(json.dumps([RR._picks_beyond_key("t.py::lockTask", 2755, "T.lockedTime", keys),
+                          RR._picks_beyond_key("j.py::propagate", 4404, "T.walltimeUnit", keys),
+                          RR._picks_beyond_key("j.py::propagate", 4405, "T.walltimeUnit", keys)]))
+        """))
+    assert json.loads(out.splitlines()[-1]) == [True, False, False]

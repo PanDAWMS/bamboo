@@ -935,7 +935,14 @@ getDatasetsToFeedContents_JEDI@130 surely false from
 14:56:41.571 to 15:57:05.666.  (d) A term comparing a time column with the clock is said where it surely failed too
 (`_timeline_failed_spans`, `timeline-term-failed`), and, where nowhere, where it did with the open arms named:
 NT-exhausted-late's kickExhaustedTasks_JEDI@1968 `modificationTime<:timeLimit` (240 h, its marks print it) over an
-eleven-hour stay.  An arm writing the clock is never None (`_none_premised`).  The moment the pass read the
+eleven-hour stay.  (e) A write a print reached is read in its pass as the judge reads a run, one candidate on that pass
+(`_judged_in_pass`): a must row of the arm missing there (rule 4), it did not write (`timeline-not-run`); a row
+printing only on a path through it, it ran, at that row's record -- where its statement picks its row by the key
+alone (`_picks_beyond_key`: lockTask_JEDI's and updateDatasetsToFinishTask_JEDI's `lockedBy=:lockedBy` ran without
+the run showing they took the row, so their writes stay reached).  NT-running-late: propagateResultToJEDI's 4404
+`SET walltimeUnit=NULL` under `if numDone in [5, 100]:` ran only in the 17:20:30 pass, the one printing its 4406
+'trigger recalculation', so `walltimeUnit IS NULL` held from 17:20:30.555 to the 17:20:39.615 take.  An arm writing
+the clock is never None (`_none_premised`).  The moment the pass read the
 value is not in its records: it is said at the print.  *Not read:* a selection's terms as a witness where no print of
 the value is (a multi-row select's `lockedBy IS NOT NULL`); a printed value no write the records show matches; an
 entry built under a test every route settles (`if not force_read:`), which `_false_between`/`_false_spans` still leave

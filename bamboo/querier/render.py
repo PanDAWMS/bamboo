@@ -762,6 +762,8 @@ TEMPLATES: dict[str, str] = {
     # bundle F, F-3: a writer M3(a)-1 left out of the stay is not the row value's
     "timeline-row-value-apart": "; not {apart:join=, or }, left out of the stay",
     "timeline-not-run": "; read as not run in their pass: {writes:join=; }",
+    # K-3 (e): a write its pass does not reach, as the judge reads a run (rule 4)
+    "its-must-rows-not-in-the-pass": "{why}",
     "timeline-not-run-write": "{at} by {arm} on {machine} ({guards:join=, })",
     "timeline-opens": "; not all read, so they may write it: {arms:join=, }",
     "timeline-read-so-far": "the records show {n} write(s) of it in the stay ({m} more in the {slack} min before it) and {k} arm(s) not writing it",
