@@ -20005,3 +20005,91 @@ def test_p43_an_arm_writing_as_the_row_is_made_is_read_at_the_birth_with_the_run
                             "(insertNewJob, the INSERT its write is born by); whether the arm ran in that pass is not read"), got
     assert got["unasked"] == got["none"] == "a birth: it wrote as the row was made, at 2026-11-14 09:10:22; no run is read", got
     assert got["kept"] == 1, got
+
+
+def test_p25i_a_count_turned_at_the_take_s_printed_count_is_read_on_the_linked_rows(tmp_path):
+    """P25 (i) (the investigator's u3/u10; the map's AGC and ``Branch.condition_atoms``): sqlEA's take printed 5/10
+    'for early avalanche'; its guard (here ``totFinished >= minSuccessScouts``, 5 a constant, ``taskstatus`` the row's
+    status in the stay) holds at 5 and not at 4, so the count turned when the fifth of the task's JobSpec rows got
+    a status under which propagateResultToJEDI writes the file 'finished'.  Per linked row: a failed job whose
+    jobSubStatus is not 'fg_done' cannot (the fine-grained way is false on its own columns); one with jobSubStatus
+    unknown leaves that way open.  Where the rows that got it by the move are not the printed count, nothing is said."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        N_ = N
+        tables = [N(name="JEDI_Tasks", rows_of="JediTaskSpec"), N(name="JEDI_Dataset_Contents", rows_of="JediFileSpec")]
+        agg = N(fn="COUNT", column="jedi_dataset_contents.status", value="'finished'")
+        total = N(fn="COUNT", column="", value="")
+        # the map's evaluator reads arithmetic from codemap-xliv f7bbf96 on; the guard here needs none
+        g = lambda name, *srcs: N(owner="t.py::prep", test_line=3759, name=name, sources=list(srcs),
+                                  test="taskstatus == 'scouting' and totFinished >= minSuccessScouts")
+        guards = [g("taskstatus", N(kind="rows", column="jedi_tasks.status", aggregate=None)),
+                  g("totFinished", N(kind="rows", column="", aggregate=agg)),
+                  g("totJobs", N(kind="rows", column="", aggregate=total)),
+                  g("minSuccessScouts", N(kind=RR.KEY_CONSTANT, name="5", aggregate=None, changes=[])),
+                  N(owner="t.py::prep", test_line=3800, name="x", test="x", sources=[])]
+        cond = ["fileSpec.type in ['input', 'pseudo_input']",
+                "jobSpec.jobStatus == 'finished' and (not ES.is_fg(jobSpec)) or (jobSpec.jobSubStatus == 'fg_done' and ES.is_fg(jobSpec))"]
+        atoms = [N(text="fileSpec.type in ['input', 'pseudo_input']", subject="JediFileSpec.type", op="in", values=["'input'", "'pseudo_input'"]),
+                 N(text="jobSpec.jobStatus == 'finished'", subject="JobSpec.jobStatus", op="==", values=["'finished'"]),
+                 N(text="jobSpec.jobSubStatus == 'fg_done'", subject="JobSpec.jobSubStatus", op="==", values=["'fg_done'"])]
+        junctions = [N(subject="JediFileSpec.status", owner="j.py::propagate", branches=[
+                         N(outcome="finished", path_condition=cond, condition_atoms=atoms),
+                         N(outcome="ready", path_condition=[], condition_atoms=[])]),
+                     N(subject="JediTaskSpec.status", owner="t.py::prep", branches=[])]
+        site = N(owner="panda:t.py::prep", anchor=N(line_start=3741), row_loops=[N(lines=[3748, 3768])])
+        fragment = N(tables=tables, guard_froms=guards, junctions=junctions, read_sites=[site], reach_graph=[])
+        RR.mapdump.fragment = lambda: fragment
+        car = N(writers=("j.py::propagate",), carriers=(("j.py::archive", frozenset({"finished", "failed", "cancelled"})),),
+                values=frozenset({"finished", "failed", "cancelled"}))
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.args = N(observed="scouting", subject="JediTaskSpec.status", key="9")
+        said = []
+        r.say = said.append
+        names = r._count_guards(fragment, "t.py::prep", 3741)
+        test = sorted(names)[0]
+        printed = {"totFinished": 5, "totJobs": 10}
+        at = [r._count_guard_value(test[1], names[test], printed, "JediTaskSpec.status", o) for o in ({}, {"totFinished": 4})]
+        states = {k: sorted(v) for k, v in [
+            ("known", r._counted_states(fragment, car, "JediFileSpec.status", "finished", "JobSpec.jobStatus", {"jobsubstatus": "none"})[0]),
+            ("open", r._counted_states(fragment, car, "JediFileSpec.status", "finished", "JobSpec.jobStatus", {})[0]),
+            ("null", r._counted_states(fragment, car, "JediFileSpec.status", "finished", "JobSpec.jobStatus", {"jobsubstatus": None})[0])]}
+
+        # the whole turn: ten scouts, five finished by the move, the fifth at 12:45:15
+        RR.PT.history_of_class = lambda cls: N(subject="JobSpec.jobStatus", created="creationTime") if cls == "JobSpec" else None
+        RR.HOP.carriers = lambda junctions, graph, inner, status: car
+        rows = [{"PandaID": str(100 + i), "jobSubStatus": "none", "creationTime": "2026-10-29T08:30:00"} for i in range(10)]
+        # a job the avalanche made after the move: in no count the take read
+        rows.append({"PandaID": "200", "jobSubStatus": "none", "creationTime": "2026-10-29T12:50:00"})
+        done = {str(100 + i): f"2026-10-29 12:{40 + i}:15" for i in range(5)}
+        by_key = {k["PandaID"]: [{"status": "running", "time": "2026-10-29 08:40:00"}]
+                  + ([{"status": "finished", "time": done[k["PandaID"]], "host": "m094.x"}] if k["PandaID"] in done else [])
+                  for k in rows}
+        r.data = {"statuslog": {"states": [{"status": "scouting", "time": "2026-10-29 08:33:31"},
+                                           {"status": "scouted", "time": "2026-10-29 12:47:05"}]},
+                  "linked": [{"class": "JobSpec", "via": {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"},
+                              "asked": ["9"], "rows": rows}],
+                  "statuslogs": {"JobSpec": {"key": "JobSpec.PandaID", "by_key": by_key}}}
+        r._row_value = lambda attr: "9"
+        r._took = RR.TookBy(N(owner="t.py::prep", line=3741), 3768, "got ... finished for early avalanche", record=N(), row=N())
+        r._printed_counts = lambda took: dict(printed)
+        r._count_guards = lambda fragment, owner, line: names
+        ended = []
+        r.end = ended.append
+        got = r._count_turn("t.py::prep", "JediTaskSpec.status", "2026-10-29 08:33:31", "2026-10-29 12:47:05", "prep")
+        text = RR.T.text(ended[0]) if ended else ""
+        printed["totFinished"] = 6
+        less = r._count_turn("t.py::prep", "JediTaskSpec.status", "2026-10-29 08:33:31", "2026-10-29 12:47:05", "prep")
+        print(json.dumps({"at": [str(x) for x in at], "states": states, "got": got, "text": text, "less": less,
+                          "said": said[-1:]}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["at"] == ["True", "False"], got
+    assert got["states"] == {"known": ["finished"], "open": ["cancelled", "failed", "finished"], "null": ["finished"]}, got
+    assert got["got"] is True, got
+    assert "the one that brought it to 5" in got["text"] and "104, finished at 2026-10-29 12:44:15.000 on m094" in got["text"], got
+    assert "of the row's 10 JobSpec row(s)" in got["text"] and "1 JobSpec row(s) made after the move not read" in got["text"], got
+    assert got["less"] is False, got

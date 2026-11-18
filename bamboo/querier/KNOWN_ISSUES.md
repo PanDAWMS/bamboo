@@ -776,6 +776,20 @@ that injects both: of the 8 live cases reaching 3694, MT-running-late STOP -> EN
 6 the same (their movers' passes are found, so S2 reads them first; a stuck case's term is not read there).  The
 next question is named, not run; the rows a job's task and a task's parent need come by rows asks once the harness
 reads their histories (its stage 1).
+P25 (i) (the investigator's u3/u10; 2026-11-18): a count the taking selection groups (the map's AGC,
+``RowAggregate`` COUNT of a column holding a value, on a guard's sources) is read in the same way.  Where the selection
+that took the row printed it in the moving pass (A-5's ``TookBy``, its record), a guard in its row loop over such a count
+that holds at the counts printed and fails at one fewer (the map's evaluator; a constant source's literal, a source of
+the row's own status column its value in the stay) turned at the k-th of the counted rows: the rows file's linked rows
+of a class with a history, made by the move, each at the first status under which an arm of the carriers' writers
+writes the counted value -- the arm's path condition with its atoms on that status set to each candidate and its atoms
+on the row's own columns from the row (the map's ``Branch.condition_atoms``; NULL is a value held), entries read
+elsewhere left out, an entry false ruling the candidate out (``_counted_states``).  The rows that got it by the move
+must be the printed k, else nothing is said; the arm's atoms left open are said as premises.  MT-scouting-late: sqlEA's
+'5/10 finished for early avalanche', 3759 (``totFinished >= totJobs * minSuccessScouts / 10``) true at 5, false at 4,
+the fifth scout job finished 109.8 s before the take.  *Premise:* the linked rows of the class stand for the counted
+rows, one each (the counted DISTINCT items hold its key); the arithmetic needs the map's evaluator of codemap-xliv
+f7bbf96 on (before it the guard reads unknown and nothing is said).
 *Revisit:* when the map's H-a lands (the shape read here is its proposal); when EXISTS or IN terms are met; when a
 next question is to be run in the same process.
 

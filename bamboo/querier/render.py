@@ -519,6 +519,10 @@ TEMPLATES: dict[str, str] = {
     "h-next-stuck": "why {cls} {key} has not left {value} since {since}, its {status}",
     "h-next-none": "why {cls} {key} had not moved on (its history holds no row)",
     "h-rows-it-waits-on": "{where}'s {polarity} term on {inner} did not hold up to {until}, the window's end: {n} of the row's {total} {cls} row(s) by {via} not in one of {values:join=, } then ({open:join=, }): it waits on them -- next: {next}; premises: {premises:join=; } (KNOWN_ISSUES.md K77)",
+    # P25 (i): a count the selection groups turned (rerun._count_turn)
+    "h-count-turned": "{mover} took it {delta} s after {where}'s count at {line} turned: {test} holds at the {name} the take printed ({k}; {printed}) and not at {less}; of the row's {n} {cls} row(s) by {via}, the one that brought it to {k} by getting a status under which {counted}={value!r} is written was {key}, {status} at {at} on {machine}{later}; premises: {premises:join=; }",
+    "h-rows-stand-for-the-count": "the rows the count is over are the row's; its {cls} rows by {via} stand for them, one per {cls} row (which of them hold {counted} rows is not read)",
+    "h-count-ways-not-read": "the writing arm's other atoms ({atoms:join=; }) are not read: a way through them may write it at another status",
     "h-carried-by": "the term's columns ({inner:join=, }) are written by {writers:join=, }, which {carriers:join=, } reach as they record {status} (the map's calls; read by function, not by its arms)",
     "h-rows-stand-for-the-term-s": "the {inner} rows the term counts are the row's; its {cls} rows by {via} stand for them (which of them hold those rows is not read)",
     "h-a-later-write-not-read": "a write of the term's columns later than its row's move (a queued update) is not read: the move came {delta} s after it",

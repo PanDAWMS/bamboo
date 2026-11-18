@@ -1918,6 +1918,15 @@ def _bare(owner: str) -> str:
     return R.named(owner)
 
 
+def _atom_text(text: str) -> str:
+    """An atom's text as the map's evaluator keys it (``ast.unparse``), so the map's ``ConditionAtom.text`` and the
+    atoms :func:`evaluate.truth` meets in a path condition's entry match whatever their spacing and quotes."""
+    try:
+        return ast.unparse(ast.parse(text.strip(), mode="eval").body)
+    except SyntaxError:
+        return text.strip()
+
+
 def _plain(owner: str) -> str:
     """:func:`_bare`, less a repository's ``panda:`` before the file: a read site's owner and a KeyFrom's compare."""
     rel, _, qual = owner.partition("::")
@@ -2591,6 +2600,10 @@ class TookBy(NamedTuple):
     text: str
     #: ``(line, why)`` of each statement ruled out by its hand-ons (:meth:`Rerun._handed_none`)
     ruled_out: tuple[tuple[int, str], ...] = ()
+    #: the print's record in the moving pass (P25 (i) reads the counts it printed); None where *line* is None
+    record: Any = None
+    #: the print's row the record matched (its holes)
+    row: Any = None
 
 
 @dataclass
@@ -7903,7 +7916,8 @@ class Rerun:
                 found = [p for p in found if p.last[:19] < q.before]
                 self.say(f"{len(moving)} pass(es) ending at {q.before} or later, the one that moved it on among them, not read")
             if not found and since is not None and (self._waker_turn(q, since, func) or self._hop_turn(
-                    q.owner, q.subject or self.args.subject, since, q.before, None, func)):
+                    q.owner, q.subject or self.args.subject, since, q.before, None, func) or self._count_turn(
+                    q.owner, q.subject or self.args.subject, since, q.before, func)):
                 return None
             if not found and (up := self._callers_of_mover(q, since, "before")) is not None:
                 return up
@@ -8185,6 +8199,230 @@ class Rerun:
                     "premises": premises}))
                 return True
         return False
+
+    def _count_turn(self, owner: str, subject: str, since: str, before: str | None, func: str) -> bool:
+        """P25 (i) (the investigator's u3/u10; the map's AGC, codemap-xliv bbc723f, and ``Branch.condition_atoms``):
+        where the mover *owner* took the row at the move (*before*) by a selection whose loop printed it
+        (:meth:`_took_by`), and a guard in that loop testing a count the selection groups (a guard source's
+        ``RowAggregate``, ``COUNT`` of a column holding a value) holds at the counts the take printed and fails at one
+        fewer, the count turned when the k-th of the rows it counts got the value.  Those rows are read on the rows
+        file's ``linked`` rows of a class with a history, linked by the row's own class, each at the first status under
+        which an arm writing the counted value may write it (:meth:`_counted_states`); the rows that got it by the move
+        must be the printed k, else nothing is said.  MT-scouting-late: sqlEA printed 5/10 'for early avalanche', its
+        3759 (``totFinished >= totJobs * minSuccessScouts / 10``, 5 at 3707) holds at 5 and not at 4, and the 5th scout
+        job finished at 12:45:15.  True with an END; False (said where it reads) else."""
+        took = getattr(self, "_took", None)
+        if (before is None or took is None or took.record is None or took.row is None
+                or _bare(str(getattr(took.statement, "owner", ""))) != _bare(owner)):
+            return False
+        fragment = mapdump.fragment()
+        printed = self._printed_counts(took)
+        turned = []
+        for (line, test), names in sorted(self._count_guards(fragment, owner, took.statement.line).items()):
+            counted = [(name, agg) for name, srcs in names.items() for src in srcs
+                       if (agg := getattr(src, "aggregate", None)) is not None and getattr(agg, "fn", "") == "COUNT"
+                       and getattr(agg, "value", "") and isinstance(printed.get(name), int)]
+            if len({name for name, _ in counted}) != 1:
+                continue
+            name, agg = counted[0]
+            k = printed[name]
+            if (self._count_guard_value(test, names, printed, subject, {}) is True
+                    and self._count_guard_value(test, names, printed, subject, {name: k - 1}) is False):
+                turned.append((line, test, name, agg, k))
+        if len(turned) != 1:
+            return False
+        line, test, name, agg, k = turned[0]
+        where = f"{func}@{took.statement.line}"
+        counted_attr = self._class_attr(fragment, str(agg.column))
+        try:
+            value = str(ast.literal_eval(str(agg.value)))
+        except (ValueError, SyntaxError):
+            value = str(agg.value).strip("'\"")
+        if not counted_attr:
+            self.say(f"H: {where}'s count at {line} ({test}) turned at the take's {name}={k}, but the map places "
+                     f"{agg.column} in no class: when is not read")
+            return False
+        cls = subject.partition(".")[0]
+        start = W.when(since)
+        moved = next((W.when(s.get("time_extended") or str(s["time"])) for s in self.data.get("statuslog", {}).get("states", [])
+                      if str(s["time"])[:19] == before[:19] and s["status"] != self.args.observed), W.when(before))
+        statuslogs = self.data.get("statuslogs") or {}
+        entries = [e for e in self.data.get("linked") or []
+                   if str((e.get("via") or {}).get("from", "")).partition(".")[0] == cls
+                   and str(self._row_value(str(e["via"]["from"]))) in {str(a) for a in e.get("asked") or []}]
+        for other in sorted({str(e.get("class", "")) for e in entries}):
+            hist = PT.history_of_class(other)
+            log = statuslogs.get(other) or {}
+            if hist is None or not log.get("by_key"):
+                continue
+            car = HOP.carriers(getattr(fragment, "junctions", None) or [], getattr(fragment, "reach_graph", None) or [],
+                              {counted_attr}, hist.subject)
+            if car is None:
+                continue
+            key_attr = str(log.get("key", "")).partition(".")[2].lower()
+            via = next(e["via"] for e in entries if e.get("class") == other)
+            reached: list[tuple[datetime.datetime, str, str, str, list[str]]] = []
+            total = later = 0
+            for e in entries:
+                if e.get("class") != other:
+                    continue
+                for row in e.get("rows") or []:
+                    low = {c.lower(): v for c, v in row.items()}
+                    if low.get(key_attr) is None:
+                        continue
+                    born = low.get(hist.created.lower()) if hist.created else None
+                    if born and W.when(str(born).replace("T", " ")) > moved:
+                        # made after the move: in no count the take read (the avalanche's jobs)
+                        later += 1
+                        continue
+                    total += 1
+                    values, open_ = self._counted_states(fragment, car, counted_attr, value, hist.subject, low)
+                    for st in sorted(HOP.states_of(log["by_key"].get(str(low[key_attr]))), key=lambda x: str(x.get("time"))):
+                        if st.get("status") in values:
+                            at = W.when(str(st.get("time_extended") or st["time"]))
+                            if at <= moved:
+                                reached.append((at, str(low[key_attr]), str(st["status"]), str(st.get("host") or st.get("modificationhost") or ""), open_))
+                            break
+            reached.sort()
+            said_via = f"{via['from']} -> {via['to']}"
+            if len(reached) != k:
+                self.say(f"H: {where}'s count at {line} ({test}) turned at the take's {name}={k}; {len(reached)} of the row's "
+                         f"{total} {other} row(s) by {said_via} got a status under which {counted_attr}={value!r} is written by "
+                         f"the move: the count is not read from them")
+                return False
+            at, key, status, host, open_ = reached[k - 1]
+            if at <= start:
+                self.say(f"H: {where}'s count at {line} ({test}) reached {k} before the stay began ({key} at {at:%Y-%m-%d %H:%M:%S}): "
+                         "why it took the row only then is not read here")
+                return False
+            delta = (moved - at).total_seconds()
+            premises = [T.Said("h-carried-by", {"inner": [counted_attr], "writers": [w.split("::")[-1] for w in car.writers],
+                                                "carriers": [f"{o.split('::')[-1]} ({', '.join(sorted(vs))})" for o, vs in car.carriers],
+                                                "status": hist.subject}),
+                        T.Said("h-rows-stand-for-the-count", {"cls": other, "via": said_via, "counted": counted_attr})]
+            if open_:
+                premises.append(T.Said("h-count-ways-not-read", {"atoms": open_}))
+            self.end(T.Said("h-count-turned", {
+                "mover": func, "delta": f"{delta:.1f}", "where": where, "line": line, "test": test, "name": name, "k": k,
+                "less": k - 1, "printed": took.text, "n": total, "cls": other, "via": said_via, "counted": counted_attr,
+                "value": value, "key": key, "status": status, "at": f"{at:%Y-%m-%d %H:%M:%S.%f}"[:23],
+                "machine": host.split(".")[0] or "an unnamed host",
+                "later": T.Said("h-made-later", {"n": later, "cls": other}) if later else "", "premises": premises}))
+            return True
+        self.say(f"H: {where}'s count at {line} ({test}) turned at the take's {name}={k}; the rows file links no rows with a "
+                 f"history whose moves write {counted_attr}: when is not read")
+        return False
+
+    def _printed_counts(self, took: TookBy) -> dict[str, Any]:
+        """P25 (i): what the taking print's holes printed in the moving pass, by expression; digits as ints."""
+        out: dict[str, Any] = {}
+        for m in getattr(took.row, "map_rows", None) or []:
+            for h in getattr(m, "holes", None) or []:
+                if h.expression in out:
+                    continue
+                got = hole_values(took.row, took.record, SimpleNamespace(part=MUST_PART_MESSAGE, expression=h.expression, bind=""))
+                if got:
+                    out[h.expression] = int(got[0]) if got[0].lstrip("-").isdigit() else got[0]
+        return out
+
+    @staticmethod
+    def _count_guards(fragment, owner: str, line: int) -> dict[tuple[int, str], dict[str, list]]:
+        """P25 (i): the guards in the loops over the rows of *owner*'s selection at *line* (the read site's
+        ``row_loops``), by (test line, test), with each name's sources (``guard_froms``)."""
+        site = next((rs for rs in getattr(fragment, "read_sites", None) or []
+                     if _plain(str(rs.owner)) == _bare(owner) and getattr(getattr(rs, "anchor", None), "line_start", None) == line), None)
+        loops = [tuple(getattr(lp, "lines", None) or ()) for lp in getattr(site, "row_loops", None) or []] if site is not None else []
+        out: dict[tuple[int, str], dict[str, list]] = {}
+        for g in getattr(fragment, "guard_froms", None) or []:
+            at = int(getattr(g, "test_line", 0) or 0)
+            if _bare(str(g.owner)) != _bare(owner) or not any(len(ls) == 2 and ls[0] <= at <= ls[1] for ls in loops):
+                continue
+            out.setdefault((at, str(g.test)), {})[str(g.name)] = list(getattr(g, "sources", None) or [])
+        return out
+
+    def _count_guard_value(self, test: str, names: dict[str, list], printed: dict[str, Any], subject: str,
+                           override: dict[str, Any]) -> Any:
+        """P25 (i): *test* evaluated (the map's evaluator) with its names bound as the take printed them (or
+        *override*), a constant source's literal, and a source of the row's own status column its value in the stay."""
+        env = E.shared.Env()
+        cls, _, attr = subject.partition(".")
+        tables = {str(t.name).lower() for t in getattr(mapdump.fragment(), "tables", None) or [] if getattr(t, "rows_of", "") == cls}
+        for name, srcs in names.items():
+            if name in override:
+                env.put(name, override[name], "one fewer")
+            elif name in printed:
+                env.put(name, printed[name], "printed by the take")
+            elif len(srcs) == 1 and srcs[0].kind == KEY_CONSTANT and not getattr(srcs[0], "changes", None):
+                try:
+                    env.put(name, ast.literal_eval(str(srcs[0].name)), "a constant")
+                except (ValueError, SyntaxError):
+                    continue
+            elif srcs and all(getattr(x, "kind", "") == "rows" and str(getattr(x, "column", "")).lower()
+                              in {f"{t}.{attr.lower()}" for t in tables} for x in srcs):
+                env.put(name, self.args.observed, "the row's value in the stay")
+        return E.shared.evaluate(test, env)
+
+    @staticmethod
+    def _class_attr(fragment, column: str) -> str:
+        """``Class.attr`` of a ``table.column`` (a guard source's spelling): the class the table's rows are of, and the
+        attribute of it some junction writes under that column's name; "" where either is not known."""
+        table, _, col = column.lower().partition(".")
+        classes = {str(t.rows_of) for t in getattr(fragment, "tables", None) or []
+                   if str(t.name).lower() == table and bool(getattr(t, "rows_of", None))}
+        attrs = {str(j.subject) for j in getattr(fragment, "junctions", None) or []
+                 if str(j.subject).partition(".")[0] in classes and str(j.subject).partition(".")[2].lower() == col}
+        return next(iter(attrs)) if len(attrs) == 1 else ""
+
+    @staticmethod
+    def _counted_states(fragment, car, counted_attr: str, value: str, status: str, row: dict[str, Any]) -> tuple[frozenset[str], list[str]]:
+        """P25 (i): the values of *status* (the linked row's history) under which an arm of the carriers' writers
+        writing *counted_attr* = *value* may write it, for the linked *row* (its columns, lowercased): each candidate
+        (the carriers' recorded values) set in the arm's path condition's atoms on *status*, the atoms on the row's
+        other columns from the row, the rest unknown (the map's ``Branch.condition_atoms`` say which atom is which;
+        none read by name); a candidate goes where an entry of the condition is false.  With the atoms left open on
+        the ways kept (said as premises)."""
+        cls = status.partition(".")[0]
+        branches = [(j, b) for j in getattr(fragment, "junctions", None) or [] if str(j.subject) == counted_attr
+                    and _bare(str(j.owner)) in {_bare(w) for w in car.writers}
+                    for b in j.branches if str(getattr(b, "outcome", "")).strip("'\"") == value]
+        kept: set[str] = set()
+        open_: list[str] = []
+        for _, b in branches:
+            atoms = list(getattr(b, "condition_atoms", None) or [])
+            if not atoms:
+                continue
+            # an entry read elsewhere ([at N], a later write's test; [in f()], a callee's) is no condition of this write
+            entries = []
+            for e in getattr(b, "path_condition", None) or []:
+                if E.shared.read_elsewhere(e):
+                    continue
+                try:
+                    entries.append(ast.parse(E.shared.strip_annotation(e), mode="eval").body)
+                except SyntaxError:
+                    continue
+            for v in sorted(car.values):
+                fixed: dict[str, bool] = {}
+                unknown: list[str] = []
+                for a in atoms:
+                    text = _atom_text(str(a.text))
+                    vals = {str(x).strip("'\"") for x in getattr(a, "values", None) or []}
+                    subj = str(getattr(a, "subject", "") or "")
+                    op = str(getattr(a, "op", ""))
+                    col = subj.partition(".")[2].lower()
+                    # the row's own column, where the rows file holds it: NULL is a value it holds (None), not unknown
+                    own = subj.partition(".")[0] == cls and subj != status and col in row
+                    if (subj != status and not own) or op not in ("==", "!=", "in", "not in"):
+                        unknown.append(str(a.text))
+                        continue
+                    held = v if subj == status else row[col]
+                    inside = held is not None and str(held) in vals
+                    fixed[text] = inside if op in ("==", "in") else not inside
+                verdicts = [E.shared.truth(e, fixed, E.shared.Env()) for e in entries]
+                if any(x is False for x in verdicts):
+                    continue
+                kept.add(v)
+                open_ += [u for u in unknown if u not in open_]
+        return frozenset(kept), open_
 
     def _stay_edges(self, fn: R.Function, owner: str, arms: list[int], subject: str, key: str, found: list,
                     since: str, whole: frozenset[int] | set[int] = frozenset()) -> tuple[list, list]:
@@ -9318,7 +9556,7 @@ class Rerun:
             return None
         moving = begun[-1]
         keys = self._key_columns(q.subject, self.args.key)
-        found: list[tuple[Any, int, str]] = []
+        found: list[tuple[Any, int, str, Any, Any]] = []
         for st in own:
             line = self._row_key_print(q.mover, st, q.subject, under_ifs=True)
             stmt = R.statement_at(fn.node, line) if line is not None else None
@@ -9334,10 +9572,13 @@ class Rerun:
                                  if trace.hole_values(m, record.text, record.token, whole=True) is not None), "")
                     text = text[1:] if text.startswith(("f'", "f\"")) else text
                     text = text.strip("'\"")
-                    found.append((st, int(line), text))
+                    found.append((st, int(line), text, record, row))
                     break
         if found:
-            return TookBy(*found[0]) if len({id(st) for st, _, _ in found}) == 1 else None
+            if len({id(st) for st, *_ in found}) != 1:
+                return None
+            st, line, text, record, row = found[0]
+            return TookBy(st, line, text, record=record, row=row)
         ruled = self._handed_none(q, fn, own, moving)
         left = [st for st in own if id(st) not in ruled]
         if len(left) != 1:
@@ -10865,6 +11106,8 @@ class Rerun:
         kinds: dict[tuple[str, int], str] = {}
         # A-5 (P25): of the mover's statements, the one whose loop printed the row's key in the moving pass took it
         took_by = self._took_by(q)
+        # P25 (i): O1 reads the counts the taking print printed
+        self._took = took_by
         if took_by is not None:
             self.result["took_by"] = {"line": took_by.statement.line, "print": took_by.line, "text": took_by.text}
             if took_by.ruled_out:
@@ -11404,6 +11647,9 @@ class Rerun:
         self.start("O1", "what other rows its selection waited on")
         func = q.owner.split("::")[-1]
         if self._hop_turn(q.owner, q.subject, q.since, q.before, q.until, func):
+            return None
+        # P25 (i): a count the taking selection groups, turned at the k-th of the rows it counts
+        if q.since is not None and self._count_turn(q.owner, q.subject, q.since, q.before, func):
             return None
         if isinstance(q.then, Callers):
             self.say(f"{func}: its callers' passes before are read (KNOWN_ISSUES.md K55)")
