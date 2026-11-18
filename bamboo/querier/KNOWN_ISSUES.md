@@ -1990,6 +1990,15 @@ Measured on the map's codemap-xxviii b386318 dump against master's querier on it
 Not changed: a reading for no arm (`printed.py`, the S and U steps, `learn`'s row facts) reads the spellings as before;
 a printed hole is keyed by the printing function's spelling, as its run is the key's run.
 
+*Changed (bundle G, G-1, 80a8458):* a bare name whose hole the map's prints name the written class's key column by
+(`function_prints`' hole `columns`) is read the same way: AtlasAnalWatchDog's 195 `jediTaskID={taskID}` in
+`for taskID in taskIDs` printed other tasks' IDs only, so 196 wrote none of the key's task.
+*Changed (G-1 narrowed, 2026-11-18, after T 7292cc2's check):* only where the name is the element a loop holding the
+arm binds whole (`which_ran._turn_elements`, `loop_elements`).  The hole's columns say whose key the value is, not that
+it is the turn's object: TaskRefiner.runImpl's 262 `pending until parent task {parent_tid} is done` names the parent
+task by its jediTaskID in the turn of this task (`for jediTaskID, splitRule, taskStatus, parent_tid in taskList`), and
+G-1 had put it out of the key's prints, so MT-rerefine-late's H2 lost runImpl:258's proof on T (the harness's check).
+
 *Shows:* a guard of a name the records do not bind is not read in the row's values ("not read"); "row N printed only
 for other values of X.PandaID".
 *Revisit:*

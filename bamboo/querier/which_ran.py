@@ -2089,9 +2089,10 @@ def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.S
     bound = row_names.names(fn.owner, line, env.written, entity, env.elements)
     captures = [row.capture(sn.run.records[i]) for i, _, _ in sn.hits.get(row.line, ())]
     keyed = _bare_key_holes(row, env.written.partition(".")[0], env.keys)
+    turns = _turn_elements(stmt, fn.node) if keyed else set()
     for expr in sorted({e for c in captures for e in c}):
         name, _, column = expr.rpartition(".")
-        if not name and expr in keyed:
+        if not name and expr in keyed and expr in turns:
             name, column = expr, keyed[expr]
         elif not bound or bound.get(name) != entity:
             continue
@@ -2106,6 +2107,23 @@ def other_objects(fn: R.Function, stmt: ast.stmt, line: int, row: R.Row, sn: R.S
         if wanted not in [str(v).strip() for v in values]:
             return f"row {row.line} printed only for other values of {expr} ({len(values)} time(s)), not {wanted!r}"
     return ""
+
+
+def _turn_elements(stmt: ast.AST, func: ast.AST) -> set[str]:
+    """G-1 narrowed (T 7292cc2's MT-rerefine-late): the names a loop holding *stmt* binds each element to whole
+    (:func:`loop_elements`: ``for taskID in taskIDs``), a turn's own object.  A bare key hole is read as the arm's
+    object only where its name is one: TaskRefiner.runImpl's ``for jediTaskID, splitRule, taskStatus, parent_tid in
+    taskList`` binds parent_tid to a part of the element, and 262's ``pending until parent task {parent_tid} is done``
+    names the parent task by its jediTaskID in the turn of this task, not another task's turn."""
+    out: set[str] = set()
+    previous = stmt
+    for ancestor in pathcond.ancestors(stmt):
+        if ancestor is func:
+            break
+        if isinstance(ancestor, R.LOOPS) and previous in getattr(ancestor, "body", []):
+            out |= set(loop_elements(ancestor))
+        previous = ancestor
+    return out
 
 
 def _bare_key_holes(row: R.Row, cls: str, keys: frozenset[str]) -> dict[str, str]:

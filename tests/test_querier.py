@@ -18355,6 +18355,21 @@ def test_g1_g4_g5_a_bare_key_hole_printing_other_keys_a_key_marked_writer_and_ca
                          # a hole another hole follows captures empty (4074's jediTaskID before its since-clause): not read
                          WR.other_objects(fn, stmt, 4, row, sn("", ""), env)]
             got["holes"] = WR._bare_key_holes(row, "JediTaskSpec", frozenset({"jediTaskID"}))
+            # G-1 narrowed (T 7292cc2's MT-rerefine-late): a bare key hole that is a part of the turn's element names
+            # another object in the turn of this one -- TaskRefiner.runImpl's 262 "pending until parent task
+            # {parent_tid} is done" in "for jediTaskID, splitRule, taskStatus, parent_tid in taskList"
+            src2 = ("def g(taskList):\\n"
+                    "    for jediTaskID, parent_tid in taskList:\\n"
+                    "        log(f'pending until parent task {parent_tid} is done')\\n"
+                    "        hold(jediTaskID)\\n")
+            module2 = ast.parse(src2)
+            pathcond.attach_parents(module2)
+            node2 = module2.body[0]
+            fn2 = N(owner="r.py::g", node=node2)
+            row2 = N(line=3, stmt=WR.R.statement_at(node2, 3),
+                     map_rows=[N(holes=[N(expression="parent_tid", columns=["JediTaskSpec.jediTaskID"])])],
+                     capture=lambda rec: {"parent_tid": rec.v})
+            got["part"] = WR.other_objects(fn2, WR.R.statement_at(node2, 4), 4, row2, sn("11"), env)
             # G-4
             RR._identity_attrs = lambda cls: ["JediTaskSpec.jediTaskID"]
             runs = {181: [N(key=[N(columns=["JediTaskSpec.jediTaskID"])])], 364: [N(key=[N(columns=["JediTaskSpec.vo"])])],
@@ -18400,6 +18415,7 @@ def test_g1_g4_g5_a_bare_key_hole_printing_other_keys_a_key_marked_writer_and_ca
     got = json.loads(out.splitlines()[-1])
     assert got["g1"] == ["row 3 printed only for other values of taskID (2 time(s)), not '7'", "", ""], got
     assert got["holes"] == {"taskID": "jediTaskID"}, got
+    assert got["part"] == "", got
     assert got["g4"] == [True, False, False, False], got
     assert got["g5"] == [[1197], [228]] and got["g5 all"] == 2, got
     assert got["printed"] == {"code": "51", "prodManager": "True"}, got
