@@ -123,8 +123,8 @@ LATER = frozenset(
 #: The name :attr:`RewriteSite.of_prior` gives the value a store replaces.
 PRIOR = "PRIOR"
 
-#: The column a class's row is named by, for :func:`objects.may_change`'s key: a history table's, and a file's.
-ROW_KEYS: dict[str, str] = {**runs.HISTORY_KEYS, "FileSpec": "row_ID"}
+#: The column a class's row is named by, for :func:`objects.may_change`'s key (:data:`runs.ROW_KEYS`).
+ROW_KEYS: dict[str, str] = runs.ROW_KEYS
 
 #: Each reason :func:`objects.may_change` leaves an answer open for (:attr:`objects.Change.open`), by its template.
 _OPEN_KINDS = (

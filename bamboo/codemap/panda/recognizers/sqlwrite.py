@@ -177,7 +177,7 @@ from bamboo.codemap.panda.attribution import SpecAttributor, loop_only_names
 # has spent the most effort undoing.
 from bamboo.codemap.panda.recognizers import progress
 from bamboo.codemap.panda.recognizers import tables as table_records
-from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES
+from bamboo.codemap.panda.runs import HISTORY_KEYS, HISTORY_TABLES, ROW_KEYS
 from bamboo.codemap.pathcond import (
     ancestors,
     arm_condition,
@@ -8687,7 +8687,7 @@ def attach_key_sources(
         )
         read += 1
     if attributor is not None and key_froms is not None:
-        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading))
+        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading, of))
     return read
 
 
@@ -9100,6 +9100,7 @@ def _unpersisted(
     modules: Iterable[SourceModule],
     attributor: SpecAttributor,
     reading: _Reading,
+    of: Callable[[ast.FunctionDef | ast.AsyncFunctionDef, str], "_Filled"],
 ) -> list[KeyFrom]:
     """A KeyFrom for each object of a junction owner whose fields it assigns at an arm no write writes -- no
     statement's record, nor a flush call's, has the arm's line for its subject -- one per what those fields reach
@@ -9107,7 +9108,8 @@ def _unpersisted(
     a statement's rows would otherwise read these as known not to be.  getRandomSeed_JEDI's
     ``tmpFileSpec.status = "ready"``, set after the spec's ``valuesMap()`` is taken, is returned; datasetManager's
     ``job.jobStatus = "failed"`` is handed to ``TaskBuffer.updateJobs``, which persists it a call away.  An arm is a
-    junction's line assigning its subject's attribute on an object of its class, by *attributor*."""
+    junction's line assigning its subject's attribute on an object of its class, by *attributor*.  Each record's
+    *sources* are those of the value the function gives the object's key field, by *of*'s reader (:func:`_object_key`)."""
     written = {
         (key_from.owner, subject, line)
         for key_from in key_froms
@@ -9173,8 +9175,32 @@ def _unpersisted(
                     writes={subject: sorted(lines) for subject, lines in sorted(writes.items())},
                 )
                 record._runs = (func, [statement for at in sorted(set(ats)) for statement in statements.get(at, ())])
+                record.attr, record.sources = _object_key(func, spelled, record.writes, of(func, module.rel_path))
                 made.append(record)
     return made
+
+
+def _object_key(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, spelled: str, writes: dict[str, list[int]], reader: "_Filled"
+) -> tuple[str, list[KeySource]]:
+    """The key field (:data:`ROW_KEYS`) of the object *spelled* -- of the class whose fields *writes* names -- the
+    function gives a value, as ``<Class>.<field>``, and that value's sources as a bind's are read
+    (:meth:`_Filled.sources`): ``extractCommon``'s ``taskSpec.jediTaskID = jediTaskID`` at 124, its parameter.
+    ``("", [])`` where the function gives none."""
+    for spec in sorted({subject.rpartition(".")[0] for subject in writes}):
+        key = ROW_KEYS.get(spec)
+        if key is None:
+            continue
+        sources: list[KeySource] = []
+        for node in own_nodes(func):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Attribute) and target.attr == key and ast.unparse(target.value) == spelled
+                for target in node.targets
+            ):
+                sources.extend(reader.sources(node.value, node))
+        if sources:
+            return f"{spec}.{key}", sources
+    return "", []
 
 
 def _uses(

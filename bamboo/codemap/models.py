@@ -4351,8 +4351,11 @@ class KeyFrom(BaseModel):
     ``WHERE`` in a loop over a dict parameter's items (``updateTask_JEDI``'s *criteria*), one per key of the dict the
     call hands it, ``jediTaskID=criteria["jediTaskID"]``.  And an object no write here persists gets one record per
     what its assigned fields reach next (*unread*: :data:`KEY_HANDED`, :data:`KEY_BOUND`, :data:`KEY_RETURNED`,
-    :data:`KEY_KEPT`, :data:`KEY_NO_USE`), of no term and no source: with none, its arms would read as known not to be
-    on a statement's rows.
+    :data:`KEY_KEPT`, :data:`KEY_NO_USE`), of no term: with none, its arms would read as known not to be on a
+    statement's rows.  Its *sources* are those of the value the function gives the object's key field
+    (:data:`bamboo.codemap.panda.runs.ROW_KEYS`, *attr*), read as a bind's value is: ``extractCommon``'s
+    ``taskSpec.jediTaskID = jediTaskID`` at 124 is its parameter; ``storeJobs``' ``job.PandaID = new_panda_ids[...]``
+    a call's value.  None where the function gives it none.
     """
 
     owner: str
@@ -4427,7 +4430,10 @@ class KeyFrom(BaseModel):
     )
     attr: str = Field(
         default="",
-        description="The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it.",
+        description=(
+            "The term's column as a subject, ``JediTaskSpec.jediTaskID``, where *table*'s spec class has it; for an "
+            "object no write here persists, its key field the function gives a value (the *sources*)."
+        ),
     )
     object: str = Field(
         default="",

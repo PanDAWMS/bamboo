@@ -24,6 +24,7 @@ from bamboo.codemap import diff, evidence, gates, pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
     KEY_BOUND,
+    KEY_CONSTANT,
     KEY_HANDED,
     KEY_KEPT,
     KEY_NO_USE,
@@ -20382,6 +20383,50 @@ def test_an_object_no_write_persists_says_what_its_fields_reach(tmp_path):
         ("mark", "job", "", KEY_HANDED, [f"{rel}::updateJobs"], [], {"JobSpec.jobStatus": [throttled]}),
         ("mark", "job", "", KEY_KEPT, [], [], {"JobSpec.jobStatus": [throttled]}),
         ("note", "job", "", KEY_NO_USE, [], [], {"JobSpec.jobStatus": [closed]}),
+    ]
+
+
+_KEYED_UNSAVED = '''
+def updateJobs(jobs):
+    return len(jobs)
+
+
+class Agent:
+    def refine(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "defined"
+        updateJobs([taskSpec])
+
+    def fresh(self):
+        job = JobSpec()
+        job.PandaID = 7
+        job.jobStatus = "defined"
+        return job
+
+    def plain(self):
+        job = JobSpec()
+        job.jobStatus = "closed"
+        return job
+'''
+
+
+def test_an_object_no_write_persists_says_where_the_key_it_is_given_came_from(tmp_path):
+    """``extractCommon`` makes ``taskSpec``, gives its key field the parameter ``jediTaskID`` and hands it on: its
+    record's sources are the parameter's, so a reader can follow the object's row up to who handed the key.  A key
+    given a literal is the literal's; an object given no key has none."""
+    rel = "pandajedi/jediorder/Agent.py"
+    froms, _keys = _flushed(tmp_path, _KEYED_UNSAVED, rel)
+
+    read = sorted(
+        (one.owner.rpartition("::")[2], one.unread, one.attr, [(source.kind, source.name) for source in one.sources])
+        for one in froms
+        if one.owner.startswith(rel)
+    )
+    assert read == [
+        ("fresh", KEY_RETURNED, "JobSpec.PandaID", [(KEY_CONSTANT, "7")]),
+        ("plain", KEY_RETURNED, "", []),
+        ("refine", KEY_HANDED, "JediTaskSpec.jediTaskID", [(KEY_PARAMETER, "jediTaskID")]),
     ]
 
 
