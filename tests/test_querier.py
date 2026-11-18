@@ -20151,3 +20151,60 @@ def test_p25i_a_count_turned_at_the_take_s_printed_count_is_read_on_the_linked_r
     assert "the one that brought it to 5" in got["text"] and "104, finished at 2026-10-29 12:44:15.000 on m094" in got["text"], got
     assert "of the row's 10 JobSpec row(s)" in got["text"] and "1 JobSpec row(s) made after the move not read" in got["text"], got
     assert got["less"] is False, got
+
+
+def test_p25_rest_a_take_that_printed_no_key_solves_the_print_s_condition_over_the_count(tmp_path):
+    """P25 (i)'s rest (the investigator's u11 NT-scouting-late u3:4, MT-scouting-stuck 2): sqlEA's take printed no
+    'got jediTaskID=... for ...' line for the row, so its print's condition was false then.  The flag the print tests
+    (``to_trigger``, False and then True in either of two ways) reads as its True bindings' tests.  With walltimeUnit
+    NULL (read with no statuslog row between) the print holds for every finished count of 1 or more, the rowcount and
+    the map's membership put the print's way, so the count was 0; with walltimeUnit not read it stays open."""
+    out = _ok(_run(tmp_path, """
+        import ast, json, textwrap
+        from types import SimpleNamespace as N
+        from bamboo.codemap import pathcond
+        import bamboo.querier.rerun as RR
+
+        src = textwrap.dedent('''
+        def prepare(resList, simTasks, statusMap, cur):
+            if simTasks is None:
+                minSuccessScouts = 5
+                for jediTaskID, taskstatus, walltimeUnit, totJobs, totFinished in resList:
+                    cur.execute(jediTaskID)
+                    nRow = cur.rowcount
+                    if nRow and totFinished and jediTaskID not in statusMap:
+                        to_trigger = False
+                        if taskstatus == "scouting" and totFinished >= totJobs * minSuccessScouts / 10:
+                            to_trigger = True
+                        elif totFinished >= 1 and walltimeUnit is None:
+                            to_trigger = True
+                        if to_trigger:
+                            print(jediTaskID)
+        ''')
+        mod = ast.parse(src)
+        pathcond.attach_parents(mod)
+        fn = N(node=mod.body[0])
+        pr = next(n for n in ast.walk(mod) if isinstance(n, ast.Expr) and getattr(n.value.func, "id", "") == "print")
+        took = next(n for n in ast.walk(mod) if isinstance(n, ast.Expr) and getattr(n.value.func, "attr", "") == "execute")
+        ran = set(pathcond.arm_condition(took))
+        tests = [RR.Rerun._flag_tests(fn, c, pr) for c in pathcond.arm_condition(pr) if c not in ran]
+        tree = ast.parse(" and ".join(f"({t})" for t in tests), mode="eval").body
+        own = {"nRow", "statusMap"}
+        known = {"taskstatus": "scouting", "minSuccessScouts": 5}
+        print(json.dumps({
+            "tests": tests,
+            "null": RR._unprinted_count(tree, {**known, "walltimeUnit": None}, "totFinished", own),
+            "unread": RR._unprinted_count(tree, known, "totFinished", own),
+            "set": RR._unprinted_count(tree, {**known, "walltimeUnit": "kSI2kseconds"}, "totFinished", own),
+        }))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # the flag: the if's test, or the elif's with the if's negated
+    assert got["tests"][-1].startswith("((taskstatus == 'scouting' and totFinished >= totJobs * minSuccessScouts / 10))")
+    assert "(not (taskstatus == 'scouting'" in got["tests"][-1] and "walltimeUnit is None" in got["tests"][-1]
+    zero, way, _, top = got["null"]
+    assert zero is True and way == {"nRow": True, "jediTaskID not in statusMap": True} and top >= 52
+    # walltimeUnit not read: a count of 1 to 4 with it set prints nothing, so the count stays open
+    assert got["unread"][0] is False and "walltimeUnit is None" in got["unread"][2]
+    # walltimeUnit set: the count of 1 or more fails the print below half of totJobs, so it is not 0
+    assert got["set"][0] is False

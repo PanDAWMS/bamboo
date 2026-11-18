@@ -80,6 +80,7 @@ import datetime
 import functools
 import hashlib
 import importlib
+import itertools
 import json
 import math
 import os
@@ -1931,6 +1932,68 @@ def _plain(owner: str) -> str:
     """:func:`_bare`, less a repository's ``panda:`` before the file: a read site's owner and a KeyFrom's compare."""
     rel, _, qual = owner.partition("::")
     return R.named(f"{rel.rpartition(':')[2]}::{qual}")
+
+
+def _unprinted_count(tree: ast.AST, bound: dict[str, Any], counted: str | None,
+                     own_values: set[str]) -> tuple[bool, dict[str, bool], list[str], int]:
+    """P25 (i)'s rest: what a print's condition *tree*, false for the row in a pass that took it, says of the name
+    *counted*, its other names *bound* where known.  The atoms naming one of the pass's *own_values* (a rowcount, a
+    container, a parameter) and not the count are put the one way the print needs them, where that way is one; the
+    other unknown atoms are tried both ways (``evaluate.truth``).  The count was 0 where the condition is false at 0
+    and holds at every count from 1 to a bound past each number the count's atoms hold (their product, at most
+    10 000, plus 2).  ``(zero, the own values' way, the atoms left open, the bound)``."""
+    found: dict[str, ast.AST] = {}
+    for atom in E.shared.atoms(tree):
+        found.setdefault(ast.unparse(atom), atom)
+
+    def names_in(node: ast.AST) -> set[str]:
+        return {x.id for x in ast.walk(node) if isinstance(x, ast.Name)}
+
+    def env_with(n: int | None) -> Any:
+        env = E.shared.Env()
+        for name, value in bound.items():
+            env.put(name, value, "read")
+        if counted is not None and n is not None:
+            env.put(counted, n, "a count tried")
+        return env
+
+    def fits(n: int | None, fixed: dict[str, bool], outcome: bool) -> list[dict[str, bool]]:
+        env = env_with(n)
+        free = [t for t, a in found.items() if t not in fixed and E.shared.truth(a, {}, env) is E.shared.UNKNOWN]
+        out = []
+        for values in itertools.product((True, False), repeat=len(free)):
+            one = {**fixed, **dict(zip(free, values, strict=True))}
+            if E.shared.truth(tree, one, env) is outcome:
+                out.append(one)
+        return out
+
+    premise = [t for t, a in found.items() if counted not in names_in(a) and names_in(a) & own_values]
+    held = fits(None, {}, True)
+    way = {t: held[0][t] for t in premise if held and t in held[0] and all(h.get(t) == held[0][t] for h in held)}
+    unknown = [t for t, a in found.items() if t not in way and E.shared.truth(a, {}, env_with(None)) is E.shared.UNKNOWN]
+    if counted is None or len(way) != len(premise):
+        return False, way, unknown, 0
+    # a bound past every number the counted name is compared with: the product of the numbers its atoms hold
+    numbers = [abs(v) for a in found.values() if counted in names_in(a) for x in ast.walk(a)
+               for v in [x.value if isinstance(x, ast.Constant) else bound.get(x.id) if isinstance(x, ast.Name) else None]
+               if isinstance(v, int | float) and not isinstance(v, bool) and v]
+    top = int(min(10_000, math.prod(max(1.0, v) for v in numbers))) + 2
+    zero = bool(fits(0, way, False)) and all(not fits(n, way, False) for n in range(1, top + 1))
+    return zero, way, unknown, top
+
+
+def _entry_requests(entries: list[str], endpoints: list) -> list[str]:
+    """The routes (``v1/harvester/update_workers``) of the map's *endpoints* whose function holds an entry of a
+    waker's ways (``file:line``, a route's outer end), one per entry that one holds; an entry no endpoint's function
+    holds gives none."""
+    by_function = {_plain(str(e.function)): f"{e.version}/{e.route}" for e in endpoints}
+    out = []
+    for entry in entries:
+        rel, _, line = entry.rpartition(":")
+        node = R.def_holding(rel, int(line)) if line.isdigit() else None
+        if node is not None and (route := by_function.get(_plain(R.owner_of(rel, node)))) is not None:
+            out.append(route)
+    return out
 
 
 @dataclass(frozen=True)
@@ -7925,9 +7988,11 @@ class Rerun:
                 self.need(T.Said("a-pass-of-before-the-one-that-2", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "q_unsure": q.unsure}), found, "K45")
             self.need(T.Said("a-pass-of-before-the-one-that", {"func": func, "q_before": q.before, "since": since, "asking_why": q.asking.why, "func_2": func}), found, "K45")
         if not found and since is not None and q.before is None:
-            # a stuck value's stay: A2 stops the branch where no row the mover takes it by came, H where the other rows
-            # its selection waits on had not moved on; else U1 reads on
-            self._waker_turn(q, since, func)
+            # a stuck value's stay: A2 ends the branch where no row the mover takes it by came and the table is written
+            # here alone (A2s), and stops it where another system writes it too; H stops it where the other rows its
+            # selection waits on had not moved on; else U1 reads on
+            if self._waker_turn(q, since, func):
+                return None
             self._hop_turn(q.owner, q.subject or self.args.subject, since, None,
                            q.asking.window[1] if q.asking.window is not None else None, func)
         if not found and (up := self._callers_of_mover(q, since, "window")) is not None:
@@ -7990,9 +8055,10 @@ class Rerun:
         a log not searched whole -- leaves it to U1 (False).  A table another system writes too (the map's inbound
         boundary, DEFT's PRODSYS_COMM) is named as a premise: its writes leave no log here.
 
-        A stuck value's stay is read the same way up to the window's end, the statuslog's as_of: no write in it stops
-        the branch (no row the mover takes it by came); a write in it with the value not moved on is not read here
-        and leaves it to U1 (False)."""
+        A stuck value's stay is read the same way up to the window's end, the statuslog's as_of: no write in it ends
+        the branch where the table is written here alone (A2s: no row the mover takes it by came; MT-paused-stuck's
+        command rows, DEFT writing none into PRODSYS_COMM) and stops it where another system writes it too; a write
+        in it with the value not moved on is not read here and leaves it to U1 (False)."""
         # one rule for late and stuck: only the stay's end differs, the move or the window's end
         if not self.logs.needs_window:
             return False
@@ -8075,6 +8141,17 @@ class Rerun:
         wakers_said = sorted({f"{w.owner.split('::')[-1].rpartition('.')[2]}:{w.line}" for w in wakers})
         told = T.Said("written-outside-too", {"writers": outside}) if outside else T.Said("written-here-alone")
         if not stay:
+            if q.before is None and not outside:
+                # A2s (out/gm/qk-design.md "A2s", delegated design; tmaeno's fact through the harness, 2026-11-18: DEFT
+                # writes no command into PRODSYS_COMM, the map's DFC): a stuck value whose mover takes the row only by
+                # the rows its wakers write, none of which was written for the key in the window, every waker's log
+                # searched whole and the table written here alone -- no row it takes came, and the branch ends
+                self.end(T.Said("no-row-its-wakers-wrote-in-the-window", {
+                    "mover": func, "reader": where, "column": said_column, "wakers": wakers_said, "since": since,
+                    "until": until, "premises": [T.Said("the-wakers-write-every-row-it-takes", {"reader": where}),
+                                                 *([T.Said("the-key-from-the-callers", {"reader": where, "callers": [
+                                                     c.split("::")[-1] for c in via]})] if via else [])]}))
+                return True
             if q.before is None:
                 self.need(T.Said("a-waker-s-write-in-the-window", {
                     "mover": func, "reader": where, "wakers": wakers_said, "since": since, "until": until, "outside": told}), None, "K55")
@@ -8089,6 +8166,11 @@ class Rerun:
         routes = {tuple(r) for w in wakers if w.owner == owner and w.line == line and (not printed or w.value in printed)
                   for r in w.routes}
         entries = sorted({r[-1] for r in routes if r})
+        # P45's endpoint part: every way in enters from an endpoint the server runs for a request (the map's
+        # endpoints): an outside request made the row -- updateWorkers' harvester and pilot ways
+        requests = _entry_requests(entries, getattr(fragment, "endpoints", None) or [])
+        through = (T.Said("through-requests", {"routes": requests}) if entries and len(requests) == len(entries)
+                   else T.Said("through-the-entry", {"entries": entries}) if len(entries) == 1 else T.Said("through-no-one-entry"))
         what = (T.Said("a-row-holding", {"subject": next(w.subject for w in wakers if w.value == printed[0]), "value": printed[0]})
                 if len(printed) == 1 else T.Said("a-row-for-it"))
         earlier = (T.Said("earlier-writes-in-the-stay", {"n": len(stay) - 1, "at": [f"{w[0]:%Y-%m-%d %H:%M:%S}" for w in stay[:-1]]})
@@ -8096,8 +8178,7 @@ class Rerun:
         self.end(T.Said("ran-on-a-row-its-wakers-wrote", {
             "mover": func, "after": f"{(moved - at).total_seconds():.0f}", "waker": owner.split("::")[-1].rpartition(".")[2],
             "line": line, "what": what, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
-            "through": T.Said("through-the-entry", {"entries": entries}) if len(entries) == 1 else T.Said("through-no-one-entry"),
-            "reader": where, "column": said_column, "earlier": earlier,
+            "through": through, "reader": where, "column": said_column, "earlier": earlier,
             "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func}),
                          *([T.Said("the-key-from-the-callers", {"reader": where, "callers": [c.split("::")[-1] for c in via]})]
                            if via else [])]}))
@@ -11620,6 +11701,7 @@ class Rerun:
         bare = func.rpartition(".")[2]
         out: list[T.Said] = []
         cache: dict = self.__dict__.get("_timelines", {})
+        seen: set[tuple[str, datetime.datetime]] = set()
         for key, tl in sorted(cache.items(), key=lambda x: str(x[0])):
             # the key as :meth:`_timeline` makes it; a reading that asked nothing (its last item) is read alike
             col, subject, observed, since, moved, nulls = key[:6]
@@ -11635,6 +11717,11 @@ class Rerun:
                 continue
             if any(abs(t - at) <= datetime.timedelta(seconds=1) for t in read):
                 continue
+            # one take a column's value names, however many readings of the column the cache keeps (one that asked
+            # nothing beside one that asked: NT-scouting-late's said its 19:53:41 take twice)
+            if (col, at) in seen:
+                continue
+            seen.add((col, at))
             lines = sorted({int(a.rpartition(":")[2]) for a in arms})
             # the moving run's own mark, where it is the mover's: its passes before ran under it too (the heads fill
             # the holes with the row's values, and prepareTasksToBeFinished_JEDI's runs are marked vo=None)
@@ -11673,11 +11760,136 @@ class Rerun:
                 out.append(T.Said("took-it-by-the-row-value-asked", {**where, "n": len({ask.key for ask, _ in missed}),
                                                                      "first": window[0], "last": window[1]}))
             elif passes:
-                out += [T.Said("took-it-by-the-row-value", {**where, "machine": p.machine.split(".")[0],
-                                                            "first": p.first[:23], "last": p.last[:23]}) for p in passes]
+                for p in passes:
+                    out.append(T.Said("took-it-by-the-row-value", {**where, "machine": p.machine.split(".")[0],
+                                                                   "first": p.first[:23], "last": p.last[:23]}))
+                    # P25 (i)'s rest: a take that printed no key at its selection's print
+                    if (unprinted := self._unprinted_take(q, fn, p, lines)) is not None:
+                        out.append(unprinted)
             else:
                 out.append(T.Said("took-it-by-the-row-value-unread", where))
         return out
+
+    def _unprinted_take(self, q: Missed, fn: R.Function, p, lines: list[int]) -> T.Said | None:
+        """P25 (i), its rest (out/gm/qk-design.md, the section on P25 (i)'s rest, delegated design; the investigator's u11
+        NT-scouting-late u3:4): a pass F-4 read as taking the row -- writing the time column a selecting term reads, by
+        *lines*, keyed by the rows of one of the mover's selections (the map's KeyFrom sources) -- that printed no key
+        at that selection's print for a row it selects and keeps (:meth:`_row_key_print` under its ifs): the print's
+        condition was false for the row then.  The condition is the print's tests (``pathcond.arm_condition``) less
+        those the key's line in the loop ran under, a flag's test read as its true bindings' tests
+        (:meth:`_flag_tests`).  Its names are bound as :meth:`_unprinted_env` reads them; the atoms of the pass's own
+        values alone (a rowcount, a container, a parameter: sources neither the row's nor constants) are put the way
+        the print needs them where that way is one, and said as premises; the rest are tried both ways
+        (``evaluate.truth``).  Where the print would hold for every count of the name counting a value (``COUNT`` of a
+        column holding it) from 1 to a bound past every number the condition holds, the count was 0 -- the hand's
+        MT-scouting-stuck reading: walltimeUnit NULL, so a finished scout prints 'reset in scouting'.  Else the
+        condition was false, its open atoms said.  None where no such print or no one selection."""
+        fragment = mapdump.fragment()
+        keyed = [k for k in getattr(fragment, "key_froms", None) or [] if _bare(str(k.owner)) == _bare(q.mover)
+                 and any(set(ls) & set(lines) for ls in (getattr(k, "writes", None) or {}).values())]
+        sources = [s for k in keyed for s in getattr(k, "sources", None) or [] if getattr(s, "kind", "") == KEY_ROWS]
+        if not sources:
+            return None
+        own = [st for st in getattr(q, "statements", None) or []
+               if st.owner == q.mover and st.line in {getattr(s, "site_line", None) for s in sources}]
+        if len(own) != 1:
+            return None
+        st = own[0]
+        printed_at = self._row_key_print(q.mover, st, q.subject, under_ifs=True)
+        if printed_at is None or printed_at in self._key_rows(fn, p, q.subject):
+            return None
+        pstmt = R.statement_at(fn.node, printed_at)
+        if pstmt is None:
+            return None
+        # the tests the key's line in the loop ran under held: the pass took the row there
+        ran = {c for s in sources if getattr(s, "site_line", None) == st.line
+               and (node := R.statement_at(fn.node, int(getattr(s, "line", 0) or 0))) is not None
+               for c in pathcond.arm_condition(node)}
+        tests = [self._flag_tests(fn, c, pstmt) for c in pathcond.arm_condition(pstmt)
+                 if c not in ran and not E.shared.read_elsewhere(c)]
+        if not tests:
+            return None
+        try:
+            tree = ast.parse(" and ".join(f"({E.shared.strip_annotation(t)})" for t in tests), mode="eval").body
+        except SyntaxError:
+            return None
+        names: dict[str, list] = {}
+        for by in self._count_guards(fragment, q.mover, st.line).values():
+            for name, srcs in by.items():
+                names.setdefault(name, srcs)
+        bound, said, counted = self._unprinted_env(names, q, p.first[:19])
+        own_values = {n for n, srcs in names.items() if srcs and all(getattr(x, "kind", "") not in (KEY_ROWS, KEY_CONSTANT) for x in srcs)}
+        zero, way, unknown, top = _unprinted_count(tree, bound, counted, own_values)
+        where = {"func": q.mover.split("::")[-1].rpartition(".")[2], "line": printed_at, "condition": ast.unparse(tree),
+                 "read": said, "premises": [T.Said("as-the-print-needs", {"atom": t, "held": v}) for t, v in way.items()]}
+        if zero and counted is not None:
+            return T.Said("unprinted-take-count-zero", {**where, "name": counted, "n": top})
+        return T.Said("unprinted-take", {**where, "open": unknown})
+
+    @staticmethod
+    def _flag_tests(fn: R.Function, test: str, at: ast.AST) -> str:
+        """P25 (i)'s rest: *test*, a print's, read as what sets it where it is a flag -- a bare name every binding of
+        which in *fn* is ``True`` or ``False``, each ``False`` one run on every way to *at* (the reset before the
+        tests): the tests its ``True`` bindings run under beyond *at*'s others, or-ed (sqlEA's ``to_trigger``: 3759's
+        or 3762's, the elif's own with the if's negation).  The map's ``guard_froms`` list a flag's constant sources by
+        value (3761's ``True`` and not 3764's), so the bindings are read with the map's shared part.  *test* where it
+        is no flag."""
+        try:
+            node = ast.parse(test.strip(), mode="eval").body
+        except SyntaxError:
+            return test
+        if not isinstance(node, ast.Name):
+            return test
+        binds = pathcond.bindings(fn.node, node.id)
+        if not binds or any(b.nested or not isinstance(b.value, ast.Constant) or not isinstance(b.value.value, bool)
+                            for b in binds):
+            return test
+        others = set(pathcond.arm_condition(at)) - {test}
+        if any(not set(pathcond.arm_condition(b.site)) <= others for b in binds
+               if isinstance(b.value, ast.Constant) and b.value.value is False):
+            return test
+        ways = [" and ".join(f"({E.shared.strip_annotation(c)})" for c in pathcond.arm_condition(b.site)
+                             if c not in others and not E.shared.read_elsewhere(c)) or "True"
+                for b in binds if isinstance(b.value, ast.Constant) and b.value.value is True]
+        return " or ".join(f"({w})" for w in ways) if ways else "False"
+
+    def _unprinted_env(self, names: dict[str, list], q: Missed, at: str) -> tuple[dict[str, Any], list[T.Said], str | None]:
+        """P25 (i)'s rest: the print's names as the take's pass held them, where known, each said: a constant source
+        its literal; the row's own status column its value in the stay; another column of the row the rows file's
+        value where no statuslog row lies between the pass (*at*) and the file's read (K22: a write that leaves no row
+        is not read).  And the one name counting a value (a ``COUNT`` of a column holding it), left for the counts
+        tried.  ``(values, said, counted)``."""
+        cls, _, attr = q.subject.partition(".")
+        fragment = mapdump.fragment()
+        tables = {str(t.name).lower() for t in getattr(fragment, "tables", None) or [] if getattr(t, "rows_of", "") == cls}
+        entity = next((e for e, c in self.data.get("classes", {}).items() if c == cls), None)
+        row = {str(c).lower(): cell for c, cell in (self.data.get("rows", {}).get(entity) or {}).items()} if entity else {}
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        values: dict[str, Any] = {}
+        said: list[T.Said] = []
+        counted = sorted({n for n, srcs in names.items() for s in srcs
+                          if (agg := getattr(s, "aggregate", None)) is not None and getattr(agg, "fn", "") == "COUNT"
+                          and getattr(agg, "value", "")})
+        for name, srcs in sorted(names.items()):
+            if len(srcs) != 1 or name in counted:
+                continue
+            s = srcs[0]
+            table, _, col = str(getattr(s, "column", "") or "").lower().partition(".")
+            if s.kind == KEY_CONSTANT and not getattr(s, "changes", None):
+                try:
+                    values[name] = ast.literal_eval(str(s.name))
+                except (ValueError, SyntaxError):
+                    continue
+            elif s.kind == KEY_ROWS and table in tables and getattr(s, "aggregate", None) is None:
+                if col == attr.lower():
+                    values[name] = q.observed
+                    said.append(T.Said("unprinted-read", {"name": name, "value": q.observed, "why": T.Said("unprinted-the-stay")}))
+                elif (isinstance(cell := row.get(col), dict) and "value" in cell
+                      and (not cell.get("as_of") or not HD.rows_after(states, at, str(cell["as_of"])))):
+                    values[name] = cell["value"]
+                    said.append(T.Said("unprinted-read", {"name": name, "value": cell["value"], "why": T.Said(
+                        "unprinted-the-rows-file", {"as_of": str(cell.get("as_of") or "")})}))
+        return values, said, (counted[0] if len(counted) == 1 else None)
 
     def other_rows(self, q: OtherRows):
         """O1 (design H, KNOWN_ISSUES.md K77): :meth:`_hop_turn` for the mover's statements; where it does not hold,

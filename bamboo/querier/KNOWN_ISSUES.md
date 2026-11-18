@@ -1715,6 +1715,31 @@ caller's call and is left out of this caller's passes, said: NJ-merging-late's a
 lie in updateUnmergedJobs' run and are not killJobs'.  The premise that a callee's run is the caller's call (how many
 other functions reach it) now covers the mover's own runs too.
 
+*Changed (A2s, 2026-11-18, out/gm/qk-design.md "A2s", delegated design):* a stuck value's A2 whose wakers wrote no row
+for the key in the window, every waker's log searched whole and the table written here alone (no inbound boundary on
+it), ends: no row the mover takes it by came.  It stopped (K55) before.  The map's DFC (tmaeno's fact through the
+harness: DEFT writes no command into PRODSYS_COMM) takes PRODSYS_COMM's inbound node away, so MT-paused-stuck's
+command rows are PanDA's alone.  A late value with no write in its stay still stops.  The premise names the map's
+wakers as every writer of the rows the selection takes.
+
+*Changed (P45's endpoint part, 2026-11-18):* A2's END says an outside request made the row where every way into the
+waker enters from a function the map's endpoints say the server runs for a request (updateWorkers' harvester and
+pilot ways): `_entry_requests`.
+
+*Changed (P25 (i)'s rest, 2026-11-18, out/gm/qk-design.md, the section on P25 (i)'s rest, delegated design; the investigator's u11
+NT-scouting-late u3:4):* where F-4 reads a pass that took the row by the row's time-column value and that pass printed
+no key at its selection's print for a row it selects and keeps, the print's condition was false for the row then
+(`_unprinted_take`).  The condition is the print's tests less those the key's line ran under, with a flag (a name
+bound to True and False only) read as the tests of its True bindings (`_flag_tests`; the map's guard_froms list a
+flag's constants by value, 3761's True and not 3764's).  Its names are bound by the map's guard_froms: constants, the
+row's status as in the stay, and another column of the row only where no statuslog row lies between the pass and the
+rows file's read (K22).  The pass's own values (a rowcount, a container, a parameter) are put the way the print needs
+them, as premises.  Where the print would hold for every count of 1 or more of the name counting a value, that count
+was 0; else the condition and its open atoms are said.  NT-scouting-late: walltimeUnit was read after the move, so
+the count stays open.  The stuck side (MT-scouting-stuck's 13:54:18 take, read by its assessmentTime) needs F-4's
+timelines in the stuck flow and is not built.  F-4 also says a take once where the timeline cache keeps two readings
+of its column.
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row
