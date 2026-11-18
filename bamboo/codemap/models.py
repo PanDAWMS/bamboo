@@ -3823,6 +3823,13 @@ KEY_BOUND = "bound in a statement"
 KEY_RETURNED = "returned"
 KEY_KEPT = "kept in what it was handed"
 KEY_NO_USE = "no use found"
+#: Why a :class:`KeptHop` is not read on (:attr:`KeptHop.open`): no call the corpus places runs the function, the
+#: call hands the object's holder as no name or field of one, or the way up is longer than six calls.
+KEPT_NO_CALL = "no call placed"
+KEPT_NOT_A_NAME = "not a name"
+KEPT_TOO_DEEP = "too deep"
+#: How many calls up a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
+KEPT_DEPTH = 6
 #: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
 #: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
 #: one carried from something not of the table's class (a scalar handed in, a parent's row).
@@ -4319,6 +4326,56 @@ class AfterChange(HeldChange):
     )
 
 
+class KeptWrite(BaseModel):
+    """One write of a :class:`KeptHop`'s caller that persists the kept object: the caller's :class:`KeyFrom` s of
+    *statement* whose *object* is *object* (a flush's call, a statement run with the object's ``valuesMap()``)."""
+
+    statement: int = Field(description="The write's :attr:`KeyFrom.statement` in the caller.")
+    object: str = Field(description="Its :attr:`KeyFrom.object`, as the caller's record spells it.")
+
+
+class KeptHop(BaseModel):
+    """Where an object a function keeps in what it was handed (:data:`KEY_KEPT`) goes next: one caller, reached by the
+    calls *via*, holding it after them -- read by the carry from the call, not by how the caller spells it.
+
+    ``TaskRefinerBase.extractCommon`` makes ``taskSpec`` and keeps it as ``self.taskSpec``: after
+    ``TaskRefiner.runImpl``'s ``impl.extractCommon(...)`` at 211, ``impl.taskSpec`` holds it, and runImpl's flushes of
+    it (``updateTask_JEDI`` at 226, ..., ``registerTaskInOneShot_JEDI`` at 602) persist it -- *persisted*; a subclass's
+    ``extractCommon`` calling the base keeps it in its own ``self`` again, so its hop goes one call further up.  A
+    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer."""
+
+    via: list[str] = Field(
+        default_factory=list,
+        description="The calls, ``file:line``, from the call into the record's function up to *owner*'s.",
+    )
+    owner: str = Field(default="", description="The caller the hop ends in (``file::name``); empty where *open*.")
+    held: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the caller's names hold the object after the call, as spelled from the carry's paths "
+            "(``impl.taskSpec``); for display, not a key."
+        ),
+    )
+    persisted: list[KeptWrite] = Field(
+        default_factory=list,
+        description=(
+            "The caller's writes persisting the object: a :class:`KeyFrom` with an *object* whose object, where the "
+            "write takes it, holds one of the fields the record assigns as its own field."
+        ),
+    )
+    handed_to: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions of the corpus (``file::name``) the caller's other calls handed the object, or a part of "
+            "it, land in -- where it may be persisted a call away, as :attr:`KeyFrom.handed_to`."
+        ),
+    )
+    open: str = Field(
+        default="",
+        description=f"Why the hop is not read: ``{KEPT_NO_CALL}``, ``{KEPT_NOT_A_NAME}``, ``{KEPT_TOO_DEEP}``.",
+    )
+
+
 class KeyFrom(BaseModel):
     """Where one row-naming term of a statement was filled from: the rows it lands on, and who named them.
 
@@ -4413,6 +4470,35 @@ class KeyFrom(BaseModel):
         ),
     )
     sources: list[KeySource] = Field(default_factory=list)
+    each_element: bool = Field(
+        default=False,
+        description=(
+            "The term compares its column with each element of its bind's value, not the value: an ``IN`` list the "
+            "corpus's helper spells as one placeholder from a sequence (``status IN (:old___in)`` from "
+            "``oldStatus``).  *sources* say where each sits in that sequence (:attr:`KeySource.paths`), so the "
+            "element is the sequence's ``[*]``.  False where each bind is one value -- a flush's, a list literal "
+            "the call hands split into its elements."
+        ),
+    )
+    flushed_in: str = Field(
+        default="",
+        description=(
+            "A flush's (a write at a call): the method whose statement persists the object (``file::name``), its "
+            "own KeyFroms the terms were read from -- the call may reach it through forwarders.  Empty for any "
+            "other record."
+        ),
+    )
+    flushed_lines: list[int] = Field(
+        default_factory=list,
+        description="A flush's: the lines of the statements of *flushed_in* whose records the term was read from.",
+    )
+    kept_hops: list[KeptHop] = Field(
+        default_factory=list,
+        description=(
+            f"Where *unread* is ``{KEY_KEPT}``: where the object goes in the callers (:class:`KeptHop`), one per "
+            "caller reached; empty for any other record."
+        ),
+    )
     reads: bool = Field(
         default=False,
         description=(
@@ -4525,6 +4611,9 @@ class KeyFrom(BaseModel):
     #: attributes the write takes back out)`` where a write persists *object*: the step after the reach record adds to
     #: *writes* the subjects the function assigns on it that reach one of those calls.
     _object: Optional[tuple] = PrivateAttr(default=None)
+    #: Where *unread* is :data:`KEY_KEPT`: ``{parameter: paths}`` where its assigned fields sit in what the function
+    #: was handed, as the carry's ``kept()`` reads them -- the start of *kept_hops*.
+    _kept: Optional[dict] = PrivateAttr(default=None)
 
 
 class TableRecord(BaseModel):

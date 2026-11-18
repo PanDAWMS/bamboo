@@ -84,6 +84,10 @@ from bamboo.codemap.models import (
     CALL_READING_ROUTE,
     FALL_BODY,
     FALL_ELSE,
+    KEPT_DEPTH,
+    KEPT_NO_CALL,
+    KEPT_NOT_A_NAME,
+    KEPT_TOO_DEEP,
     KEY_ATTRIBUTE,
     KEY_BOUND,
     KEY_COLUMN_EXPRESSION,
@@ -143,6 +147,8 @@ from bamboo.codemap.models import (
     HeldSource,
     JoinPair,
     JunctionNode,
+    KeptHop,
+    KeptWrite,
     KeyFrom,
     KeySource,
     ListPrint,
@@ -502,6 +508,7 @@ def _key_froms(
                 term=term,
                 keyed=mapping,
                 unread=KEY_NO_MAP,
+                each_element=bind.endswith(sqltext.IN_LIST_SUFFIX),
             )
             record._binds = (func, rel_path, [])
             key_froms.append(record)
@@ -5538,7 +5545,8 @@ class _PathCarry:
     """Which parts of which names hold the rows in one function, as it runs: a holding is a name and an access path.
 
     The rows come in through the statement's own seeds (*start*: a write holds them whole), the parameters a call
-    hands parts of them to (*seeds*), or the value of a call the function made (*call_values*: the way back).  A
+    hands parts of them to (*seeds*), the value of a call the function made (*call_values*: the way back), or what
+    a call's definition kept in an object the function handed it (*kept_values*: the way back through it).  A
     write holds what its value holds, put at its steps -- ``x.a[k] = v`` puts what ``v`` holds at ``.a[*]`` of ``x``
     -- ``setattr(x, n, v)`` at any field of ``x`` where ``n`` is computed, but in a ``for n, v in P.items()`` what
     each key of ``P`` holds at the field it names (:func:`_keyed_fields`: ``AdderPluginBase.__init__``'s ``params``)
@@ -5579,6 +5587,7 @@ class _PathCarry:
         call_values: Optional[dict[int, _Paths]] = None,
         deciding: bool = False,
         item: Optional[int] = None,
+        kept_values: Optional[dict[int, dict[tuple[str, tuple[str, ...]], _Paths]]] = None,
     ):
         self.reading, self.file, self.func, self.bound = reading, file, func, bound
         self.call_values = call_values or {}
@@ -5597,10 +5606,17 @@ class _PathCarry:
             self._add(write.fresh())
         arguments = getattr(func, "args", None)
         seeds = seeds or {}
+        kept_values = kept_values or {}
         start_ids = {id(node) for node in start}
         for write in self.writes:
             if write.node is arguments and write.source is None and write.call is None and write.name in seeds:
                 write.forced = frozenset(seeds[write.name])
+            elif write.call is not None and id(write.call) in kept_values:
+                # What the call's definition keeps in what this function hands it (:func:`_kept_hops`): the way back
+                # through a kept object, as *call_values* is through a return.
+                kept = kept_values[id(write.call)].get((write.name, write.steps))
+                if kept:
+                    write.forced = _below(write.steps, kept)
             elif (
                 id(write.node) in start_ids
                 and write.call is None
@@ -7589,6 +7605,7 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                         term=spelled,
                         unread=KEY_NO_MAP,
                         reads=True,
+                        each_element=all(bind.endswith(sqltext.IN_LIST_SUFFIX) for bind in binds),
                     )
                     record._binds = (func, file, [])
                 # A way of an OR, or a term only some runs append, in any of the texts the statement runs with.
@@ -8687,7 +8704,9 @@ def attach_key_sources(
         )
         read += 1
     if attributor is not None and key_froms is not None:
-        key_froms.extend(_unpersisted(froms, junctions, modules, attributor, reading, of))
+        made = _unpersisted(froms, junctions, modules, attributor, reading, of)
+        key_froms.extend(made)
+        _attach_kept_hops(made, froms, reading)
     return read
 
 
@@ -9131,8 +9150,10 @@ def _unpersisted(
             for node in own_nodes(func):
                 if isinstance(node, ast.stmt):
                     statements.setdefault(node.lineno, []).append(node)
-            used: dict[int, list[tuple[str, int, frozenset[str]]]] = {}
-            found: dict[tuple[str, str], tuple[list[int], set[str], dict[str, set[int]]]] = {}
+            used: dict[int, list[tuple[str, int, frozenset[str], dict[str, _Paths]]]] = {}
+            found: dict[
+                tuple[str, str], tuple[list[int], set[str], dict[str, set[int]], dict[str, _Paths]]
+            ] = {}
             for junction in here:
                 spec, _dot, attribute = junction.subject.rpartition(".")
                 lines = {
@@ -9158,12 +9179,14 @@ def _unpersisted(
                     statement, obj = assigned[0]
                     if id(statement) not in used:
                         used[id(statement)] = _uses(reading, module.rel_path, func, statement)
-                    for kind, at, callees in used[id(statement)]:
-                        ats, handed_to, writes = found.setdefault((ast.unparse(obj), kind), ([], set(), {}))
+                    for kind, at, callees, kept_in in used[id(statement)]:
+                        ats, handed_to, writes, kept = found.setdefault((ast.unparse(obj), kind), ([], set(), {}, {}))
                         ats.append(at)
                         handed_to |= callees
                         writes.setdefault(junction.subject, set()).add(line)
-            for (spelled, kind), (ats, handed_to, writes) in sorted(found.items()):
+                        for name, paths in kept_in.items():
+                            kept[name] = kept.get(name, _NOTHING) | paths
+            for (spelled, kind), (ats, handed_to, writes, kept) in sorted(found.items()):
                 record = KeyFrom(
                     owner=owner,
                     file=module.rel_path,
@@ -9176,6 +9199,8 @@ def _unpersisted(
                 )
                 record._runs = (func, [statement for at in sorted(set(ats)) for statement in statements.get(at, ())])
                 record.attr, record.sources = _object_key(func, spelled, record.writes, of(func, module.rel_path))
+                if kind == KEY_KEPT:
+                    record._kept = kept
                 made.append(record)
     return made
 
@@ -9205,13 +9230,14 @@ def _object_key(
 
 def _uses(
     reading: _Reading, file: str, func: ast.FunctionDef | ast.AsyncFunctionDef, statement: ast.stmt
-) -> list[tuple[str, int, frozenset[str]]]:
+) -> list[tuple[str, int, frozenset[str], dict[str, _Paths]]]:
     """What the field *statement* assigns reaches next, as the carry reads it from there: each kind of use --
     :data:`KEY_HANDED` (calls of the corpus handed a part of it, or made on what holds it, and the functions they land
     in), :data:`KEY_BOUND` (the database's calls), :data:`KEY_RETURNED`, :data:`KEY_KEPT` (put in what a parameter,
     ``self`` among them, names: the caller holds it after -- adder's ``self.job.ddmErrorCode = ...`` before it
     returns) -- with the first line it is used on (the assignment's, kept), else :data:`KEY_NO_USE` at the
-    assignment.  A call no reading places (a log line, a builtin, a hole) is no use."""
+    assignment.  A call no reading places (a log line, a builtin, a hole) is no use.  :data:`KEY_KEPT`'s, last, are
+    where the field sits in what each parameter holds (``{parameter: paths}``, :meth:`_PathCarry.kept`)."""
     carry = _PathCarry(reading, file, func, (), start=[statement])
     handed: list[int] = []
     callees: set[str] = set()
@@ -9235,9 +9261,10 @@ def _uses(
     ]
     arguments = func.args
     handed_in = {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
-    kept = [statement.lineno] if handed_in & set(carry.kept()) else []
+    kept_in = {name: paths for name, paths in carry.kept().items() if name in handed_in}
+    kept = [statement.lineno] if kept_in else []
     found = [
-        (kind, min(lines), frozenset(names))
+        (kind, min(lines), frozenset(names), kept_in if kind == KEY_KEPT else {})
         for kind, lines, names in (
             (KEY_HANDED, handed, callees),
             (KEY_BOUND, bound, set()),
@@ -9246,7 +9273,150 @@ def _uses(
         )
         if lines
     ]
-    return found or [(KEY_NO_USE, statement.lineno, frozenset())]
+    return found or [(KEY_NO_USE, statement.lineno, frozenset(), {})]
+
+
+def _attach_kept_hops(made: list[KeyFrom], froms: list[KeyFrom], reading: _Reading) -> None:
+    """:attr:`KeyFrom.kept_hops` of each :data:`KEY_KEPT` record of *made*: from each call into its function, where
+    the object goes in the caller (:func:`_kept_hops`), the writes persisting it being *froms*' records of an
+    object (a flush's call, a statement run with an object's ``valuesMap()``)."""
+    writers: dict[int, list[KeyFrom]] = {}
+    for key_from in froms:
+        if key_from._object is not None and key_from._runs is not None:
+            writers.setdefault(id(key_from._runs[0]), []).append(key_from)
+    done: dict[tuple, list[KeptHop]] = {}
+    for record in made:
+        if record.unread != KEY_KEPT or not record._kept or record._runs is None:
+            continue
+        fields = frozenset(("." + subject.rpartition(".")[2],) for subject in record.writes)
+        record.kept_hops = _kept_hops(
+            reading, record.file, record._runs[0], record._kept, _NOTHING, fields, writers, KEPT_DEPTH, done
+        )
+
+
+def _kept_hops(
+    reading: _Reading,
+    file: str,
+    func: ast.AST,
+    kept: dict[str, _Paths],
+    returned: _Paths,
+    fields: frozenset[tuple[str, ...]],
+    writers: dict[int, list[KeyFrom]],
+    depth: int,
+    done: dict[tuple, list[KeptHop]],
+) -> list[KeptHop]:
+    """Where what *func* keeps in its parameters (*kept*, ``{parameter: paths}``) or returns (*returned*) of an
+    object's assigned *fields* goes in each caller: one :class:`KeptHop` per call into it -- the caller's writes
+    whose object holds one of *fields* as its own field (*writers*), the functions its other calls handed a part of
+    it land in -- and, where the caller keeps or returns it again, its callers' hops, the call put first in their
+    *via*, up to *depth* calls.  Read by the carry from the call (:class:`_PathCarry`'s *kept_values* and
+    *call_values*), not by how the caller spells the object."""
+    key = (file, getattr(func, "lineno", 0), frozenset(kept.items()), returned, fields, depth)
+    if key in done:
+        return done[key]
+    done[key] = []
+    owned = reading.calls.types.method_class(file, func)
+    target = Target(file, func, owned[1] if owned else None)
+    sites = [
+        site
+        for site in reading.calls.callers(target)
+        if not site.in_module and not (site.file == file and site.func is func)
+    ]
+    if not sites:
+        done[key] = [KeptHop(open=KEPT_NO_CALL)]
+        return done[key]
+    if depth <= 0:
+        done[key] = [KeptHop(open=KEPT_TOO_DEEP)]
+        return done[key]
+    receiver = receiver_parameter(target)
+    hops: list[KeptHop] = []
+    for site in sites:
+        at = f"{site.file}:{site.call.lineno}"
+        owner = f"{site.file}::{def_name(site.func)}"
+        try:
+            handed: dict[str, Optional[ast.expr]] = dict(reading.calls.handed(site, target))
+            placed = reading.calls.callees(site.file, site.func, site.call)
+        except Exception:  # noqa: BLE001 -- the record has the call as a hole
+            hops.append(KeptHop(via=[at], owner=owner, open=KEPT_NOT_A_NAME))
+            continue
+        if receiver is not None and not placed.on_class and isinstance(site.call.func, ast.Attribute):
+            handed[receiver] = (
+                reading.calls.made_on(site.file, site.func, site.call) if placed.forwarded else site.call.func.value
+            )
+        values: dict[tuple[str, tuple[str, ...]], _Paths] = {}
+        for parameter, paths in kept.items():
+            where = _access_path(handed.get(parameter))
+            if where is not None:
+                values[where] = values.get(where, _NOTHING) | paths
+        if not values and not returned:
+            hops.append(KeptHop(via=[at], owner=owner, open=KEPT_NOT_A_NAME))
+            continue
+        carry = _PathCarry(
+            reading,
+            site.file,
+            site.func,
+            (),
+            call_values={id(site.call): returned} if returned else None,
+            kept_values={id(site.call): values} if values else None,
+        )
+        held = sorted(
+            {
+                base + "".join((*steps, *path[:-1]))
+                for (base, steps), paths in values.items()
+                for path in paths
+                if path and (path[-1],) in fields
+            }
+        )
+        persisted: dict[tuple[int, str], KeptWrite] = {}
+        taken: set[int] = set()
+        for writer in writers.get(id(site.func), ()):
+            spelled, _class, takers, _excluded = writer._object  # type: ignore[misc]
+            for taker in takers:
+                objects = [
+                    one
+                    for one in (
+                        *(argument for argument in taker.args if not isinstance(argument, ast.Starred)),
+                        *(keyword.value for keyword in taker.keywords),
+                        *([taker.func.value] if isinstance(taker.func, ast.Attribute) else []),
+                    )
+                    if ast.unparse(one) == spelled
+                ]
+                if any(path[:1] in fields for one in objects for path in carry.held(one, taker)):
+                    persisted[(writer.statement, writer.object)] = KeptWrite(
+                        statement=writer.statement, object=writer.object
+                    )
+                    taken.add(id(taker))
+        handed_to: set[str] = set()
+        for call in _own_calls(site.func):
+            if call is site.call or id(call) in taken or not carry.handed_any(call):
+                continue
+            if reading.record.is_database(site.file, call):
+                continue
+            placed_here = reading.place(carry, call)
+            if placed_here is not None:
+                handed_to |= {one.owner for one in placed_here.targets}
+        hops.append(
+            KeptHop(
+                via=[at],
+                owner=owner,
+                held=held,
+                persisted=[persisted[one] for one in sorted(persisted)],
+                handed_to=sorted(handed_to),
+            )
+        )
+        arguments = getattr(site.func, "args", None)
+        parameters = (
+            {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
+            if arguments is not None
+            else set()
+        )
+        again = {name: paths for name, paths in carry.kept().items() if name in parameters}
+        back = carry.returns()
+        if again or back:
+            for hop in _kept_hops(reading, site.file, site.func, again, back, fields, writers, depth - 1, done):
+                hops.append(hop.model_copy(update={"via": [at, *hop.via]}))
+    done[key] = hops
+    return hops
 
 
 #: The order a statement's why is told in where several of its key columns are new.

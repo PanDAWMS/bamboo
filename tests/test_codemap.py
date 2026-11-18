@@ -20430,6 +20430,103 @@ def test_an_object_no_write_persists_says_where_the_key_it_is_given_came_from(tm
     ]
 
 
+_KEPT_PROXY = '''
+class StatusModule:
+    def setTaskStatus_JEDI(self, taskSpec: JediTaskSpec, criteria, oldStatus):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Tasks SET {taskSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in criteria.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        names, values = get_sql_IN_bind_variables(oldStatus, prefix=":old_")
+        sql += f"status IN ({names}) AND "
+        varMap.update(values)
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+
+_KEPT = '''
+def note(spec):
+    return spec.status
+
+
+class Refiner:
+    def extract(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "defined"
+        self.taskSpec = taskSpec
+
+
+class Prod(Refiner):
+    def extract(self, jediTaskID):
+        Refiner.extract(self, jediTaskID)
+
+
+class Runner:
+    def run(self, jediTaskID, taskStatus):
+        impl = Prod()
+        impl.extract(jediTaskID)
+        other = JediTaskSpec()
+        spec: JediTaskSpec = impl.taskSpec
+        self.taskBufferIF.setTaskStatus_JEDI(spec, {"jediTaskID": jediTaskID}, [taskStatus])
+        self.taskBufferIF.setTaskStatus_JEDI(other, {"jediTaskID": jediTaskID}, self.statusList)
+        note(impl.taskSpec)
+'''
+
+
+def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_the_callers(tmp_path):
+    """``extractCommon`` keeps the ``taskSpec`` it made as ``self.taskSpec``; after ``impl.extractCommon(...)``
+    ``impl.taskSpec`` holds it, and ``runImpl``'s flush of it persists it -- read by the carry from the call, so a
+    name bound to it is it and the flush of another spec is not, and a subclass's method calling the base's keeps it
+    again one call up.  A
+    flush's record names the method it was read from, and an ``IN`` term built by the helper compares each element of
+    its bind's value, unless the call hands a list literal split into its elements."""
+    rel = "pandajedi/jediorder/Runner.py"
+    froms, _keys = _flushed(
+        tmp_path, _KEPT, rel, more={"pandaserver/taskbuffer/db_proxy_mods/status_module.py": _KEPT_PROXY}
+    )
+    lines = _KEPT.split("\n")
+    at = {
+        text: next(n for n, line in enumerate(lines, 1) if text in line)
+        for text in ("Refiner.extract(self", "impl.extract(", "(spec,", "(other,")
+    }
+
+    (kept,) = [one for one in froms if one.unread == KEY_KEPT and one.owner.endswith("::Refiner.extract")]
+    assert kept.object == "taskSpec"
+    hops = [
+        (hop.via, hop.owner.rpartition("::")[2], hop.held, [(w.statement, w.object) for w in hop.persisted], hop.open)
+        for hop in kept.kept_hops
+    ]
+    # ``impl`` is a ``Prod``: its ``extract`` is the subclass's, which keeps the object in its ``self`` again.
+    assert hops == [
+        ([f"{rel}:{at['Refiner.extract(self']}"], "Prod.extract", ["self.taskSpec"], [], ""),
+        (
+            [f"{rel}:{at['Refiner.extract(self']}", f"{rel}:{at['impl.extract(']}"],
+            "run",
+            ["impl.taskSpec"],
+            [(at["(spec,"], "spec")],
+            "",
+        ),
+    ]
+    assert kept.kept_hops[1].handed_to == [f"{rel}::note"]
+
+    flushes = sorted(
+        (one.statement, one.term, one.each_element, one.flushed_in, one.flushed_lines)
+        for one in froms
+        if one.flushed_in
+    )
+    method = "pandaserver/taskbuffer/db_proxy_mods/status_module.py::setTaskStatus_JEDI"
+    update = next(n for n, line in enumerate(_KEPT_PROXY.split("\n"), 1) if "self.cur.execute(" in line)
+    assert flushes == [
+        (at["(spec,"], 'jediTaskID=criteria["jediTaskID"]', False, method, [update]),
+        (at["(spec,"], "status IN (:old___in)", False, method, [update]),
+        (at["(other,"], 'jediTaskID=criteria["jediTaskID"]', False, method, [update]),
+        (at["(other,"], "status IN (:old___in)", True, method, [update]),
+    ]
+
 
 _LOOPED_UNSAVED = '''
 def updateJobs(jobs):

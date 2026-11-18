@@ -882,21 +882,33 @@ def _call_key_froms(
     write (a term on one is its compare-and-set) and where the call appends the term; and, where the method's
     ``WHERE`` is made of a dict parameter's items, one per key of the dict the call hands it.  A term the method
     fills only with values of its own -- its rows, its ``self`` -- is :data:`KEY_IN_CALLEE`.  Its object is the spec,
-    and what it writes is read after the reach record: the caller's assignments on the spec that reach the call."""
+    and what it writes is read after the reach record: the caller's assignments on the spec that reach the call.  Each
+    says the method and its statements it was read from (*flushed_in*, *flushed_lines*), and compares each element
+    of its bind's value where the method's own term does and the call hands no list literal split into its elements
+    (*each_element*)."""
     caller = f"{rel_path}::{calls_mod.def_name(func)}"
     found: dict[tuple[str, str, str], KeyFrom] = {}
 
-    def put(table: str, term: str, spelled: str, spec: str, binds: list, unread: str) -> None:
+    def put(table: str, term: str, spelled: str, spec: str, binds: list, unread: str, line: int, each: bool) -> None:
         record = found.get((table, term, spelled))
         if record is None:
             record = found[(table, term, spelled)] = KeyFrom(
-                owner=caller, file=rel_path, statement=call.lineno, table=table, term=term, object=spelled
+                owner=caller,
+                file=rel_path,
+                statement=call.lineno,
+                table=table,
+                term=term,
+                object=spelled,
+                flushed_in=flush.owner,
+                each_element=each,
             )
             record._binds = (func, rel_path, [])
             record._object = (spelled, spec, [call], flush.excluded)
             record._runs = (func, [call])
         record._binds[2].extend(binds)
         record.unread = "" if record._binds[2] else unread
+        record.each_element = record.each_element and each
+        record.flushed_lines = sorted({*record.flushed_lines, line})
 
     at = site_of(call)
     for spec in sorted(flush.spec_classes):
@@ -919,14 +931,32 @@ def _call_key_froms(
                 if sqlwrite._fields_at(func, obj, attribute, [call], spec)
             }
             given = _argument(call, flush.criteria, flush.parameters) if flush.criteria else None
-            for _line, table in statements[:1] if given is not None else ():
+            for first, table in statements[:1] if given is not None else ():
                 if not isinstance(given, ast.Dict):
-                    put(table, f"{flush.criteria}={ast.unparse(given)}", spelled, spec, [sql.Bind(given, at)], "")
+                    put(
+                        table,
+                        f"{flush.criteria}={ast.unparse(given)}",
+                        spelled,
+                        spec,
+                        [sql.Bind(given, at)],
+                        "",
+                        first,
+                        False,
+                    )
                     continue
                 for key, value in zip(given.keys, given.values, strict=True):
                     named = key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
                     if named is not None and named.lower() not in written:
-                        put(table, f'{named}={flush.criteria}["{named}"]', spelled, spec, [sql.Bind(value, at)], "")
+                        put(
+                            table,
+                            f'{named}={flush.criteria}["{named}"]',
+                            spelled,
+                            spec,
+                            [sql.Bind(value, at)],
+                            "",
+                            first,
+                            False,
+                        )
             for line, table in statements:
                 for record in owned.get((flush.owner, line), ()):
                     if record._insert is not None or record.table.lower() != table.lower():
@@ -944,7 +974,7 @@ def _call_key_froms(
                     )
                     if ways is not None and _carried_at(call, flush, ways) is None:
                         continue
-                    binds, own = [], False
+                    binds, own, split = [], False, False
                     for bind in (record._binds or (None, None, []))[2]:
                         root = sqlwrite._root(bind.value)
                         handed = (
@@ -961,9 +991,10 @@ def _call_key_froms(
                             own = True
                             continue
                         values = moved.elts if isinstance(moved, (ast.List, ast.Tuple, ast.Set)) else [moved]
+                        split = split or isinstance(moved, (ast.List, ast.Tuple, ast.Set))
                         binds.extend(sql.Bind(one, at) for one in values if not isinstance(one, ast.Starred))
                     unread = KEY_IN_CALLEE if own else record.unread or KEY_NO_BIND
-                    put(record.table, record.term, spelled, spec, binds, unread)
+                    put(record.table, record.term, spelled, spec, binds, unread, line, record.each_element and not split)
     return list(found.values())
 
 
