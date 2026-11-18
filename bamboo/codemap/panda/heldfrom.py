@@ -79,6 +79,7 @@ from bamboo.codemap.models import (
     FIELD_SETATTR,
     KEY_ATTRIBUTE,
     KEY_CALL,
+    KEY_COLUMN_TEXTS,
     KEY_CONSTANT,
     KEY_CONTAINER,
     KEY_DATABASE,
@@ -110,6 +111,7 @@ from bamboo.codemap.models import (
     HeldSource,
     HeldThrough,
     JunctionNode,
+    KeySource,
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
@@ -187,6 +189,16 @@ class _Way(NamedTuple):
     aggregate: Optional[Any] = None
     #: In the order met going back from the read (:attr:`HeldSource.printed`, :meth:`_Reader._return_printed`).
     printed: tuple["_Printed", ...] = ()
+    #: Where the end is a statement's rows read as no one select item (no *column*): ``(position, paths)`` of each
+    #: select item, the parts of the value it sits at, spelled as *paths* and cut by each step as they are
+    #: (:func:`_items_cut`).  A position the steps take whole is the item the value is (:meth:`_Reader._item_read`):
+    #: a callee's ``return self.cur.fetchall()`` is the rows whole, and its caller's ``for id, lockedby in res``
+    #: takes ``[*]`` then ``[0]``, the first select item.
+    items: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    #: Where the end is a statement's select item whose texts give it different columns (*column_unread* ``texts
+    #: differ``): the column, ``table.column`` lowered, on each select list, empty on one with no such item
+    #: (:meth:`_Reader._text_columns`).
+    texts: tuple[str, ...] = ()
 
 
 class _Printed(NamedTuple):
@@ -226,6 +238,9 @@ class RowItem(NamedTuple):
     made: str = ""
     #: The item is one column's ``MAX`` or ``MIN`` (:class:`sqltext.Aggregate`): that.
     aggregate: Optional[Any] = None
+    #: Where the statement's texts give the item different columns: each text's (:attr:`_Way.texts`) -- a reader
+    #: whose classes declare them one attribute reads that (``jobsDefined4``'s or ``jobsActive4``'s ``PandaID``).
+    texts: tuple[str, ...] = ()
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -412,8 +427,10 @@ def _step(
         and way.through[0].steps == len(way.steps)
     ):
         return [way._replace(through=way.through[1:])]
-    if not way.paths or step == _ENTER:
+    if step == _ENTER:
         return [way._replace(steps=way.steps + (step,))]
+    if not way.paths:
+        return [_items_cut(way._replace(steps=way.steps + (step,)), step, element, keys)]
     if select is not None and step == "[*]" and not way.loose:
         return _selected(way, select, element, keys)
     return _cut(way, step, element, unread, keys)
@@ -429,6 +446,20 @@ def _cut(way: _Way, step: str, element: bool, unread: Optional[_Way], keys: bool
     if "()" in under:
         found.insert(0, unread or _unread_part(way, step) if way.loose else way._replace(paths=()))
     return found
+
+
+def _items_cut(way: _Way, step: str, element: bool, keys: bool) -> _Way:
+    """*way*, whose value is its source itself (no *paths*), with its select items' parts (:attr:`_Way.items`, where
+    each sits in the source) cut by *step*: an item no part of which is under the step is gone.  While the source
+    sits at parts of the value, a step takes those parts and leaves the items as they are."""
+    if not way.items:
+        return way
+    from bamboo.codemap.panda.recognizers.sqlwrite import paths_under
+
+    items = tuple(
+        (position, under) for position, paths in way.items if (under := tuple(paths_under(step, paths, element, keys)))
+    )
+    return way._replace(items=items)
 
 
 def _path_key(path: str) -> Optional[str]:
@@ -1157,6 +1188,9 @@ class _Reader:
         for site in sites:
             self.sites_of.setdefault(site.owner, []).append(site)
         self._filled: dict[int, object] = {}
+        #: A read site's name -> ``(the _Filled of its function, the site)``, as :meth:`_sources` met it: the select
+        #: lists a way's :attr:`_Way.items` are of (:meth:`_item_read`).
+        self._row_sites: dict[str, tuple[Any, ReadSiteNode]] = {}
         self._cursor_fields: dict[int, set[str]] = {}
         #: What a callee returns or yields, by the function and the classes ``self`` is there (:data:`_Selves`).
         self._returns: dict[tuple[int, tuple, Optional[str]], list[_Way]] = {}
@@ -1269,13 +1303,16 @@ class _Reader:
         found = []
         cursors = self._cursors(file, func)
         read = ast.unparse(expr) if isinstance(expr, ast.Attribute) else ""
-        for source in self.filled(file, func).sources(expr, at):
+        filled = self.filled(file, func)
+        for source in filled.sources(expr, at):
             if source.kind == KEY_SELF_FIELD and source.name in cursors:
                 continue
             parts = tuple(path for path in source.paths if path != "()")
             if source.kind == KEY_SELF_FIELD and source.name == read:
                 parts = ()
             loose = source.kind not in (KEY_ROWS, KEY_SEQUENCE)
+            # Where each select item sits in the value, which the way with no paths is: the source itself.
+            items = self._row_items(filled, source, expr, at) if source.kind == KEY_ROWS and not source.column else ()
             # The value itself and parts of it too: two ways, the whole (no paths) and the parts -- a way with paths
             # sits at those parts only.
             for paths in ([()] if "()" in source.paths or not parts else []) + ([parts] if parts else []):
@@ -1296,9 +1333,62 @@ class _Reader:
                         attr=source.attr,
                         column_unread=source.column_unread,
                         loose=bool(paths) and loose,
+                        items=() if paths else items,
                     )
                 )
         return found
+
+    def _row_items(
+        self, filled: Any, source: KeySource, expr: ast.expr, at: ast.AST
+    ) -> tuple[tuple[int, tuple[str, ...]], ...]:
+        """:attr:`_Way.items` of *source*, a statement's rows *expr* holds where *at* runs and no one select item of
+        them: where each select item sits in *expr*'s value, as the carry of that item alone reads it
+        (:meth:`sqlwrite._Filled.column` reads the same carries for the item *expr* is)."""
+        site = next((one for one in filled.sites if one.name == source.name), None)
+        if site is None:
+            return ()
+        self._row_sites.setdefault(site.name, (filled, site))
+        found = []
+        for position in self._sqlwrite._positions(filled.items(site)):
+            paths = filled._item(site, position).held(expr, at)
+            if paths:
+                found.append((position, tuple(self._sqlwrite._spelled_paths(paths))))
+        return tuple(found)
+
+    def _item_read(self, way: _Way) -> _Way:
+        """*way*, a statement's rows its steps took one select item of whole (:attr:`_Way.items`), as that item: its
+        column, as :meth:`sqlwrite._Filled.column` chooses it on the statement's select lists, with no steps or
+        parts left -- the value is the item, as where the function reading it ran the statement itself.  Any other
+        way as it is."""
+        if way.kind != KEY_ROWS or way.column or not way.items:
+            return way
+        held = [position for position, paths in way.items if "()" in paths]
+        found = self._row_sites.get(way.name)
+        if not held or found is None:
+            return way
+        filled, site = found
+        lists = filled.items(site)
+        column, attr, unread = self._sqlwrite._column_choice(lists, held, None, site, filled.attr)
+        aggregate = self._sqlwrite._column_aggregate(lists, held) if not column else None
+        return way._replace(
+            column=column,
+            attr=attr or way.attr,
+            column_unread=unread,
+            aggregate=aggregate,
+            steps=(),
+            paths=(),
+            loose=False,
+            items=(),
+            texts=self._text_columns(lists, held, site) if unread == KEY_COLUMN_TEXTS else (),
+        )
+
+    def _text_columns(self, lists: tuple, held: list[int], site: ReadSiteNode) -> tuple[str, ...]:
+        """The column, ``table.column`` lowered, the select item at *held* is on each of *lists* (:attr:`_Way.texts`),
+        as :func:`sqlwrite._column_choice` chooses it on one; empty on a list with none."""
+        return tuple(
+            self._sqlwrite._item_choice(items, [number for number in held if number < len(items)], None, site)[0]
+            for items in lists
+        )
 
     def _cursors(self, file: str, func: ast.AST) -> set[str]:
         held = self._cursor_fields.get(id(func))
@@ -1330,8 +1420,9 @@ class _Reader:
         """The ways of *expr*, read where *at* runs in *func*; one ending at *func*'s own parameter is kind
         ``parameter``.  Each end made here is placed in *file* (:func:`_placed_in`).  *selves*: the classes ``self``
         can be in *func*, as the call entering it placed it (:data:`_Selves`); a call there is placed, and what may
-        change a name's object in place is read, for them."""
-        return _placed_in(self._ways_of(expr, at, file, func, selves=selves), file, func)
+        change a name's object in place is read, for them.  A statement's rows whose steps took one select item whole
+        are that item (:meth:`_item_read`)."""
+        return [self._item_read(one) for one in _placed_in(self._ways_of(expr, at, file, func, selves=selves), file, func)]
 
     def binding_rows(self, expr: ast.Name, site: ast.AST, file: str, func: ast.AST) -> tuple[list[RowItem], bool]:
         """What the binding *site* of *func*, reaching the read *expr*, gives it, read as a statement's rows: a
@@ -1340,14 +1431,16 @@ class _Reader:
         a call's value -- where the same value is the select item a guard's way names (``for (id,) in res``).  A way
         through a call or an operator that makes another value of the item -- a text holding it, a sum -- is not the
         item whole; a copy and the same value as another type (``int(row[0])``) are (:data:`_SAME_VALUE`)."""
-        ways = [one for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
+        ways = [self._item_read(one) for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
         items = []
         for one in ways:
             if one.kind != KEY_ROWS:
                 continue
             made = next((through.gives for through in one.through if through.gives not in _SAME_VALUE), "")
             whole = not made and not one.steps and not one.loose and all(path in ("", "()") for path in one.paths)
-            items.append(RowItem(one.name, one.column, one.attr, one.column_unread, whole, made, one.aggregate))
+            items.append(
+                RowItem(one.name, one.column, one.attr, one.column_unread, whole, made, one.aggregate, one.texts)
+            )
         return items, bool(ways) and len(items) == len(ways)
 
     def _ways_of(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()) -> list[_Way]:
@@ -1861,7 +1954,8 @@ class _Reader:
         items = filled.items(site)
         column, attr, unread = self._sqlwrite._column_choice(items, [slot], expr, site, filled.attr)
         aggregate = self._sqlwrite._column_aggregate(items, [slot]) if not column else None
-        return way._replace(column=column, attr=attr or way.attr, column_unread=unread, aggregate=aggregate)
+        texts = self._text_columns(items, [slot], site) if unread == KEY_COLUMN_TEXTS else ()
+        return way._replace(column=column, attr=attr or way.attr, column_unread=unread, aggregate=aggregate, texts=texts)
 
     def _changed(
         self,
