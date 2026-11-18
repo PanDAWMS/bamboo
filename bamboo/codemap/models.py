@@ -908,6 +908,16 @@ REWRITE_STATEMENT_UNREAD = "statement_unread"
 REWRITE_CUT = "follow_cut"
 
 
+#: Why a passthrough arm's :attr:`Branch.copied_from` may not be every value it copies (:attr:`Branch.copied_open`):
+#: a way to the copy passes none of them -- it may copy what the object held before the function --, one is on the
+#: object only through a hole, the arm is a statement's ``SET a=b`` -- the row's column as it was before the statement
+#: --, or the copy's value is not read.
+COPY_BEFORE = "before"
+COPY_PERHAPS = "perhaps"
+COPY_ROW = "row"
+COPY_UNREAD = "not read"
+
+
 class SamePassWrite(BaseModel):
     """Another column the block of an arm's write writes on the arm's row (:mod:`bamboo.codemap.panda.rewrites`)."""
 
@@ -1428,6 +1438,27 @@ class Branch(BaseModel):
     rewrites_open: list[RewriteOpen] = Field(
         default_factory=list,
         description="Where the later writes were not read, so ``rewrites`` may hold less than every one.",
+    )
+    copied_from: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "On a passthrough arm copying an attribute of an object the function names -- ``updateJob``'s "
+            "``job.stateChangeTime = job.modificationTime`` at 509 --: the lines of the function's assignments of "
+            "that attribute on that object the copy can read (:func:`bamboo.codemap.objects.assigns_reaching`, by "
+            "the object's records, not its spelling), the copied subject's arms where they are one -- 506's "
+            "``job.modificationTime = naive_utcnow()``; a copy through a name, the attribute its binding reads, at "
+            "the binding.  ``[]`` where none can be; ``None`` on any other arm, or where not read (*copied_open*)."
+        ),
+    )
+    copied_open: str = Field(
+        default="",
+        description=(
+            f"Empty where every way to the copy passes one of *copied_from* (:func:`bamboo.codemap.panda.flow."
+            f"passes_before`): the copy is a value its pass wrote.  ``{COPY_BEFORE}``: a way passes none, so the copy "
+            f"may be what the object held before the function (its caller's, a row read); ``{COPY_PERHAPS}``: one is "
+            f"on the object only through a hole; ``{COPY_ROW}``: a statement's ``SET a=b``, the row's column as it "
+            f"was before the statement; ``{COPY_UNREAD}``: the copy's value is not an attribute the records place."
+        ),
     )
     off_row: Optional[OffRow] = Field(
         default=None,

@@ -280,7 +280,8 @@ NOT_COMPARED: dict[str, dict[str, str]] = {
 #: ``value_cuts`` which lengths of it are read as a frame's head,
 #: ``off_row`` and ``unchanged`` whether a reader of the row's value skips the branch,
 #: ``after_made`` whether it can change a row made before it, and
-#: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's.
+#: ``same_pass`` and ``rewrites`` what else the row can hold beside the arm's,
+#: ``copied_from`` which writes of the same pass a copy takes its value from.
 BRANCH_FIELDS: tuple[str, ...] = (
     "path_condition",
     "row_precondition",
@@ -310,6 +311,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "same_pass",
     "rewrites",
     "rewrites_open",
+    "copied_from",
+    "copied_open",
     "unset_default",
     "amount",
     "handed",

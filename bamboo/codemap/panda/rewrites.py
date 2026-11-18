@@ -77,6 +77,10 @@ from typing import TYPE_CHECKING, Optional
 from bamboo.codemap import calls as C
 from bamboo.codemap import objects, pathcond, values
 from bamboo.codemap.models import (
+    COPY_BEFORE,
+    COPY_PERHAPS,
+    COPY_ROW,
+    COPY_UNREAD,
     REWRITE_CALL,
     REWRITE_COLUMNS_UNRECORDED,
     REWRITE_CUT,
@@ -99,9 +103,10 @@ from bamboo.codemap.models import (
     SamePassWrite,
     SourceModule,
 )
-from bamboo.codemap.panda import mustprints, runs
+from bamboo.codemap.panda import flow, mustprints, runs
 from bamboo.codemap.panda import objects as panda_objects
 from bamboo.codemap.panda.recognizers import progress
+from bamboo.codemap.panda.recognizers.sqlwrite import _VERSION
 
 if TYPE_CHECKING:
     from bamboo.codemap.objects import Change
@@ -149,14 +154,22 @@ _NOT_READ = "the statement is not read"
 
 
 def attach(reader: "runs._Reader", modules: list[SourceModule]) -> int:
-    """Every branch's ``same_pass``, ``rewrites`` and ``rewrites_open``; returns how many branches have a rewrite."""
+    """Every branch's ``same_pass``, ``rewrites`` and ``rewrites_open``, and a passthrough arm's ``copied_from`` and
+    ``copied_open``; returns how many branches have a rewrite."""
     later = _Later(reader, modules)
     found = 0
     for junction in reader.fragment.junctions:
         for branch in junction.branches:
             later.read(junction, branch)
+            later.copied(junction, branch)
             found += bool(branch.rewrites)
     return found
+
+
+#: An SQL text's ``SET``: a passthrough arm whose statement spells one copies a column of the row in the statement.
+_SET = re.compile(r"(?i)\bSET\b")
+#: The order a passthrough arm's *copied_open* takes where its sites say several: the least known first.
+_COPY_ORDER = (COPY_UNREAD, COPY_PERHAPS, COPY_BEFORE, COPY_ROW)
 
 
 def _statements_by_line(func: ast.AST) -> dict[int, ast.stmt]:
@@ -207,6 +220,8 @@ class _Later:
         #: :func:`objects.may_change`'s memo of what it reads of the whole record.
         self._record: dict = {}
         self._afters: dict[tuple[int, int, int], Optional[ast.stmt]] = {}
+        #: :func:`objects.assigns_reaching`'s follows, read on :attr:`rows` (:meth:`copied`).
+        self._follows: dict = {}
 
     # -- one branch ----------------------------------------------------------------------------------------------
 
@@ -308,6 +323,99 @@ class _Later:
                 one.why,
             ),
         )
+
+    # -- what a copy copies ----------------------------------------------------------------------------------------
+
+    def copied(self, junction: JunctionNode, branch: Branch) -> None:
+        """A passthrough arm's :attr:`Branch.copied_from` and :attr:`Branch.copied_open`: at each of its statements,
+        the assignments of the attribute it copies, on the object it copies it from, that the copy can read
+        (:meth:`_copied_at`) -- or that it is a statement's ``SET a=b``, the row's column as it was.  Any other arm
+        has ``None`` and ``""``."""
+        branch.copied_from, branch.copied_open = None, ""
+        if not branch.outcome.startswith("passthrough("):
+            return
+        sites = mustprints._sites(junction, branch, self.reader.trees)
+        if isinstance(sites, str):
+            branch.copied_open = COPY_UNREAD
+            return
+        lines: set[int] = set()
+        opens: set[str] = set()
+        read = False
+        for site in sites:
+            statement = site.statement
+            if mustprints._written_object(statement, junction.subject) is None:
+                spelled = [
+                    node.value
+                    for node in ast.walk(statement)
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                ]
+                if any(_SET.search(one) for one in spelled):
+                    opens.add(COPY_ROW)
+                    read = True
+                else:
+                    opens.add(COPY_UNREAD)
+                continue
+            owner = self.reader.names.of(site.func)
+            found = self._copied_at(site.func, owner, statement) if owner in self.rows else None
+            if found is None:
+                opens.add(COPY_UNREAD)
+                continue
+            read = True
+            lines |= found[0]
+            opens |= found[1]
+        branch.copied_from = sorted(lines) if read else None
+        branch.copied_open = next((one for one in _COPY_ORDER if one in opens), "")
+
+    def _copied_at(
+        self, func: ast.AST, owner: str, statement: ast.stmt
+    ) -> Optional[tuple[set[int], set[str]]]:
+        """``(lines, opens)`` of the copy *statement* makes of an attribute: its value's -- or, where its value is a
+        name, each reaching binding's (:func:`pathcond.held_at`) -- object as the record's paths take it at that
+        line, and the assignments of the attribute on it that can run before (:func:`objects.assigns_reaching`);
+        :data:`COPY_PERHAPS` where one is on it only through a hole, :data:`COPY_BEFORE` where a way from the
+        function's entry to the read passes none (:func:`flow.passes_before`).  ``None`` where the value is no
+        attribute the record places."""
+        value = getattr(statement, "value", None)
+        reads: list[tuple[ast.stmt, ast.Attribute]] = []
+        if isinstance(value, ast.Attribute):
+            reads.append((statement, value))
+        elif isinstance(value, ast.Name) and isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            try:
+                held = pathcond.held_at(func, value.id, statement)
+            except ValueError:
+                return None
+            for site in held.sites:
+                bound = getattr(site, "value", None)
+                if not isinstance(site, (ast.Assign, ast.AnnAssign)) or not isinstance(bound, ast.Attribute):
+                    return None
+                reads.append((site, bound))
+        if not reads:
+            return None
+        row = self.rows[owner]
+        paths_at = objects.line_paths(row)
+        by_line = _statements_by_line(func)
+        lines: set[int] = set()
+        opens: set[str] = set()
+        for at, attribute in reads:
+            spelled = ast.unparse(attribute.value)
+            paths = sorted(path for path in paths_at.get(at.lineno, ()) if _VERSION.sub("", path) == spelled)
+            if not paths:
+                return None
+            answer = objects.assigns_reaching(
+                self.rows, owner, at.lineno, paths, attribute.attr, False, self._follows
+            )
+            got = {line for line in answer.lines if line != at.lineno}
+            lines |= got
+            if got & set(answer.perhaps):
+                opens.add(COPY_PERHAPS)
+            nodes = [by_line[line] for line in sorted(got) if line in by_line]
+            try:
+                every = bool(nodes) and flow.passes_before(at, nodes)
+            except ValueError:
+                every = False
+            if not every:
+                opens.add(COPY_BEFORE)
+        return lines, opens
 
     # -- what the block writes beside the arm ----------------------------------------------------------------------
 
