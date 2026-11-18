@@ -16,6 +16,10 @@ the values are the caller's, and each carries where it came from.
   chain of them (``0 < nRow <= limit``, false where any pair is); one Python
   cannot make is unknown, not an error: ``None in 3`` or ``None > 0`` says
   nothing of the run.
+* **Arithmetic is on numbers.**  ``+``, ``-``, ``*``, ``/``, ``//``, ``%``
+  and a sign on ints and floats known (:func:`_arithmetic`): sqlEA's
+  ``totFinished >= totJobs * minSuccessScouts / 10`` is decided by the three
+  counts.  A string's ``+``, a bool, ``**`` and a zero divisor are unknown.
 * **A call is the reader's.**  The map runs no code of the corpus.  A call is
   looked up by its text, as a printed hole of it would be put
   (``str(self.job.altStgOutFileList())``), unless the reader hands a function
@@ -78,6 +82,19 @@ _COMPARE: dict[type, Callable[[Any, Any], Any]] = {
     ast.Gt: lambda a, b: a > b,
     ast.GtE: lambda a, b: a >= b,
 }
+
+#: The arithmetic a value is computed by, on numbers (:func:`_number`): no ``**``, whose value can be too large to
+#: compute.
+_ARITHMETIC: dict[type, Callable[[Any, Any], Any]] = {
+    ast.Add: lambda a, b: a + b,
+    ast.Sub: lambda a, b: a - b,
+    ast.Mult: lambda a, b: a * b,
+    ast.Div: lambda a, b: a / b,
+    ast.FloorDiv: lambda a, b: a // b,
+    ast.Mod: lambda a, b: a % b,
+}
+#: The signs a number is read with.
+_SIGNS: dict[type, Callable[[Any], Any]] = {ast.USub: lambda a: -a, ast.UAdd: lambda a: +a}
 
 
 @dataclass
@@ -216,14 +233,43 @@ def _literal(node: ast.AST) -> Any:
         return UNKNOWN
 
 
+def _number(value: Any) -> bool:
+    """Whether *value* is one arithmetic is read on: an int or a float, not a bool -- a flag added to a count is
+    more likely a misread than the run's."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _arithmetic(node: Union[ast.BinOp, ast.UnaryOp], env: Env) -> Any:
+    """A sum, difference, product, quotient or remainder (:data:`_ARITHMETIC`), or a sign (:data:`_SIGNS`), of
+    numbers known: :data:`UNKNOWN` where an operand is unknown or not a number, or where Python raises (a zero
+    divisor)."""
+    compute: Optional[Callable[..., Any]]
+    if isinstance(node, ast.BinOp):
+        compute = _ARITHMETIC.get(type(node.op))
+        operands = [node.left, node.right]
+    else:
+        compute = _SIGNS.get(type(node.op))
+        operands = [node.operand]
+    if compute is None:
+        return UNKNOWN
+    values = [ev(one, env) for one in operands]
+    if not all(_number(one) for one in values):
+        return UNKNOWN
+    try:
+        return compute(*values)
+    except ArithmeticError:
+        return UNKNOWN
+
+
 def ev(node: ast.AST, env: Env) -> Any:
     """What *node* holds by what *env* knows, or :data:`UNKNOWN`."""
     if isinstance(node, ast.Constant):
         return node.value
     if isinstance(node, ast.UnaryOp) and not isinstance(node.op, ast.Not):
         folded = _literal(node)
-        if folded is not UNKNOWN:
-            return folded
+        return folded if folded is not UNKNOWN else _arithmetic(node, env)
+    if isinstance(node, ast.BinOp):
+        return _arithmetic(node, env)
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         items = [ev(one, env) for one in node.elts]
         return UNKNOWN if any(one is UNKNOWN for one in items) else items
@@ -276,7 +322,9 @@ def decidable(node: ast.AST, known: set[str], env: Env) -> bool:
 
     The shapes are :func:`ev`'s own, so a test said decidable here is one the evaluator decides once the values
     come: every part of a ``BoolOp`` (its short circuit hangs on values not yet read), a comparison :func:`ev`
-    makes, a chain's every part, a call the reader runs (:attr:`Env.call`) on decidable arguments.
+    makes, a chain's every part, a call the reader runs (:attr:`Env.call`) on decidable arguments, the arithmetic
+    :func:`ev` computes on decidable operands.  It is a question of shapes: a value of a type the shape cannot take
+    -- ``None > 0``, ``count * None`` -- still comes out unknown.
     """
     text = text_of(node)
     if text in known or env.knows(text):
@@ -284,7 +332,13 @@ def decidable(node: ast.AST, known: set[str], env: Env) -> bool:
     if isinstance(node, ast.Constant):
         return True
     if isinstance(node, ast.UnaryOp) and not isinstance(node.op, ast.Not):
-        return _literal(node) is not UNKNOWN
+        return _literal(node) is not UNKNOWN or (
+            type(node.op) in _SIGNS and decidable(node.operand, known, env)
+        )
+    if isinstance(node, ast.BinOp):
+        return type(node.op) in _ARITHMETIC and all(
+            decidable(one, known, env) for one in (node.left, node.right)
+        )
     if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.BoolOp)):
         return all(
             decidable(one, known, env)

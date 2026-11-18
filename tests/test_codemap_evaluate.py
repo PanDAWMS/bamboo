@@ -43,6 +43,30 @@ def test_an_ordering_and_a_chain_are_decided_as_python_makes_them() -> None:
     assert evaluate.evaluate("nRow > 0", _env(nRow=None)) is UNKNOWN
 
 
+def test_arithmetic_on_known_numbers_is_computed_and_anything_else_is_unknown() -> None:
+    """sqlEA's scouting guard at the printed 5 of 10 and at 4 of 10; an unknown operand, a string, a bool, ``**``
+    and a zero divisor say nothing; decidable on the same shapes."""
+    test = "taskstatus == 'scouting' and totFinished >= totJobs * minSuccessScouts / 10"
+    counts = {"taskstatus": "scouting", "totJobs": 10, "minSuccessScouts": 5}
+    assert evaluate.evaluate(test, _env(totFinished=5, **counts)) is True
+    assert evaluate.evaluate(test, _env(totFinished=4, **counts)) is False
+    assert evaluate.evaluate(test, _env(totFinished=4, taskstatus="scouting", totJobs=10)) is UNKNOWN
+    assert evaluate.evaluate("n - 1 == 2 and -n == -3 and n // 2 == 1 and n % 2 == 1", _env(n=3)) is True
+    for text, values in (
+        ("n + 1", {"n": "3"}),
+        ("n + 1", {"n": True}),
+        ("n ** 2", {"n": 3}),
+        ("n / m", {"n": 3, "m": 0}),
+        ("-n", {"n": "3"}),
+    ):
+        assert evaluate.evaluate(text, _env(**values)) is UNKNOWN, text
+    node = ast.parse(test, mode="eval").body
+    assert evaluate.decidable(node, {"taskstatus", "totFinished", "totJobs", "minSuccessScouts"}, Env())
+    assert not evaluate.decidable(node, {"taskstatus", "totFinished", "totJobs"}, Env())
+    assert evaluate.decidable(ast.parse("-n > 0", mode="eval").body, {"n"}, Env())
+    assert not evaluate.decidable(ast.parse("n ** 2 > 0", mode="eval").body, {"n"}, Env())
+
+
 def test_a_call_is_looked_up_by_its_text_unless_the_reader_hands_the_function() -> None:
     """The map runs no corpus code: a call is what a printed hole of it says, or what the reader's function
     returns for it, with its arguments known."""
