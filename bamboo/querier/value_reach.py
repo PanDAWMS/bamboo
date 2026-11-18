@@ -17,8 +17,9 @@ where the reach of V is not closed: a statement selecting V with its callers not
 not place (``crosses_open``).
 
 Spellings: the map's read sites, their crossings and the junctions name a function ``file::function``; its reach graph
-names it ``file::Class.function``.  Both are read as ``file::function`` (:func:`bare`): two classes of one file with a
-method of one name are one function here, as they are in the crossings the map writes.  The walk itself is the map's
+names it ``file::Class.function``.  Both are read as ``file::function`` (:func:`bare`), with what encloses it kept
+where its module repeats the name, as the map's records name it since D-1 (a dump before it named every def bare, and
+there two classes of one file with a method of one name are one function).  The walk itself is the map's
 closure over its reach graph (:func:`closure`), each call followed for the classes it holds for: a ``file::function``
 start starts as each definition of that name, and what it reaches is read as ``file::function`` again.
 """
@@ -29,6 +30,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from bamboo.querier import map_reach as MR
+from bamboo.querier import rows as R
 
 #: how many calls past a function the rows are handed to are followed in the map's reach graph (the M2 measure's,
 #: ``m2_down3``: 26 of the 29 late questions named their movers at 3)
@@ -36,9 +38,9 @@ DEPTH = 3
 
 
 def bare(owner: str) -> str:
-    """*owner* as ``file::function``, the class dropped."""
-    rel, _, qual = owner.partition("::")
-    return f"{rel}::{qual.rpartition('.')[2]}"
+    """*owner* as ``file::function``, the class dropped -- with what encloses it kept where its module repeats the
+    name, as the map's records name it (:func:`rows.named`, D-1): ``datasetManager.py``'s seven ``run`` are seven."""
+    return R.named(owner)
 
 
 @dataclass(frozen=True)

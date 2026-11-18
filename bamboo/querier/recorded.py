@@ -91,6 +91,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -506,6 +507,9 @@ class RecordedLogs:
         for record in self._records.values():
             self._alike.setdefault(_alike(record["ask"]), []).append(record)
         self._logs: dict[tuple, Log] = {}
+        #: ``other(key, log, record)``: the record's message holds *key* only as another column (K67b B,
+        #: ``key_holes.other_column``), so its mark is no mark of the key's run; set by the asker for its question's key
+        self.other: Callable[[str, str, Record], bool] | None = None
 
     def names(self, wanted: list[str]) -> list[str]:
         return list(dict.fromkeys(wanted))
@@ -619,10 +623,16 @@ class RecordedLogs:
         # the other lines starting with that word are no part of it -- copyArchive's module logger, "reassignJobs for
         # JEDI at Nq/Nr overshoot site ..." (633), whose ask, unanswered, kept the whole log from MJE-7398283030 (UMK)
         pattern = keyed(key)
+        other = self.other
+
+        # a message holding the key names it, but where it names it only as another column (K67b B)
+        def in_message(r: Record) -> bool:
+            return bool(pattern.search(r.message)) and not (other is not None and other(key, name, r))
+
         lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
         marks: dict[str, set[str]] = {}
         for r in got.records.values():
-            if (r.token and pattern.search(r.message) and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w
+            if (r.token and not pattern.search(r.token) and lo_w <= _t(r.stamp) <= hi_w and in_message(r)
                     and not unmarked(name, r.token, r.text)):
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners, whole)
@@ -639,7 +649,7 @@ class RecordedLogs:
         near: dict[str, list[tuple[datetime.datetime, datetime.datetime, str]]] = {}
         for m, token in sorted(share):
             stamps = sorted(_t(r.stamp) for r in got.records.values()
-                            if (r.machine, r.token) == (m, token) and pattern.search(r.message))
+                            if (r.machine, r.token) == (m, token) and in_message(r))
             start, end = max(_t(window[0]), stamps[0] - 2 * EDGE), min(_t(window[1]), stamps[-1] + 2 * EDGE)
             if start <= end:
                 near.setdefault(m, []).append((start, end, token))
@@ -669,7 +679,7 @@ class RecordedLogs:
         # and its mark holds the key; a shared mark's run is read as cut there (the module's doc)
         widen: dict[tuple[str, Window], set[str]] = {}
         shared = 0
-        for (m, token), lo, hi in _runs(got, pattern, window, own, strings_of):
+        for (m, token), lo, hi in _runs(got, pattern, window, own, strings_of, in_message):
             if (m, token) in partial:
                 continue
             # not past an end inside the window (a file read only in part, or not read, is not read better by asking
@@ -705,6 +715,7 @@ class RecordedLogs:
         log.without = frozenset(got.without)
         log.unlisted = unlisted
         log.jedi = frozenset(m for m, service in got.services.items() if service == "jedi")
+        log.services = dict(got.services)
         log.machines = frozenset(got.listed)
         if partial:
             kinds = sorted(set(partial.values()))
@@ -864,8 +875,9 @@ def _strings(machine: str, tokens: set[str], narrowed: dict[tuple[str, str], str
 
 
 def _runs(got: _Gathered, pattern, window: Window, own: _Gathered,
-          strings_of) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
-    """``((machine, mark), lo, hi)`` of every run the key is in that reaches *window*: *lo* the stretch *own* searched
+          strings_of, in_message: Callable[[Record], bool]) -> list[tuple[tuple[str, str], tuple | None, tuple | None]]:
+    """``((machine, mark), lo, hi)`` of every run the key is in (its mark holds it, or *in_message* finds it in a
+    record's message) that reaches *window*: *lo* the stretch *own* searched
     (the asks over the window itself) for the strings that return its records (*strings_of(machine, mark)*) the first
     record of its part near the window is in, as ``(start, end, first)``,
     and *hi* the one its last is in, as ``(start, end, last)``; None for a record outside every such stretch -- one a
@@ -875,7 +887,7 @@ def _runs(got: _Gathered, pattern, window: Window, own: _Gathered,
     +- EDGE.  A task's mark holds days of passes; its passes far from the window are not what the window asks about.
     """
     lo_w, hi_w = _t(window[0]) - EDGE, _t(window[1]) + EDGE
-    hits = {(r.machine, r.token) for r in got.records.values() if r.token and (pattern.search(r.message) or pattern.search(r.token))}
+    hits = {(r.machine, r.token) for r in got.records.values() if r.token and (pattern.search(r.token) or in_message(r))}
     stamps_of: dict[tuple[str, str], list[datetime.datetime]] = {}
     for r in got.records.values():
         if (r.machine, r.token) in hits:

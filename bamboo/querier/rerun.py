@@ -81,12 +81,13 @@ import functools
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -107,7 +108,6 @@ from bamboo.codemap.models import (
     KEY_ROWS,
     KEY_UNKNOWN,
     MUST_PART_BIND,
-    MUST_PART_MARK,
     MUST_PART_MESSAGE,
     MUST_ROW_WRITTEN,
     RESULT_AGGREGATE,
@@ -116,8 +116,8 @@ from bamboo.codemap.models import (
     Symptom,
     required_values,
 )
+from bamboo.codemap.panda import flow, sqltext
 from bamboo.codemap.panda import sql as sql_mod
-from bamboo.codemap.panda import sqltext
 from bamboo.codemap.panda.provenance import facade_calls
 from bamboo.codemap.panda.recognizers.sqlwrite import _flag_parameters
 from bamboo.codemap.reading import containing_function
@@ -132,6 +132,7 @@ from bamboo.querier import handlers as H
 from bamboo.querier import held as HD
 from bamboo.querier import heldcol as HC
 from bamboo.querier import hop as HOP
+from bamboo.querier import key_holes as KH
 from bamboo.querier import map_reach as MR
 from bamboo.querier import mapdump
 from bamboo.querier import outbound as O
@@ -154,6 +155,7 @@ from bamboo.querier.records import (
     Log,
     Logs,
     Owners,
+    Record,
     Run,
     Unrecorded,
     Window,
@@ -165,14 +167,21 @@ from bamboo.querier.which_ran import (
     Moment,
     Verdict,
     at_window,
+    before_stretch,
+    branches_at,
     class_of,
+    constant_on_way,
+    cut_passes,
+    handing_rows,
     holds_key,
+    hole_values,
     inside_call,
     judge,
     key_env,
     of_mover,
     once_loops_of,
     passes_of,
+    printed_before,
     printed_row_column,
     recorded_in_pass,
     spans,
@@ -412,27 +421,21 @@ def _hole_holds(row: R.Row, record, name, key: str) -> bool:
     """Whether *record*, a line of the print *row*, holds *key* in the hole the map's must name *name* reads: an entry
     of its printed bind map (``sqltext.cut``: ``str(var_map)`` after the statement), or a hole of its logger's mark or
     of its message as the map's rows read them back (``trace.hole_values``, the record whole first) --
-    ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID``."""
-    if name.part == MUST_PART_BIND:
-        got = sqltext.cut(record.text)
-        values = [got[1].get(name.bind)] if got is not None else []
-    else:
-        values = []
-        for m in row.map_rows:
-            for whole in (True, False):
-                read = trace.hole_values(m, record.text, record.token, whole=whole)
-                if read is None:
-                    continue
-                holes, printed = (m.prefix_holes, read[1]) if name.part == MUST_PART_MARK else (m.holes, read[0])
-                values += [v for h, v in zip(holes, printed, strict=False) if h.expression == name.expression]
-                break
-    return any(v is not None and str(v).strip().strip("'\"") == key for v in values)
+    ``updateTask_JEDI < jediTaskID=53637838 >``'s ``taskSpec.jediTaskID`` (:func:`which_ran.hole_values`)."""
+    return key in hole_values(row, record, name)
 
 
 def _written_offset(b) -> datetime.timedelta | None:
     """What the arm *b* writes, as an offset from the time it ran: the clock itself (``attr_time.NOW``), or a clock
     plus a settled offset (``Branch.amount``, the map's batch 2 W: updateTask_JEDI 1441's ``timeNow - 1 h``,
-    ``CURRENT_DATE-1``); None where it is no such value (a parameter, a bind's scale, a value only said)."""
+    ``CURRENT_DATE-1``); None where it is no such value (a parameter, a bind's scale, a value only said).  K-1b: a copy
+    of what its own pass wrote, as that write (:func:`_copied_offset`)."""
+    own = _own_offset(b)
+    return own if own is not None else _copied_offset(b)
+
+
+def _own_offset(b) -> datetime.timedelta | None:
+    """:func:`_written_offset` of the arm's own outcome: the clock, or the clock with a settled offset."""
     if b.outcome in AT.NOW:
         return datetime.timedelta(0)
     a = getattr(b, "amount", None)
@@ -440,6 +443,55 @@ def _written_offset(b) -> datetime.timedelta | None:
             or getattr(a, "needs", None)):
         return None
     return datetime.timedelta(seconds=a.offset_seconds)
+
+
+def _copied_offset(b) -> datetime.timedelta | None:
+    """K-1b (bundle L; the map's (E), ``Branch.copied_from`` and ``copied_open``): a passthrough arm copying an attribute
+    the same function's assignments put on the object in its pass, every way to the copy passing one of them
+    (``copied_open`` empty), writes what they write -- the clock with their one offset, where every one of them at the
+    lines ``copied_from`` names does: updateJob's 509 ``job.stateChangeTime = job.modificationTime`` after 506's
+    ``naive_utcnow()``.  None otherwise (a way passing none, a copy of another object's field, an assignment of
+    another value)."""
+    copied_open = str(getattr(b, "copied_open", None) or "")
+    if not str(getattr(b, "outcome", "") or "").startswith("passthrough(") or copied_open \
+            or not getattr(b, "copied_from", None):
+        return None
+    fragment = mapdump.fragment()
+    return _copied_offsets(id(fragment)).get(id(b)) if fragment is not None else None
+
+
+@functools.cache
+def _copied_offsets(fragment_id: int) -> dict[int, datetime.timedelta]:
+    """:func:`_copied_offset` for every arm of the installed dump it reads, by the arm's identity."""
+    fragment = mapdump.fragment()
+    junctions = getattr(fragment, "junctions", None) or []
+    by_column: dict[tuple[str, str], list] = {}
+    for j in junctions:
+        by_column.setdefault((j.owner, getattr(j, "subject", "")), []).extend(j.branches)
+    out: dict[int, datetime.timedelta] = {}
+    for j in junctions:
+        for b in j.branches:
+            outcome = str(getattr(b, "outcome", "") or "")
+            lines = set(getattr(b, "copied_from", None) or [])
+            if not outcome.startswith("passthrough(") or str(getattr(b, "copied_open", None) or "") or not lines:
+                continue
+            arms = [c for c in by_column.get((j.owner, outcome[len("passthrough("):-1]), [])
+                    if lines & {c.line, *(getattr(c, "other_lines", None) or [])}]
+            covered = {line for c in arms for line in lines & {c.line, *(getattr(c, "other_lines", None) or [])}}
+            offsets = {_own_offset(c) for c in arms}
+            off = next(iter(offsets)) if len(offsets) == 1 else None
+            if covered == lines and off is not None:
+                out[id(b)] = off
+    return out
+
+
+def _time_value(value: object) -> datetime.datetime | None:
+    """*value* read as a time (``windows.when``), or None where it is none (P62: a row's window at that time holds its
+    write)."""
+    try:
+        return W.when(str(value))
+    except (ValueError, TypeError):
+        return None
 
 
 def _null_states(b) -> tuple[datetime.datetime, datetime.datetime]:
@@ -516,29 +568,141 @@ def _write_bounds(value, at: datetime.datetime) -> tuple[datetime.datetime, date
     return value if value is not None else (TL.LOW, TL.HIGH)
 
 
-def _landed(fn, sn, i: int, line: int, b) -> bool | None:
+@functools.cache
+def _write_runs(fragment_id: int) -> dict[tuple[str, str], list[tuple[frozenset[int], int]]]:
+    """``(owner, subject) -> [(the lines it writes the subject's values on, the line the statement runs on)]`` of the
+    installed dump's writes (``KeyFrom.writes`` and ``statement``; *fragment_id* keys the cache to the dump): every
+    write the map read, a statement no placed caller runs too."""
+    out: dict[tuple[str, str], list[tuple[frozenset[int], int]]] = {}
+    for kf in getattr(mapdump.fragment(), "key_froms", None) or []:
+        if getattr(kf, "reads", False) or not kf.statement:
+            continue
+        for subject, lines in (kf.writes or {}).items():
+            out.setdefault((_bare(kf.owner), subject), []).append((frozenset(lines), kf.statement))
+    return out
+
+
+def _branch_runs(owner: str, subject: str, b) -> set[int]:
+    """The lines the statements writing the arm *b* of *owner*'s *subject* run on: each write whose ``KeyFrom.writes``
+    holds the subject at the branch's line or one of its ``other_lines`` (prepareTasksToBeFinished_JEDI's lockedBy
+    arm at 3839 with 3844: sqlTU's run at 4075, sqlTUU's at 4090)."""
+    lines = {b.line, *(getattr(b, "other_lines", None) or [])}
+    return {run for at, run in _write_runs(id(mapdump.fragment())).get((_bare(owner), subject), []) if at & lines}
+
+
+def _landed(fn, sn, i: int, line: int, b, owner: str = "", subject: str = "") -> tuple[bool | None, int]:
     """R (the map's batch 2, ``Branch.count_prints``): what the first count print of the write's statement in the run
     after the write's print (record *i*, of the print at *line*) and before that print's next record says of the rows
     the run changed -- False for none or not one (lockTask_JEDI's ``done with {} locked by another``, the lock's
-    ``failed to lock jediTaskID={}``), True for one or some (``done with {}``); None where none printed there.  A
-    record another print reads at least as well is not taken."""
+    ``failed to lock jediTaskID={}``), True for one or some (``done with {}``); None where none printed there; with
+    the count print's line (0 with none).  A record another print reads at least as well is not taken.  A write whose
+    count says none is read as not written (E-4, as A-1 reads a guard read false: :meth:`Rerun._column_writes`).
+
+    E-4 (out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``Branch.printed_counts``): a print
+    holding the row count of the statement's run in a hole is read the same way, where every way from the function's
+    entry to it passes one of the arm's lines (``flow.passes_before``): 0 changed no row, 1 or more changed it -- updateJobStatus's
+    243 ``attemptNr={} nUp={} old={} new={}`` after its UPDATE at 241, the heartbeat's modificationTime arm at 238.
+
+    Each count is of one statement's run, the line it runs on its ``run`` (the map's M-E4): it is read where the arm's
+    write runs at one of the arm's statements (:func:`_branch_runs` of *owner*'s *subject*), not at another.  Where the
+    arm's write runs at several, each statement writes the arm's outcome as the map spells it, the same value where
+    that is a literal (the map, 2026-11-17 21:5x: a branch is one outcome and path condition, its statements' writes
+    merged into it): for such an arm a count of 1 or more at any of its statements' runs says the value was written,
+    and 0 says it was not only where every one of them is counted, each 0 -- prepareTasksToBeFinished_JEDI's lockedBy
+    arm at 3839 with 3844 (NULL) writes at sqlTU's run at 4075 and sqlTUU's at 4090; 4092 counts sqlTUU's only, so
+    its 1 says NULL was written, its 0 nothing.  An arm whose outcome is no literal (a bind, a name: the statements may
+    write different values under one spelling) is read at one statement only (tmaeno's "add" 2026-11-17 21:1x,
+    out/gm/qk-design.md).  A record made before M-E4 (``run`` 0) does not say which run it counts: no count is read
+    for an arm with ``other_lines`` there, as before it."""
+    counts = [*(getattr(b, "count_prints", None) or []), *(getattr(b, "printed_counts", None) or [])]
+    if not counts:
+        return None, 0
+    if any(not getattr(c, "run", 0) for c in counts):
+        if getattr(b, "other_lines", None):
+            return None, 0
+        runs = None
+    else:
+        runs = _branch_runs(owner, subject, b)
+        if not runs or (len(runs) > 1 and not _literal_outcome(b)):
+            return None, 0
+    several = runs is not None and len(runs) > 1
     nxt = min((k for k, _, _ in sn.hits.get(line, ()) if k > i), default=None)
-    first: tuple[int, str] | None = None
-    for cp in getattr(b, "count_prints", None) or []:
-        stmt = R.statement_at(fn.node, cp.line)
-        crow = fn.row_at(stmt) if stmt is not None else None
-        if crow is None:
-            continue
+    #: the first count record after the write's print, by the run it counts where the arm writes at several (else 0)
+    found: dict[int, tuple[int, bool, int]] = {}
+
+    def note(run: int, k: int, wrote: bool, at: int) -> None:
+        at_run = run if several else 0
+        if at_run not in found or k < found[at_run][0]:
+            found[at_run] = (k, wrote, at)
+
+    def records_after(crow: R.Row) -> Iterable[int]:
         for k, literal, _ in sn.hits.get(crow.line, ()):
             if k <= i or (nxt is not None and k >= nxt) or any(
                     other != crow.line and any(kk == k and lit >= literal for kk, lit, _ in hs)
                     for other, hs in sn.hits.items()):
                 continue
-            if first is None or k < first[0]:
-                first = (k, cp.rows)
-    if first is None:
-        return None
-    return first[1] in ("one", "some")
+            yield k
+
+    for cp in getattr(b, "count_prints", None) or []:
+        stmt = R.statement_at(fn.node, cp.line)
+        crow = fn.row_at(stmt) if stmt is not None else None
+        if crow is None or (runs is not None and cp.run not in runs):
+            continue
+        for k in records_after(crow):
+            note(getattr(cp, "run", 0), k, cp.rows in ("one", "some"), cp.line)
+    printed = getattr(b, "printed_counts", None) or []
+    # the arm's lines, every one at once: a way to the print passes one of them (``flow.passes_before``)
+    arms = [s for at in (b.line, *(getattr(b, "other_lines", None) or [])) if (s := R.statement_at(fn.node, at)) is not None] if printed else []
+    for pc in printed:
+        stmt = R.statement_at(fn.node, pc.line)
+        crow = fn.row_at(stmt) if stmt is not None else None
+        if (stmt is None or crow is None or not arms or (runs is not None and pc.run not in runs)
+                or not _passes_arm(stmt, arms)):
+            continue
+        for k in records_after(crow):
+            count = _printed_count(crow, sn.run.records[k], pc.holes)
+            if count is not None:
+                note(getattr(pc, "run", 0), k, count > 0, pc.line)
+    if not several:
+        return (found[0][1], found[0][2]) if 0 in found else (None, 0)
+    wrote = sorted((k, at) for k, w, at in found.values() if w)
+    if wrote:
+        return True, wrote[0][1]
+    if runs is not None and set(found) == runs:
+        return False, min(found.values())[2]
+    return None, 0
+
+
+def _literal_outcome(b) -> bool:
+    """Whether the arm *b* writes a value its source spells as a literal (``None``, ``'ready'``, ``0``): the one value
+    every statement writing the arm writes (:func:`_landed`); not a bind, a name, a call or the clock."""
+    try:
+        ast.literal_eval(str(getattr(b, "outcome", "") or "").strip())
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False
+    return True
+
+
+def _passes_arm(printed: ast.stmt, arms: list[ast.stmt]) -> bool:
+    """Whether every way from the function's entry to *printed* passes one of *arms* (``flow.passes_before``)."""
+    try:
+        return flow.passes_before(printed, arms)
+    except (ValueError, LookupError):
+        return False
+
+
+def _printed_count(row: R.Row, record: Any, holes: list[int]) -> int | None:
+    """The row count *record*, a line of the print *row*, holds in its message's hole *holes* names (counted from 0,
+    as the map's ``PrintedCount``): the first map row that reads the record, its holes in their order; None where none
+    reads it or the holes hold no one whole number."""
+    for m in row.map_rows:
+        for whole in (True, False):
+            read = trace.hole_values(m, record.text, record.token, whole=whole)
+            if read is None:
+                continue
+            got = {str(read[0][h]).strip() for h in holes if 0 <= h < len(read[0]) and read[0][h] is not None}
+            return int(got.pop()) if len(got) == 1 and next(iter(got)).isdigit() else None
+    return None
 
 
 def _counted_names(b, keys: set[str]) -> list:
@@ -1122,6 +1286,26 @@ def _runtime_apart(before: SV.Before) -> list[str]:
     return [r for r in before.runtime if r.rpartition(":")[0] not in funcs]
 
 
+def _left_writers(row_value: tuple, before: SV.Before, begun: datetime.datetime) -> tuple:
+    """Bundle F, F-3 (out/gm/qk-design.md, bundle F widened, tmaeno's OK 2026-11-17 15:2x): the row value's writers
+    (:meth:`Rerun._row_value_write`), where its write fell inside the stay -- past a second after its start -- are those
+    M3(a)-1 leaves as able to write the column while the value holds (``left``); each other is put apart with why it
+    was left out.  NT-scouting-late's assessmentTime 19:53:41 was written by prepareTasksToBeFinished_JEDI:3744, not
+    getAchievedTasks_JEDI:3283, whose statement takes running and pending rows only.  Where none of them is left, or
+    the write fell at or before the start, as it was.  ``(written at, value, arms, as_of, (arm, why) put apart)``, and
+    the arms K-1 names (:meth:`Rerun._row_value_write`) after them where it does."""
+    at, value, arms, as_of = row_value[:4]
+    named = tuple(row_value[5:])
+    if at <= begun + datetime.timedelta(seconds=1) or not before.left:
+        return (at, value, arms, as_of, (), *named)
+    kept = tuple(a for a in arms if a in before.left)
+    if not kept or kept == tuple(arms):
+        return (at, value, arms, as_of, (), *named)
+    why = dict(before.out)
+    apart = tuple((a, why.get(a, "not among the arms that may write it while the value holds")) for a in arms if a not in kept)
+    return (at, value, kept, as_of, apart, *named)
+
+
 def _timeline_gaps(tl: TL.Timeline) -> list[T.Said]:
     """Why a timeline (:meth:`Rerun._timeline`) does not settle a column all the stay: the arms no record reads all of,
     besides the writes it read and where the row's value (*row_value*) shows none wrote it since (MT-scouting-late's
@@ -1145,16 +1329,25 @@ def _timeline_counts(tl: TL.Timeline) -> dict[str, int]:
 def _timeline_said(subject: str, tl: TL.Timeline) -> T.Said:
     """The words for a column read on its timeline: each write read, marked where it fell before the stay, the arms
     shown not to write, those not read."""
-    writes = [T.Said("timeline-write", {"at": f"{w.at:%H:%M:%S.%f}"[:12], "how": w.how, "arms": list(w.arms),
-                                        "where": w.where, "machine": w.machine,
-                                        "before": T.Said("timeline-before-the-stay") if w.at < tl.start else ""})
+    writes = [T.Said("timeline-write" if w.machine else "timeline-birth-write", {
+        "at": f"{w.at:%H:%M:%S.%f}"[:12], "how": w.how, "arms": list(w.arms), "where": w.where, "machine": w.machine,
+        "before": T.Said("timeline-before-the-stay") if w.at < tl.start else ""})
               for w in tl.writes]
     return T.Said("timeline-read", {"subject": subject, "start": f"{tl.start:%Y-%m-%d %H:%M:%S}",
                                     "end": f"{tl.end:%Y-%m-%d %H:%M:%S}", "slack": _timeline_counts(tl)["slack"],
                                     "writes": T.Said("timeline-writes", {"writes": writes}) if writes else T.Said("timeline-no-write"),
                                     "rowvalue": T.Said("timeline-row-value", {
                                         "value": f"{tl.row_value[1]:%Y-%m-%d %H:%M:%S}", "as_of": tl.row_value[3],
-                                        "at": f"{tl.row_value[0]:%Y-%m-%d %H:%M:%S}", "arms": list(tl.row_value[2])}) if tl.row_value else "",
+                                        "at": f"{tl.row_value[0]:%Y-%m-%d %H:%M:%S}", "arms": list(tl.row_value[2]),
+                                        "how": (T.Said("timeline-row-value-clock") if len(tl.row_value) < 6
+                                                else T.Said("timeline-row-value-matched", {"named": list(tl.row_value[5])}) if tl.row_value[5]
+                                                else T.Said("timeline-row-value-matched-clock")),
+                                        "apart": T.Said("timeline-row-value-apart", {"apart": [
+                                            f"{a} ({why})" for a, why in next(iter(tl.row_value[4:]), ())]})
+                                        if next(iter(tl.row_value[4:]), ()) else ""}) if tl.row_value else "",
+                                    "confirmed": T.Said("timeline-confirmed", {"writes": [
+                                        T.Said("timeline-confirmed-write", {"at": f"{at:%H:%M:%S.%f}"[:12], "arm": arm, **by})
+                                        for at, arm, by in tl.confirmed]}) if tl.confirmed else "",
                                     "notrun": T.Said("timeline-not-run", {"writes": [
                                         T.Said("timeline-not-run-write", {"at": f"{at:%H:%M:%S.%f}"[:12], "arm": arm,
                                                                           "machine": machine, "guards": guards})
@@ -1577,14 +1770,9 @@ def _condition_read(p: object, read: set[str]) -> bool:
 
 
 def _branches_at(subject: str, owner: str, line: int) -> list:
-    """The map's branches of *subject* at *owner*'s *line*.  A reading's owner is ``file::function``, a junction's
-    ``file::Class.function``: matched by the file, the function's name and the line."""
-    fragment = mapdump.fragment()
-    file, _, qual = owner.partition("::")
-    name = qual.rpartition(".")[2]
-    return [b for j in (fragment.junctions if fragment else []) if j.subject == subject
-            and j.owner.partition("::")[0] == file and j.owner.partition("::")[2].rpartition(".")[2] == name
-            for b in j.branches if b.line == line]
+    """The map's branches of *subject* at *owner*'s *line* (:func:`which_ran.branches_at`), in the map this module
+    reads."""
+    return branches_at(subject, owner, line, mapdump.fragment())
 
 
 #: a path condition's term tested in a method the arm's statement calls, in that method's names: ``X  [in f()]``
@@ -1620,15 +1808,15 @@ _GUARD_REASONS = ("step 5:", "rule 6:")
 
 
 def _bare(owner: str) -> str:
-    """A ``file::Class.function`` owner as H2's candidates name it, ``file::function``."""
-    rel, _, qual = owner.partition("::")
-    return f"{rel}::{qual.rpartition('.')[2]}"
+    """A ``file::Class.function`` owner as H2's candidates and the map's records name it (:func:`rows.named`, D-1):
+    ``file::function``, or with what encloses it where its module repeats the name."""
+    return R.named(owner)
 
 
 def _plain(owner: str) -> str:
     """:func:`_bare`, less a repository's ``panda:`` before the file: a read site's owner and a KeyFrom's compare."""
     rel, _, qual = owner.partition("::")
-    return f"{rel.rpartition(':')[2]}::{qual.rpartition('.')[2]}"
+    return R.named(f"{rel.rpartition(':')[2]}::{qual}")
 
 
 @dataclass(frozen=True)
@@ -1711,6 +1899,17 @@ def key_terms(key_froms: list, owner: str, line: int) -> KeyTerms:
     return KeyTerms(tuple(joined), tuple(either), tuple(handed), tuple(other))
 
 
+def taken_as_handed(key_froms: list, owner: str, subject: str, lines: set[int]) -> bool:
+    """I-2: whether every write of *subject* at *lines* of *owner* takes its row by a key the map draws, in the owner
+    itself, from its parameters alone (its ``KeyFrom`` sources with no ``via``, each ``parameter``; one through a call
+    route is where a caller got what it hands): the owner runs on a row only as its callers hand it -- activateJob's
+    113 by ``job.PandaID`` (and, through TaskBuffer.py:982, peekJob's rows), not FinisherThr.run's writes, by the rows
+    its own selection reads."""
+    kfs = [kf for kf in key_froms if _bare(kf.owner) == _bare(owner) and set(kf.writes.get(subject) or []) & lines]
+    own = [[s for s in kf.sources if not getattr(s, "via", None)] for kf in kfs]
+    return bool(kfs) and all(mine and all(s.kind == KEY_PARAMETER for s in mine) for mine in own)
+
+
 def _tree_leaves(node) -> list:
     """The terms of a condition tree (the map's ``all``/``any`` nodes opened)."""
     if node.node in ("all", "any"):
@@ -1765,7 +1964,7 @@ def _store_unread(subject: str, owner: str, line: int, fn: Any, via: Any) -> T.S
     if via is None:
         return ""
     handler = H.leave(fn.node, f"call at {line}")[2]
-    return T.Said("failure-caught-not-read", {"fn": fn.name, "line": handler.lineno}) if handler is not None else ""
+    return T.Said("failure-caught-not-read", {"fn": fn.shown, "line": handler.lineno}) if handler is not None else ""
 
 
 def tree_stamp(path: Path) -> str:
@@ -1909,7 +2108,8 @@ class Blocked:
     """What kept every pass from the arms that move the value.  *exit_line* is None where every pass took none of the
     candidates (:func:`took_none`), or ran none of the arms (:func:`ran_no_arm`) and not all by one exit shown: then
     *left_by* holds the exits such a pass may have left by, and *took*, where any pass was shown to leave by one, each
-    pass's (None for one not shown)."""
+    pass's (None for one not shown).  *unhanded*, each pass's D-4 reason where every arm of it was a call handing no
+    element of the key's turn (``Verdict.unhanded``), empty for one otherwise."""
 
     fn: R.Function
     exit_line: int | None
@@ -1918,6 +2118,7 @@ class Blocked:
     arms: list[Arm]
     left_by: tuple[int, ...] = ()
     took: tuple[int | None, ...] = ()
+    unhanded: tuple[str, ...] = ()
 
 
 @dataclass
@@ -1936,6 +2137,8 @@ class Caller:
     #: U2X (A): the lines of *lines* whose call reaches the mover across a send (SND), and the sends (``file:line``)
     across: list[int] = field(default_factory=list)
     sent: list[str] = field(default_factory=list)
+    #: H-3 (P15): each route's outermost hop (``file:line``) with the line of *lines* it reaches the mover by
+    outer: list[tuple[str, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -1943,8 +2146,9 @@ class Callers:
     """Why a mover's passes did not take the row in *window*: its callers' passes of the key there (U1; KNOWN_ISSUES.md
     K55).  *kind* is the stop it goes on from: ``before``, a late mover's passes before the move (K45); ``window``, a
     mover's passes in the window; ``statement``, a statement of the mover's that took the row only at the move (L2's
-    judgement 1).  *entries* are the mover's ``called_from``; *up*, the hop-1 caller U1 went up from (once: the map
-    lists two hops)."""
+    judgement 1); ``after``, a stuck value's mover, which runs on the row only as its callers hand it, after its last
+    pass on the row (I-2).  *entries* are the mover's ``called_from``; *up*, the hop-1 caller U1 went up from (once:
+    the map lists two hops)."""
 
     mover: str
     arms: list[Arm]
@@ -1955,6 +2159,10 @@ class Callers:
     entries: list[str]
     before: str | None = None
     up: str | None = None
+    #: I-2, kind ``after``: the end of the mover's last pass on the row (to the microsecond; the window opens at its
+    #: second), and what S2 read of its passes
+    after: str | None = None
+    left: T.Said | None = None
 
 
 @dataclass
@@ -2312,6 +2520,9 @@ class Missed:
     #: what the amounts a statement's runs print are asked over (:meth:`Rerun._fill`): stuck's S1 window, read at one
     #: moment; None: the part of [since, moved] judgement 3 asks first (``W.last_part``)
     amounts: W.Asking | None = None
+    #: when the stay began, where the window is one moment (stuck's as_of, ``since`` = ``moved``): the observed value's
+    #: last statuslog row (:meth:`Rerun._stamps_itself`); None: ``since``
+    began: datetime.datetime | None = None
 
 
 @dataclass
@@ -2326,6 +2537,9 @@ class Ordered:
 #: the clocks the map names that read one UTC clock: PanDA's Oracle session runs in UTC (WrappedCursor.initialize,
 #: ``ALTER SESSION SET TIME_ZONE='UTC'``); SYSDATE, SYSTIMESTAMP and datetime.now read a host's zone, unknown here
 UTC_CLOCKS = {"naive_utcnow", "datetime.utcnow", "datetime.now(utc)", "CURRENT_DATE", "CURRENT_TIMESTAMP"}
+#: K-1: how far the records' clock (a host's, printing the write) and the database's (CURRENT_DATE as it wrote) may be
+#: apart when a row's value is matched to the write the records show (:meth:`Rerun._row_value_write`)
+CLOCKS_APART = datetime.timedelta(seconds=1)
 #: why a term on a column the row holds NULL fails (SQL's NULL; ``_leaf``, ``_pair_fails``)
 #: movers_of's word for a mover the map's guarded_by gives (a writer whose write requires the value)
 GUARDED = "its write requires the value"
@@ -2350,6 +2564,108 @@ def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
     class's key: doForPriorityMassage's "label=user"; changeTaskPriorityPanda's "<jediTaskID=...>" for a job."""
     ident = set(_identity_attrs(cls))
     return marks_holding(owner, line, lambda k: bool(ident & set(k.columns)), key) if ident else ()
+
+
+def referencing(cls: str) -> dict[str, list[str]]:
+    """E-1 (W8; out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``TableRecord.references``):
+    each ``Class.attr`` whose column holds, by the foreign keys the schema declares, a value of *cls*'s identity, with
+    the ``table.column -> table.column`` steps it goes through -- ``JediDatasetSpec.jediTaskID`` holds a
+    ``JediTaskSpec.jediTaskID`` (jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid); a composite key is followed a
+    column at a time.  Empty where the dump declares none."""
+    ident = set(_identity_attrs(cls))
+    edges: dict[str, list[tuple[str, str]]] = {}
+    for t in getattr(mapdump.fragment(), "tables", None) or []:
+        for ref in getattr(t, "references", None) or []:
+            for i, attr in enumerate(ref.attrs or []):
+                if attr and i < len(ref.table_attrs or []) and ref.table_attrs[i]:
+                    edges.setdefault(attr, []).append(
+                        (ref.table_attrs[i], f"{t.name}.{ref.columns[i]} -> {ref.table}.{ref.table_columns[i]}"))
+    out: dict[str, list[str]] = {}
+    for start in edges:
+        stack: list[tuple[str, list[str]]] = [(start, [])]
+        seen = {start}
+        while stack:
+            attr, way = stack.pop()
+            for to, step in edges.get(attr, []):
+                if to in ident:
+                    out.setdefault(start, [*way, step])
+                elif to not in seen:
+                    seen.add(to)
+                    stack.append((to, [*way, step]))
+    return out
+
+
+def ref_marks(owner: str, line: int, cls: str, key: str) -> tuple[tuple[str, ...], list[str]]:
+    """E-1: :func:`key_marks` where the run's mark holds a column that references *cls*'s identity
+    (:func:`referencing`) instead of the identity itself -- insertFilesForDataset_JEDI's ``jediTaskID={} datasetID={}``,
+    ``datasetSpec.jediTaskID``: the dataset's task.  ``(the marks, [the attr, the foreign keys it goes through])``."""
+    refs = referencing(cls)
+    if not refs:
+        return (), []
+    held: list[str] = []
+
+    def holds(k: Any) -> bool:
+        hit = sorted(set(refs) & set(k.columns))
+        if hit and not held:
+            held[:] = [hit[0], *refs[hit[0]]]
+        return bool(hit)
+
+    marks = marks_holding(owner, line, holds, key)
+    return marks, held if marks else []
+
+
+def after_marks(arm: Any, cls: str, key: str) -> tuple[str, ...]:
+    """Q5 (P40(b)): what a print after *arm*'s write (``attr_time.Arm``) carries where it holds *cls*'s key *key*: for
+    each print the map says the function runs after the write on every way (``AfterPrint.every_way``) with a hole in
+    its message holding the written row's identity (``MustName.row`` written), the print's literal text around that
+    hole, the key in it -- insertTaskParamsPanda's 3853 ``{comm_cmd} jediTaskID={jediTaskID} with {...}`` after its
+    ramCount arm at 3840: "jediTaskID=53652263 with".  A pass that wrote prints it, so asked over the object's life it
+    reads the writer's passes of the key, as :func:`key_marks` reads a run's mark (F3; out/gm/qk-design.md, the H2-2
+    bundle's Q5, tmaeno's OK 2026-11-17 09:4x).  Empty where no such print is read."""
+    ident = set(_identity_attrs(cls))
+    out: set[str] = set()
+    for p in getattr(arm, "after_prints", None) or ():
+        exprs = {n.expression for n in p.names
+                 if n.row == MUST_ROW_WRITTEN and n.column in ident and getattr(n, "part", "") == "message"}
+        if not getattr(p, "every_way", False) or not exprs:
+            continue
+        found = R._prints_of(arm.owner, [p.line])
+        for st in getattr(found, "statements", None) or []:
+            for row in st.rows or [] if st.line == p.line else []:
+                for h in row.holes or []:
+                    if h.expression in exprs and (text := _around_group(row.capture or "", h.group, key)):
+                        out.add(text)
+    return tuple(sorted(out))
+
+
+def _around_group(capture: str, group: int, value: str) -> str:
+    """*capture*'s literal text either side of its *group*-th group, *value* in the group, stripped; "" where the
+    capture has a group of another kind (``(?``) or not that many, or the text is *value* alone."""
+    if "(?" in capture:
+        return ""
+    parts, cur, depth, i = [], "", 0, 0
+    while i < len(capture):
+        ch = capture[i]
+        if ch == "\\":
+            cur += capture[i:i + 2] if depth == 0 else ""
+            i += 2
+            continue
+        if ch == "(":
+            if depth == 0:
+                parts.append(cur)
+                cur = ""
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    if not 1 <= group < len(parts):
+        return ""
+    left, right = (re.sub(r"\\(.)", r"\1", s) for s in (parts[group - 1], parts[group]))
+    text = (left + value + right).strip()
+    return text if text != value else ""
 
 
 def marks_holding(owner: str, line: int, holds: Callable[[Any], bool], value: str) -> tuple[str, ...]:
@@ -2928,7 +3244,7 @@ def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> lis
             node = R.def_holding(rel, line)
             if node is None:
                 break
-            owner = f"{rel}::{node.name}"
+            owner = R.owner_of(rel, node)
             silent = prints_nothing(owner, [line])
             marks = () if silent else key_marks(owner, line, cls, key)
             how = "silent" if silent else "marks" if marks else "key" if prints_key(owner, [line], columns) else "none"
@@ -2940,6 +3256,8 @@ def callers_of(entries: list[str], cls: str, key: str, columns: set[str]) -> lis
         owner, rel, line, how, marks, at = pick
         c = out.setdefault((rel, at), Caller(owner, [], n + 1, how, marks))
         c.lines = sorted({*c.lines, line})
+        if sites := re.findall(r"([\w./-]+\.py):(\d+)", entry):
+            c.outer = sorted({*c.outer, (f"{sites[0][0]}:{sites[0][1]}", line)})
         c.marks = tuple(sorted({*c.marks, *marks}))
         c.between = sorted({*c.between, *(f"{r}:{n_}" for _, r, n_, _, _, _ in hops[:n])})
         if (send := sends.get(entry)) and send in {f"{r}:{n_}" for _, r, n_, _, _, _ in hops[:n]}:
@@ -3473,6 +3791,8 @@ class Rerun:
     #: the movers L2 found ran on the key in a late value's stay, other than the one that moved it, each followed on its
     #: own (``_late_absence``, ``missed``)
     _late_ran: tuple[Passes, ...] = ()
+    #: the values each history write's row can record (``attr_time.recorded_values``), read once (P37)
+    _recorded_values: dict[str, list[str]] | None = None
     #: the time columns a reading names the arms of as having not written them, by column, while one collects them (a
     #: turn, M3(a)-cap; Q1's assumed spans); None when none does
     _assuming: dict[str, list[str]] | None = None
@@ -3489,6 +3809,10 @@ class Rerun:
         self.hand = json.loads(Path(args.hand).read_text()) if args.hand else {}
         self.hand_used: list[str] = []
         self.logs: Logs = RecordedLogs(args.records) if args.records else FileLogs(args.log)
+        if isinstance(self.logs, RecordedLogs):
+            # K67b B: a record naming the key only as another column makes no mark of the key's run
+            cls = args.subject.partition(".")[0]
+            self.logs.other = lambda key, log, r: key == args.key and KH.other_column(r, log, key, cls)
         self.lines: list[str] = []
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
@@ -3571,6 +3895,17 @@ class Rerun:
         self.ends.append((self.hop, what))
         self.say(f"END {what}")
 
+    def _other_of(self, key: str, log: Log) -> Callable[[Record], bool] | None:
+        """K67b B (``key_holes``): ``records.runs_for``'s *other* for the question's key in *log* -- a record whose
+        message names it only as another column than the question's class's identity makes no run of it; None for any
+        other key (a caller's value, a bare mark, a function's name), read as before, and None where no question is
+        held (a Rerun made without one)."""
+        args = getattr(self, "args", None)
+        if args is None or key != args.key:
+            return None
+        cls = args.subject.partition(".")[0]
+        return lambda r: KH.other_column(r, log.name, key, cls)
+
     def files_of(self, owner: str, today: list[str], lines) -> list[str]:
         """Where *owner*'s own rows are looked for (``R.own_log_files``)."""
         return R.own_log_files(owner, list(today), lines)
@@ -3643,7 +3978,7 @@ class Rerun:
                 self.say(f"  {name}: {note}")
             if log.holes:
                 holes[name] = log.holes
-            out[name] = runs_for(log, key)
+            out[name] = runs_for(log, key, self._other_of(key, log))
         return out, unanswered, holes
 
     def _keep_unanswered(self, unanswered: list) -> None:
@@ -3987,14 +4322,14 @@ class Rerun:
         at_fn = self._guard_at(w, site_fn) if question is not None else site_fn
         if w.via is not None and question is None:
             # one of the arms left, read at a call of which no run is read (K38)
-            self.say(f"{site_fn.name}:{chosen.line} prints nothing: read at its caller's call, {w.via.candidate.func}:{w.via.line}, "
+            self.say(f"{site_fn.shown}:{chosen.line} prints nothing: read at its caller's call, {w.via.candidate.func}:{w.via.line}, "
                      f"of which no run is read (KNOWN_ISSUES.md K25)")
         elif w.via is not None:
-            self.say(f"{site_fn.name}:{chosen.line} prints nothing: read on its caller's run, at {at_fn.name}:{w.via.line} (KNOWN_ISSUES.md K25)")
+            self.say(f"{site_fn.shown}:{chosen.line} prints nothing: read on its caller's run, at {at_fn.shown}:{w.via.line} (KNOWN_ISSUES.md K25)")
         # the run was chosen by its mark before the function was known; a mark that is
         # the key can hold several passes of it (rule 20), and then this run is not one
         if question is not None and len(starts := R.entries(at_fn, question, self.mode)) > 1:
-            self.say(f"WARNING: the run holds {len(starts)} passes of {at_fn.name} (rule 20); the steps below read them as one")
+            self.say(f"WARNING: the run holds {len(starts)} passes of {at_fn.shown} (rule 20); the steps below read them as one")
         site = R.statement_at(site_fn.node, chosen.line)
         # an attribute's question is when it took the value, and H2 answered it: the pass of the arm that wrote it last
         # (KNOWN_ISSUES.md K37).  A status's goes on to why its writer's arm ran
@@ -4006,14 +4341,14 @@ class Rerun:
         self.start("H3", "what its guard reads")
         # the tests reaching it ran under: the ifs around it and the early exits above it (KNOWN_ISSUES.md K61)
         guards = pathcond.arm_condition(site)
-        self.say(f"guards of {site_fn.name}:{chosen.line}: {guards}")
+        self.say(f"guards of {site_fn.shown}:{chosen.line}: {guards}")
         # an arm H2 left is one that may have written, not one left by elimination (K38)
         left = (T.Said("left-by-elimination") if not branch else T.Said("it-may-have", {"premises": [_said(p) for p in a.premises]}) if a.premises
                 else T.Said("shown-to-write"))
         if question is None and not attribute:
             # a status goes on to why its writer's arm ran, which is read in its run
             raise Stop(T.at(self.hop, T.Said("a-run-that-shows-ran", {
-                "fn_name": site_fn.name, "chosen_line": chosen.line,
+                "fn_name": site_fn.shown, "chosen_line": chosen.line,
                 "why": T.Said("left-by-elimination-no-pass") if not branch else T.Said("no-pass-at-the-window", {"left": left}),
             })))
         # an arm its run shows ran (H2's positive, its own run: a stand-in's is its caller's) ran under its guards
@@ -4051,9 +4386,9 @@ class Rerun:
             if branch and (false := [g for g, got in read.items() if got is False]):
                 # it did not write at this row: an older one it may have written at, else it is not among the arms
                 h = held.get(false[0])
-                where = (f"{site_fn.name}:{chosen.line}'s guard " + T.text(T.Said("held-read-false", {"guard": false[0], "section": h.section, "as_of": h.as_of}))
+                where = (f"{site_fn.shown}:{chosen.line}'s guard " + T.text(T.Said("held-read-false", {"guard": false[0], "section": h.section, "as_of": h.as_of}))
                          if h is not None else
-                         f"{site_fn.name}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values")
+                         f"{site_fn.shown}:{chosen.line}'s guard {false[0]!r} read false in the {'run' if shown else 'rows'}' values")
                 if a.older:
                     nxt = a.older[0]
                     self.say(f"{where}{f' at {_row_said(w.row)}' if w.row else ''}: it did not write there; its next row, {_row_said(nxt.row)}")
@@ -4079,7 +4414,7 @@ class Rerun:
                       T.Said("at-a-try-s-row", {"row": _row_said(w.row)}) if w.row and _f3(w.row) else
                       T.Said("in-the-pass-of-the-row", {"status": w.row["status"], "time": w.row["time"]}) if w.row else
                       T.Said("at-time", {"time": hi}) if lo == hi else T.Said("in-window", {"lo": lo, "hi": hi}))
-                via = T.Said("called-at", {"fn": at_fn.name, "line": w.via.line}) if w.via is not None else ""
+                via = T.Said("called-at", {"fn": at_fn.shown, "line": w.via.line}) if w.via is not None else ""
                 how = (T.Said("its-guards-hold-in-the-run" if shown else "its-guards-hold-in-the-rows") if guards
                        else T.Said("it-has-no-guard"))
                 used = [g for g in guards if g in held and read[g] is True]
@@ -4098,7 +4433,7 @@ class Rerun:
                     premise = held[used[0]].premise(used)
                     how = (T.Said("its-guards-hold-held", {"held": premise}) if len(used) == len(guards)
                            else T.Said("its-guards-hold-with-held", {"how": how, "held": premise}))
-                said = T.Said("written-last-by", {"subject": q.subject, "observed": q.observed, "fn": site_fn.name,
+                said = T.Said("written-last-by", {"subject": q.subject, "observed": q.observed, "fn": site_fn.shown,
                                                   "line": chosen.line, "via": via})
                 # what it leaves unread of the value reaching the row (KNOWN_ISSUES.md K41)
                 store = _store_unread(q.subject, chosen.candidate.owner, chosen.line, site_fn, w.via)
@@ -4119,7 +4454,7 @@ class Rerun:
                       for g, got in read.items() if got is not True]
             # an arm left by elimination is read in no run: its unread guards are not shown to hold (G is a positive
             # arm's, KNOWN_ISSUES.md K54)
-            self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.name, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
+            self.need(T.Said("a-run-that-shows-ran-to-read", {"fn_name": site_fn.shown, "chosen_line": chosen.line, "left": left, "unread": list(unread)}), shown)
         # what H3 lacks is then the values the guards read at the run, a call in a guard read as any term (K74)
         if not guards:
             if ran and not attribute and mark_identities(chosen.candidate.owner, chosen.line, question):
@@ -4131,7 +4466,7 @@ class Rerun:
             ways = callee_ways(q.subject, chosen.candidate.owner, chosen.line, q.observed)
             if ways:
                 self._read_ways(q, w, site_fn, chosen, ways, ran)
-            self.need(T.Said("no-guard-to-read", {"fn": site_fn.name, "line": chosen.line}), None)
+            self.need(T.Said("no-guard-to-read", {"fn": site_fn.shown, "line": chosen.line}), None)
         if ran and not attribute and site is not None:
             # a status's arm ran under its guards: where the values they held on came from, said where its run printed
             # them -- unless they read a guard false, which the run says held
@@ -4155,7 +4490,7 @@ class Rerun:
                 term_ends = [T.Said("term-ends", {"term": t.term, "ends": [_way_said(e) for e in t.ends]}) for t in once]
                 if first is None and entry.end in SR.ENDS:
                     # every value its guards held on, and its entry, end (C2): why it ran is answered
-                    self.end(T.Said("ran-where-every-value-ends", {"fn": site_fn.name, "line": chosen.line, "held": held_on,
+                    self.end(T.Said("ran-where-every-value-ends", {"fn": site_fn.shown, "line": chosen.line, "held": held_on,
                                                                    "terms": term_ends, "entry": _way_said(entry)}))
                     return None
                 what = T.Said("values-held-on-from", {
@@ -4204,9 +4539,9 @@ class Rerun:
 
         readings = [[read(t) for t in way] for way in ways]
         left = [i for i, way in enumerate(readings) if not any(got is False for got, _ in way)]
-        self.say(f"{fn.name}:{line}'s value {q.observed!r} through {callee}(): {len(ways)} way(s) to it, "
+        self.say(f"{fn.shown}:{line}'s value {q.observed!r} through {callee}(): {len(ways)} way(s) to it, "
                  f"{len(left)} left by the values read")
-        facts = {"fn": fn.name, "line": line, "value": q.observed, "callee": callee, "n": len(ways)}
+        facts = {"fn": fn.shown, "line": line, "value": q.observed, "callee": callee, "n": len(ways)}
         if not left:
             self.need(T.Said("no-way-to-the-value-holds", facts | {
                 "ways": [T.Said("one-way", {"terms": [s for _, s in way]}) for way in readings],
@@ -4331,7 +4666,7 @@ class Rerun:
             out.append(self._held_drops(self._s4c(t, fn, printed, run, window, seen | {f"{fn.rel}:{line}"}, pad), pad)
                        if run is not None and window is not None else t)
         entry = self._entry_end(fn, owner, line, run, window, out)
-        self.say(f"{pad}entry of {fn.name}: {_way_text(entry)}")
+        self.say(f"{pad}entry of {fn.shown}: {_way_text(entry)}")
         return out, entry
 
     def _read_by_its_run(self, fn: R.Function, terms: list[SR.Term], printed: dict[tuple[int, str], tuple[str, str]],
@@ -4550,7 +4885,7 @@ class Rerun:
         if node is not None:
             log = getattr(getattr(run, "log", None), "name", "")
             # where its rows are looked for, as :meth:`_call_shown` looks
-            owner = f"{rel}::{node.name}"
+            owner = R.owner_of(rel, node)
             today = sorted({f for st in getattr(R._prints_of(owner, [int(ln)]), "statements", None) or [] for f in st.log_files})
             files = self.files_of(owner, today, [int(ln)])
             if log and log in files:
@@ -4574,7 +4909,7 @@ class Rerun:
         node = R.def_holding(rel, int(ln))
         if node is None:
             return SR.Made(c, site, rel, how)
-        owner = f"{rel}::{node.name}"
+        owner = R.owner_of(rel, node)
         fn = R.function(rel, node.name, [int(ln)])
         stmt = R.statement_at(fn.node, int(ln))
         if stmt is None:
@@ -4817,7 +5152,7 @@ class Rerun:
         if node is None:
             return None
         fn = R.function(rel, node.name, [int(ln)])
-        owner = f"{rel}::{node.name}"
+        owner = R.owner_of(rel, node)
         each: list[dict[tuple[str, tuple[int, ...]], list[ast.If]]] = []
         for w in consts:
             stmt = R.statement_at(fn.node, w.bound_at)
@@ -5069,7 +5404,7 @@ class Rerun:
         # the map's model: with nothing open the function ran only from its sites, so from the one there is
         if len(rec.sites) == 1 and not rec.open:
             site = next(iter(into))
-            self.say(f"  entry: the map holds one call into {fn.name}, at {site}, and no other way in")
+            self.say(f"  entry: the map holds one call into {fn.shown}, at {site}, and no other way in")
             return SR.End("entry", SR.CALLER, "only-way-in", site)
         # the callers' logs are asked only where the entry is all the answer waits for (gm2-predictions.txt F4)
         if rec.sites and all(t.ended for t in terms) and (by := self._entered_by(owner, line, run, window, rec)) is not None:
@@ -5109,7 +5444,7 @@ class Rerun:
         if not out or len(left) != 1:
             return None
         call = next(iter(left))
-        self.say(f"  entry: its run's prints at its entry rule out the call(s) into {fn.name} at "
+        self.say(f"  entry: its run's prints at its entry rule out the call(s) into {fn.shown} at "
                  + "; ".join(f"{c} ({', '.join(why)})" for c, why in sorted(out.items())) + f": {call} is left")
         return SR.End("entry", SR.CALLER, "by-values", call)
 
@@ -5200,6 +5535,7 @@ class Rerun:
                 self.say(f"{len(out)} left out, no read of {before!r}'s rows ({', '.join(reach.reads)}) reaching them, "
                          f"only reads of other values, and no API endpoint (M2): {', '.join(names)}")
                 self.result["left_out_by_reach"] = {"before": before, "reads": list(reach.reads), "owners": names}
+        readings = self._handed_other(subject, value, readings)
         attr = subject.split(".")[-1]
 
         # H2
@@ -5240,10 +5576,21 @@ class Rerun:
             self._stop_unanswered(unanswered)
             return self._scan(subject, attr, value, key, readings, tries)
         state, asking, own = tries[0]
+        # H-5 (P43, bundle H, tmaeno's OK 2026-11-17 17:1x): a value held's window ends at the statuslog row that first
+        # shows it; where no run of the key is there, that row is read as the scan reads one, its writers asked by
+        # another key of the row their marks hold (K67's ``_recorded``): NR-J cloud's JobGenerator, by the task's
+        closing = (next((s for s in self.data["statuslog"]["states"] if s["time"] == asking.window[1]), None)
+                   if holding is not None and state is None and asking.window is not None
+                   and self.hop not in self.hand else None)
         # a statuslog row the judge chooses no writer at is read as the scan reads a row (H2-1); a window with no row (a
         # value held, a time) has none to read so, and a time handed is the hand's
         wrote = self._wrote_at(subject, attr, value, key, readings if own is None else own, state, asking,
-                               state is not None and self.hop not in self.hand)
+                               state is not None and self.hop not in self.hand, no_run=closing is not None)
+        if wrote is None and closing is not None:
+            # with no row of its own (*row* False), _wrote_at gives None only where no run of the key is there
+            self.say(f"no run of {key} in the window: the statuslog's {closing['status']!r} at {closing['time']}, which "
+                     "ends it, is read as one row of the scan, each writer asked as there (H-5)")
+            return self._scan(subject, attr, value, key, readings, [(closing, asking, own)])
         if wrote is None:
             self.say("the judge chose no writer at the row: it is read as one row of the scan, each arm that wrote or "
                      "may have walking on (KNOWN_ISSUES.md K38)")
@@ -5357,6 +5704,64 @@ class Rerun:
         left: list[Possible] = []
         named = self._named(subject, key, readings, tries)
         tries = self._runs_as_rows(subject, key, tries)
+        if not self._scan_tries(subject, attr, value, key, readings, tries, named, left) and (
+                life := self._placed_life(subject, key, readings)) is not None:
+            # no row shows a pass of a writer: the life of the ones on history rows that mark their runs by the key (Q2)
+            cands = self._h2_candidates(subject, life[2])
+            self._stop_unanswered(self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), life[1],
+                                            owners_of([c.owner for c in cands]), whole=True)[1])
+            more = self._runs_as_rows(subject, key, [life])
+            self._scan_tries(subject, attr, value, key, readings, more, named | self._named(subject, key, readings, [life]),
+                             left)
+            tries = tries + more
+        if (answer := self._answer(left)) is not None:
+            self.question = answer.question
+            return answer
+        return OneOf(left, len(tries))
+
+    def _placed_life(self, subject: str, key: str, readings: list) -> tuple[dict, W.Asking, list] | None:
+        """Q2 (P38): where no statuslog row shows a pass of a writer of an attribute no history records, F3's life for
+        the writers that are on history rows (``attr_time.arms``' placed) and mark their runs by the object's key
+        (:func:`key_marks`): a pass of theirs may have written between the rows, writing none -- setScoutJobData_JEDI's
+        1217 (mergeWalltime) in prepareTasksToBeFinished_JEDI's sqlEA 'reset in running' pass, which writes no status
+        (NR-T-53639338-mergeWalltime).  Read run by run as F3's life is (:meth:`_runs_as_rows`), each run judged as a
+        row is, where the printed bind map tells the value it wrote (``_printed_write``).  None where no writer is so,
+        the subject has a history, or the life's ends are not known (said)."""
+        if PT.history(subject) is not None:
+            return None
+        fragment = mapdump.fragment()
+        cls = subject.partition(".")[0]
+        # an arm on a history row holds its pairs, which hash not: kept as pairs, not as keys
+        marks = [(a, m) for a in AT.arms(fragment, subject, readings) if a.placed and (m := key_marks(a.owner, a.line, cls, key))]
+        if not marks:
+            return None
+        names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a, _ in marks)
+        life = W.lifetime(self._made_at(cls), self._read_at(subject), tuple(sorted({s for _, m in marks for s in m})))
+        if life.window is None:
+            self.say(f"Q2: {names} not asked over the object's life: {T.text(life.why)}")
+            return None
+        self.say(f"Q2: no row shows a pass of the writers; {names}, on history rows and marking their runs by the "
+                 f"object's key, asked over {T.text(life.why)} (P38)")
+        return {"status": None, "time": life.window[1], "f3": "span"}, life, AT.readings_of(readings, [a for a, _ in marks])
+
+    def _outside_life(self, ran: datetime.datetime, subject: str) -> str:
+        """Q3 (P42): why a write of *subject* run at *ran* is outside the object's life -- after the value was read
+        (:meth:`_read_at`), or before its row was made (:meth:`_made_at`), by more than SLACK either way, the clocks
+        being the database's and the machines' -- so it did not write the value; "" where it is not, or an end is not
+        known.  A write of ``CURRENT_DATE-1`` of a task's modificationTime read the morning after it would have run at
+        the value plus a day, after the read (NR-T-53655760-modificationTime)."""
+        read = self._read_at(subject)
+        if read and ran - W.SLACK > W.when(read):
+            return f"after the value was read at {read}"
+        made = self._made_at(subject.partition(".")[0])
+        if made and ran + W.SLACK < W.when(made):
+            return f"before the row was made at {made}"
+        return ""
+
+    def _scan_tries(self, subject: str, attr: str, value: str, key: str, readings: list, tries: list, named: set[str],
+                    left: list[Possible]) -> bool:
+        """:meth:`_scan`'s reading of *tries* in order, each one's arms added to *left*, until one shows a writer's pass
+        wrote: whether one did."""
         for n, (state, asking, own) in enumerate(tries, 1):
             kind = _f3(state)
             if kind in ("made", "open"):
@@ -5376,11 +5781,8 @@ class Rerun:
                 found = self._row_at(subject, attr, value, key, readings if own is None else own, state, asking, named)
             left += found
             if any(p.wrote for p in found):
-                break
-        if (answer := self._answer(left)) is not None:
-            self.question = answer.question
-            return answer
-        return OneOf(left, len(tries))
+                return True
+        return False
 
     def _runs_as_rows(self, subject: str, key: str, tries: list) -> list:
         """*tries* with F3's life (``_f3`` "span": the logs of writers on no history row of the object that mark their
@@ -5430,9 +5832,23 @@ class Rerun:
                                         strings=asking.strings, whole=True)
                 except Unrecorded:
                     continue
-                if runs_for(log, key):
+                if runs_for(log, key, self._other_of(key, log)):
                     out.add(name)
         return out
+
+    def _marked_by_key(self, c: Candidate, subject: str) -> bool:
+        """G-4 (P33): whether every run the map records for the function of each of *c*'s arms is marked by a key
+        holding the class's identity (``FunctionPrintsNode.runs``, as :func:`key_marks` reads one): it names its runs by
+        the key whenever it runs.  TaskCommando's ``<jediTaskID=...>``; not a poller under ``label=user``."""
+        ident = set(_identity_attrs(subject.partition(".")[0]))
+        if not ident or not c.lines:
+            return False
+        for line in c.lines:
+            found = R._prints_of(c.owner, [line])
+            runs = list(getattr(found, "runs", None) or [])
+            if not runs or not all(any(ident & set(k.columns or []) for k in run.key or []) for run in runs):
+                return False
+        return True
 
     def _unshown(self, readings: list, cands: list[Candidate], key: str, state: dict, env: E.Env,
                  window: tuple[str, str]) -> list[Possible]:
@@ -5525,7 +5941,7 @@ class Rerun:
         there = {name: log for name, log in logs.items() if host not in log.without}
         # the host's runs: a log the host is not listed for comes asked of every machine (K13), and another machine's
         # run is not the host's (a run of a file handed in names no machine)
-        inner = [r for log in there.values() for r in runs_for(log, key)
+        inner = [r for log in there.values() for r in runs_for(log, key, self._other_of(key, log))
                  if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi
                  and r.machine in (host, "")]
         # a method's run under its own mark holds every call of it (updateTask_JEDI's 21 records over 15 hours, for
@@ -5604,12 +6020,24 @@ class Rerun:
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
+        self._mark_row_after(cands, subject, readings, state)
+        # P62: a row at the value's own time holds its write; a line writing its clock plus an offset did not write it
+        if (written := _time_value(value)) is not None and abs(W.when(hi) - written) <= W.SLACK:
+            cands = self._offset_out(cands, subject, written)
         runs, _, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                    owners_of([c.owner for c in cands]), whole=True)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        at.update(self._ended_before(cands, at, handed, runs, (lo, hi)))
         env = self.base_env(at=state["time"])
-        maybe = self._unshown(readings, [c for c in cands if not any(f in named or f in holes for f in c.log_files)], key, state, env, (lo, hi))
+        unnamed = [c for c in cands if not any(f in named or f in holes for f in c.log_files)]
+        # G-4 (P33, bundle G, tmaeno's OK 2026-11-17 16:0x): a writer whose every arm's run is marked by the key names
+        # its runs by it whenever it runs: its logs searched whole at the row with no run there is no pass of it
+        marked = [c for c in unnamed if c.log_files and self._marked_by_key(c, subject)]
+        for c in marked:
+            self.say(f"  no pass of {c.owner.split('::')[-1]} at {when}: its marks hold the key, and {list(c.log_files)} "
+                     "searched whole there show no run of it (G-4)")
+        maybe = self._unshown(readings, [c for c in unnamed if c not in marked], key, state, env, (lo, hi))
         maybe = self._recorded(subject, key, state, asking, maybe)
         if not at and not holes and not handed:
             self.say(f"  no run of {key} at {when}: no writer's pass" + (" of a log that names it" if maybe else ""))
@@ -5722,13 +6150,44 @@ class Rerun:
         cls = subject.partition(".")[0]
         births = [a for a in found if a.unplaced and a.born]
         marks = {a: key_marks(a.owner, a.line, cls, self.args.key) for a in found if a.unplaced and not a.born}
+        # one whose runs no mark holds the key of, but which prints the key after its write on every way, is asked by
+        # that print as a marked one is by its mark (Q5)
+        printing = set()
+        for a, m in marks.items():
+            if not m and (got := after_marks(a, cls, self.args.key)):
+                marks[a] = got
+                printing.add(id(a))
         marked = [a for a, m in marks.items() if m]
         for a in found:
             self.say(f"  {a.owner.split('::')[-1]}:{a.line} " + (f"is on no history row of the object: {a.unplaced}" if a.unplaced else
                      "writes in a pass that writes the object's history row (" + ", ".join(sorted({f"{p.caller.split('::')[-1]}:{p.call} "
                      f"{p.callee.split('.')[-1]} {p.order}" for p in a.placed})) + ")") +
-                     ("; a birth: it wrote as the row was made" if a in births else "; its runs are marked by the object's key" if a in marked else ""))
+                     ("; a birth: it wrote as the row was made" if a in births else
+                      "; it prints the object's key after its write on every way" if id(a) in printing else
+                      "; its runs are marked by the object's key" if a in marked else ""))
         unplaced = [a for a in found if a.unplaced and a not in births and a not in marked]
+        # Q3 (P42): one whose write is its clock plus a settled offset ran at the value less the offset, if it wrote it:
+        # none where that is outside the object's life (before its row was made, after the value was read, by more than
+        # SLACK either way: the clocks are the database's and the machines'), or the selection its key comes from
+        # returns no row of the object then; else asked around then
+        clocked: list[tuple[AT.Arm, W.Asking]] = []
+        for a in list(unplaced):
+            off = _written_offset(a)
+            around = W.near_ran(attr, value, off) if off is not None else None
+            if off is None or around is None:
+                continue
+            unplaced.remove(a)
+            ran = W.when(value) - off
+            if outside := self._outside_life(ran, subject):
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: its write is its clock plus {int(off.total_seconds())} s, so it "
+                         f"ran at {ran} if it wrote {value!r}, {outside}: it did not write it (P42)")
+                continue
+            if (why := self._selection_false(a.owner, a.line, subject, ran)) is not None:
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: its write is its clock plus {int(off.total_seconds())} s, so it "
+                         f"ran at {ran} if it wrote {value!r}, when the selection its key comes from returns no row of the "
+                         f"object: {why} (P42)")
+                continue
+            clocked.append((a, around))
         self.need(T.Said("every-writer-of-on-a-history-row", {"subject": subject, "value": value, "n_unplaced": len(unplaced), "n_found": len(found)}), not unplaced)
         states = self.data["statuslog"]["states"]
         rows = AT.row_writers(found, states, AT.recorded_values(fragment))
@@ -5755,6 +6214,10 @@ class Rerun:
             self.say(f"F3: {a.owner.split('::')[-1]}:{a.line} writes the time it runs: asked over {asking.why}")
             end = asking.window[1] if asking.window else value
             tries.insert(0, ({"status": None, "time": end, "f3": "span"}, asking, AT.readings_of(readings, [a])))
+        for a, asking in clocked:
+            self.say(f"Q3: {a.owner.split('::')[-1]}:{a.line} asked over {asking.why} (P42)")
+            tries.insert(0, ({"status": None, "time": asking.window[1] if asking.window else value, "f3": "span"}, asking,
+                             AT.readings_of(readings, [a])))
         if births:
             names = ", ".join(f"{a.owner.split('::')[-1]}:{a.line}" for a in births)
             self.need(T.Said("when-the-row-was-made-for-the", {"names": names}), made)
@@ -5765,23 +6228,30 @@ class Rerun:
         return tries
 
     def _wrote_at(self, subject: str, attr: str, value: str, key: str, readings: list, state: dict | None,
-                  asking: W.Asking, row: bool) -> Wrote | None:
+                  asking: W.Asking, row: bool, no_run: bool = False) -> Wrote | None:
         """H2 at one window: the run of the key there and which candidate ran.  None where the judge chooses none at
         a statuslog row (*row*), before its report: the caller reads the row as :meth:`_scan` reads one, whose judge
         is this one -- the same candidates, runs and window -- and reports it (H2-1, KNOWN_ISSUES.md K38).
         MF-7396944927's 'failed' at 14:46:00 left process_job_report:416 and 441 and archiveJob:1813, each of which
-        may have written it last in the adder's pass, and stopped here."""
+        may have written it last in the adder's pass, and stopped here.  None too, with *no_run*, where no run of the
+        key is in the window: a value held's, whose closing row the caller reads so (H-5)."""
         readings, said = self._unborn(readings, subject, state)
         if said:
             self.say(said)
         lo, hi = asking.window
         when = hi if lo == hi else f"{lo}..{hi}"
         cands = self._h2_candidates(subject, readings)
+        self._mark_row_after(cands, subject, readings, state)
+        if asking.holds_write:
+            cands = self._selected_out(cands, subject, W.when(hi))
         runs, unanswered, holes = self._ask(key, list(dict.fromkeys(f for c in cands for f in c.log_files)), asking,
                                             owners_of([c.owner for c in cands]), whole=True)
         self._stop_unanswered(unanswered)
         at = {name: held for name, rs in runs.items() if (held := [r for r in rs if spans(r, (lo, hi))])}
         handed = self._batched(cands, at, runs, holes, state, hi, subject)
+        at.update(self._ended_before(cands, at, handed, runs, (lo, hi)))
+        if no_run and not at and not handed and not holes:
+            return None
         self.need(T.Said("a-run-of-at", {"key": key, "when": when}), at or handed)
         # a batched writer's run ended before the row: a run of its own log, judged as the others are
         at = {**at, **{r.log.name: [r] for r in handed.values()}}
@@ -5838,6 +6308,76 @@ class Rerun:
             self._readings[(subject, value)] = inv.hops[0].strategy.readings
         return self._readings[(subject, value)]
 
+    def _handed_other(self, subject: str, value: str, readings: list) -> list:
+        """M2 (P40(a), out/gm/qk-design.md's H2-2 bundle; the map's ``ParameterFrom``, its answer 2026-11-17): *readings*
+        less each line whose value is a parameter every call into its function hands as a literal other than *value*
+        (:meth:`_calls_handing`); a reading left with no line goes.  A line one of whose calls hands a value not so read
+        stays, the calls ruled out said.  entity_module's reassignShare:477 writes ``JobSpec.gshare = runtime(gshare)``:
+        AtlasAnalWatchDog:717 hands 'Express Analysis' and AtlasProdWatchDog:196 'Express'; TaskCommando:345 and
+        task_api:717 values made at run time, which stay (NR-J-7424203630-gshare)."""
+        kept = []
+        for r in readings:
+            lines = []
+            for line in r.lines:
+                calls = self._calls_handing(subject, value, r.owner, line)
+                if calls is None:
+                    lines.append(line)
+                    continue
+                other = [f"{c} ({', '.join(o)})" for c, (o, k) in calls.items() if not k]
+                left = [f"{c} ({', '.join(k)})" for c, (o, k) in calls.items() if k]
+                where = f"  {r.owner.split('::')[-1]}:{line}, writing a parameter"
+                if left:
+                    lines.append(line)
+                    if other:
+                        self.say(f"{where}: its call(s) {'; '.join(other)} hand another value than {value!r}; left: "
+                                 f"{', '.join(left)} (P40(a))")
+                else:
+                    self.say(f"{where}: every call into it hands another value than {value!r}: {'; '.join(other)}; "
+                             f"no candidate (P40(a))")
+            if lines == list(r.lines):
+                kept.append(r)
+            elif lines:
+                kept.append(r.model_copy(update={"lines": lines}))
+        return kept
+
+    def _calls_handing(self, subject: str, value: str, owner: str, line: int) -> dict[str, tuple[list[str], list[str]]] | None:
+        """The calls a value of *subject* written at *owner*'s *line* comes in by, where the map's branches there all
+        write a parameter (``runtime(<name>)``, ``Branch.handed``), each with ``(others, kept)``: the parameter's ways
+        (:func:`sources.param_ways`) by the call where they part -- their routes, read from where the value is made
+        inward, less the calls every way goes by (``file:line``; reassignShare's TaskBuffer:2081) -- the literals other
+        than *value* they end at, and why any other way of it is kept: it ends at *value* ("the value"), at a part of a
+        value, at a literal only part of the value, or anywhere else (a value made at run time, the database, an API's
+        parameter, a stop, by its kind).  None where the line writes no parameter or a way has no route."""
+        branches = _branches_at(subject, owner, line)
+        names = {str(getattr(b.handed, "name", "")).rpartition(".")[2] for b in branches if getattr(b, "handed", None)}
+        if not branches or len(names) != 1 or not all(str(b.outcome or "").startswith("runtime(") and b.handed for b in branches):
+            return None
+        ways = SR.param_ways(_bare(owner), names.pop())
+        if not ways or any(not w.route for w in ways):
+            return None
+        common = 0
+        while all(len(w.route) > common and w.route[-1 - common] == ways[0].route[-1 - common] for w in ways):
+            common += 1
+        calls: dict[str, tuple[list[str], list[str]]] = {}
+        for w in ways:
+            at = w.route[-1 - common] if len(w.route) > common else w.route[0]
+            others, kept = calls.setdefault(f"{Path(at.rpartition(':')[0]).name}:{at.rpartition(':')[2]}", ([], []))
+            if w.end != SR.CONSTANT:
+                why = f"{w.end}: {w.why}" if w.end == SR.STOP and w.why else w.end
+            elif w.steps:
+                why = "a part of a value"
+            elif w.why in SR.NO_LITERAL:
+                why = w.why
+            elif SR.same_value(w.value, value):
+                why = "the value"
+            else:
+                why = ""
+                if w.value not in others:
+                    others.append(w.value)
+            if why and why not in kept:
+                kept.append(why)
+        return calls
+
     def _unborn(self, readings: list, subject: str, state: dict | None) -> tuple[list, str]:
         """``(readings, said)``: *readings* less their lines that make the row (births, K29) where the statuslog holds
         a row of the key before *state*.  The row was there, and a write that makes a row writes none that was:
@@ -5862,6 +6402,202 @@ class Rerun:
         said = (f"the key's row was there before {state['status']!r} at {state['time']}, so its writes that make a row "
                 f"are no candidates: {'; '.join(left)} (KNOWN_ISSUES.md K29)") if left else ""
         return kept, said
+
+    def _mark_row_after(self, cands: list[Candidate], subject: str, readings: list, state: dict | None) -> None:
+        """P37: a candidate each of whose ways of writing the statuslog row *state* writes it by a call after its write
+        (the map's history pairs, ``attr_time.after_on_row``) is read with the passes that ended before the row, where
+        none is at it (``Candidate.row_after``: the time of the row before, "" where none).  Not for a window with no
+        row (a value held, a time, F3's)."""
+        if state is None or state.get("f3") or not state.get("status"):
+            return
+        fragment = mapdump.fragment()
+        if self._recorded_values is None:
+            self._recorded_values = AT.recorded_values(fragment)
+        owners = AT.after_on_row(AT.arms(fragment, subject, readings), state, self._recorded_values)
+        if not owners:
+            return
+        states = (self.data.get("statuslog") or {}).get("states") or []
+        since = max((s["time"][:19] for s in states if s["time"][:19] < state["time"][:19]), default="")
+        for c in cands:
+            if c.owner in owners:
+                c.row_after = since
+
+    def _ended_before(self, cands: list[Candidate], at: dict[str, list], handed: dict[str, Run], runs: dict[str, list],
+                      window: tuple[str, str]) -> dict[str, list]:
+        """P37: for a candidate read with the passes that ended before the row (``Candidate.row_after``), the key's runs
+        in each of its logs that hold none at the row and meet the stretch from the row before to it
+        (``which_ran.before_stretch``), by log; said where taken.  A batched writer's run (:meth:`_batched`) stands."""
+        out: dict[str, list] = {}
+        for c in cands:
+            if c.row_after is None or c.owner in handed:
+                continue
+            stretch = before_stretch(window, c.row_after)
+            for name in c.log_files:
+                if name in at or name in out or name not in runs:
+                    continue
+                if held := [r for r in runs[name] if spans(r, stretch)]:
+                    out[name] = held
+                    self.say(f"{c.func}: no run of the key in {name} at the row; the map has its history call after its "
+                             f"write, so its runs from {stretch[0]} to the row are read (P37)")
+        return out
+
+    def _selection_false(self, owner: str, line: int, subject: str, at: datetime.datetime) -> str | None:
+        """Q3 (P39, P42): why the selections *owner*'s write of *subject* at *line* draws its key from return no row of
+        the object at *at*: each ``rows`` source of the write's key (the map's ``KeyFrom``, read in the writer itself)
+        is a read site read as judgement 3 reads a route's record (:meth:`_route_refuses`: a refused pair it holds, a
+        restricted subject whose values lack the row's, a condition false), at that one moment -- the object's status the
+        statuslog's then, its other columns as judgement 3 takes them (the rows file's; KNOWN_ISSUES.md K17).  Every one
+        false: the words; else None, and None where the key is drawn from no selection the map reads.
+        getAchievedTasks_JEDI's 3303 asks ``goal IS NOT NULL``: a task whose row holds no goal is none of its rows
+        (NR-T-53646395-assessmentTime).  I-4: where the key has no ``rows`` source in the writer but its parameters
+        (an object made there with its key field from a parameter, the map's KMA: extractCommon's ``taskSpec.jediTaskID
+        = jediTaskID``), each way the parameter comes in (``sources.param_ways``) must end at a statement's rows, and
+        those selections are read so; one way ending anywhere else: None."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        if fragment is None or history is None:
+            return None
+        writes = [kf for kf in getattr(fragment, "key_froms", None) or []
+                  if _bare(kf.owner) == _bare(owner) and line in (kf.writes.get(subject) or [])]
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        names = [s.name for kf in writes for s in getattr(kf, "sources", None) or [] if s.kind == "rows" and not s.via]
+        if not names:
+            params = [(kf.owner, s.name) for kf in writes for s in getattr(kf, "sources", None) or []
+                      if s.kind == KEY_PARAMETER and not s.via]
+            ways = [w for owner_, p in params for w in SR.param_ways(owner_, p)]
+            if not params or not ways or any(w.end != SR.DATABASE or not w.site for w in ways):
+                return None
+            names = list(dict.fromkeys(w.site for w in ways))
+        if any(n not in sites for n in names):
+            return None
+        drawn = [sites[n] for n in names]
+        states = [s for s in (self.data.get("statuslog") or {}).get("states") or [] if _when(s.get("time_extended") or s["time"]) <= at]
+        if not states:
+            return None
+        then = f"at {at.isoformat(' ')[:19]}"
+        q = Missed(history.subject, states[-1]["status"], "", at, at, [], "", None, end=then, start=then)
+        said = []
+        for site in {id(site): site for site in drawn}.values():
+            why = self._route_refuses(site, q)
+            if not why:
+                return None
+            said.append(f"@{site.anchor.line_start} " + "; ".join(why))
+        return ", ".join(said)
+
+    def _persisted_false(self, owner: str, line: int, subject: str, at: datetime.datetime) -> str | None:
+        """K-4b (bundle K, out/gm/qk-design.md; the map's (A)(B)(C), codemap-xliii 637d38f): why no write persisting
+        *owner*'s arm at *line* lands on the row at *at*, where the arm sets *subject* on an object it keeps in what it
+        was handed (``KEY_KEPT``): the map's ``kept_hops`` name every caller's write persisting it (none open), and each
+        such write -- a flush, read in the method it reaches (``flushed_in``, ``flushed_lines``), or the caller's own
+        statement -- has a term on the class's history subject whose value, on every way the call hands it
+        (``sources.param_ways``, each element where ``each_element``), is not the state the statuslog holds then: a
+        literal of another state, or the rows of a selection whose selects lack it.  goal's arms (extractCommon 276,
+        278) are persisted by TaskRefiner.runImpl's registerTaskInOneShot_JEDI (``status=:preStatus``) and seven
+        updateTask_JEDI flushes (``status IN (:old___in)``), the value on getTasksToRefine_JEDI@1147's way the literal
+        'registered' (1340), on @1369's its rows.  None where any of it is not read."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = [s for s in ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+                  if _when(s.get("time_extended") or s["time"]) <= at]
+        if fragment is None or history is None or not states:
+            return None
+        state = states[-1].get("status")
+        kfs = key_froms()
+        kept = [kf for kf in kfs if _bare(kf.owner) == _bare(owner) and not getattr(kf, "term", "")
+                and getattr(kf, "unread", "") == KEY_KEPT and line in (kf.writes.get(subject) or [])]
+        hops = [h for kf in kept for h in getattr(kf, "kept_hops", None) or []]
+        if not kept or not hops or any(getattr(h, "open", "") for h in hops):
+            return None
+        writes = list(dict.fromkeys((h.owner, w.statement, w.object) for h in hops for w in getattr(h, "persisted", None) or []))
+        if not writes:
+            return None
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        takes: set[str] = set()
+        for caller, statement, obj in writes:
+            own = [kf for kf in kfs if kf.owner == caller and getattr(kf, "statement", None) == statement
+                   and getattr(kf, "object", "") == obj]
+            flushes = [kf for kf in own if getattr(kf, "flushed_in", "")]
+            terms = [(kf, False) for kf in own if getattr(kf, "attr", "") == history.subject and getattr(kf, "term", "")] + [
+                (ck, True) for fk in flushes for ck in kfs if ck.owner == fk.flushed_in
+                and getattr(ck, "statement", None) in (getattr(fk, "flushed_lines", None) or [])
+                and getattr(ck, "attr", "") == history.subject and getattr(ck, "term", "")]
+            if not terms:
+                return None
+            call = f"{caller.partition('::')[0]}:{statement}"
+            for term, flushed in terms:
+                for s in term.sources:
+                    if s.kind == KEY_CONSTANT and not getattr(s, "paths", None):
+                        values = [s.name]
+                    elif s.kind == KEY_PARAMETER and getattr(s, "site_owner", ""):
+                        ways = SR.param_ways(s.site_owner, s.name, steps=("[*]",) if getattr(term, "each_element", False) else ())
+                        ways = [w for w in ways if call in w.route] if flushed else ways
+                        if not ways:
+                            return None
+                        values = []
+                        for w in ways:
+                            if w.end == SR.CONSTANT and w.why not in (SR.THROUGH, SR.MADE_EMPTY):
+                                values.append(w.value)
+                            elif w.end == SR.DATABASE and w.site in sites:
+                                selected = [v.partition("=")[2] for v in getattr(sites[w.site], "selects", None) or []
+                                            if v.partition("=")[0] == history.subject]
+                                if not selected or state in selected:
+                                    return None
+                                takes |= {f"{w.site.rpartition('::')[2]} ({', '.join(selected)})"}
+                            else:
+                                return None
+                    else:
+                        return None
+                    literals = {str(v).strip("'\"") for v in values}
+                    if state in literals:
+                        return None
+                    takes |= {repr(v) for v in sorted(literals)}
+        return (f"the {len(writes)} write(s) persisting it ({', '.join(sorted({c.rpartition('::')[2] for c, _, _ in writes}))}) "
+                f"take the row in {', '.join(sorted(takes))} only, the statuslog holding {state!r} then")
+
+    def _selected_out(self, cands: list[Candidate], subject: str, at: datetime.datetime) -> list[Candidate]:
+        """Q3 (P39): *cands* less each line whose selection returns no row of the object at *at*, the time the write
+        itself is in (a window holding the write, ``W.Asking.holds_write``), and a candidate left with no line; each
+        said.  The judge then reads the rest as before: one left alone wrote there (KNOWN_ISSUES.md K47) --
+        prepareTasksToBeFinished_JEDI's 3744, whose pass printed no key for a task with no finished job, once
+        getAchievedTasks_JEDI's 3283 is out (NR-T-53646395-assessmentTime).
+
+        Lines out by their offset first (:meth:`_offset_out`, P62)."""
+        out = []
+        for c in self._offset_out(cands, subject, at):
+            kept = []
+            for line in c.lines:
+                if (why := self._selection_false(c.owner, line, subject, at)) is None:
+                    kept.append(line)
+                else:
+                    self.say(f"  {c.func}:{line} did not write at {at}: the selection its key comes from returns no row "
+                             f"of the object then: {why} (P39)")
+            if kept:
+                c.lines = kept
+                out.append(c)
+        return out
+
+    def _offset_out(self, cands: list[Candidate], subject: str, at: datetime.datetime) -> list[Candidate]:
+        """P62 (the investigator's u8 W11): *cands* less each line writing its clock plus a settled offset beyond SLACK
+        (``_written_offset``, the map's ``Branch.amount``), for a window at *at* holding the write of the value at
+        *at*: a pass then writes *at* plus the offset, not the value -- as P42 reads an unplaced arm.  A candidate left
+        with no line is out; each said.  kickChildTasks_JEDI's 5181 writes ``CURRENT_DATE-1`` (child tasks'
+        modificationTime), so its pass at 04:37:31 did not write the task's 04:37:31 (NR-T-53655760-modificationTime)."""
+        offsets = {(_bare(j.owner), b.line): off for j in asyncio.run(self._writers_of(subject)) for b in j.branches
+                   if (off := _written_offset(b)) is not None}
+        out = []
+        for c in cands:
+            kept = []
+            for line in c.lines:
+                off = offsets.get((_bare(c.owner), line))
+                if off is not None and abs(off) > W.SLACK:
+                    self.say(f"  {c.func}:{line} did not write at {at}: its write is its clock plus "
+                             f"{int(off.total_seconds())} s, so a pass then writes {at + off}, not the value (P62)")
+                else:
+                    kept.append(line)
+            if kept:
+                c.lines = kept
+                out.append(c)
+        return out
 
     def _candidates(self, readings: list) -> list[Candidate]:
         return [Candidate(r.file, r.owner.split("::")[-1], r.lines, self.files_of(r.owner, r.log_files, r.lines)) for r in readings]
@@ -5940,7 +6676,7 @@ class Rerun:
             (r, ch) for r in question.records for ch in r.chains()
             if any(f.rel == fn.rel and f.func == fn.name for f in ch.frames)
         ]
-        record = self.need(T.Said("a-traceback-through-in-the-run", {"fn_name": fn.name}), chains[0][0] if chains else None)
+        record = self.need(T.Said("a-traceback-through-in-the-run", {"fn_name": fn.shown}), chains[0][0] if chains else None)
         if record.cut:
             self.need(T.Said("the-whole-traceback-of-the-search-cut", {"record_span": record.span}), None)
         # a traceback prints the lines of the code the run ran: a frame read at another line of the pin says so
@@ -6142,19 +6878,19 @@ class Rerun:
         for atom, truth in q.settled.items():
             found = V.occurrences(atom, [(f, q2) for f, q2 in self.touched if f.owner != fn7.owner], self.mode, other_env)
             seen_at = set()
-            self.say(f"  {atom!r} ({truth} at {fn7.name}:{exit7.line}): {len(found)} occurrence(s)")
+            self.say(f"  {atom!r} ({truth} at {fn7.shown}:{exit7.line}): {len(found)} occurrence(s)")
             for o in found:
                 if (o.fn.owner, o.line) in seen_at:
                     continue
                 seen_at.add((o.fn.owner, o.line))
-                self.say(f"    {o.fn.name}:{o.line} -> {o.value!r}  {dict(o.env.used)}")
+                self.say(f"    {o.fn.shown}:{o.line} -> {o.value!r}  {dict(o.env.used)}")
                 if o.value is (not truth):
                     pairs.append((atom, truth, o))
         self.need(T.Said("exactly-one-test-that-came-out-the"), len({(a2, o.fn.owner, o.line) for a2, _, o in pairs}) == 1)
         atom, truth, other = pairs[0]
-        self.say(f"contradiction: {fn7.name}:{exit7.line} has {atom} {truth}; {other.fn.name}:{other.line} has it {other.value}")
-        a_side = V.Side(f"{fn7.name}", q.steps, q.env, fn7.owner)
-        b_side = V.Side(f"{other.fn.name}", V.walk_steps(other.fn, other.line), other.env, other.fn.owner)
+        self.say(f"contradiction: {fn7.shown}:{exit7.line} has {atom} {truth}; {other.fn.shown}:{other.line} has it {other.value}")
+        a_side = V.Side(f"{fn7.shown}", q.steps, q.env, fn7.owner)
+        b_side = V.Side(f"{other.fn.shown}", V.walk_steps(other.fn, other.line), other.env, other.fn.owner)
         return Pair(atom, a_side, b_side)
 
     # ------------------------------------------------------------ Pair: where they part
@@ -6217,7 +6953,7 @@ class Rerun:
         # a plugin's own attributes (``self.add_to_top_only``) printed by its other methods in the run
         stable_holes([R.seen(f, q2, self.mode) for f, q2 in self.touched if q2 is question and class_of(f) == cls], env, cls)
         steps = A.walk(fn, frame.line)
-        self.say(f"walk from {fn.name}:{frame.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
+        self.say(f"walk from {fn.shown}:{frame.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
         ran = [(f"{f.rel}::{f.func}", f.line) for f in ch.frames if f.in_corpus]
         walk = G.Walk(steps, env, self._collections(env), self.data, ran, ask=self.ask_collection)
         if walk.held:
@@ -6290,7 +7026,7 @@ class Rerun:
         runs = {}
         for label, prefer in (("as it ran", {}), (f"with {alt.step.name} = @{alt.step.line} {alt.step.value}", {alt.step.name: alt.step.line})):
             args = {}
-            self.say(f"{fn.name}({', '.join(params)}) {label}:")
+            self.say(f"{fn.shown}({', '.join(params)}) {label}:")
             for name in params:
                 if name == "self" or not (walk.defs(name, fn.owner) or walk.handed(name, fn.owner)):
                     continue
@@ -6713,6 +7449,25 @@ class Rerun:
             entry["verdict"] = "ran"
             return Passes(owner, logs, list(arms.values()), key, searched, owners, subject=subject,
                           entries=_entries_of(writers, owner)), missed
+        if way == "key" and rest is not None and rest.window is not None and self.logs.needs_window and not holes:
+            # G-3 (P12, bundle G, tmaeno's OK 2026-11-17 16:0x): a writer taking the row by its key may have run as the
+            # call that began the stay did -- setupper's activateJob at NJ-defined-late's start: the stay's start is
+            # asked too, from the row less SLACK to SLACK after it.  A run there is read; none says no more than before,
+            # and nor does an ask no record answers: it is kept for a records round, and the step goes on as before
+            # (merged into the step's asks, it stopped NJ-transferring-stuck's S1 ahead of the branch bundle D ended)
+            lo = rest.window[0]
+            hi = min(rest.window[1], W._down(W.when(lo) + 2 * W.SLACK))
+            head = W.Asking((lo, hi), None, T.Said("the-stay-s-start-by-key", {"start": lo, "end": hi}))
+            hfound, hmissed, _, _ = self._ask_mover(key, owner, to_hand, head, None, owners)
+            if hmissed:
+                self._keep_unanswered(hmissed)
+            if hlogs := self._runs_of(hfound, owner, head):
+                self.say(f"  {name}: a run of its own at the stay's start, {lo} .. {hi} (G-3)")
+                entry["verdict"] = "ran"
+                return Passes(owner, hlogs, list(arms.values()), key, head, owners, subject=subject,
+                              entries=_entries_of(writers, owner)), missed
+            self.say(f"  {name}: {'no run of its own at' if not hmissed else 'not recorded at'} the stay's start, "
+                     f"{lo} .. {hi}, either (G-3)")
         entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, searched, missed, holes, writers, rest)
         if holes:
             # not found is not "did not run" where the search did not reach
@@ -6880,7 +7635,39 @@ class Rerun:
             return up
         self.need(T.Said("a-pass-in-the-window-that-holds-the-key", {"func": func, "unkeyed": unkeyed}) if unkeyed
                   else T.Said("a-pass-of-the-mover-in-the-window"), found)
-        return self._which_way(fn, rel, func, found, q.arms)
+        blocked = self._which_way(fn, rel, func, found, q.arms)
+        if q.before is None and q.stay is None and since is not None and (up := self._callers_after(q, found, blocked)) is not None:
+            return up
+        return blocked
+
+    def _callers_after(self, q: Passes, found: list, blocked: Blocked) -> Callers | None:
+        """I-2 (D-4b, out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x): a stuck value's mover
+        whose arms' writes take the row by what its callers hand it alone (the map's KeyFrom sources, each a parameter)
+        runs on the row again only where a caller hands it the row.  After its last pass on the row (*found*'s, the way
+        S2 read them *blocked*) to the window's end, the statuslog's as_of, its callers' passes are read (U1, kind
+        ``after``), in place of S3 on the guard that pass left by: activateJob's 21:32:49 pass left by 151, then
+        ActivatorWithRuleThr's turns of the key each left before the append (D-4; NJ-assigned-stuck).  None where the
+        map lists no caller, the window is not known (the door over files), nothing is left of it, or an arm's key comes
+        from elsewhere (a selection of its own: the stay is its selection's, S1 and H read it)."""
+        if not q.entries or not found or not self.logs.needs_window:
+            return None
+        window = W.stuck(self.data.get("statuslog", {}), self.args.observed).window
+        last = found[-1].last
+        if window is None or W.when(last) >= W.when(window[1]):
+            return None
+        subject = q.subject or self.args.subject
+        if not taken_as_handed(getattr(mapdump.fragment(), "key_froms", None) or [], q.owner, subject, {a.line for a in q.arms}):
+            return None
+        func = q.owner.split("::")[-1]
+        n = len(found)
+        way = (T.Said("passes-left-by", {"n": n, "exit": f"{func}:{blocked.exit_line}"}) if blocked.exit_line is not None
+               else T.Said("passes-ran-no-arm", {"n": n, "left_by": list(blocked.left_by)}) if blocked.left_by
+               else T.Said("passes-took-none", {"n": n}))
+        self.say(f"{func} runs on the row only as its callers hand it (the keys of its arms' writes are parameters, by the "
+                 f"map's KeyFrom), and no pass of it is on the row from {last[:23]} to {window[1]}: its callers' passes "
+                 "after it are read, not the guard its last pass left by (I-2)")
+        return Callers(q.owner, q.arms, subject, q.key, (last[:19], window[1]), "after", q.entries, after=last[:23],
+                       left=T.Said("the-mover-s-last-pass", {"mover": func, "last": last[:23], "way": way}))
 
     def _callers_of_mover(self, q: Passes, since: str | None, kind: str) -> Callers | None:
         """U1's question where no pass of the mover *q* asks of took the row in the window: its callers' passes there,
@@ -7392,7 +8179,7 @@ class Rerun:
         # the callee's mark holds every call of it for the key (record_task_status_change's at 'staged' and at
         # 'defined', 17 minutes apart): each run is cut at its entry rows, and the calls at the row are read
         cfn, when = R.function(crel, cfunc, [], lines), (str(row["time"]), str(row["time"]))
-        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key)
+        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key, self._other_of(key, log))
                  if of_mover(r, callee) and r.machine == host and r.last[:19] >= edge[0] and r.first[:19] <= edge[1]
                  for part in passes_of(cfn, r, self.mode)[0] if at_window(part, when)]
         for p in mine:
@@ -7418,12 +8205,17 @@ class Rerun:
         took: list[int | None] = []  # the exit a pass that ran no arm was shown to leave by, None where none is shown
         envs = []
         left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1, S-2a)
+        unhanded: list[str] = []  # D-4: a pass every arm of which was a call handing no element of the key's turn
+        arm_lines = {a.line for a in arms}
         for n, p in enumerate(found, 1):
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
             j = judge([Candidate(rel, func, lines, run=p)], {p.log.name: [p]}, mode=self.mode, decide=self.decide, question_run=p, env=env)
             self.say(j.report(p))
+            mine = [v for v in j.verdicts if v.line in arm_lines]
+            unhanded.append("; ".join(dict.fromkeys(v.unhanded for v in mine))
+                            if mine and len(mine) == len(arm_lines) and all(v.unhanded for v in mine) else "")
             if j.chosen is None and (arm := _the_arm_taken(j, {a.line for a in arms})) is not None:
                 j.chosen = arm
                 self.say(f"  the way pass {n} went is arm {arm.line}: the positive exit(s) "
@@ -7451,7 +8243,7 @@ class Rerun:
         if all(v is None for v in chosen) and len(set(took)) == 1 and took[0] is not None:
             # every pass ran no arm and was shown to leave by the same exit: the way they went
             self.say(f"every pass ({len(found)}) left by {func}:{took[0]}")
-            return Blocked(fn, took[0], found, envs, arms)
+            return Blocked(fn, took[0], found, envs, arms, unhanded=tuple(unhanded))
         taken = {v.line if v is not None else None for v in chosen}
         self.need(T.Said("one-exit-every-pass-took"), len(taken) == 1)
         exit_line = taken.pop()
@@ -7459,7 +8251,7 @@ class Rerun:
                  else f"every pass ({len(found)}) of {func} took none of its candidates" if not left_by
                  else f"every pass ({len(found)}) of {func} ran none of its arms")
         return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)),
-                       tuple(took) if exit_line is None and any(x is not None for x in took) else ())
+                       tuple(took) if exit_line is None and any(x is not None for x in took) else (), tuple(unhanded))
 
     # ------------------------------------------------------------ Callers: what called the mover on the row
     def callers(self, q: Callers):
@@ -7470,8 +8262,14 @@ class Rerun:
         if self._own_cycles(q):
             return None
         cls = q.subject.partition(".")[0]
+        if (other := self._mark_key(q)) is not None:
+            self.say(f"the run that moved it is marked by another {cls}'s key ({other}), not the row's: its callers' "
+                     "passes are asked by that key (H-4)")
+            q = replace(q, key=other)
         found = callers_of(q.entries, cls, q.key, self._key_columns(q.subject, q.key))
         self.need(T.Said("a-caller-the-map-lists", {"func": func}), found, "K55")
+        found = self._callers_by_printed(q, found)
+        found = self._callers_by_service(q, found)
         ways = {"marks": "asked for its marks holding the key", "key": "asked for the key alone (a row of it prints it)",
                 "none": "its runs print no key"}
         for c in found:
@@ -7482,6 +8280,121 @@ class Rerun:
         if len(asks) == 1:
             return asks[0]
         return Fork(asks, [T.Said("caller-branch", {"caller": c.owner.split("::")[-1], "lines": c.lines}) for c in found])
+
+    def _callers_by_printed(self, q: Callers, found: list[Caller]) -> list[Caller]:
+        """Bundle G, G-5 (P28, out/gm/qk-design.md, tmaeno's OK 2026-11-17 16:0x): of the callers U1 lists, those every
+        way of a parameter the mover printed comes in by from them ends at a literal other than the value its moving run
+        printed (the map's ParameterFrom, :func:`sources.param_ways`, the way's route holding one of the caller's call
+        lines) did not hand that run its value.  killJob prints ``code=51`` at 840 before any rebinding of ``code``:
+        copyArchive's calls handing '10' or '2' are not the one.  A caller with a way the map does not end at a literal,
+        or at the value, stays; where every caller would go, none goes.  Only the mover's moving run of a late value."""
+        q2 = getattr(self, "_missed_q", None)
+        if len(found) < 2 or q2 is None or q2.mover != q.mover or q2.run is None:
+            return found
+        printed = self._printed_parameters(q.mover, q2.run)
+        if not printed:
+            return found
+        bare = _bare(q.mover)
+        ways = {p: SR.param_ways(bare, p) for p in printed}
+        kept: list[tuple[Caller, str]] = []
+        dropped: list[tuple[Caller, str]] = []
+        for c in found:
+            rel = c.owner.partition("::")[0]
+            sites = {f"{Path(rel).name}:{line}" for line in c.lines}
+            why = ""
+            for p, value in printed.items():
+                mine = [w for w in ways[p] if any(f"{Path(r.rpartition(':')[0]).name}:{r.rpartition(':')[2]}" in sites
+                                                  for r in w.route)]
+                if mine and all(w.end == SR.CONSTANT and not w.steps and w.why not in SR.NO_LITERAL
+                                and not SR.same_value(w.value, value) for w in mine):
+                    why = f"its calls hand {p} {sorted({w.value for w in mine})}, none the value the run printed for it"
+                    break
+            (dropped if why else kept).append((c, why))
+        if not kept or not dropped:
+            return found
+        for c, why in dropped:
+            self.say(f"  {c.owner.split('::')[-1]} at {c.lines}: not the caller of the run that moved it: {why} (G-5)")
+        return [c for c, _ in kept]
+
+    def _mark_key(self, q: Callers) -> str | None:
+        """Bundle H, H-4 (P20, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): the one value the mover's
+        moving run's mark holds in a hole the map names a key column of the asked class by, where it is not the row's
+        key: the run wrote the row in a pass of that other object, which its callers' passes are asked by.
+        NJ-merging-late's updateUnmergedJobs ran under ``updateUnmergedJobs < PandaID=<the merge job> >``, writing the
+        unmerged job in the merge job's pass.  None where no such hole, two values, or not the moving run of a late
+        value."""
+        q2 = getattr(self, "_missed_q", None)
+        if q2 is None or q2.mover != q.mover or q2.run is None or not getattr(q2.run, "token", ""):
+            return None
+        own = self._key_columns(q.subject, q.key)
+        others: set[str] = set()
+        for r in getattr(R._prints_of(q.mover, [a.line for a in q.arms]), "runs", None) or []:
+            vs = mark_values(q2.run.token, r.mark)
+            if vs is None or len(vs) != len(r.key or []):
+                continue
+            for k, v in zip(r.key, vs, strict=True):
+                if set(getattr(k, "columns", None) or []) & own and str(v).strip() and str(v).strip() != q.key:
+                    others.add(str(v).strip())
+        return others.pop() if len(others) == 1 else None
+
+    def _callers_by_service(self, q: Callers, found: list[Caller]) -> list[Caller]:
+        """Bundle H, H-3 (P15, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): pandajedi's code runs in
+        JEDI's processes alone (pandaserver does not import it), so a route whose outermost hop is in ``pandajedi/``
+        runs on a JEDI machine; where the mover's moving run is on a machine the records name another service's, those
+        routes did not make that run.  NJ-defined-late's killJob ran on aipanda097, a server machine: killJobs' routes
+        from TaskCommando and AtlasProdWatchDog are not its.  A caller every route of which is so goes; one with other
+        routes stays, the JEDI routes said.  A route entering in pandaserver is not placed (JEDI imports pandaserver);
+        where every caller would go, none goes.  Only the mover's moving run of a late value, as G-5."""
+        q2 = getattr(self, "_missed_q", None)
+        if q2 is None or q2.mover != q.mover or q2.run is None:
+            return found
+        machine = getattr(q2.run, "machine", "") or ""
+        service = (getattr(getattr(q2.run, "log", None), "services", None) or {}).get(machine)
+        if not machine or service is None or service == "jedi":
+            return found
+        where = f"{machine.split('.')[0]}, a {service} machine as the records say"
+        kept, said = [], []
+        for c in found:
+            jedi = sorted({o for o, _ in c.outer if o.startswith("pandajedi/")})
+            if not jedi:
+                kept.append(c)
+            elif all(o.startswith("pandajedi/") for o, _ in c.outer):
+                said.append(f"  {c.owner.split('::')[-1]} at {c.lines}: not the caller of the run that moved it: every "
+                            f"route into it enters at {', '.join(jedi)}, in a JEDI process, and the run is on {where} (H-3)")
+            else:
+                kept.append(c)
+                said.append(f"  {c.owner.split('::')[-1]} at {c.lines}: its routes entering at {', '.join(jedi)}, in a "
+                            f"JEDI process, are not the run's: the run is on {where} (H-3)")
+        if not kept:
+            return found
+        for line in said:
+            self.say(line)
+        return kept
+
+    def _printed_parameters(self, mover: str, run) -> dict[str, str]:
+        """G-5: the mover's parameters its moving *run* printed as handed -- a bare parameter name in a hole of a row
+        no binding of that name in the function precedes -- each with the one value its records there hold.  A name
+        printed with two values, or bound before the print, is left out."""
+        rel, _, func = _bare(mover).partition("::")
+        try:
+            fn = R.function(rel, func, [])
+        except (LookupError, ValueError, SyntaxError):
+            return {}
+        node = fn.node
+        args = node.args
+        params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)} - {"self", "cls"}
+        bound: dict[str, int] = {}
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store) and n.id in params:
+                bound[n.id] = min(bound.get(n.id, n.lineno), n.lineno)
+        sn = R.seen(fn, run, self.mode)
+        values: dict[str, set[str]] = {}
+        for row in fn.rows:
+            for i, _, _ in sn.hits.get(row.line, ()):
+                for expr, text in row.capture(run.records[i]).items():
+                    if expr in params and text is not None and row.line < bound.get(expr, row.line + 1):
+                        values.setdefault(expr, set()).add(str(text).strip())
+        return {p: v.pop() for p, v in values.items() if len(v) == 1}
 
     def caller(self, q: CallerPasses):
         """U2: which way each pass of one caller went on the row in the window -- its calls into the mover are its arms,
@@ -7522,7 +8435,12 @@ class Rerun:
                     found += parts
                     whole |= {id(p) for p in parts if p is run}
         found = sorted((p for p in found if p.first[:19] <= end), key=lambda p: p.first)
-        found, moved_on = self._stay_edges(fn, c.owner, c.lines, up.subject, up.key, found, start, whole)
+        if up.after is not None:
+            # I-2: the passes begun after the mover's last on the row; the window opens at no statuslog row
+            found = [p for p in found if W.when(p.first) > W.when(up.after)]
+            moved_on: list = []
+        else:
+            found, moved_on = self._stay_edges(fn, c.owner, c.lines, up.subject, up.key, found, start, whole)
         keyed = [p for p in found if holds_key(fn, p, runs, self.mode, self._called_at)]
         if len(found) > len(keyed):
             self.say(f"{len(found) - len(keyed)} pass(es) of {func} in the window print no record of the key, nor run it inside a call: not read")
@@ -7534,6 +8452,8 @@ class Rerun:
                 self.say(f"{len(moving)} pass(es) ending at {up.before} or later, the one that called {mover} to move it on among them, not read")
             if c.across and keyed:
                 keyed, moved = self._moved_across(fn, rel, func, keyed, c, up.before)
+                # the pass set aside as the one that moved it on is a moving pass (P16: M3(a)-2 reads its time)
+                moving = [*moving, *(p for p in moved if not any(p is m for m in moving))]
                 if moved and not keyed:
                     # no pass before the one that moved it: the caller is read as absent up to that pass
                     up = replace(up, window=(start, moved[0].first))
@@ -7542,9 +8462,39 @@ class Rerun:
         outcomes = sorted({o for a in up.arms for o in a.outcomes})
         arms = [Arm(line, outcomes, self._call_guards(rel, line)) for line in c.lines]
         blocked = self._which_way(fn, rel, func, keyed, arms)
+        if self._caller_handed_none(c, up, fn, keyed, blocked, to_hand, asking, holes):
+            return None
         self.need(T.Said("caller-called-mover-not-found", {"caller": func, "line": blocked.exit_line, "mover": mover}),
                   blocked.exit_line not in c.lines, "K55")
         return blocked
+
+    def _caller_handed_none(self, c: Caller, up: Callers, fn: R.Function, keyed: list, blocked: Blocked, to_hand: list[str],
+                     asking: W.Asking, holes: dict) -> bool:
+        """I-2 (out/gm/qk-design.md's bundle I second half, tmaeno's OK 2026-11-17 20:3x), one rule for U2 whatever the
+        window's end (a late value's move, a stuck one's as_of): where every pass of the caller *c* on the row in the
+        window had each of its calls into the mover hand a list without the key's element (D-4, ``Blocked.unhanded``),
+        no pass of it handed the mover the row there -- where every pass of it on the row is read: the window searched
+        whole, every log of it asked, and a pass handing the key's element printing a record of it (the rows every way
+        to the append prints begin with the element's key, :func:`which_ran.handing_rows`).  An END and True; False,
+        said why, where a premise does not hold (S3 reads on)."""
+        if not keyed or len(blocked.unhanded) != len(keyed) or not all(blocked.unhanded):
+            return False
+        func = c.owner.split("::")[-1]
+        rows = handing_rows(fn, c.lines)
+        premises = {"window": self._searched_whole(to_hand, asking, asking, [], holes, None),
+                    "logs": every_log_asked(c.owner, c.lines, to_hand),
+                    "prints": {"held": bool(rows), "why": T.Said("a-handing-prints-the-element", {"rows": rows, "lines": c.lines})
+                               if rows else T.Said("a-handing-prints-no-element", {"lines": c.lines})}}
+        failing = [p["why"] for p in premises.values() if not p["held"]]
+        if failing:
+            self.say(f"every pass of {func} on the row handed {up.mover.split('::')[-1]} no element of the key's turn (D-4), "
+                     f"but not every pass of it on the row is read: {'; '.join(T.text(w) for w in failing)}")
+            return False
+        self.end(T.Said("no-pass-of-the-caller-handed-the-row", {
+            "caller": func, "lines": c.lines, "mover": up.mover.split("::")[-1], "n": len(keyed),
+            "start": up.after or up.window[0], "end": up.window[1], "why": list(dict.fromkeys(blocked.unhanded)),
+            "after": up.left or "", "premises": [p["why"] for p in premises.values()]}))
+        return True
 
     def _call_tied(self, c: Caller, up: Callers) -> bool:
         """Q1 part 2 (call-tied runs; out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06; P22,
@@ -7574,15 +8524,23 @@ class Rerun:
         mover = _bare(up.mover)
         # each callee that prints the key: the lines of the caller's calls reaching it, the map's name, its logs
         printing: dict[str, tuple[set[int], str, set[str]]] = {}
+        # E-1 (W8): a callee whose runs are marked by a column that references the key's class's identity, with that
+        # column and the foreign keys it goes through -- feed_contents_to_tasks' insertFilesForDataset_JEDI
+        referenced: dict[str, list[str]] = {}
+        cls = up.subject.partition(".")[0]
         for o, (lines, _) in reached.items():
             bare = _bare(o)
             try:
                 found = R._prints_of(o)
             except LookupError:
                 continue
-            if found is None or bare in printing or not (bare == mover or prints_key(o, (), columns)
-                                                          or key_marks(o, 0, up.subject.partition(".")[0], up.key)):
+            if found is None or bare in printing:
                 continue
+            if not (bare == mover or prints_key(o, (), columns) or key_marks(o, 0, cls, up.key)):
+                marks, refs = ref_marks(o, 0, cls, up.key)
+                if not marks:
+                    continue
+                referenced[bare] = refs
             printing[bare] = (lines, o, {f for st in found.statements for f in st.log_files})
         files = {f for _, _, fs in printing.values() for f in fs}
         to_hand = self.logs.names(sorted(files))
@@ -7609,7 +8567,7 @@ class Rerun:
                 if m is None:
                     continue
                 for bare, (lines, o, fs) in printing.items():
-                    if bare.rpartition("::")[2] != m[1] or name not in fs:
+                    if bare.rpartition("::")[2].rpartition(".")[2] != m[1] or name not in fs:
                         continue
                     # a mark's run glues every call of it: its records of the key in the window, cut where they stop
                     # for a minute, each a call
@@ -7635,7 +8593,11 @@ class Rerun:
         def callee_premises(groups: list[list]) -> list[T.Said]:
             return [T.Said("a-callee-run-is-the-caller-s", {
                 "caller": func, "callee": o.rpartition("::")[2].rpartition(".")[2], "n": _others_reaching(o, mine)})
-                for o in sorted({q[5] for g in groups for q in g if q[3] != mover})]
+                for o in sorted({q[5] for g in groups for q in g if q[3] != mover})] + [
+                T.Said("a-callee-marked-by-a-reference", {
+                    "callee": b.rpartition("::")[2].rpartition(".")[2], "attr": referenced[b][0], "cls": cls,
+                    "keys": referenced[b][1:]})
+                for b in sorted({q[3] for g in groups for q in g if q[3] in referenced})]
 
         premises = callee_premises(grouped)
 
@@ -7850,7 +8812,8 @@ class Rerun:
         outer = [e.split(" -> ")[0] for e in up.entries if " -> " in e and _site(e.split(" -> ")[1]) in sites]
         if c.hop == 1 and up.up is None and outer:
             self.say(f"up to {func}'s callers: {outer}")
-            return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner)
+            return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner,
+                           after=up.after, left=up.left)
         if moving and up.before is not None and self._agent_cycles(c, up, moving, absent=True):
             return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
@@ -7907,7 +8870,14 @@ class Rerun:
         nothing): prepareTasksToBeFinished_JEDI's 3768 ``got jediTaskID=... finished for early avalanche``.  For it a
         fall (``fall@<line>``, the map's part B 5197de0: an ``if`` whose other way ends the row's turn handing nothing on)
         is no exit: a print past it is printed for a row handed on -- read as an exit, sqlEA's falls at 3755 and 3764
-        hid its 3766 on pin d, and MT-scouting-late lost which statement took the row (measure bD to bE)."""
+        hid its 3766 on pin d, and MT-scouting-late lost which statement took the row (measure bD to bE).
+
+        P16 (the map's HOA and RL, tmaeno's OK 2026-11-18 00:26): a later loop the map reads as taking every row one by
+        one (``RowLoop.each_row``: getTasksToBeFinished_JEDI's over ``taskStatList``, the copy of its rows) is read as
+        the first is, with the exits in it before the print; and a print after the first loop of every element of a
+        list it puts each row into (``ListPrint``: copyArchive main's 885 ``str(jobs[iJob:iJob + nJob])`` in the
+        slicing ``while``, 864 ``str(jobs)``), its hole holding the list naming the key, is printed for every row the
+        pass selects, by the map's reading of every way on from the loop."""
         handled = list(getattr(st, "rows_handled", None) or [])
         if len(handled) != 2:
             return None
@@ -7917,23 +8887,70 @@ class Rerun:
             fn = R.function(rel, name, [handled[0]])
         except (LookupError, ValueError, SyntaxError):
             return None
-        loop = next((n for n in ast.walk(fn.node) if isinstance(n, ast.For | ast.AsyncFor) and n.lineno == handled[0]), None)
+
+        def for_at(line: int) -> ast.For | ast.AsyncFor | None:
+            return next((n for n in ast.walk(fn.node) if isinstance(n, ast.For | ast.AsyncFor) and n.lineno == line), None)
+
+        loop = for_at(handled[0])
         found = R._prints_of(owner, [handled[0]])
         if loop is None or found is None:
             return None
+        site = self._read_site_of(st)
+        later = [(x, rl.lines[0]) for rl in getattr(site, "row_loops", None) or []
+                 if rl.each_row and rl.lines and rl.lines[0] != handled[0] and (x := for_at(rl.lines[0])) is not None]
+        listed = {lp.line: set(lp.holes) for lp in getattr(site, "list_prints", None) or []}
         exits = [e.line for e in getattr(st, "exits", None) or [] if not (under_ifs and getattr(e, "kind", "") == "fall")]
+
+        def names_key(pst, holes: set[str] | None = None) -> bool:
+            return any(keys & set(h.columns or []) for r in pst.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])]
+                       if holes is None or h.expression in holes)
+
+        def in_body(stmt, around) -> bool:
+            body = [n for s in around.body for n in ast.walk(s)] if under_ifs else around.body
+            return any(stmt is s for s in body) and not (
+                under_ifs and any(isinstance(a, R.LOOPS) and a is not around for a in pathcond.ancestors(stmt)
+                                  if any(a is n for n in ast.walk(around))))
+
         for pst in getattr(found, "statements", None) or []:
-            if not handled[0] < pst.line <= handled[1] or any(x <= pst.line for x in exits):
+            if pst.line in listed:
+                if names_key(pst, listed[pst.line]):
+                    return int(pst.line)
                 continue
-            if not any(keys & set(h.columns or []) for r in pst.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])]):
+            if not handled[0] < pst.line <= handled[1] or not names_key(pst):
                 continue
             stmt = R.statement_at(fn.node, pst.line)
-            body = [n for s in loop.body for n in ast.walk(s)] if under_ifs else loop.body
-            if stmt is not None and any(stmt is s for s in body) and not (
-                    under_ifs and any(isinstance(a, R.LOOPS) and a is not loop for a in pathcond.ancestors(stmt)
-                                      if any(a is n for n in ast.walk(loop)))):
+            if stmt is None:
+                continue
+            if not any(x <= pst.line for x in exits) and in_body(stmt, loop):
+                return int(pst.line)
+            if any(start < pst.line <= (x.end_lineno or start) and not any(start <= e <= pst.line for e in exits)
+                   and in_body(stmt, x) for x, start in later):
                 return int(pst.line)
         return None
+
+    def _read_site_of(self, st):
+        """The map's read site of the statement reading *st* (``ReadSiteNode`` by its owner and line); None where the
+        map has none."""
+        owner, line = getattr(st, "owner", ""), getattr(st, "line", 0)
+        return next((r for r in getattr(mapdump.fragment(), "read_sites", None) or []
+                     if r.owner == owner and r.anchor.line_start == line), None)
+
+    def _together_lines(self, owner: str, a: int, b: int) -> bool:
+        """Whether one turn of *owner* on a row can run its statements at lines *a* and *b* (the map's
+        ``flow.together``, the loops around both read as going round once: the row's turn): ``stay_value.tied``'s
+        statement tie (W9).  reactivatePendingTasks_JEDI's loop over its tasks runs 4723 for one task and 4728 for
+        another in one call, never both for one.  True where either statement is not read, as the tie stood."""
+        rel, _, name = _bare(owner).partition("::")
+        try:
+            fn = R.function(rel, name, [a, b])
+        except (LookupError, ValueError, SyntaxError):
+            return True
+        sa, sb = R.statement_at(fn.node, a), R.statement_at(fn.node, b)
+        if sa is None or sb is None:
+            return True
+        around = {id(x) for x in pathcond.ancestors(sb)}
+        once = [x for x in pathcond.ancestors(sa) if isinstance(x, R.LOOPS) and id(x) in around]
+        return flow.together(sa, sb, once=once)
 
     def _took_by(self, q: Missed) -> TookBy | None:
         """Bundle A, A-5 (P25, out/gm/qk-design.md, tmaeno's OK 2026-11-16): which of the mover's selecting statements
@@ -7954,7 +8971,7 @@ class Rerun:
             fn = R.function(rel, name, [st.line for st in own])
         except (LookupError, ValueError, SyntaxError):
             return None
-        parts, _ = R.passes(fn, cast(Any, q.run), self.mode)
+        parts, _ = cut_passes(fn, cast(Any, q.run), self.mode)
         begun = [p for p in parts if p.records and W.when(p.records[0].stamp) <= q.moved + datetime.timedelta(seconds=1)]
         if not begun:
             return None
@@ -8933,7 +9950,10 @@ class Rerun:
         lo, hi = fn.node.lineno, fn.node.end_lineno or fn.node.lineno
         readings: dict[str, set] = {}
         for g in found:
-            readings.setdefault(g.name, set()).add(_held_reading(g, rel, lo, hi))
+            reading = _held_reading(g, rel, lo, hi)
+            if reading is None and (on_way := self._constant_printed_way(fn, run, g, rel, lo, hi)) is not None:
+                reading = ("way", *on_way)
+            readings.setdefault(g.name, set()).add(reading)
         said = []
         for name, got in sorted(readings.items()):
             if len(got) != 1 or None in got or env.knows(name):
@@ -8941,6 +9961,9 @@ class Rerun:
             kind, *what = next(iter(got))
             if kind == "constant":
                 value, where = what[0], f"the constant at {what[1]}"
+            elif kind == "way":
+                # F-2: the binding the printed way passed last before the test, in the key's turn
+                value, where = what[0], f"the constant at {what[1]}, which the way to {what[2]}'s record passed last"
             else:
                 read = self._callee_print(run, *what)
                 if read is None:
@@ -8956,6 +9979,48 @@ class Rerun:
             else:
                 said.append(f"{name} = {value!r} ({where})")
         return said
+
+    def _constant_printed_way(self, fn: R.Function, run, g, rel: str, lo: int, hi: int) -> tuple[Any, int, int] | None:
+        """Bundle F, F-2: where the map's GuardFrom *g* reads its name back to more than one literal, the one the pass
+        *run* took to the test in the key's turn (:func:`which_ran.constant_on_way`), read off its rows whose records
+        there hold the key.  None where a way changes the object in place in the function, a source is no literal, or
+        the printed rows do not say."""
+        sources = list(getattr(g, "sources", None) or [])
+        if len(sources) < 2 or any(s.kind != "constant" for s in sources) or getattr(fn, "node", None) is None:
+            return None
+        for s in sources:
+            for c in getattr(s, "changes", None) or []:
+                crel, _, cline = str(c.at).rpartition(":")
+                if crel == rel and cline.isdigit() and lo <= int(cline) <= hi:
+                    return None
+        try:
+            bindings = {int(s.line): ast.literal_eval(s.name) for s in sources}
+        except (ValueError, SyntaxError, TypeError):
+            return None
+        if len({repr(v) for v in bindings.values()}) < 2 or not all(_hashable(v) for v in bindings.values()):
+            return None
+        lines = self._key_rows(fn, run)
+        return constant_on_way(fn, lines, int(g.test_line), bindings) if lines else None
+
+    def _key_rows(self, fn: R.Function, run, subject: str | None = None) -> list[int]:
+        """The lines of *fn*'s rows with a record in *run* whose hole of the row's key column holds the question's key
+        (the check :meth:`_took_by` makes of a selection's print)."""
+        try:
+            hits = R.seen(fn, run, self.mode).hits
+        except (AttributeError, TypeError):
+            return []
+        keys = self._key_columns(subject or self.args.subject, self.args.key)
+        out = []
+        for line, found in hits.items():
+            stmt = R.statement_at(fn.node, line)
+            row = fn.row_at(stmt) if stmt is not None else None
+            if row is None or row.line != line:
+                continue
+            exprs = {h.expression for m in row.map_rows for h in m.holes or [] if keys & set(h.columns or [])}
+            if any(_hole_holds(row, run.records[i], SimpleNamespace(part=MUST_PART_MESSAGE, expression=e, bind=""),
+                               self.args.key) for i, _, _ in found for e in exprs):
+                out.append(line)
+        return sorted(out)
 
     def _callee_print(self, run, at: str, statement: str, hole: int, expression: str) -> tuple[Any, str] | None:
         """``(value, where)``: what the callee's print at *statement* holds in its hole *expression*, its one record
@@ -8992,7 +10057,7 @@ class Rerun:
             for log in logs.values() if not unanswered else ():
                 if run.machine in log.without:
                     continue
-                for r in runs_for(log, self.args.key):
+                for r in runs_for(log, self.args.key, self._other_of(self.args.key, log)):
                     if not of_mover(r, callee) or r.machine != run.machine:
                         continue
                     for i, _, _ in R.seen(cfn, r, self.mode).hits.get(row.line, ()):
@@ -9029,21 +10094,21 @@ class Rerun:
             keeps, so = self._keeps_said(fn, list(q.left_by), q.arms)
             by_way = Counter(x for x in left_ways if x is not None)
             if not q.left_by:
-                self.say(f"{fn.name}: every pass took none of its candidates, so no exit's path settles a guard")
+                self.say(f"{fn.shown}: every pass took none of its candidates, so no exit's path settles a guard")
             elif not by_way:
-                self.say(f"{fn.name}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
+                self.say(f"{fn.shown}: every pass ran none of its arms, so no exit's path settles a guard; a pass may have left "
                          f"by {list(q.left_by)} {keeps}{so}")
             else:
                 went = "; ".join(f"{k} pass(es) left by {x}, reached when {path_of(x)}" for x, k in sorted(by_way.items()))
                 rest = len(left_ways) - sum(by_way.values())
-                self.say(f"{fn.name}: every pass ran none of its arms: {went}"
+                self.say(f"{fn.shown}: every pass ran none of its arms: {went}"
                          + (f"; {rest} may have left by one of the others or ran on past them" if rest else "")
                          + f"; of the exits {list(q.left_by)} {keeps}{so}")
         else:
             path = path_of(q.exit_line)
             paths = [path] * len(q.passes)
             keeps, _ = self._keeps_said(fn, [q.exit_line], q.arms)
-            self.say(f"{fn.name}:{q.exit_line} is reached when {path}"
+            self.say(f"{fn.shown}:{q.exit_line} is reached when {path}"
                      + (f" {keeps}" if keeps.startswith("(the map's") else ""))
         read = {a.line: arm_guards(fn.node, a) for a in q.arms}
         # an arm in an except handler is kept off where every pass's rows show its try raised nothing: no guard to read
@@ -9061,6 +10126,14 @@ class Rerun:
         for n, (run, env) in enumerate(zip(q.passes, q.envs, strict=True), 1):
             for line in self._held_printed(fn, run, env, guarded, tested):
                 self.say(f"  pass {n}: {line}")
+            # D-3 (P50, bundle D): what the rows every way to a guarded arm prints before it printed in the pass, put as
+            # the values its tests read (``printed_before``): FinisherThr's 727 prints the Limit and End 728 compares
+            if run is not None:
+                sn = R.claim([R.seen(fn, run, self.mode)])[0]
+                for a in guarded:
+                    stmt = R.statement_at(fn.node, a.line)
+                    if stmt is not None:
+                        printed_before(fn, sn, stmt, R.must_rows(fn.node, stmt)[0], env)
         per_pass = []
         for run, env, path in zip(q.passes, q.envs, paths, strict=True):
             fixed: dict[str, bool] = {}
@@ -9103,7 +10176,7 @@ class Rerun:
         if not guarded:
             # kept off by no guard to follow: why nothing raised has no cause to walk, so the branch did not do it
             raise Excluded(T.at(self.hop, T.Said("every-arm-runs-only-in-an-except", {
-                "fn_name": fn.name, "handlers": sorted({h for h, _ in quiet.values()}),
+                "fn_name": fn.shown, "handlers": sorted({h for h, _ in quiet.values()}),
                 "rows": sorted({r for _, rows in quiet.values() for r in rows})})))
         fewest = min(len(v) for v in blocking.values())
         nearest = [a for a in guarded if len(blocking[a.line]) == fewest]
@@ -9151,7 +10224,7 @@ class Rerun:
         observed in every pass: the mover ran and wrote it again, an END (Fr2's updateJobStatus: "old=running
         new=running", the pilot's reports).  Anything else stops, saying what is not read."""
         fn = q.fn
-        self.say(f"{fn.name}:{arm.line} is an arm that writes {arm.outcomes}: every pass ({len(q.passes)}) went through it")
+        self.say(f"{fn.shown}:{arm.line} is an arm that writes {arm.outcomes}: every pass ({len(q.passes)}) went through it")
         names = {o[len("runtime("):-1] for o in arm.outcomes if o.startswith("runtime(") and o.endswith(")")}
         name = self.need(T.Said("what-arm-wrote-yet-the-value-stayed", {"arm_line": arm.line, "observed": self.args.observed, "arm_outcomes": arm.outcomes}), names.pop() if len(names) == 1 and len(arm.outcomes) == 1 else None)
         spans = lines_after(fn.node, R.statement_at(fn.node, arm.line), name)
@@ -9166,7 +10239,7 @@ class Rerun:
         self.need(T.Said("the-value-of-arm-wrote-in-every", {"name": name, "arm_line": arm.line, "name_2": name}), all(len(v) == 1 for v in wrote))
         values = sorted({v[0] for v in wrote})
         self.need(T.Said("arm-wrote-in-the-passes-not-the", {"arm_line": arm.line, "values": values, "observed": self.args.observed}), values == [self.args.observed])
-        self.end(T.Said("ran-in-every-pass-and-wrote-the", {"fn_name": fn.name, "arm_line": arm.line, "n_q_passes": len(q.passes), "name": name, "observed": self.args.observed}))
+        self.end(T.Said("ran-in-every-pass-and-wrote-the", {"fn_name": fn.shown, "arm_line": arm.line, "n_q_passes": len(q.passes), "name": name, "observed": self.args.observed}))
         return None
 
     # ------------------------------------------------------------ Input: where the guard's name was bound
@@ -9182,7 +10255,7 @@ class Rerun:
         self.say(f"{q.guard!r} at {q.line} reads {names} (unknown from the passes)")
         name = self.need(T.Said("one-name-the-guard-reads"), names[0] if len(names) == 1 else None)
         steps = A.walk(fn, q.line)
-        self.say(f"walk from {fn.name}:{q.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
+        self.say(f"walk from {fn.shown}:{q.line}: asked by question" + (f"; {steps.note}" if steps.note else ""))
         takens = [E.taken(steps, name, env, owner=fn.owner) for env in q.envs]
         t = takens[0]
         for step, false in t.dropped:
@@ -9221,7 +10294,7 @@ class Rerun:
                                  for k, source in list(view.used.items()))
                 self.say(f"  pass {n}: {text} is {value!r}: {read}")
         self.end(T.Said("false-on-the-values-read", {
-            "fn_name": fn.name, "line": q.line, "n": len(q.passes), "parts": deciding,
+            "fn_name": fn.shown, "line": q.line, "n": len(q.passes), "parts": deciding,
             "whatever": T.Said("whatever-they-held", {"unread": unread}) if unread else ""}))
 
     # ------------------------------------------------------------ Rows: what the call returned
@@ -9486,7 +10559,8 @@ class Rerun:
         # every other mover that ran in the stay goes on alone beside it: why its passes did not move the value (M3)
         ran = list(self._late_ran)
         return Fork([own, *ran], [T.Said("mover-that-moved-it-label", {"owner": q.mover}),
-                                  *(T.Said("mover-label", {"owner": p.owner}) for p in ran)])
+                                  *(T.Said("mover-earlier-takes-label" if p.owner == q.mover else "mover-label",
+                                           {"owner": p.owner}) for p in ran)])
 
     def _why_moved_only_then(self, q: Missed, ordered: list):
         """L2's question of the mover that moved the value on: why only then -- its passes before (judgement 4), its
@@ -9514,8 +10588,10 @@ class Rerun:
             return []
         at, words, header = self._reading_moment(q.subject, as_of)
         asked = f"{q.subject}={q.observed}"
+        rows = [s for s in self.data.get("statuslog", {}).get("states", []) if s["status"] == q.observed]
         mq = Missed(q.subject, q.observed, "", at, at, [rs for rs in follow.reader_statements if asked in rs.selects], "", None,
-                    end=words, start=words, at_end=True, amounts=W.stuck(self.data.get("statuslog", {}), q.observed))
+                    end=words, start=words, at_end=True, amounts=W.stuck(self.data.get("statuslog", {}), q.observed),
+                    began=_when(str(rows[-1].get("time_extended") or rows[-1]["time"])) if rows else None)
         paths = paths_of(follow, writers, q.subject, q.observed)
         self.say(header)
         out = []
@@ -9747,6 +10823,13 @@ class Rerun:
             if if_spans and assumed:
                 held = T.Said("held-for-the-row-if", {"spans": _spans_words(if_spans, (q.since, q.moved)),
                                                       "premises": self._held_premises(assumed, {}, f"{q.moved}")})
+            else:
+                # F-1: its selection took the row in a pass before, which did not move it: that pass's way is read
+                takes, earlier = self._earlier_takes(q)
+                if takes:
+                    held = T.Said("held-at-times-not-known-taken-before" if earlier
+                                  else "held-at-times-not-known-taken-before-unread", {"takes": takes})
+                self._late_ran = (*self._late_ran, *earlier)
         said = T.Said("why-took-it-only-at-and-it", {"name": name, "q_moved": q.moved, "where": where, "held": held})
         entries = _entries_of(q.writers, q.mover)
         since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{q.moved:%Y-%m-%d %H:%M:%S}"
@@ -9771,6 +10854,206 @@ class Rerun:
             return then
         self.need(said, None)
         return None
+
+    def _earlier_takes(self, q: Missed) -> tuple[list[T.Said], list[Passes]]:
+        """Bundle F, F-1 (out/gm/qk-design.md, bundle F, tmaeno's OK 2026-11-17 15:2x; P25 (ii)): where none of the
+        mover's selecting statements is read as holding for the row in the stay, its passes before the one that moved
+        it on whose selection's loop printed the row's key (:meth:`_row_key_print`, under the loop's ifs too) -- each
+        took the row then and did not move it.  They are read from the key's records alone, as U2 reads a caller's
+        callees (the key in the prints' logs over the stay to the moving pass, no marks; a pass printing no key is not
+        found, and nothing is said of one).  Each take's pass is then read from the mover's marks' heads on its
+        machine (:meth:`_take_pass`, H-1) and goes to S2 as judgement 4's do: which way it went.  MT-scouting-late's
+        sqlEA (3739) took the row at 09:24:32.303 on aipanda085, printing 3766's ``... finished for reset in
+        scouting``, and that pass wrote scout data only.  ``(what is said of each take, the passes for S2)``; ``([],
+        [])`` where none is read, the asks of a log not in the records kept."""
+        own = [st for st in q.statements if st.owner == q.mover]
+        if not own or q.run is None or not self.logs.needs_window:
+            return [], []
+        rel, _, name = _bare(q.mover).partition("::")
+        try:
+            fn = R.function(rel, name, [st.line for st in own])
+        except (LookupError, ValueError, SyntaxError):
+            return [], []
+        parts, _ = cut_passes(fn, cast(Any, q.run), self.mode)
+        begun = [p for p in parts if p.records and W.when(p.records[0].stamp) <= q.moved + datetime.timedelta(seconds=1)]
+        start = W.when(begun[-1].records[0].stamp) if begun else q.moved
+        prints = {line: st for st in own if (line := self._row_key_print(q.mover, st, q.subject, under_ifs=True)) is not None}
+        found = R._prints_of(q.mover, sorted(prints)) if prints else None
+        files = sorted({f for pst in getattr(found, "statements", None) or [] if pst.line in prints for f in pst.log_files})
+        to_hand = self.logs.names(files)
+        arms = list(arms_of(q.writers, q.mover, q.subject, q.observed).values())
+        if not to_hand or not arms or start <= q.since:
+            return [], []
+        bare = name.rpartition(".")[2]
+        since, before = f"{q.since:%Y-%m-%d %H:%M:%S}", f"{start:%Y-%m-%d %H:%M:%S}"
+        asking = W.Asking((since, before), None, T.Said("for-the-key-before-the-moving-pass", {
+            "func": bare, "since": since, "before": before}))
+        runs, missed, _ = self._ask(self.args.key, to_hand, asking, {}, quiet=True)
+        if missed:
+            self._keep_unanswered(missed)
+            self.say(f"{bare}: {len({ask.key for ask, _ in missed})} ask(s) of its logs from the stay's start to its "
+                     "moving pass are not in the records: its passes before are not read")
+            return [], []
+        takes: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        uncut: set[tuple[str, str]] = set()
+        tokens: dict[tuple[str, str], str] = {}
+        for log_name in to_hand:
+            for run in runs.get(log_name, []):
+                if not of_mover(run, q.mover):
+                    continue
+                for p in cut_passes(fn, run, self.mode)[0]:
+                    if not p.records or W.when(p.records[0].stamp) >= start:
+                        continue
+                    lines = sorted(set(self._key_rows(fn, p, q.subject)) & set(prints))
+                    if lines and W.when(p.records[-1].stamp) >= start:
+                        # a run of the key's records alone that holds no record of the entry row is not cut into
+                        # passes (MT-scouting-late's on aipanda085, 09:24:32 .. 18:29:47): the take is the print's own
+                        # record before the moving pass, and which way its pass went is not read
+                        hits = R.seen(fn, p, self.mode).hits
+                        before_start = {line: min(st) for line in lines
+                                        if (st := [p.records[i].stamp for i, _, _ in hits.get(line, ())
+                                                   if W.when(p.records[i].stamp) < start])}
+                        if not before_start:
+                            continue
+                        at = min(before_start.values())
+                        lines = sorted(before_start)
+                        uncut.add((at, run.machine))
+                    else:
+                        at = p.records[0].stamp
+                    for line in lines:
+                        takes.setdefault((at, run.machine), []).append((prints[line].line, line))
+                    tokens.setdefault((at, run.machine), getattr(run, "token", "") or "")
+        by_value = self._row_value_takes(q, fn, start, [W.when(at) for at, _ in takes])
+        if not takes:
+            return by_value, []
+        said, branches, result = [], [], []
+        for (at, machine), ways in sorted(takes.items()):
+            how, passes, where = self._take_pass(q, at, machine, start, arms, since, before, tokens.get((at, machine), ""))
+            words = {"func": bare, "at": at[:23], "machine": machine.split(".")[0],
+                     "lines": [f"@{st} (printing the row at {line})" for st, line in sorted(set(ways))], **where}
+            said.append(T.Said({"read": "took-it-before", "asked": "took-it-before-heads-asked",
+                                "heads-uncut": "took-it-before-heads-uncut"}.get(how, "took-it-before-uncut"), words))
+            branches += [passes] if passes is not None else []
+            result.append({"at": at, "machine": machine, "statements": sorted({st for st, _ in ways}),
+                           "cut": (at, machine) not in uncut, "pass": how})
+        self.result["earlier_takes"] = result
+        return said + by_value, branches
+
+    def _take_pass(self, q: Missed, at: str, machine: str, start: datetime.datetime, arms: list, since: str,
+                   before: str, token: str = "") -> tuple[str, Passes | None, dict]:
+        """Bundle H, H-1 (F-1b, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): the pass of a take F-1
+        found, asked by the mover's marks' heads on its machine, ``windows.SLACK`` each side of the take (F-4's ask),
+        so the records hold its entry row and its prints without the key: the key's records alone hold neither
+        (MT-scouting-late's sqlEA pass at 09:24:32 on aipanda085, its 3641 'start' not among them).  It goes to S2 as
+        judgement 4's passes do where S2's own cut (``passes_of``) holds a pass around the take ending before the moving
+        pass; else nothing is handed, and why is said.  The run's own mark (*token*, the key's records hold it) is
+        asked where known: the heads fill their holes with the row's values, and the agent's call may not
+        (prepareTasksToBeFinished_JEDI's runs are marked ``vo=None``, the task's row holding 'atlas').  ``(how,
+        passes, where)``: ``read``, ``asked`` (the asks kept), ``heads-uncut``, or ``no-heads``."""
+        rel, _, func = _bare(q.mover).partition("::")
+        lines = sorted({a.line for a in arms} | {st.line for st in q.statements if st.owner == q.mover})
+        heads = (token,) if token else self._row_mark_heads(q.mover, lines)[0]
+        names = self.logs.names(self.files_of(q.mover, [], lines))
+        t = W.when(at)
+        lo, hi = W._down(max(q.since, t - W.SLACK)), W._down(min(start, t + W.SLACK))
+        where = {"first": lo, "last": hi}
+        if not heads or not names:
+            return "no-heads", None, where
+        owners = owners_of([q.mover])
+        asking = W.Asking((lo, hi), machine, T.Said("the-take-s-pass-by-heads", {
+            "func": func.rpartition(".")[2], "at": at[:23], "machine": machine.split(".")[0], "first": lo, "last": hi}), heads)
+        runs, missed, _ = self._ask(self.args.key, names, asking, owners, quiet=True)
+        if missed:
+            self._keep_unanswered(missed)
+            return "asked", None, {**where, "n": len({ask.key for ask, _ in missed})}
+        try:
+            fn = R.function(rel, func, [a.line for a in arms])
+        except (LookupError, ValueError, SyntaxError):
+            return "heads-uncut", None, where
+        for name in names:
+            for run in runs.get(name, []):
+                if not of_mover(run, q.mover):
+                    continue
+                parts, how = passes_of(fn, run, self.mode)
+                if not how.startswith("cut at"):
+                    continue
+                if any(p.records and W.when(p.records[0].stamp) <= t <= W.when(p.records[-1].stamp) < start for p in parts):
+                    return "read", Passes(q.mover, names, arms, self.args.key, asking, owners, since=since, before=before,
+                                          subject=q.subject, entries=_entries_of(q.writers, q.mover),
+                                          stay=(since, before)), where
+        return "heads-uncut", None, where
+
+    def _row_value_takes(self, q: Missed, fn: R.Function, start: datetime.datetime,
+                         read: list[datetime.datetime]) -> list[T.Said]:
+        """Bundle F, F-4 (out/gm/qk-design.md, bundle F widened, tmaeno's OK 2026-11-17 15:2x; P25 (iii)): a time
+        column the mover's selection terms read -- a timeline already built for the question, no new one -- whose row
+        value only the mover's own arms wrote (F-3's narrowing), inside the stay before its moving pass: its pass then
+        took the row.  One the key's records hold a pass of at that second (*read*, F-1's) is said there.  Otherwise
+        its passes around the write are read by its marks' heads on every machine its log is on, ``windows.SLACK``
+        each side, as L4 reads them; a log not in the records keeps its asks.  NT-scouting-late's assessmentTime,
+        19:53:41, by prepareTasksToBeFinished_JEDI:3744 (sqlEA's lock of the rows it took): that pass printed no key.
+        What is said of each."""
+        own = SV._name(q.mover, 0).rpartition(":")[0]
+        rel, _, func = _bare(q.mover).partition("::")
+        bare = func.rpartition(".")[2]
+        out: list[T.Said] = []
+        cache: dict = self.__dict__.get("_timelines", {})
+        for (col, subject, observed, since, moved, nulls), tl in sorted(cache.items(), key=lambda x: str(x[0])):
+            if (nulls or tl is None or not tl.row_value
+                    or (subject, observed, since, moved) != (q.subject, q.observed, q.since, q.moved)):
+                continue
+            at, arms = tl.row_value[0], tuple(tl.row_value[2])
+            # a row value of a DATE column names its second: the write fell in [at, at + 1 s), so it is before the
+            # moving pass only where that second ended by the pass's start (MT-scouting-late's 12:47:03 was the
+            # moving pass's own write at 12:47:03.942)
+            if (not arms or any(a.rpartition(":")[0] != own for a in arms)
+                    or not (q.since < at and at + datetime.timedelta(seconds=1) <= start)):
+                continue
+            if any(abs(t - at) <= datetime.timedelta(seconds=1) for t in read):
+                continue
+            lines = sorted({int(a.rpartition(":")[2]) for a in arms})
+            # the moving run's own mark, where it is the mover's: its passes before ran under it too (the heads fill
+            # the holes with the row's values, and prepareTasksToBeFinished_JEDI's runs are marked vo=None)
+            token = getattr(q.run, "token", "") if q.run is not None and of_mover(cast(Any, q.run), q.mover) else ""
+            heads = (token,) if token else self._row_mark_heads(q.mover, lines)[0]
+            names = self.logs.names(self.files_of(q.mover, [], lines))
+            stamp = f"{at:%Y-%m-%d %H:%M:%S}"
+            where = {"func": bare, "column": col.partition(".")[2], "at": stamp, "arms": list(arms)}
+            if not heads or not names:
+                out.append(T.Said("took-it-by-the-row-value-unread", where))
+                continue
+            window = (W._down(at - W.SLACK), W._down(at + W.SLACK))
+            because = (f"which pass of {bare} wrote {col} at {stamp}, the row's value, taking the row: its mark holds no "
+                       "key, so it is asked by its mark (F-4)")
+            owners = owners_of([q.mover])
+            missed: list = []
+            passes: list = []
+            for name in names:
+                try:
+                    listed = self.logs.log(name, self.args.key, window, owners=owners)
+                except Unrecorded as e:
+                    missed += [(ask, because) for ask, _ in e.asks]
+                    continue
+                for machine in sorted(listed.machines - listed.without):
+                    try:
+                        log = self.logs.log(name, self.args.key, window, machine=machine, owners=owners, strings=heads)
+                    except Unrecorded as e:
+                        missed += [(ask, because) for ask, _ in e.asks]
+                        continue
+                    for run in runs_for(log, bare):
+                        if of_mover(run, bare):
+                            passes += [p for p in passes_of(fn, run, self.mode)[0]
+                                       if W.when(p.first) - datetime.timedelta(seconds=1) <= at <= W.when(p.last) + datetime.timedelta(seconds=1)]
+            if missed:
+                self._keep_unanswered(missed)
+                out.append(T.Said("took-it-by-the-row-value-asked", {**where, "n": len({ask.key for ask, _ in missed}),
+                                                                     "first": window[0], "last": window[1]}))
+            elif passes:
+                out += [T.Said("took-it-by-the-row-value", {**where, "machine": p.machine.split(".")[0],
+                                                            "first": p.first[:23], "last": p.last[:23]}) for p in passes]
+            else:
+                out.append(T.Said("took-it-by-the-row-value-unread", where))
+        return out
 
     def other_rows(self, q: OtherRows):
         """O1 (design H, KNOWN_ISSUES.md K77): :meth:`_hop_turn` for the mover's statements; where it does not hold,
@@ -9965,14 +11248,72 @@ class Rerun:
         """``(known, value)`` of *subject* from the rows file's ``after`` -- the asked row's columns as the rows file
         read them -- where that time is the moment read (``q.at_end``: stuck, read when the rows file was); late's
         ``after`` was read after the window and answers nothing, but for a column only the row's birth writes
-        (:meth:`_born_only`).  ``source``, ``as_of`` and ``clock`` say where and when, and are no column."""
+        (:meth:`_born_only`), or only passes whose selections return no row of the object from the window on
+        (:meth:`_written_only_before`, I-4).  ``source``, ``as_of`` and ``clock`` say where and when, and are no
+        column."""
         cls, _, attr = subject.partition(".")
         after = self._read()[1]
         if cls != q.subject.partition(".")[0] or attr in ("source", "as_of", "clock") or attr not in after:
             return False, None
-        if not q.at_end and not self._born_only(subject, q):
+        if not q.at_end and not self._born_only(subject, q) and not self._written_only_before(subject, q):
             return False, None
         return True, after[attr]
+
+    def _written_only_before(self, subject: str, q: Missed) -> list[tuple[str, str]]:
+        """I-4 (Q6b, out/gm/qk-design.md, tmaeno's OK 2026-11-17 20:3x; built on the map's KMA): ``(arm, why)`` for
+        each arm writing *subject*, a column late's ``after`` holds of the asked row, where every one of them takes the
+        row by a key drawn from selections (:meth:`_selection_false`) that return no row of the object at *q*'s start
+        nor at any statuslog row after it up to the rows file's reading: no pass of theirs took the row from then on,
+        so the value read after the move is the one it held over the window.  goal's arms (TaskRefinerBase.
+        extractCommon 276, 278) take the task by ``jediTaskID``, handed down from getTasksToRefine_JEDI's rows, whose
+        status terms the task left before 02:06:38 (NR-T-53646395-assessmentTime, getAchievedTasks_JEDI's ``goal IS NOT
+        NULL``).  Empty where an arm's selection may return the row at one of those moments, or cannot be read; a
+        column read while it is being read (a selection's own terms) is empty too."""
+        cls, _, attr = subject.partition(".")
+        after = self._read()[1]
+        if q.at_end or cls != q.subject.partition(".")[0] or attr not in after or mapdump.fragment() is None:
+            return []
+        reading: set[str] = self.__dict__.setdefault("_written_only_reading", set())
+        cache: dict[tuple[str, datetime.datetime], list[tuple[str, str]]] = self.__dict__.setdefault("_written_only_before_of", {})
+        if (subject, q.since) in cache:
+            return cache[subject, q.since]
+        if subject in reading:
+            return []
+        reading.add(subject)
+        # a reading tried, not a step: what its selections said and asked is not kept (the sentence says why it read),
+        # nor the marks of what is said once (a window, a timeline), so a step after it says them as it would have
+        said_lines: list = self.__dict__.setdefault("lines", [])
+        unanswered: list = self.__dict__.setdefault("unanswered", [])
+        lines, asks = len(said_lines), len(unanswered)
+        once = [(s, set(s)) for s in (getattr(self, "windows_said", None), self.__dict__.get("_timelines_told"))
+                if s is not None]
+        told_before = "_timelines_told" in self.__dict__
+        said: list[tuple[str, str]] = []
+        try:
+            arms = [(j.owner, b.line) for j in asyncio.run(self._writers_of(subject)) for b in j.branches]
+            states = list((self.data.get("statuslog") or {}).get("states") or [])
+            moments = [q.since, *(_when(s.get("time_extended") or s["time"])
+                                  for s in HD.rows_after(states, q.since.isoformat(" "), after.get("as_of")))]
+            for owner, line in arms:
+                # K-4b: where the selections are not read at a moment, the writes persisting the arm's object
+                whys = [self._selection_false(owner, line, subject, t) or self._persisted_false(owner, line, subject, t)
+                        for t in moments]
+                if any(w is None for w in whys):
+                    said = []
+                    break
+                said.append((SV._name(owner, line), str(whys[0])))
+        except Stop:
+            said = []
+        finally:
+            reading.discard(subject)
+            del said_lines[lines:]
+            del unanswered[asks:]
+            for marks, before in once:
+                marks.intersection_update(before)
+            if not told_before:
+                self.__dict__.pop("_timelines_told", None)
+        cache[subject, q.since] = said
+        return said
 
     def _born_only(self, subject: str, q: Missed) -> list[str]:
         """Q1 P10: the arms writing *subject*, a column late's ``after`` holds of the asked row, where every one of
@@ -10053,7 +11394,8 @@ class Rerun:
                           lambda owner, line: sites.get((owner, line)), row_tables,
                           lambda owner, b: born(b, birth_marks(owner, subject)), nulls=nulls, existed=existed,
                           status_born=lambda owner, b: born(b, birth_marks(owner, q.subject)),
-                          offset_of=lambda b: o.total_seconds() if (o := _written_offset(b)) is not None else None)
+                          offset_of=lambda b: o.total_seconds() if (o := _written_offset(b)) is not None else None,
+                          together=self._together_lines)
         if found is None:
             cache[key] = None
             return None
@@ -10062,7 +11404,7 @@ class Rerun:
             "known": found.known, "value": start if found.known else None, "starts": list(found.starts),
             "lacking": list(found.lacking), "runtime": list(found.runtime), "left": list(found.left),
             "out": [list(x) for x in found.out], "births": list(found.births),
-            "offsets": [list(x) for x in found.offsets]}
+            "offsets": [list(x) for x in found.offsets], "runtime_starts": list(found.runtime_starts)}
         return cache[key]
 
     def _timeline(self, subject: str, q: Missed, nulls: bool = False) -> TL.Timeline | None:
@@ -10077,7 +11419,11 @@ class Rerun:
         *nulls* (Q1 batch 2 part 1, out/gm/qk-design.md, tmaeno's OK 2026-11-16): *subject* is a column a selecting
         statement tests ``IS NULL``, its states read the same way (:data:`timeline.NULL`, :func:`_null_states`), the
         stay begun with the states of the column's arms tied to the arm of the value that began it (``starts``' mates);
-        an arm read as writing a value it knows only at run time is named (``premised``).  Kept as ``states``."""
+        an arm read as writing a value it knows only at run time is named (``premised``).  Kept as ``states``.  None
+        while I-4 tries a selection (:meth:`_written_only_before`): a try asks no log, so a step after it reads and says
+        the timeline as it would have."""
+        if self.__dict__.get("_written_only_reading"):
+            return None
         found = self._before(subject, q, nulls)
         if found is None or found[0].known:
             return None
@@ -10099,6 +11445,7 @@ class Rerun:
         absent: list[str] = []
         premised: set[str] = set()
         not_run: list[tuple[datetime.datetime, str, str, Any]] = []  # A-1: writes their pass's guard read false
+        confirmed: list[tuple[datetime.datetime, str, Any]] = []  # K-2 (a): reached writes read as run
         # why each open arm is: no must print names the row it writes ("unprinted"), a log of it the records lack
         # ("unasked"), or judgement 3's premises not held otherwise ("unread") -- Q1 batch 2 part 2's (ii), (i), (iii)
         open_why: dict[str, str] = self.__dict__.setdefault("_open_why", {}).setdefault((subject, nulls), {})
@@ -10122,6 +11469,16 @@ class Rerun:
                     value = _written_offset(b)
                     opening = TL.Opening(name, value, value)
                 for at, machine, where, how, bound in got:
+                    if how == TL.REACHED:
+                        # K-2 (b): a write whose key's selection takes other states than the row held then is none of
+                        # the row's (getTasksToBeFinished_JEDI's lock at 1690, the task in tobroken)
+                        if (other := self._selection_takes_other_states(j.owner, b.line, subject, at)) is not None:
+                            not_run.append((at, name, machine.split(".")[0], [T.Said("its-selection-takes-other-states", other)]))
+                            continue
+                        # K-2 (a): one whose statement's own status value the statuslog shows then ran
+                        if (by := self._statement_ran(j.owner, b.line, subject, at, q)) is not None:
+                            how = TL.RAN
+                            confirmed.append((at, name, by))
                     # a value its statement's printed bind map holds stands for the arm's own (the bind-print part)
                     read = _printed_bounds(bound[0], nulls) if bound else None
                     shown.setdefault((j.owner, at, machine, where), []).append((name, how, value if read is None else read))
@@ -10136,6 +11493,9 @@ class Rerun:
             ran = all(how == TL.RAN for _, how, _ in arms) and (len(arms) == 1 or (len(set(vals)) == 1 and vals[0] != (TL.LOW, TL.HIGH)))
             writes.append(TL.Write(at, lo, hi, TL.RAN if ran else TL.REACHED, tuple(n for n, _, _ in arms), where,
                                    machine.split(".")[0]))
+        if not nulls and (birth := self._birth_write(subject, q, before, arms_by_name, since, begun)) is not None:
+            # F-5: the row made in the window before the stay began, its birth arms writing the clock then
+            writes = sorted([*writes, birth], key=lambda w: (w.at, w.where))
 
         def start_of(kept: list[str]) -> tuple[datetime.datetime, datetime.datetime] | None:
             # the states the column's arms tied to the kept arms of the value write (*nulls*); the clock's time with
@@ -10143,7 +11503,7 @@ class Rerun:
             if not kept:
                 return None
             if not nulls:
-                shifts = [dict(before.offsets).get(s, 0.0) for s in kept]
+                shifts = [{**dict(before.offsets), **dict(before.runtime_offsets)}.get(s, 0.0) for s in kept]
                 if not any(shifts):
                     return None
                 return (begun + datetime.timedelta(seconds=min(shifts)), begun + datetime.timedelta(seconds=max(shifts)))
@@ -10156,10 +11516,16 @@ class Rerun:
         # A-3: an arm writing the status from a value known only at run time whose write the records show as the stay
         # began may have begun it, as one writing the value alone, read as writing the observed value (said)
         began_rt = self._runtime_began(q, before, begun) if before.runtime else []
-        lacking_all = [*before.lacking, *began_rt]
-        starts, lacking = bool(before.starts), bool(lacking_all)
+        # E-2 (bundle E, out/gm/qk-design.md, tmaeno's OK 2026-11-17 13:42): such an arm whose pass's column arm the map
+        # ties to it (M3(a)-1's ``runtime_starts``, A-2's tie) wrote the column as it began the stay, as a start does --
+        # updateJobStatus:240 'starting' with 238 ``modificationTime=CURRENT_DATE`` in its UPDATE at 241
+        rt_starts = [s for s in before.runtime_starts if s.partition(" with ")[0] in began_rt]
+        tied_rt = {s.partition(" with ")[0] for s in rt_starts}
+        all_starts = [*before.starts, *rt_starts]
+        lacking_all = [*before.lacking, *(r for r in began_rt if r not in tied_rt)]
+        starts, lacking = bool(all_starts), bool(lacking_all)
         a_starts, a_lacking = starts, lacking
-        kept_s = a_kept_s = list(before.starts)
+        kept_s = a_kept_s = list(all_starts)
         begun_by: tuple[str, ...] = ()
         begun_assumed: tuple[str, ...] = ()
         # P3: which kind of arm began the stay matters only where both may have
@@ -10167,7 +11533,7 @@ class Rerun:
             absent_b, unread_b = self._stay_begun_by(q, before, begun, began_rt)
 
             def left(out: set[str]) -> tuple[list[str], list[str]]:
-                return ([s for s in before.starts if s.partition(" with ")[0] not in out],
+                return ([s for s in all_starts if s.partition(" with ")[0] not in out],
                         [s for s in lacking_all if s not in out])
 
             if absent_b:
@@ -10182,7 +11548,9 @@ class Rerun:
                 begun_assumed = tuple(sorted(unread_b))
             elif absent_b:
                 a_starts, a_lacking = starts, lacking
-        row_value = None if nulls else self._row_value_write(subject, q)
+        row_value = None if nulls else self._row_value_write(subject, q, writes)
+        if row_value is not None:
+            row_value = _left_writers(row_value, before, begun)
         if row_value is not None and row_value[0] <= begun:
             # none wrote it from the row's value's write on: no arm is open in the stay (NT-pending-late's
             # assessmentTime, last written on 11-14 17:06:01 by getAchievedTasks_JEDI:3283 or its 3744)
@@ -10193,7 +11561,7 @@ class Rerun:
                          tuple(sorted({(x[0], x[1], x[2]): x for x in not_run}.values(), key=lambda x: (x[0], x[1]))),
                          tuple(began_rt),
                          tuple(r for r in _runtime_apart(before) if r not in began_rt) if begun_by else (),
-                         row_value)
+                         row_value, tuple(confirmed))
         cache[ckey] = tl
 
         def said(lo: datetime.datetime, hi: datetime.datetime) -> str | None:
@@ -10208,21 +11576,60 @@ class Rerun:
             "absent": absent, "open": [o.arm for o in opens], "begun_by": list(begun_by),
             "not_run": [{"at": _iso(str(at)), "arm": arm, "machine": machine} for at, arm, machine, _ in tl.not_run],
             "begun_runtime": list(tl.begun_runtime),
+            "confirmed": [{"at": _iso(str(at)), "arm": arm, "by": by.get("by", "")} for at, arm, by in tl.confirmed],
             "runtime_unread": list(tl.runtime_unread),
             "row_value": {"at": _iso(str(tl.row_value[0])), "value": _iso(str(tl.row_value[1])), "arms": list(tl.row_value[2]),
-                          "as_of": tl.row_value[3]} if tl.row_value else None,
+                          "as_of": tl.row_value[3],
+                          **({"apart": [a for a, _ in apart]} if (apart := next(iter(tl.row_value[4:]), ())) else {}),
+                          **({"named": list(tl.row_value[5])} if len(tl.row_value) > 5 else {})}
+            if tl.row_value else None,
             "begun_assumed": list(begun_assumed), **({"first": said(*tl.first), "premised": list(tl.premised)} if nulls else {})}
         return tl
 
-    def _row_value_write(self, subject: str, q: Missed
-                         ) -> tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str] | None:
+    def _birth_write(self, subject: str, q: Missed, before: SV.Before, arms_by_name: dict, since: datetime.datetime,
+                     begun: datetime.datetime) -> TL.Write | None:
+        """Bundle F, F-5 (out/gm/qk-design.md, bundle F widened, tmaeno's OK 2026-11-17 15:2x; P1 (2)(b)): the row's
+        birth as a write of the time column *subject*, where the row was made inside the timeline's window (from the
+        stay's start less ``windows.SLACK`` to the start) and the arms M3(a)-1 puts out as births write the clock as it
+        is made -- the clock itself, or the class's creation column (``attr_time.creation_of``), itself the clock then.
+        Its time is that column's value in the rows file; ``RAN``.  MJ-assigned-late's prodDBUpdateTime: insertNewJob
+        sets it to the job's creationTime, 09:05:55, fourteen seconds before the stay; lockJobsForActivator's term
+        (NULL, or older than an hour) holds from 10:05:55.  None otherwise."""
+        cls = subject.partition(".")[0]
+        created = AT.creation_of(mapdump.fragment(), cls)
+        births = [a for a, why in before.out if why.startswith("a birth") and a in arms_by_name]
+        if not created or not births:
+            return None
+        try:
+            born = _when(str(self._row_value(f"{cls}.{created}", q)))
+        except (TypeError, ValueError):
+            return None
+        if not since <= born <= begun:
+            return None
+        clock = sorted(a for a in births if arms_by_name[a].outcome in AT.NOW
+                       or arms_by_name[a].outcome == f"passthrough({cls}.{created})")
+        if not clock:
+            return None
+        return TL.Write(born, born, born, TL.RAN, tuple(clock), f"its {created}", "")
+
+    def _row_value_write(self, subject: str, q: Missed, writes: Sequence[TL.Write] = ()) -> tuple | None:
         """Bundle A, A-4 (P24, out/gm/qk-design.md, tmaeno's OK 2026-11-16): a time column's value as the rows file
         read it (late's ``after``, read at its ``as_of``), where every arm of the column writes the clock with one
         offset (:func:`_written_offset`): its last write was at the value less that offset, and none wrote it from then
         to when the rows file read it -- a later write would hold a later time.  ``(written at, the value, the arms,
         as_of)`` where that write fell before the move; None otherwise.  NT-scouting-late's assessmentTime 2026-11-14
         19:53:41, read on 11-15: written then by prepareTasksToBeFinished_JEDI:3744 or getAchievedTasks_JEDI:3283, each
-        ``CURRENT_DATE``."""
+        ``CURRENT_DATE``.
+
+        K-1 (bundle K, out/gm/qk-design.md): where the column's arms write other values too, the last of the *writes*
+        the records show (the timeline's) by an arm writing the clock with an offset whose clock then is the value, to
+        its second (:data:`CLOCKS_APART`), ran or reached, with no write the records show as run after it: that write
+        left the value.  A later write by an arm writing the clock would hold a later time; one writing another value
+        is named as having not written the same value again (``(written at, the value, the arms, as_of, (), named)``).
+        NJ-holding-late's endTime 15:35:35, read on 11-15, was written by updateJobStatus:233 (``CURRENT_DATE``) at
+        15:35:35.751 as the job went holding; process_job_report:450 and the others writing the clock would have
+        written a later time, and updateJobStatus:67 (the pilot's endTime) and the copies of modificationTime are
+        named."""
         cls, _, attr = subject.partition(".")
         after = self._read()[1]
         if cls != q.subject.partition(".")[0] or attr not in after or not after.get("as_of"):
@@ -10237,12 +11644,91 @@ class Rerun:
         arms = [(j.owner, b) for j in self._subject_writers(subject) for b in j.branches]
         offsets = {_written_offset(b) for _, b in arms}
         offset = next(iter(offsets)) if len(offsets) == 1 else None
-        if not arms or offset is None:
+        if not arms:
             return None
-        at = value - offset
-        if at > q.moved or at > read_at:
+        if offset is not None:
+            at = value - offset
+            if at > q.moved or at > read_at:
+                return None
+            return at, value, tuple(sorted(SV._name(o, b.line) for o, b in arms)), str(after["as_of"])
+        by_name = {SV._name(o, b.line): _written_offset(b) for o, b in arms}
+        named = tuple(sorted(n for n, off in by_name.items() if off is None))
+        for w in sorted(writes, key=lambda w: w.at, reverse=True):
+            hits = tuple(n for n in w.arms if (off := by_name.get(n)) is not None
+                         and value - CLOCKS_APART <= w.at + off < value + datetime.timedelta(seconds=1) + CLOCKS_APART)
+            if hits:
+                if w.at > q.moved or w.at > read_at:
+                    return None
+                return w.at, value, hits, str(after["as_of"]), (), named
+            if w.how == TL.RAN:
+                # a write run after any that may have left the value: what it wrote is not the value read
+                return None
+        return None
+
+    def _selection_takes_other_states(self, owner: str, line: int, subject: str, at: datetime.datetime) -> dict | None:
+        """K-2 (b) (bundle K, out/gm/qk-design.md): a write of *subject* by *owner*'s arm at *line*, a print reaching it at
+        *at*, is none of the row's where the write's key comes only from selections' rows (the map's ``KeyFrom``
+        ``rows`` sources) and each selection's selects of the class's history subject lack the state the statuslog
+        holds then.  Only that state is read at that moment; the selections' other terms are not (they would be read
+        in the rows file's later values, KNOWN_ISSUES.md K17).  getTasksToBeFinished_JEDI's lock at 1690 at 03:58:05
+        takes rows of its 1644 (prepared, scouted, breaking, toabort, passed) while the task was tobroken
+        (NT-breaking-late).  The words' fields, or None."""
+        fragment = mapdump.fragment()
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = [s for s in ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+                  if _when(s.get("time_extended") or s["time"]) <= at]
+        if fragment is None or history is None or not states:
             return None
-        return at, value, tuple(sorted(SV._name(o, b.line) for o, b in arms)), str(after["as_of"])
+        writes = [kf for kf in key_froms() if _bare(kf.owner) == _bare(owner) and kf.term
+                  and line in (kf.writes.get(subject) or [])]
+        sources = [s for kf in writes for s in getattr(kf, "sources", None) or []]
+        if not sources or any(s.kind != "rows" or getattr(s, "via", None) for s in sources):
+            return None
+        sites = {rs.name: rs for rs in getattr(fragment, "read_sites", None) or []}
+        state = states[-1].get("status")
+        takes: list[str] = []
+        names: list[str] = []
+        for name in dict.fromkeys(s.name for s in sources):
+            site = sites.get(name)
+            values = [v.partition("=")[2] for v in getattr(site, "selects", None) or [] if v.partition("=")[0] == history.subject]
+            if site is None or not values or state in values:
+                return None
+            takes += [v for v in values if v not in takes]
+            names.append(name.rpartition("::")[2])
+        return {"site": ", ".join(names), "takes": takes, "state": repr(state)}
+
+    def _statement_ran(self, owner: str, line: int, subject: str, at: datetime.datetime, q: Missed) -> dict | None:
+        """K-2 (a) (bundle K, out/gm/qk-design.md): a write of *subject* by *owner*'s arm at *line*, a print reaching it at
+        *at*, ran where a status arm of the same function the map ties to it (``stay_value.tied``: ``same_pass``, or
+        the one arm of the column at the status arm's statement, one call running both) writes the value the statuslog
+        shows within a second and ``CLOCKS_APART`` of *at*: that row is the statement's run, and the column went with
+        it.  prepareTasksToBeFinished_JEDI's UPDATE at 4075 writes the status (3971 'tobroken') and lockedBy only by 3839
+        (NULL); the statuslog's tobroken row is at 03:57:57.7, the print at .600 (NT-breaking-late).  updateJobStatus's
+        241 writes endTime by 233 or 67, neither tied: a 'running' row says nothing of endTime.  Another writer of the
+        same status in that second is not told apart.  The words' fields, or None."""
+        history = PT.history_of_class(subject.partition(".")[0])
+        states = ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+        if history is None or not states or subject == history.subject:
+            return None
+        status = history.subject
+        def mine(subj: str) -> list[tuple[str, Any]]:
+            return [(j.owner, b) for j in self._subject_writers(subj) if _bare(j.owner) == _bare(owner) for b in j.branches]
+
+        columns = [c for _, c in mine(subject)]
+        kfs = key_froms()
+        near = CLOCKS_APART + datetime.timedelta(seconds=1)
+        for o, sb in mine(status):
+            value = (sb.outcome or "").strip("'\"") if isinstance(sb.outcome, str) else None
+            then = next((t for s in states if value and s.get("status") == value
+                         and abs((t := _when(s.get("time_extended") or s["time"])) - at) <= near), None)
+            if then is None or not any(c.line == line for c in SV.tied(sb, o, status, subject, columns, kfs, self._together_lines)):
+                continue
+            stmt = next((kf.statement for kf in kfs if kf.owner == o and set(kf.writes.get(status) or []) & SV._lines(sb)
+                         and line in (kf.writes.get(subject) or [])), None)
+            return {"by": SV._name(o, sb.line), "value": repr(value),
+                    "statement": f"in the same statement, {_bare(o).rpartition('::')[2]}:{stmt}" if stmt else "in the same pass",
+                    "then": f"{then:%H:%M:%S.%f}"[:12]}
+        return None
 
     def _runtime_began(self, q: Missed, before: SV.Before, begun: datetime.datetime) -> list[str]:
         """Bundle A, A-3 (out/gm/qk-design.md, tmaeno's OK 2026-11-16): the arms writing the status from a value known
@@ -10387,8 +11873,14 @@ class Rerun:
                         held = [n for n in shown if n.line == line and _hole_holds(row, record, n, key)]
                         if held:
                             # R: the statement's count print in the same run says whether the write landed
-                            landed = _landed(fn, sn, i, row.line, b)
+                            landed, counted_at = _landed(fn, sn, i, row.line, b, j.owner, j.subject)
                             if landed is False:
+                                # E-4: the run changed no row -- not a write, and read as not having written it, as
+                                # A-1 reads a write whose guard its pass read false
+                                unwritten = True
+                                if not_run_out is not None:
+                                    not_run_out.append((at, SV._name(j.owner, b.line), (record.machine or "").split(".")[0],
+                                                        [T.Said("a-printed-count-of-none", {"line": counted_at})]))
                                 continue
                             if (guard := self._not_run_in_pass(fn, j, b, run, i)) is not None:
                                 unwritten = True
@@ -10434,7 +11926,7 @@ class Rerun:
                         and set(kf.writes.get(j.subject, [])) & {b.line, *(getattr(b, "other_lines", None) or [])}})
         cache: dict[tuple[int, int], list] = self.__dict__.setdefault("_passes_cut", {})
         if (id(fn), id(run)) not in cache:
-            cache[(id(fn), id(run))] = [fn, run, R.passes(fn, run, self.mode)[0]]
+            cache[(id(fn), id(run))] = [fn, run, cut_passes(fn, run, self.mode)[0]]
         record = run.records[i]
         part = next((p for p in cache[(id(fn), id(run))][2] if any(r is record for r in p.records)), None)
         if part is None:
@@ -10486,6 +11978,11 @@ class Rerun:
 
         for reading in st.condition_trees:
             for t in leaves(reading.tree):
+                if t.node == "compare" and not t.settled and t.text not in seen and (
+                        said := self._timeline_false_if(t, q)) is not None:
+                    seen.add(t.text)
+                    out.append(said)
+                    continue
                 if t.node != "compare" or not t.settled or t.text in seen:
                     continue
                 strict = self._timeline_spans(t, q)
@@ -10510,6 +12007,39 @@ class Rerun:
                 else:
                     out.append(T.Said("timeline-term-not-held", {"term": t.text}))
         return out
+
+    def _timeline_false_if(self, t, q: Missed) -> T.Said | None:
+        """E-5 (out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``ConditionValue`` *base* and
+        *scale_seconds* beside *said*): a term ``col < clock - X units`` whose X the map does not settle (Watcher's
+        main@309, ``naive_utcnow() - datetime.timedelta(hours=workflow_timeout_map['analysis'])``: base naive_utcnow,
+        scale -3600) is false at every moment of the stay where X units are at least the most the column's age reaches
+        there on its timeline (:meth:`_timeline`; an open arm writes at any moment, and one whose least is not read leaves
+        no such bound).  That least X is said, not X itself (a setting).  None for any other term, a column with no
+        timeline read, or no bound."""
+        if t.op not in ("<", "<=") or len(t.values) != 1:
+            return None
+        v = t.values[0]
+        scale = getattr(v, "scale_seconds", None)
+        if (v.base not in UTC_CLOCKS or v.offset_seconds is not None or not scale or scale >= 0
+                or not getattr(v, "said", "") or getattr(v, "needs", None)):
+            return None
+        tl = self._timeline(t.subject, q)
+        if tl is None or not tl.read():
+            return None
+        ages = []
+        for p in tl.pieces():
+            lo, _ = TL.bounds_at(p, p[1])
+            if lo in (TL.LOW, TL.HIGH) or not isinstance(lo, datetime.datetime):
+                return None
+            ages.append(p[1] - lo)
+        if not ages:
+            return None
+        age = max(ages)
+        # the least X, rounded up: the term is false all the stay from it on
+        least = f"{math.ceil(age.total_seconds() / -scale * 100) / 100:.2f}".rstrip("0").rstrip(".")
+        return T.Said("timeline-term-false-if", {
+            "term": t.text, "said": v.said, "least": least, "unit": int(-scale),
+            "age": f"{age.total_seconds() / 60:.1f} min", "opens": len(tl.opens), **_timeline_counts(tl)})
 
     def _timeline_false(self, t, q: Missed) -> str | None:
         """Why a term comparing a time column with the clock is surely false for the row all the window on the
@@ -10831,10 +12361,11 @@ class Rerun:
             return f"{entry} {leaves[0].why}"
         return f"{entry}: " + "; ".join(f"{leaf.text} {leaf.why}" for leaf in leaves)
 
-    def _route_refuses(self, route, q: Missed) -> list[str]:
+    def _route_refuses(self, route, q: Missed, terms: set[str] | None = None) -> list[str]:
         """What refuses the row on one route of calls, read from its record alone: a refused pair it holds, a
         restricted subject whose values lack the row's (the asked one compared too: a call that never asks for the
-        observed value did not pass the row over), a condition false for it all the window."""
+        observed value did not pass the row over), a condition false for it all the window.  *terms*, where handed,
+        gets the subjects of the false conditions' terms."""
         said, said_on = [], set()
         for pair in route.refuses:
             if self._row_holds(pair, q):
@@ -10845,20 +12376,83 @@ class Rerun:
             if why:
                 said.append(f"restricts {subject} to {sorted(values)}; {why}")
                 said_on.add(subject)
-        said += [self._tree_words(entry, leaves) for entry, leaves in self._trees_false(route.condition_trees, q, said_on)]
+        false = self._trees_false(route.condition_trees, q, said_on)
+        if terms is not None:
+            terms.update(leaf.subject for _, leaves in false for leaf in leaves)
+        said += [self._tree_words(entry, leaves) for entry, leaves in false]
         return said
+
+    def _stamps_itself(self, st, q: Missed, subjects: set[str]) -> list[str]:
+        """Bundle D, D-5 (P24, out/gm/qk-design.md, tmaeno's OK 2026-11-17): of the columns *subjects* whose terms keep
+        the selection *st* from the row, those its own function writes with the clock (the map's arm with
+        ``_written_offset`` 0): lockJobsForFinisher's 895 ``SET modificationTime=CURRENT_DATE`` on each row its 892
+        takes, lockJobsForActivator's 941 ``prodDBUpdateTime``.  Where the row's value of one is a time inside the stay
+        (after its start, by the time the window ends), every pass that takes the row stamps it again: the selection
+        takes the row no more often than the gap its term reads.  Which write put the row's value is not read: a pass
+        of the selection, or another write after it (NJ-transferring-stuck's 09:39:56, 24 s after the last Finisher
+        round's prints, by the updateJob that follows the round)."""
+        out = []
+        own = _bare(st.owner)
+        began = q.began if q.began is not None else q.since
+        for subject in sorted(subjects):
+            # the row's value first: the map's writers are read only for a time in the stay
+            known, held = self._held(subject, q)
+            try:
+                value = _when(str(held)) if known and held is not None else None
+            except (TypeError, ValueError):
+                value = None
+            if value is None or not began < value <= q.moved:
+                continue
+            arms = sorted({b.line for j in self._subject_writers(subject) if _bare(j.owner) == own for b in j.branches
+                           if _written_offset(b) == datetime.timedelta(0)})
+            if not arms:
+                continue
+            out.append(f"{own.split('::')[-1]} writes {subject} with the clock itself on the rows it takes (at {arms}), "
+                       f"and the row's {held} falls in the stay, after {began} (which write put it there is not read): "
+                       "each pass of it that takes the row stamps it again, so it takes the row no more often than "
+                       "its term's gap")
+        return out
+
+    def _stamps_by_writes(self, st, q: Missed) -> list[T.Said]:
+        """Bundle H, H-2 (P5, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): D-5's reading
+        (:meth:`_stamps_itself`) where the row's value is no time in the stay, from the writes the records show
+        instead: a column of *st*'s terms whose every write read in the stay (its timeline, two or more) is by an arm
+        of *st*'s own function writing the clock itself (``_written_offset`` 0) -- getTasksToExecCommand_JEDI's 4571
+        ``SET modificationtime=CURRENT_DATE``, 93 times in MT-finishing-late's stay before the move.  Each pass that
+        took the row stamped it again, so it took the row no more often than its term's gap: on the writes the records
+        show."""
+        own = _bare(st.owner)
+        func = own.split("::")[-1].rpartition(".")[2]
+        out = []
+        for subject in sorted(_statement_subjects(st)):
+            tl = self._timeline(subject, q)
+            # the writes of the stay before the move's second: one in it is the moving pass's (MT-finishing-late's
+            # updateTask_JEDI at 07:49:38.704), not a take's
+            moved = q.moved.replace(microsecond=0)
+            writes = [w for w in (tl.writes if tl is not None else ()) if q.since <= w.at < moved]
+            if len(writes) < 2:
+                continue
+            arms = sorted({f"{func}:{b.line}" for j in self._subject_writers(subject) if _bare(j.owner) == own
+                           for b in j.branches if _written_offset(b) == datetime.timedelta(0)})
+            if not arms or not all(w.arms and {a.rpartition(".")[2] for a in w.arms} <= set(arms) for w in writes):
+                continue
+            out.append(T.Said("stamps-itself-by-writes", {"func": func, "subject": subject, "arms": arms, "n": len(writes),
+                                                         "first": f"{writes[0].at:%H:%M:%S}", "last": f"{writes[-1].at:%H:%M:%S}"}))
+        return out
 
     def _routes(self, st, q: Missed) -> tuple[str, list[str]]:
         """L2's verdict from the routes of calls into *st* (the map's ``call_readings``): ``refused`` when the map
         places every call (``callers_complete``) and every route that runs the statement refuses the row;
         ``refused on a call`` for the routes that do; else nothing.  A route reading as the statement refuses only
-        what the statement does, and that was said before the routes are asked."""
+        what the statement does, and that was said before the routes are asked.  A refusing term on a column the
+        selection stamps with the clock itself is said so (:meth:`_stamps_itself`)."""
         lines, running, refusing = [], 0, 0
+        terms: set[str] = set()
         for route in st.call_readings:
             if route.not_run:
                 continue
             running += 1
-            why = [] if route.as_statement else self._route_refuses(route, q)
+            why = [] if route.as_statement else self._route_refuses(route, q, terms)
             if not why:
                 continue
             refusing += 1
@@ -10867,6 +12461,7 @@ class Rerun:
             lines.append(f"called from {route.chain[-1]}{via} ({constants}): " + "; ".join(why))
         if not refusing:
             return "not settled", []
+        lines += self._stamps_itself(st, q, terms)
         if st.callers_complete and refusing == running:
             return "refused", [f"every call refuses it: {running} route(s), and the map places every call", *lines]
         stop = "; ".join(st.callers_stop) or "the map does not say it places every call"
@@ -11106,6 +12701,10 @@ class Rerun:
                 said.append(T.text(_held_before_said(x, q.observed, *before)))
             elif arms := self._born_only(x, q):
                 said.append(T.text(T.Said("born-only-held", {"subject": x, "arms": arms})))
+            elif before_ := self._written_only_before(x, q):
+                said.append(T.text(T.Said("written-only-before-held", {
+                    "subject": x, "since": f"{q.since:%Y-%m-%d %H:%M:%S}",
+                    "arms": [f"{arm} ({why})" for arm, why in before_]})))
             elif (tl := self._timeline(x, q)) is not None and tl.read() and x not in told:
                 # Q1 part 1: what the records show of it in the stay, said once
                 told.add(x)
@@ -11115,6 +12714,9 @@ class Rerun:
         if kind == "refused":
             return kind, said
         by_call, calls = self._routes(st, q)
+        # H-2: D-5's own sentence, where the routes said it, is not said again from the writes
+        said += [x for x in map(T.text, self._stamps_by_writes(st, q))
+                 if not any(c.startswith(x.partition(" with the clock itself")[0]) for c in calls)]
         kind = min(kind, by_call, key=KINDS.index)
         if kind != "refused":
             said += self.ask_linked(st, [x for x, (code, _) in unanswered.items() if code == "rows-no-row"], q)

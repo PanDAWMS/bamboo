@@ -116,7 +116,9 @@ def _caller(node: ast.AST, owner: str) -> tuple[str, int] | None | str:
     start included: what ran before the start ran before the thread).  None where nothing in the corpus enters it (a
     daemon's or an API's entry); a str saying why where it is entered from more than one, or a way in is open."""
     rel = owner.partition("::")[0]
-    rec = SR.entered(f"{rel}::{getattr(node, 'name', '')}", getattr(node, "lineno", 0))
+    named = (R.owner_of(rel, node) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+             else f"{rel}::{getattr(node, 'name', '')}")
+    rec = SR.entered(named, getattr(node, "lineno", 0))
     if rec is not None:
         sites = [(s.owner.partition("::")[0], s.line) for s in getattr(rec, "sites", None) or []]
         if getattr(rec, "open", None):
