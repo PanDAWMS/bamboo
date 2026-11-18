@@ -8440,6 +8440,10 @@ def test_h2_reads_an_arm_whose_logs_never_name_the_key_on_the_run_that_recorded_
                 "pass": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine], G: [gen]}),
                 "pass unrecorded": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine]}),
                 "no pass": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine], G: []}),
+                # P43's redo: no row says the machine (a new job's creation to its first status)
+                "anywhere pass": read({M("panda-DBProxy.log"): "absent", M("panda-JediDBProxy.log"): [mine], G: [gen]}, None),
+                "anywhere two": read({M("panda-DBProxy.log"): [elsewhere], M("panda-JediDBProxy.log"): [mine], G: [gen]}, None),
+                "anywhere none": read({M("panda-DBProxy.log"): [other], M("panda-JediDBProxy.log"): []}, None),
             }))
             """,
         )
@@ -8487,6 +8491,13 @@ def test_h2_reads_an_arm_whose_logs_never_name_the_key_on_the_run_that_recorded_
     assert got["pass unrecorded"]["left"] == as_was
     assert got["pass unrecorded"]["asks"] == [["panda-JobGenerator.log", ["<t=5 "], row]]
     assert got["no pass"]["left"] == as_was
+    # P43's redo: with no machine the row's, the method's runs of the key near the row on one machine alone make it
+    # the host, read there as above; on two machines nothing is said; on none, in logs read whole, not its row
+    assert got["anywhere pass"]["left"] == got["pass"]["left"]
+    assert got["anywhere pass"]["lines"][0].endswith("are on m85 alone: the row's recorder is read there (P43)")
+    assert got["anywhere two"]["left"] == as_was and got["anywhere two"]["pass"] == []
+    assert got["anywhere none"]["left"] == [as_was[1], as_was[3]]
+    assert all("near the row on any machine" in line for line in got["anywhere none"]["lines"])
 
 
 def test_a_recorder_prints_the_key_first_by_a_hole_or_by_a_mark_every_run_holds(tmp_path):

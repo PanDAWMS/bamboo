@@ -2373,6 +2373,15 @@ job questions dropped none.
 *Risk:* a print of another class's column holding the key's value (a file's or dataset's jediTaskID), in a run that
 writes the key's row without printing it, would lose that run.  None of the four kinds writes the task's row.
 
+*Changed (P43's redo, 2026-11-18, the investigator's u11 NR-J cloud 1, gshare 1, delegated design):* a row no machine
+is known for -- H2's row from a new job's creation to its first status, "on every machine (no row says which run wrote
+it)" -- was left as it was: `_recorded` read only a row with a machine.  Now its recording methods' runs of the key
+are asked of every machine over the row less and plus EDGE (`_recorder_anywhere`).  Runs on one machine alone make it
+the host, and the reading goes on there as above.  None, in logs read whole, each method printing the key first, is
+"not its row" as on a host.  Runs on two machines say nothing.  NR-J cloud: JobGenerator's doGenerate arms writing
+cloud are recorded by insertNewJob's "inserted <PandaID>" in runImpl's storeJobs; panda-DBProxy.log and
+panda-JediDBProxy.log are asked of every machine (2 asks).  NR-J gshare stops at H2 on reassignShare (P40) before.
+
 ### K68. A local printed before an arm on every path is read by the arm's guards, through a conversion too
 
 H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column

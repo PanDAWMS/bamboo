@@ -6230,7 +6230,7 @@ class Rerun:
         at the row, that pass is said in place of the key not being named.  Else it stays as it was.  A stand-in, read
         at its caller's call on the way to it (``Wrote.via``), is read on that caller's recording calls only: another
         caller's pass is not its pass."""
-        if not asking.machine or not left:
+        if not left:
             return left
         out = []
         for p in left:
@@ -6260,7 +6260,14 @@ class Rerun:
         inside the call of a pass of the call's function at the row (``which_ran.recorded_in_pass``), its log asked on
         the machine for the marks the object's row fills (:meth:`_pass_marks`), with that pass; ``("", None, None)``
         where the records do not say.  Last, the methods' runs at the row that were read (each cut to its call there).
-        An ask no record answers is kept for the asks file, with no stop."""
+        An ask no record answers is kept for the asks file, with no stop.
+
+        P43's redo (out/gm/qk-design.md, the section on P43's redo; the investigator's u11 NR-J cloud 1, gshare 1): a row
+        no machine is known for (the row's creation to its first status, NR-J's cloud) has its methods' runs of the key
+        near it asked of every machine first; the one machine they ran on is the host, read as above
+        (:meth:`_recorder_anywhere`)."""
+        if not asking.machine:
+            return self._recorder_anywhere(rec, subject, key, state, asking)
         host = str(asking.machine)
         at = datetime.datetime.fromisoformat(state["time"][:19])
         lo, hi = (at - EDGE).isoformat(" "), (at + EDGE).isoformat(" ")
@@ -6333,6 +6340,38 @@ class Rerun:
             if got is not None:
                 part, site = got
                 return "pass", T.Said("its-pass-recorded-the-row", {"run": part.said(), "methods": names, "key": key, "site": site}), part, inner
+        return "", None, None, inner
+
+    def _recorder_anywhere(self, rec: Recorder, subject: str, key: str, state: dict,
+                           asking: W.Asking) -> tuple[str, T.Said | None, Run | None, list[Run]]:
+        """:meth:`_recorder_read` where no row says the machine: the recording methods' logs asked of every machine for
+        the key over the row less and plus EDGE, each whole.  Runs of theirs on one machine alone make it the host, and
+        the reading goes on there; none, in logs read whole, each method printing the key before it records the row,
+        is ``"none"`` as on a host; else nothing is said.  JobGenerator's arms writing a new job's cloud, recorded by
+        insertNewJob's "inserted <PandaID>" in storeJobs, on the machine that made the job."""
+        at = datetime.datetime.fromisoformat(state["time"][:19])
+        lo, hi = (at - EDGE).isoformat(" "), (at + EDGE).isoformat(" ")
+        methods = [(_bare(m), list(lines)) for m, lines in rec.methods]
+        names = [m.rpartition("::")[2] for m, _ in methods]
+        files = list(dict.fromkeys(f for m, lines in methods for f in self.files_of(m, [], lines)))
+        ask = W.Asking((lo, hi), None, T.Said("for-the-rows-recorder-anywhere", {
+            "methods": names, "status": state.get("status"), "time": state["time"]}))
+        logs, unanswered = self._logs_at(key, files, ask, owners_of([m for m, _ in methods]))
+        if unanswered:
+            self._keep_unanswered(unanswered)
+            return "", None, None, []
+        inner = [r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+                 if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi]
+        hosts = {r.machine for r in inner if r.machine}
+        if len(hosts) == 1 and all(r.machine for r in inner):
+            host = hosts.pop()
+            self.say(f"  {', '.join(names)}: the runs of {key} near the row's {state['time']} are on "
+                     f"{host.split('.')[0]} alone: the row's recorder is read there (P43)")
+            return self._recorder_read(rec, subject, key, state, replace(asking, machine=host))
+        if (not inner and logs and not any(log.holes for log in logs.values())
+                and all(prints_key_before(m, lines, set(self._key_columns(subject, key))) for m, lines in methods)):
+            return "none", T.Said("no-recorder-run-at-the-row", {"methods": names, "key": key, "logs": sorted(logs),
+                                                                "machine": "any machine"}), None, []
         return "", None, None, inner
 
     def _row_values(self, subject: str) -> dict[str, str]:

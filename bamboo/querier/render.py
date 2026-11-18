@@ -383,6 +383,7 @@ TEMPLATES: dict[str, str] = {
     "no-recorder-run-at-the-row": "{methods:join=, } ran no run of {key} near the row on {machine} ({logs:join=, }, read "
                                   "whole there): no pass through its call that records the row wrote it",
     "for-the-recorders-pass": "the pass of {func} around its call at {call}, for {marks:rjoin=, }",
+    "for-the-rows-recorder-anywhere": "for the key in the runs of {methods:join=, } that record the row ({status}, {time}) within EDGE of it, on every machine (no row says which)",
     "for-the-rows-recorder": "the run of {methods:join=, } that records the statuslog's {status!r} at {time}, on {machine}, "
                              "the row's host",
     # L1's stay (rerun._stay_of, _stays_said)
