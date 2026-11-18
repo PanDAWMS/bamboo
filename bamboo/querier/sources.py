@@ -435,6 +435,9 @@ class Way:
     #: built (``file:line``) -- the premise its reader says, that the field its ``get`` hands out holds what that
     #: construction handed its ``__init__``; empty for any other way
     elements_of: str = ""
+    #: a way ending at the database by a statement's rows: the map's read site of that statement (I-4,
+    #: ``Rerun._selection_false``); empty for any other way
+    site: str = ""
 
 
 def _made_of(s: Any) -> str:
@@ -1217,7 +1220,7 @@ def _param_source_ways(s: Any, steps: tuple[str, ...], seen: frozenset, truth: b
         return [Way(CONSTANT, s.name, s.kind, route, bound_at=(getattr(s, "line", None) or 0) if len(route) == 1 else 0,
                     end_at=here)]
     if s.kind in (M.KEY_ROWS, M.KEY_SEQUENCE, M.KEY_DATABASE):
-        return [Way(DATABASE, "", s.kind, route, end_at=here)]
+        return [Way(DATABASE, "", s.kind, route, end_at=here, site=name if s.kind == M.KEY_ROWS else "")]
     if (s.kind == M.KEY_CALL and len(route) == 1 and getattr(s, "line", None)
             and _clock_at(f"{route[0].rpartition(':')[0]}:{s.line}", s.name or "")):
         # a call in the caller the map reads as a clock (S2's (b)); one in a callee the value came back from is in a

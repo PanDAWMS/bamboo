@@ -5898,6 +5898,11 @@ def test_a_writer_whose_selection_returns_no_row_of_the_object_when_it_would_hav
             r = RR.Rerun.__new__(RR.Rerun)
             said = []
             r.say = said.append
+
+            async def no_writers(subject):
+                return []
+            # P62's offsets: no writer of the column writes its clock plus an offset here
+            r._writers_of = no_writers
             r.data = {"statuslog": {"states": [{"status": "assigning", "time": "2026-11-13 15:00:00"},
                                                {"status": "prepared", "time": "2026-11-13 15:28:00"}]}}
             late, early = datetime.datetime(2026, 11, 13, 15, 29, 16), datetime.datetime(2026, 11, 13, 15, 10)
@@ -18972,6 +18977,198 @@ def test_i_the_writers_of_a_line_read_a_print_beginning_with_a_hole_as_the_line_
         # a record the search cut: as found
         "with_rule_cut": ["777", ["ActivatorThr", "ActivatorWithRuleThr"], ["ActivatorWithRuleThr"]],
     }, got
+
+
+def test_p16_a_print_of_every_row_after_the_first_loop_tells_a_pass_reached_the_selection(tmp_path):
+    """P16 (the map's HOA and RL): copyArchive main puts each selected PandaID into ``jobs`` and prints the list in
+    slices of 100 in a ``while`` after the loop (885); getTasksToBeFinished_JEDI works a copy of its rows through in a
+    second loop that prints per row.  A print the map reads as printing every row (``ListPrint``), or one in the body of
+    a later loop taking every row one by one (``RowLoop.each_row``), names the key of each row a pass selects, as one
+    in the first loop's body does."""
+    out = _ok(_run(tmp_path, """
+        import ast
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+
+        src = (
+            "def main(res):\\n"
+            "    jobs = []\\n"
+            "    for (id,) in res:\\n"
+            "        jobs.append(id)\\n"
+            "    i = 0\\n"
+            "    while i < len(jobs):\\n"
+            "        log(f'kill {str(jobs[i:i + 2])}')\\n"
+            "        i += 2\\n"
+            "    for t in jobs:\\n"
+            "        log(f'done {t}')\\n"
+        )
+        node = ast.parse(src).body[0]
+        RR.R.function = lambda rel, func, lines: N(node=node)
+
+        def key_print(list_columns=("JobSpec.PandaID",), each_row=True, listed=True, site=True, exits=()):
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.args = N(key="7")
+            r._key_columns = lambda s, k: {"JobSpec.PandaID"}
+            slice_hole = N(expression="str(jobs[i:i + 2])", columns=list(list_columns))
+            RR.R._prints_of = lambda owner, lines: N(statements=[
+                N(line=7, rows=[N(holes=[slice_hole], prefix_holes=[])]),
+                N(line=10, rows=[N(holes=[N(expression="t", columns=["JobSpec.PandaID"])], prefix_holes=[])])])
+            loops = [N(lines=[3, 4], each_row=True), N(lines=[6, 8], each_row=False), N(lines=[9, 10], each_row=each_row)]
+            prints = [N(line=7, holes=["str(jobs[i:i + 2])"])] if listed else []
+            sites = [N(owner="c.py::main", anchor=N(line_start=1), row_loops=loops, list_prints=prints)] if site else []
+            RR.mapdump.fragment = lambda: N(read_sites=sites)
+            st = N(owner="c.py::main", line=1, rows_handled=[3, 10], exits=[N(line=x, kind="continue") for x in exits])
+            return r._row_key_print("c.py::main", st, "JobSpec.jobStatus")
+        print(json.dumps({
+            "list_print": key_print(),
+            "later_loop": key_print(listed=False),
+            "list_print_naming_nothing": key_print(list_columns=()),
+            "later_loop_not_each_row": key_print(listed=False, each_row=False),
+            "exit_in_the_later_loop": key_print(listed=False, exits=(9,)),
+            "no_site": key_print(site=False),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        "list_print": 7,
+        "later_loop": 10,
+        # a hole holding the list but naming no column: the later loop's print still names it
+        "list_print_naming_nothing": 10,
+        # a loop the map does not read as taking every row, or an exit before the print in it: none
+        "later_loop_not_each_row": None,
+        "exit_in_the_later_loop": None,
+        # no read site: as before (only the first loop's body)
+        "no_site": None,
+    }, got
+
+
+def test_i4_a_column_only_passes_taking_the_row_by_refusing_selections_write_holds_its_after_value(tmp_path):
+    """I-4: goal is written only by TaskRefinerBase.extractCommon, on an object whose key field is set from its
+    parameter jediTaskID (the map's KMA), handed down from getTasksToRefine_JEDI's rows.  Where that selection returns
+    no row of the task at the window's start nor at any statuslog row after it up to the rows file's reading, the value
+    read after the move is the one goal held over the window.  One moment the selection may return the row, or a way
+    of the parameter ending elsewhere than a statement's rows: not read."""
+    out = _ok(_run(tmp_path, """
+        import asyncio
+        import datetime
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+        from bamboo.querier import sources as SR
+
+        t = datetime.datetime.fromisoformat
+        states = [{"status": "registered", "time": "2026-11-14 01:34:12"}, {"status": "defined", "time": "2026-11-14 01:34:13"},
+                  {"status": "prepared", "time": "2026-11-14 02:11:43"}, {"status": "done", "time": "2026-11-14 02:12:11"}]
+        kf = N(owner="pandajedi/r.py::extractCommon", writes={"JediTaskSpec.goal": [276]},
+               sources=[N(kind="parameter", name="jediTaskID", via=None)])
+        site = N(name="refine@1369", anchor=N(line_start=1369))
+        RR.mapdump.fragment = lambda: N(key_froms=[kf], read_sites=[site])
+        RR.PT.history_of_class = lambda cls: N(subject="JediTaskSpec.status")
+
+        def rerun(refused, ways):
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.data = {"statuslog": {"states": states}}
+            r._read = lambda: ({}, {"goal": None, "as_of": "2026-11-15 09:57:31"})
+            r.lines, r.unanswered = ["before"], [("H2", "an ask before", "why")]
+
+            async def writers(subject):
+                return [N(owner="pandajedi/r.py::extractCommon", branches=[N(line=276)])]
+            r._writers_of = writers
+            seen = []
+
+            def refuses(st, q):
+                # what a selection's reading says and asks while I-4 tries it is not kept
+                seen.append(q.observed)
+                r.lines.append("a window line"), r.unanswered.append(("H2", "an ask of the try", "why"))
+                return ["status IN (registered) refuses " + q.observed] if q.observed not in refused else []
+            r._route_refuses = refuses
+            SR.param_ways = lambda owner, p: ways
+            return r, seen
+
+        db = [SR.Way(SR.DATABASE, "", "rows", ("a:1",), site="refine@1369")]
+        q = N(at_end=False, subject="JediTaskSpec.status", since=t("2026-11-14 02:06:38"))
+        got = {}
+        r, seen = rerun(set(), db)
+        got["read"] = [[arm, why] for arm, why in r._written_only_before("JediTaskSpec.goal", q)]
+        got["moments"] = seen
+        got["after"] = list(r._after("JediTaskSpec.goal", q))
+        got["kept"] = [r.lines, len(r.unanswered)]
+        r, _ = rerun({"done"}, db)
+        got["one_moment_open"] = r._written_only_before("JediTaskSpec.goal", q)
+        got["kept_open"] = [r.lines, len(r.unanswered)]
+        r, _ = rerun(set(), db + [SR.Way(SR.API, "", "no_caller", ("b:2",))])
+        got["a_way_elsewhere"] = r._written_only_before("JediTaskSpec.goal", q)
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {
+        "read": [["extractCommon:276", "@1369 status IN (registered) refuses defined"]],
+        # the state at the window's start, then each statuslog row after it to the reading
+        "moments": ["defined", "prepared", "done"],
+        "after": [True, None],
+        # the try leaves no line and no ask behind, read or not
+        "kept": [["before"], 1],
+        "one_moment_open": [],
+        "kept_open": [["before"], 1],
+        "a_way_elsewhere": [],
+    }, got
+
+
+def test_w9_a_statements_one_arm_of_the_column_is_tied_to_a_status_arm_only_on_its_way(tmp_path):
+    """The investigator's u8 W9 (NT-registered-late): reactivatePendingTasks_JEDI's execute at 4729 writes the status
+    by 4715 ('exhausted') or 4728 (status=oldStatus), and modificationtime only by 4723, in 4715's arm of the ``if``.
+    The stay of 'registered' was begun by 4728, which writes no modificationtime: 4723 is not its arm (the map's
+    ``flow.together``), while a column arm one call can run with it still is (prepareTasksToBeFinished_JEDI's 3839)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import stay_value as SV
+
+        kf = N(owner="t.py::reactivate", writes={"JediTaskSpec.status": [4715, 4728], "JediTaskSpec.modificationTime": [4723]})
+        b, c = N(line=4728, lines=[4728]), N(line=4723, lines=[4723])
+
+        def tied(together):
+            return [x.line for x in SV.tied(b, "t.py::reactivate", "JediTaskSpec.status", "JediTaskSpec.modificationTime",
+                                             [c], [kf], together)]
+        print(json.dumps({"apart": tied(lambda owner, x, y: False), "together": tied(lambda owner, x, y: True),
+                          "not_read": tied(None)}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"apart": [], "together": [4723], "not_read": [4723]}, got
+
+
+def test_p62_a_line_writing_its_clock_plus_an_offset_did_not_write_the_value_of_its_window(tmp_path):
+    """P62 (the investigator's u8 W11): kickChildTasks_JEDI's 5181 writes ``CURRENT_DATE-1``: a pass at 04:37:31 writes
+    the day before, not the task's 04:37:31.  In a window holding the write it is out, as P42 reads an unplaced arm;
+    a line writing the clock itself, or an offset within SLACK, is judged as before."""
+    out = _ok(_run(tmp_path, """
+        import datetime
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun as RR
+        from bamboo.querier.which_ran import Candidate
+
+        def amount(seconds):
+            return N(base="CURRENT_DATE", offset_seconds=seconds, scale_seconds=None, needs=[])
+
+        async def writers(subject):
+            return [N(owner="t.py::C.kickChildTasks_JEDI", branches=[N(line=5181, outcome="runtime(CURRENT_DATE-1)",
+                                                                       amount=amount(-86400.0))]),
+                    N(owner="t.py::C.updateTask_JEDI", branches=[N(line=1441, outcome="runtime(naive_utcnow())", amount=None),
+                                                                 N(line=1443, outcome="runtime(x)", amount=amount(-60.0))])]
+        r = RR.Rerun.__new__(RR.Rerun)
+        r.lines, r.hop = [], "H2"
+        r._writers_of = writers
+        r._selection_false = lambda owner, line, subject, at: None
+        cands = [Candidate("t.py", "kickChildTasks_JEDI", [5181], ["x.log"]), Candidate("t.py", "updateTask_JEDI", [1441, 1443], ["x.log"])]
+        kept = r._offset_out(cands, "JediTaskSpec.modificationTime", datetime.datetime(2026, 11, 15, 4, 37, 31))
+        print(json.dumps({"kept": [[c.func, c.lines] for c in kept], "said": [line for line in r.lines if "P62" in line]}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["kept"] == [["updateTask_JEDI", [1441, 1443]]], got
+    assert got["said"] == ["  kickChildTasks_JEDI:5181 did not write at 2026-11-15 04:37:31: its write is its clock plus -86400 s, "
+                           "so a pass then writes 2026-11-14 04:37:31, not the value (P62)"], got
 
 
 def test_k67b_a_record_naming_the_keys_digits_only_as_another_column_makes_no_run_of_the_key(tmp_path):

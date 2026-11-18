@@ -836,6 +836,15 @@ from, which can set a writer aside with no log asked (updateJobMetrics_JEDI take
 finished); for F1, a writer whose runs print no key (count again when the pin moves), with its run matched to
 the row by another column of the mark.
 
+*Changed (I-4, bundle J, 2026-11-18; the map's KMA, codemap-xliii e554d3e):* a column late's rows-file `after` holds
+is read over the window where every arm writing it takes the row by a key from selections that return no row of the
+object at the window's start nor at any statuslog row after it up to the reading (`Rerun._written_only_before`, through
+`_selection_false`, which follows the writer's parameter up its ways, `sources.Way.site`, where it has no rows
+source).  The reading is a try: it asks no log, reads no timeline, and leaves no line or ask behind.  It does not yet
+read NR-T-53646395-assessmentTime's goal: extractCommon's jediTaskID comes in through the tuple getTasksToRefine_JEDI
+puts at 1340, `(jediTaskID, None, 'registered', parent_tid)`, and the querier takes the read's `[0]` on every part, the
+constants among them, though the map gives each part its place (`KeySource.paths`).  Reading that place is next.
+
 ## H steps
 
 ### K20. H2 asks a value the history's rows hold over a window, on every machine
@@ -1533,6 +1542,22 @@ that did not run, and is named.  Effect: none on the live 144 yet -- (2) needs t
 `Sent Watcher {id}` hole as JobSpec.PandaID (the map's RHC); simulated with that hole named, MJ-sent-late goes to END
 by (2) alone, its time column's arms named (on the old version (1) does not hold on peekJob's fill).  For the current
 version's cases (v88's NJ-sent), measured after their records round.
+
+*Changed (P16, bundle J, 2026-11-18; the map's HOA and RL, codemap-xliii 6e9a941):* (2)'s print may also stand in the
+body of a later loop the map reads as taking every row one by one (`RowLoop.each_row`: getTasksToBeFinished_JEDI's over
+`taskStatList`, its rows' copy), with no exit in that loop before it, or be a print the map reads as printing every
+element of a list the first loop puts each row into (`ListPrint`: copyArchive main's 885 `str(jobs[iJob:iJob + nJob])`
+in the slicing `while`, 864 `str(jobs)`), its hole holding the list naming the key.  The read site is joined by the
+statement's owner and line (`Rerun._read_site_of`).  The pass `_moved_across` sets aside as the one that moved the row
+on is a moving pass for (2).  NJ-pending-late's main branch ends: the first pass to reach 871 after its turn (08:37:56)
+moved the job on at 09:14:58.  Those facts load only with the xliii models.
+
+*Changed (P63, the investigator's u8 W9, 2026-11-18):* the stay's start reads a status arm's tie to its column arm
+(`stay_value.tied`; bundle A's A-2, E-2) by the statement's one arm of the column only where one turn on a row can run
+both (the map's `flow.together`, the loops around both read as going round once: `Rerun._together_lines`).
+reactivatePendingTasks_JEDI's execute writes the status by 4715 or 4728 and modificationtime only by 4723, in 4715's
+arm of the `if`: 4728, which began NT-registered-late's stay of 'registered', wrote no modificationtime, and the term
+starts at the write's value plus 10 min again (03:16:37.913168).
 
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
@@ -2538,6 +2563,15 @@ the map cannot read whole): the run is not split" -- whether the map can read th
 or the parenthesis is not there.
 *Revisit:* a function with no entry row whose runs span hours, or whose entry the map cannot read whole; the
 question's run of a mark with no key; the prefix proof (K44) on the map's whole reading.
+
+*Changed (P62, the investigator's u8 W11, 2026-11-18):* in a window at a time column's own value -- one holding the
+write (`W.Asking.holds_write`), or a statuslog row within SLACK of the value -- a line writing its clock plus a settled
+offset beyond SLACK (the map's `Branch.amount`, `_written_offset`) writes the window's time plus the offset, not the
+value, and is out before the judge (`Rerun._offset_out`, in `_selected_out` and `_row_at`), as P42 reads an unplaced
+arm.  kickChildTasks_JEDI's `CURRENT_DATE-1` (the child tasks' modificationTime) was chosen at
+NR-T-53655760-modificationTime's 'done' 04:37:31; it is out, with updateTask_JEDI 1441's `timeNow - 1 h` and the -6 h
+and -1 day writers, and the answer is one of 2 arms the data does not decide (updateTask_JEDI 1443, open;
+prepareTasksToBeFinished_JEDI 3839 at 04:37:30, ended).
 
 ### K50. A row before the site implies it only where nothing on its way to the site may leave
 

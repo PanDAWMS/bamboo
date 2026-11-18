@@ -91,13 +91,18 @@ def _now_only(branch) -> float | None:
     return 0.0 if branch.outcome in NOW else None
 
 
-def tied(b, owner: str, subject: str, column: str, arms: list, key_froms: list) -> list:
+def tied(b, owner: str, subject: str, column: str, arms: list, key_froms: list,
+         together: Callable[[str, int, int], bool] | None = None) -> list:
     """The column's *arms* (of *owner*) the map ties to the status arm *b* (bundle A, A-2, out/gm/qk-design.md,
     tmaeno's OK 2026-11-16): those whose ``same_pass`` names *b*'s line for the status, or that *b*'s ``same_pass``
     names -- updateTaskStatusByContFeeder_JEDI's 1373 names 1370 'assigning', where its 1352 (``timeNow``) is on
     another path; else the one arm of the column at every statement *b* writes at (``KeyFrom.writes``):
     prepareTasksToBeFinished_JEDI's 4075 writes 3971 'tobroken' and lockedBy only by 3839 (NULL).  Empty where the map
-    ties none, or a statement of *b*'s holds more than one arm of the column and no ``same_pass`` picks one."""
+    ties none, or a statement of *b*'s holds more than one arm of the column and no ``same_pass`` picks one.
+    The statement's one arm counts only where one call can run it and *b* (*together*, the map's ``flow.together``):
+    reactivatePendingTasks_JEDI's execute at 4729 writes the status by 4715 ('exhausted') or 4728 (status=oldStatus),
+    and modificationtime only by 4723, ``sql = sqlTO`` in 4715's arm of the ``if``, which 4728's run never passes
+    (the investigator's u8 W9, NT-registered-late: 4728 began the stay of 'registered' writing no modificationtime)."""
     attr, col = subject.partition(".")[2], column.partition(".")[2]
     by_pass = [c for c in arms
                if any(s.column == attr and s.line in _lines(b) for s in getattr(c, "same_pass", None) or [])
@@ -108,7 +113,7 @@ def tied(b, owner: str, subject: str, column: str, arms: list, key_froms: list) 
     lines = {line for kf in statements for line in kf.writes.get(column, [])}
     if len(lines) != 1 or not all(kf.writes.get(column) for kf in statements):
         return []
-    return [c for c in arms if _lines(c) & lines]
+    return [c for c in arms if _lines(c) & lines and (together is None or together(owner, b.line, c.line))]
 
 
 def time_column(column_junctions: list) -> bool:
@@ -140,7 +145,8 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
            running: Callable[[object], bool], read_at: Callable[[str, int], object | None], row_tables: set[str],
            born: Callable[[str, object], bool], nulls: bool = False, existed: bool = False,
            status_born: Callable[[str, object], bool] | None = None,
-           offset_of: Callable[[object], float | None] = _now_only) -> Before | None:
+           offset_of: Callable[[object], float | None] = _now_only,
+           together: Callable[[str, int, int], bool] | None = None) -> Before | None:
     """*column* (``Class.attr``) of a row while *subject* held *value*: see the module; None for a column no arm
     writes the time it runs.  *status_junctions* and *column_junctions* are the map's writers of the two; *key_froms*
     the dump's KeyFroms (each statement's row-naming terms, the subjects it writes by line, its table, its sources),
@@ -183,7 +189,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 runtime.append(_name(j.owner, b.line))
                 # E-2: its pass's column arm, tied as a start's is, with the clock
                 if not nulls:
-                    rt_ties = [c for c in tied(b, j.owner, subject, column, column_arms.get(j.owner, []), key_froms)
+                    rt_ties = [c for c in tied(b, j.owner, subject, column, column_arms.get(j.owner, []), key_froms, together)
                                if offset_of(c) is not None]
                     if rt_ties:
                         mate = min(c.line for c in rt_ties)
@@ -200,7 +206,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 continue
             # A-2: the column's arms the map ties to this one (same_pass, or its statement's one arm of the column) --
             # a clock with an offset among them -- before those of its history call
-            ties = [c for c in tied(b, j.owner, subject, column, column_arms.get(j.owner, []), key_froms)
+            ties = [c for c in tied(b, j.owner, subject, column, column_arms.get(j.owner, []), key_froms, together)
                     if nulls or offset_of(c) is not None]
             if ties:
                 mates = sorted({c.line for c in ties})
