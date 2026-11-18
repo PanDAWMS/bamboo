@@ -303,6 +303,9 @@ TEMPLATES: dict[str, str] = {
     "may-have": "may have",
     # H3's end: what was written last, by which line, how and when
     "written-last-by": "{subject}={observed!r} written last by {fn}:{line}{via}",
+    # W10: a branch's arm no run shows ran, with no guard of its own
+    "written-last-by-if-it-ran": "{subject}={observed!r} written last by {fn}:{line}{via} if it ran",
+    "it-has-no-guard-callers-unread": "it has no guard of its own, and its callers' conditions, which made it run or not, are not read",
     "called-at": ", called at {fn}:{line}",
     "its-guards-hold-in-the-run": "its guards hold in the run's values",
     "its-guards-hold-in-the-rows": "its guards hold in the rows' values",
@@ -726,10 +729,17 @@ TEMPLATES: dict[str, str] = {
     "for-a-callee-s-print": "for {callee}'s print at {line} of what its call at {at} gives, inside the pass {first} .. {last}",
     "false-on-the-values-read": "{fn_name}'s test at {line} was false in every pass ({n}) on the values read, by {parts:rjoin=, }{whatever}: the arms were kept off there; why those values were what they were is not read here",
     "whatever-they-held": ", whatever {unread:rjoin=, } held",
-    "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{rowvalue}{confirmed}{notrun}{absent}{opens}{begun:join=}",
+    "timeline-read": "{subject} over the stay ({start} .. {end}) and the {slack} min before it, from the records: {writes}{rowvalue}{confirmed}{witnessed}{tied}{notrun}{absent}{opens}{quiet:join=}{begun:join=}",
     # K-2 (a): a reached write read as run, its statement's status value the statuslog shows then
     "timeline-confirmed": "; read as run, the statuslog showing their statement's own status value then: {writes:join=; }",
     "timeline-confirmed-write": "{at} by {arm} ({by} writes {value} {statement}; the statuslog's row at {then})",
+    # K-3 (b): a write whose clock a later print of the column's value is, read as run, the value held to the print
+    "timeline-witnessed": "; read as run, a later print showing the value it wrote: {writes:join=; }",
+    "timeline-witnessed-write": "{at} by {arms:join= or } (its clock then is {value}, which {where} on {machine} printed as the row's at {printed}: none wrote it between)",
+    # K-3 (c): a write whose statement's write of another column of the row a later print shows run
+    "timeline-tied": "; read as run, its statement's write of another column of the row shown run by a later print: {writes:join=; }",
+    "timeline-tied-write": "{at} by {arm} (its statement writes {column} by {arms:join=/}, {value} then, which {where} on {machine} printed at {printed})",
+    "timeline-quiet": "; {arms:join=, } did not write it from {since} to {until}: their statements write {column} too, which a print shows held its value then",
     # K-2 (b): a reached write whose key's selection takes other states than the row's then
     "its-selection-takes-other-states": "its key's selection {site} takes {takes:join=, } only, the statuslog holding {state} then",
     "timeline-begun-by": "; the stay begun by {arms:join=, } (the other arms writing the value shown not to then, judgement 3)",
@@ -765,6 +775,14 @@ TEMPLATES: dict[str, str] = {
     "none-of-wrote-it": "none of {arms:join=, } wrote {column} in the stay",
     "none-of-began-it": "none of {arms:join=, } began the stay",
     "timeline-term-not-held": "{term}: surely held at no moment of the stay on the writes the records show (a value not read leaves it open)",
+    # K-3 (d): a term comparing a time column with the clock, where it surely failed
+    "timeline-term-failed": "{term}: surely false for the row {spans}, on the writes the records show",
+    "timeline-term-failed-if": "{term}: surely false for the row {spans}, on the writes the records show, where {named:join= and }",
+    # K-3 (a): a term IS NULL or IS NOT NULL on its column's states
+    "timeline-state-term": "{term}: {parts:join=; }, on the writes the records show{where}",
+    "state-term-held": "surely held for the row {spans}",
+    "state-term-failed": "surely false for the row {spans}",
+    "state-term-where": ", where {named:join= and }",
     "held-for-the-row-if": "held for the row {spans} where {premises:join=; }",
     "before-premise-runtime": "; premise: {arms:join=, } write the status from a value known at run time, read as not writing {observed!r}",
     "rows-no-column-why": "its row here holds no {attr}",

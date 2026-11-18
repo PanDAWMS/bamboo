@@ -915,8 +915,31 @@ lock takes 1644's rows (prepared, scouted, breaking, toabort, passed) while the 
 subject's state is read at that moment, not the selections' other terms (K17).  NT-breaking-late's END now says the
 lock term was true for the row before the take.
 *Not read:* an unlock whose statement writes no status (NT-passed-late's updateDatasetsToFinishTask_JEDI 4352); a
-copy of another column not tied to the write it copies (updateJob 509, the map's (E)); a later run's selection as a
-witness of an earlier state (NT-defined-late's unlockTasks_JEDI@872).
+copy of another column not tied to the write it copies (updateJob 509, the map's (E)).
+
+*Changed (K-3, bundle K, 2026-11-18):* a later print of the row's value is a witness of an earlier write.  (b) A must or
+count print read as a write shows, in holes the map names columns of the row's class (`SkeletonHole.columns`), the
+row's other columns as its pass read them (`_printed_columns`); a time column's printed value, earlier than the print
+by more than two seconds, is matched as K-1 matches the row's value to the last write before the print whose clock it
+is (`_clock_write`): that write ran, and the column held the value from it to the print, no arm writing it there
+(`Timeline.witnessed`, `Rerun._printed_witnesses`).  NT-defined-late: unlockTasks_JEDI's 897 printed lockedTime
+14:56:41 on aipanda081 at 15:57:05.666, so getTaskWithID_JEDI's 1818 lock on aipanda082 at 14:56:41.571 ran and
+`lockedTime<:lockTimeLimit` held from 15:06:41.  (c) The statement of that write (`KeyFrom.writes`) ran: its write of
+another column at that print is read as run (`Timeline.tied`, `_tied_witness`: 1847's lockedBy), and an open arm whose
+every statement writes the witnessed column too, by NULL or a clock, did not run while it held -- save near where its
+clock could be the value (`Timeline.quiet`, `_tied_quiet`).  (a) A term `IS NULL`/`IS NOT NULL` is said on its column's
+states where it surely held and where it surely failed (`_timeline_state_term`), its states' timeline said once where
+no other line says the column and it shows a write in the stay or a term on it reads something sure, read from the
+records at hand (`_states_at_hand`: such a note asks no log): `tabT.lockedBy IS NULL` at
+getDatasetsToFeedContents_JEDI@130 surely false from
+14:56:41.571 to 15:57:05.666.  (d) A term comparing a time column with the clock is said where it surely failed too
+(`_timeline_failed_spans`, `timeline-term-failed`), and, where nowhere, where it did with the open arms named:
+NT-exhausted-late's kickExhaustedTasks_JEDI@1968 `modificationTime<:timeLimit` (240 h, its marks print it) over an
+eleven-hour stay.  An arm writing the clock is never None (`_none_premised`).  The moment the pass read the
+value is not in its records: it is said at the print.  *Not read:* a selection's terms as a witness where no print of
+the value is (a multi-row select's `lockedBy IS NOT NULL`); a printed value no write the records show matches; an
+entry built under a test every route settles (`if not force_read:`), which `_false_between`/`_false_spans` still leave
+out (the notes read it).
 
 ## H steps
 
@@ -1105,6 +1128,22 @@ walking on (KNOWN_ISSUES.md K38)", then the row as the scan reads it.
 the scan reads it, one-of: tmaeno's OK 2026-11-14, a step after H2-1, measured first); a log no record shows naming the
 key, asked over the object's life (H2-1's arms not read); when the map says what fills a print's prefix (then ask a
 writer's log by its mark's key).
+
+*Changed (P66, 2026-11-18; the investigator's u9 W12):* a write statement's printed bind map (P35, `printed_write_arms`)
+compared a printed time with the row's value as text, so a time printed to the microsecond never was the row's DATE
+value: NR-T-53655760-modificationTime's 'done' pass printed `':modificationTime': datetime.datetime(2026, 11, 15, 4, 37,
+31, 304478)` at updateTask_JEDI's 1483, its 1443 stayed kept, and the scan went on to the 'prepared' row, whose branch
+END said 3839 "written last" though updateTask_JEDI's 'done' write followed.  A printed time is now the row's value at
+the precision the row holds it (`which_ran._value_match`): a fraction below half a second is the row's second whether
+the column cuts or rounds it; from half a second on either second may be it, so it is neither the same (no positive)
+nor another (no arm excluded by it).  The END is 1443's, in the 'done' pass.
+
+*Changed (W10, 2026-11-18; the investigator's u8/u9):* an arm H2 left among others whose run no record shows ran and
+which has no guard of its own ended its branch as "written last ... (no run shows the line ran; it has no guard)" with
+nothing read for it: NR-J-7423807701-cloud's doGeneratePrePro:2174, for an evgen job.  Such a branch now ends
+"written last by ... if it ran (...; it has no guard of its own, and its callers' conditions, which made it run or not,
+are not read)": the branch still ends, and one left alone when the others are excluded is still the answer, as the
+K38 design reads it; an arm left by elimination or on the only way ends as before.
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 

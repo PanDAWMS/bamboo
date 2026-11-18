@@ -11095,8 +11095,10 @@ def test_where_h2_decides_nothing_each_arm_left_walks_on_and_those_not_excluded_
                                     "pass of the statuslog row 'scouting' at 2026-10-29 10:06:00: the run; the other 1 arm(s) left "
                                     "excluded (1)"]
     assert (got["shown"]["code"], got["shown"]["wrote"]) == (None, True)
+    # W10: put:7, no run showing it ran and no guard of its own, ends its branch only if it ran
     assert got["older"]["ends"] == [
-        "END JediTaskSpec.transUses='A' written last by put:7 (no run shows the line ran; it has no guard), in the pass of the "
+        "END JediTaskSpec.transUses='A' written last by put:7 if it ran (no run shows the line ran; it has no guard of its "
+        "own, and its callers' conditions, which made it run or not, are not read), in the pass of the "
         "statuslog row 'running' at 2026-10-29 11:38:00; it rests on: no line of a.log in the records holds 7: its runs are not "
         "shown to name it; or at an older row it may have written at: 'scouting' 2026-10-29 10:06:00; the other 1 arm(s) left "
         "excluded (2)"]
@@ -15493,7 +15495,7 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
                 r._subject_writers = lambda subject: writers
                 r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
 
-                def column_writes(j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None):
+                def column_writes(j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None, seen_out=None):
                     if missed_out is not None and b.line in missed:
                         missed_out.append(("an ask", "why"))
                     got, whole = hits[b.line]
@@ -15634,7 +15636,11 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
     assert got["p3_premises"] == [
         "none of feed:742 began the stay (they print nothing naming the row as it began, while another arm that may have does)",
         "none of staged:5710 wrote JediTaskSpec.modificationTime in the stay, besides the 2 write(s) the records show"], got
+    # K-3 (d): and where it surely failed, from the stay's start to five minutes after it, on the same premises
     assert got["p3_terms"] == ["modificationtime<:timeLimit: surely held for the row from 2026-11-13 20:34:16.423630 to 2026-11-13 20:34:45.105988, "
+                               "on the writes the records show, where none of staged:5710 wrote "
+                               "JediTaskSpec.modificationTime in the stay and none of feed:742 began the stay",
+                               "modificationtime<:timeLimit: surely false for the row from 2026-11-13 20:29:16.423630 to 2026-11-13 20:34:16.423630, "
                                "on the writes the records show, where none of staged:5710 wrote "
                                "JediTaskSpec.modificationTime in the stay and none of feed:742 began the stay"], got
     assert got["p3_none"] == [] and got["p3_asked"] == [], got
@@ -16217,14 +16223,14 @@ def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
             r._key_columns = lambda subject, key: {"JediTaskSpec.jediTaskID"}
             hits = {1441: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))],
                     1443: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))]}
-            r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None: (hits[b.line], True)
+            r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None, seen_out=None: (hits[b.line], True)
             r._row_value_write = lambda subject, q, writes=(): None
             q = N(subject="JediTaskSpec.status", observed="pending", since=D.datetime(2026, 11, 15, 6, 0, 0),
                   moved=D.datetime(2026, 11, 15, 7, 7, 11, 370000), writers=[])
             tl = RR.Rerun._timeline(r, C, q)
             got["writes"] = [[str(w.at), w.how, list(w.arms), str(w.lo), str(w.hi), w.where] for w in tl.writes]
             # A-4: the row's value written before the stay began leaves no arm open in it; written in it, they stay
-            r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None: (
+            r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None, seen_out=None: (
                 [] if b.line == 1443 else hits[b.line], b.line != 1443)
             got["opens"] = {}
             for name, rv in (("none", None), ("before", q.since - D.timedelta(days=1)), ("in", q.moved - D.timedelta(minutes=1))):
@@ -19581,3 +19587,140 @@ def test_k1b_a_copy_of_what_its_own_pass_wrote_writes_the_clock_as_that_write(tm
     got = json.loads(out.splitlines()[-1])
     assert got == {"509": 0.0, "511": None, "512": None, "513": None}, got
 
+
+
+def test_k3_a_print_of_a_columns_value_reads_its_write_run_and_ties_the_statements_other_columns(tmp_path):
+    """K-3 (bundle K, out/gm/qk-design.md, the delegated design; NT-defined-late): (b) a print of the row's lockedTime
+    (unlockTasks_JEDI's 897, 15:57:05.666) whose value is the clock of a reached write before it (getTaskWithID_JEDI's
+    1818 at 14:56:41.571) reads that write run and the column held from it to the print -- not a value the print's own
+    clock may be, nor one a write run between left; (c) the statement's write of lockedBy at that print ran too, and an
+    open arm whose every statement nulls lockedTime as well did not write lockedBy while it held, save near where an
+    arm's clock could be the value; (a) the term ``lockedBy IS NULL`` then surely failed, said by its states."""
+    out = _ok(_run(tmp_path, """
+        import datetime as D, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import timeline as TL
+        import bamboo.querier.rerun as RR
+
+        def t(s):
+            return D.datetime.fromisoformat(f"2026-11-14 {s}")
+
+        got = {}
+        lock = TL.Write(t("14:56:41.571"), t("14:56:41.571"), t("14:56:41.571"), TL.REACHED, ("getTask:1818",), "getTask:1807", "m82")
+        unlock = TL.Write(t("15:57:05.666"), TL.LOW, TL.HIGH, TL.RAN, ("unlock:847",), "unlock:897", "m81")
+        other = TL.Write(t("15:20:00"), t("15:20:00"), t("15:20:00"), TL.RAN, ("lockTask:2755",), "lockTask:2760", "m84")
+        offsets = {"getTask:1818": D.timedelta(0), "lockTask:2755": D.timedelta(0), "unlock:847": None}
+        got["clock"] = [RR._clock_write(t("14:56:41"), [lock], offsets)[0] is lock,
+                        RR._clock_write(t("14:56:41"), [lock, other], offsets) is None,
+                        RR._clock_write(t("14:50:00"), [lock], offsets) is None]
+
+        # the map's print holes naming columns, read off a record
+        hole = lambda e, c: N(expression=e, columns=c, listed=False)
+        frag = N(function_prints=[N(owner="m.py::Mod.unlock", statements=[N(line=897, rows=[N(holes=[
+            hole("jediTaskID", ["T.jediTaskID"]), hole("lockedBy", ["T.lockedBy"]), hole("lockedTime", ["T.lockedTime"])],
+            prefix_holes=[])])])], key_froms=[])
+        RR.mapdump.fragment = lambda: frag
+        row = N(capture=lambda record: {"jediTaskID": "7", "lockedBy": "a-pid", "lockedTime": "2026-11-14 14:56:41"})
+        got["printed"] = RR._printed_columns("m.py::unlock", 897, row, None, "T", {"T.jediTaskID"})
+
+        r = RR.Rerun.__new__(RR.Rerun)
+        writers = {"T.lockedTime": [N(owner="m.py::getTask", subject="T.lockedTime",
+                                      branches=[N(line=1818, outcome="runtime(CURRENT_DATE)", amount=None)]),
+                                    N(owner="m.py::unlock", subject="T.lockedTime", branches=[N(line=847, outcome="None", amount=None)]),
+                                    N(owner="m.py::single", subject="T.lockedTime", branches=[N(line=2833, outcome="None", amount=None)]),
+                                    N(owner="m.py::stamp", subject="T.lockedTime",
+                                      branches=[N(line=142, outcome="runtime(CURRENT_DATE)", amount=None)])]}
+        r._subject_writers = lambda s: writers.get(s, [])
+        seen = [("T.lockedTime", "2026-11-14 14:56:41", t("15:57:05.666"), "m81.x", "unlock:897"),
+                ("T.lockedTime", "2026-11-14 15:57:05", t("15:57:05.666"), "m81.x", "unlock:897"),
+                ("T.lockedBy", "a-pid", t("15:57:05.666"), "m81.x", "unlock:897")]
+        found = r._printed_witnesses("T.lockedTime", seen, [lock, unlock])
+        got["witness"] = [[str(x[0]), str(x[1]), str(x[2]), list(x[3]), x[4], x[5], x[6]] for x in found]
+        got["witness ran between"] = r._printed_witnesses("T.lockedTime", seen[:1], [lock, other, unlock])
+
+        tl = TL.Timeline(t("14:56:38"), t("16:21:01"), (TL.LOW, TL.HIGH), (TL.LOW, TL.HIGH), (lock, unlock),
+                         (TL.Opening("single:2833", None, None),), witnessed=tuple(x[:7] for x in found))
+        pieces = tl.pieces()
+        got["held"] = [[str(a), str(b)] for a, b in TL.surely_true("<", D.timedelta(minutes=-10), pieces)]
+
+        # (c): getTask's one statement writes both; the unlocks null lockedTime too, the stamp writes its clock
+        RR.key_froms = lambda: [N(owner="m.py::getTask", writes={"T.lockedBy": [1847], "T.lockedTime": [1818]}),
+                                N(owner="m.py::single", writes={"T.lockedBy": [2833], "T.lockedTime": [2833]}),
+                                N(owner="m.py::stamp", writes={"T.lockedBy": [140], "T.lockedTime": [142]}),
+                                N(owner="m.py::lone", writes={"T.lockedBy": [76]})]
+        r._timeline = lambda column, q, nulls=False: tl if column == "T.lockedTime" and not nulls else None
+        got["tied"] = r._tied_witness("m.py::getTask", 1847, "T.lockedBy", t("14:56:41.571"), "m82.x", None)
+        got["tied elsewhere"] = r._tied_witness("m.py::getTask", 1847, "T.lockedBy", t("14:56:41.571"), "m86.x", None)
+        arms = {"single:2833": N(line=2833), "stamp:140": N(line=140), "lone:76": N(line=76)}
+        owners = {"single:2833": "m.py::single", "stamp:140": "m.py::stamp", "lone:76": "m.py::lone"}
+        opens = [TL.state_opening(a, TL.NULL_ONLY) for a in arms]
+        quiet = r._tied_quiet("T.lockedBy", None, opens, arms, owners)
+        got["quiet"] = [[str(a), str(z), list(n), c] for a, z, n, c in quiet]
+
+        # (a): lockedBy's states, its lock read run, the unlock's arm quiet: surely set from the lock to the unlock
+        lb_lock = TL.Write(t("14:56:41.571"), *TL.SET_ONLY, TL.RAN, ("getTask:1847",), "getTask:1807", "m82")
+        lb_unlock = TL.Write(t("15:57:05.666"), *TL.NULL_ONLY, TL.RAN, ("unlock:847",), "unlock:897", "m81")
+        states = TL.Timeline(t("14:56:38"), t("16:21:01"), TL.EITHER, TL.EITHER, (lb_lock, lb_unlock), tuple(opens),
+                             quiet=tuple(quiet))
+        got["set"] = [[str(a), str(b)] for a, b in TL.state_spans(False, states.pieces())]
+        got["set unquiet"] = TL.state_spans(False, TL.Timeline(t("14:56:38"), t("16:21:01"), TL.EITHER, TL.EITHER,
+                                                               (lb_lock, lb_unlock), tuple(opens)).pieces())
+        two = TL.Timeline(t("14:56:38"), t("16:21:01"), TL.EITHER, TL.EITHER, (lb_lock, lb_unlock),
+                          tuple(o for o in opens if o.arm != "lone:76"), quiet=tuple(quiet))
+        got["set two"] = [[str(a), str(b)] for a, b in TL.state_spans(False, two.pieces())]
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    # the last write whose clock is the value, none run between; another value, or one run between, matches nothing
+    assert got["clock"] == [True, True, True], got
+    assert got["printed"] == [["T.lockedBy", "a-pid"], ["T.lockedTime", "2026-11-14 14:56:41"]], got
+    # the print's own second is no witness; the value of 14:56:41 is, from the lock's write to the print
+    assert got["witness"] == [["2026-11-14 14:56:41.571000", "2026-11-14 15:57:05.666000", "2026-11-14 14:56:41",
+                               ["getTask:1818"], "unlock:897", "m81", "m82"]], got
+    assert got["witness ran between"] == [], got
+    # lockedTime < now - 10 min held from ten minutes after the value printed to the unlock, the open arm aside there
+    assert got["held"] == [["2026-11-14 15:06:41", "2026-11-14 15:57:05.666000"]], got
+    assert got["tied"] == {"column": "T.lockedTime", "arms": ["getTask:1818"], "value": "2026-11-14 14:56:41",
+                           "where": "unlock:897", "machine": "m81", "printed": "15:57:05.666"}, got
+    assert got["tied elsewhere"] is None, got
+    # the unlock that nulls both is quiet all the stretch; the stamp's clock could be the value just after the lock;
+    # an arm whose statement writes no lockedTime is not
+    assert got["quiet"] == [["2026-11-14 14:56:41.571000", "2026-11-14 15:57:05.666000", ["single:2833"], "T.lockedTime"],
+                            ["2026-11-14 14:56:43", "2026-11-14 15:57:05.666000", ["stamp:140"], "T.lockedTime"]], got
+    assert got["set"] == [], got  # lone:76 is still open, writing NULL at any moment
+    assert got["set unquiet"] == [], got
+    # without it: surely set from where the stamp's clock could no longer be the value to the unlock
+    assert got["set two"] == [["2026-11-14 14:56:43", "2026-11-14 15:57:05.666000"]], got
+
+
+def test_p66_a_printed_time_is_the_rows_value_at_the_second_it_keeps_where_cut_and_rounded_agree(tmp_path):
+    """P66 (the investigator's u9 W12): updateTask_JEDI's 1483 printed ``':modificationTime':
+    datetime.datetime(2026, 11, 15, 4, 37, 31, 304478)``; the row (a DATE column) holds '2026-11-15 04:37:31'.  A
+    fraction below half a second is that second whether the column cuts or rounds it: the same value, so P35 reads the
+    arm that printed it as the one that gave it.  From half a second on either second may be it -- neither the same nor
+    another, so no arm is excluded by it; a row value with a fraction is compared as it stands."""
+    out = _ok(_run(tmp_path, """
+        import datetime as D, json
+        from bamboo.querier import which_ran as W
+
+        v = D.datetime(2026, 11, 15, 4, 37, 31, 304478)
+        late = D.datetime(2026, 11, 15, 4, 37, 30, 704478)
+        got = {
+            "below half": [W._value_match(v, "2026-11-15 04:37:31"), W._value_match(v, "2026-11-15 04:37:30")],
+            "half or more": [W._value_match(late, "2026-11-15 04:37:30"), W._value_match(late, "2026-11-15 04:37:31"),
+                             W._value_match(late, "2026-11-15 04:37:29")],
+            "with a fraction": [W._value_match(v, "2026-11-15 04:37:31.304478"), W._value_match(v, "2026-11-15 04:37:31.3")],
+            "whole second": W._value_match(D.datetime(2026, 11, 15, 4, 37, 31), "2026-11-15 04:37:31"),
+            "same": [W._same_value(v, "2026-11-15 04:37:31"), W._same_value(late, "2026-11-15 04:37:31")],
+            "text": [W._value_match("running", "running"), W._value_match("running", "scouting"),
+                     W._value_match(v, "not a time")],
+        }
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["below half"] == [True, False], got
+    assert got["half or more"] == [None, None, False], got
+    assert got["with a fraction"] == [True, False], got
+    assert got["whole second"] is True, got
+    assert got["same"] == [True, False], got
+    assert got["text"] == [True, False, False], got

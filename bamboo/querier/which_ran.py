@@ -1395,8 +1395,33 @@ def printed_binds(fn: R.Function, sn: R.Seen, wp: Any, keys: set[str], raised_at
     return None
 
 
-def _same_value(value: Any, text: str) -> bool:
+def _value_match(value: Any, text: str) -> bool | None:
+    """Whether a value a statement ran with is the row's value *text*: True, False, or None where it may be either.
+
+    P66 (the investigator's u9 W12): a time printed to the microsecond is the row's value at the precision the row
+    holds it.  A DATE column keeps its seconds, the fraction cut or rounded (which, is not read here), so a fraction
+    below half a second is the same second either way: updateTask_JEDI's 1483 printed ``':modificationTime':
+    datetime.datetime(2026, 11, 15, 4, 37, 31, 304478)``, the row's '2026-11-15 04:37:31'.  From half a second on,
+    either of the two seconds may be it."""
+    if isinstance(value, datetime.datetime):
+        try:
+            seen = datetime.datetime.fromisoformat(str(text).strip())
+        except ValueError:
+            return str(value).strip() == str(text).strip()
+        if value == seen:
+            return True
+        if seen.microsecond or not value.microsecond:
+            return False
+        cut = value.replace(microsecond=0)
+        if value.microsecond < 500000:
+            return cut == seen
+        return None if seen in (cut, cut + datetime.timedelta(seconds=1)) else False
     return str(value).strip() == str(text).strip()
+
+
+def _same_value(value: Any, text: str) -> bool:
+    """:func:`_value_match` where it is sure the value is the row's."""
+    return _value_match(value, text) is True
 
 
 def _names_read(node: ast.AST) -> set[str]:
@@ -1484,7 +1509,7 @@ def _not_by(fn: R.Function, sn: R.Seen, stmt: ast.stmt, shown: PrintedBinds, bin
             got = E.evaluate(ast.unparse(value), tenv)
         except SyntaxError:
             got = E.UNKNOWN
-        if got is not E.UNKNOWN and not _same_value(got, observed):
+        if got is not E.UNKNOWN and _value_match(got, observed) is False:
             return f"P35: it gives {bind} {ast.unparse(value)}, {got!r} {shown.where} ({_used(tenv, ast.unparse(value))})"
     for guard in pathcond.arm_condition(stmt):
         if E.read_elsewhere(guard):
