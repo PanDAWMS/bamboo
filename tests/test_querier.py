@@ -20273,3 +20273,67 @@ def test_p14_a_row_the_stay_waited_on_made_inside_it_is_read_for_its_birth_run_a
     # neither recorded: the asks kept, said as asked
     assert got["not recorded"]["said"][0].startswith("JobSpec 9's birth: the runs of insertNewJob holding it are asked"), got
     assert got["not recorded"]["kept"] == 1, got
+
+
+def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_birth(tmp_path):
+    """P14's first form, step two: the maker's functions are the one holding the INSERT's new_row_at (storeJobs) and
+    those reaching it within two calls (JobGeneratorThread.runImpl); its selections are read sites with wakers whose
+    rows cross to one of them, keyed by the linking column; their wakers' writes for the link over the birth less EDGE
+    are read as A2 reads them, the last before the birth said."""
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "O1", [], "outside"
+        rerun.R.def_holding = lambda rel, line: N(name="storeJobs") if line == 358 else None
+        rerun.R.owner_of = lambda rel, node: f"{rel}::{node.name}"
+        rerun.MR.graph = lambda: N(rows={})
+        rerun.MR.owners = lambda name, record: [name.replace("::", "::TaskBuffer.")]
+        rerun.MR.reaching = lambda name, depth: {"pandajedi/g.py::JobGeneratorThread.runImpl"}
+        waker = N(owner="panda:pandaserver/d.py::D.updateUnmergedDatasets", line=1971, value="ready", kind="update")
+        sites = [N(owner="panda:pandaserver/t.py::_get_tasks_datasets_with_unprocessed_inputs", anchor=N(line_start=1872),
+                   wakers=[waker], keys=["JediTaskSpec.jediTaskID"], crosses_to=["pandajedi/g.py::runImpl"]),
+                 # keyed otherwise, or crossing to no maker: not read
+                 N(owner="panda:pandaserver/t.py::other", anchor=N(line_start=9), wakers=[waker], keys=["JediTaskSpec.status"],
+                   crosses_to=["pandajedi/g.py::runImpl"]),
+                 N(owner="panda:pandaserver/t.py::far", anchor=N(line_start=7), wakers=[waker], keys=["JediTaskSpec.jediTaskID"],
+                   crosses_to=["pandajedi/x.py::elsewhere"])]
+        rerun.mapdump.fragment = lambda: N(read_sites=sites)
+        maker = N(owner="panda:pandaserver/j.py::J.insertNewJob", new_row=True, new_row_at="pandaserver/taskbuffer/TaskBuffer.py:358")
+        born, start = datetime.datetime(2026, 11, 14, 17, 45, 57), datetime.datetime(2026, 11, 13, 20, 9, 7)
+        calls = []
+
+        def writes_of(found):
+            def f(wakers, key, since, until, where, values, quiet=False, why=None):
+                calls.append([key, since, until, where, sorted(values), quiet])
+                return found
+            return f
+
+        got = {}
+        p = N(machine="aipanda099.cern.ch")
+        for name, found in {"wrote": ([(datetime.datetime(2026, 11, 14, 17, 40), p, "pandaserver/d.py::D.updateUnmergedDatasets", 1971, ["ready"]),
+                                       (datetime.datetime(2026, 11, 14, 17, 44, 56), p, "pandaserver/d.py::D.updateUnmergedDatasets", 1971, ["ready"])], [], None),
+                            "asked": ([], [(N(key="k1"), ""), (N(key="k2"), "")], None),
+                            "none": ([], [], None)}.items():
+            r._waker_writes, r.unanswered, calls[:] = writes_of(found), [], []
+            said = r._waited_trigger("JobSpec", [maker], "5", "JediTaskSpec.jediTaskID", start, born)
+            got[name] = {"said": [T.text(x) for x in said], "calls": list(calls), "kept": len(r.unanswered)}
+        rerun.MR.reaching = lambda name, depth: set()
+        got["no maker reach"] = [T.text(x) for x in r._waited_trigger("JobSpec", [maker], "5", "JediTaskSpec.jediTaskID", start, born)]
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    # one selection, the birth less EDGE, quiet
+    assert got["wrote"]["calls"] == [["5", "2026-11-14 17:35:57", "2026-11-14 17:45:57",
+                                      "_get_tasks_datasets_with_unprocessed_inputs@1872", ["ready"], True]], got
+    assert got["wrote"]["said"] == ["its maker's selection _get_tasks_datasets_with_unprocessed_inputs@1872 takes rows its wakers "
+                                     "write: the last such write for the key in the 10 minutes before the JobSpec was made was "
+                                     "updateUnmergedDatasets:1971's (ready) at 2026-11-14 17:44:56 on aipanda099"], got
+    assert got["asked"]["kept"] == 2 and "are asked (2 ask(s))" in got["asked"]["said"][0], got
+    assert got["none"]["said"] == ["its maker's selection _get_tasks_datasets_with_unprocessed_inputs@1872: no waker of it wrote "
+                                   "for the key from 2026-11-14 17:35:57 to 2026-11-14 17:45:57"], got
+    # the INSERT's site reached from no selection's function: nothing said
+    assert got["no maker reach"] == [], got

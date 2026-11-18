@@ -800,8 +800,15 @@ insertNewJob, ppEventServiceJob, makeFakeCoJumbo) holding its key, over its crea
 machine, each whole.  They are asked by the value linking it to the asked row first (the task's ID: the maker's mark
 holds it, so the records the walk holds answer), then by its own key.  Its life: its history rows with their times
 and machines.  NT-scouting-late: made by insertNewJob's run at 17:45:57,966 on aipanda089; pending 17:45:58 on 089 ...
-finished 20:03:00 on 090.  Why its maker made it then (the maker's selection's wakers: updateUnmergedDatasets' 'ready'
-at 17:44:56 on aipanda099) is not read yet.
+finished 20:03:00 on 090.  Why its maker made it then (`_waited_trigger`): the maker's functions are the one holding
+the INSERT's ``new_row_at`` (TaskBuffer.storeJobs) and those reaching it within two calls (JobGeneratorThread.runImpl);
+its selections are read sites with wakers whose ``crosses_to`` reaches one of them and whose keys hold the linking
+column (``_get_tasks_datasets_with_unprocessed_inputs@1872``, keyed by the task); their wakers' writes for the linking
+value over the birth less EDGE are read as A2 reads them (`_waker_writes`, now A2's own), the last before the birth
+said.  EDGE, not the stay: a maker that polls takes a row a waker wrote within its round, and the day-long stay asked
+whole by the wakers' marks was 32 asks.  NT-scouting-late: 10 asks of the 10 minutes before 17:45:57; with them the
+line should name updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099.
+*Premise:* a write the maker took is a waker write within EDGE before the birth; one older than its round is not read.
 
 ## Row values at a step's time (`held.py`)
 
