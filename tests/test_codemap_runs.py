@@ -2748,8 +2748,8 @@ def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_n
     """copyArchive's ``maxModTime={maxModificationTime}``: the item is ``MAX(creationTime)`` of ``jobsDefined4``
     grouped by ``jobDefinitionID, ...`` -- the greatest of a group's values, no row's.  So the hole names no column,
     and says the aggregate (:attr:`SkeletonHole.aggregate`): the function, the column and the grouping, as the
-    classes declare them.  A ``COUNT`` is no column's value at all and says nothing; the grouping column itself is
-    that column."""
+    classes declare them.  A ``COUNT(*)`` is no column's value either: how many rows the group has, no column; the
+    grouping column itself is that column."""
     holes = _row_holes(tmp_path, read_rows=True)
     line = _line(ROWS, "W9")
     newest = holes[("newest", line)]
@@ -2760,7 +2760,14 @@ def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_n
         "JobSpec.PandaID",
         ["JobSpec.jobStatus"],
     )
-    assert holes[("n", line)].aggregate is None
+    counted = holes[("n", line)]
+    assert counted.columns == []
+    assert counted.aggregate is not None
+    assert (counted.aggregate.fn, counted.aggregate.column, counted.aggregate.group_by) == (
+        "COUNT",
+        "",
+        ["JobSpec.jobStatus"],
+    )
     assert (holes[("status", line)].columns, holes[("status", line)].aggregate) == (["JobSpec.jobStatus"], None)
 
 

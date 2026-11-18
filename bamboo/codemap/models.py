@@ -4164,6 +4164,15 @@ class HeldSource(KeySource):
     """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
     of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
 
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            f"``rows`` whose item is ``{KEY_COLUMN_EXPRESSION}`` that is one value over a group's rows "
+            "(:class:`RowAggregate`), the same on every text of the statement: prepareTasksToBeFinished_JEDI's "
+            "``totFinished``.  Its columns are spelled as *column* is: ``table.column`` lowered."
+        ),
+    )
+
     steps: list[str] = Field(
         default_factory=list,
         description=(
@@ -7191,17 +7200,40 @@ KEY_STOPS: dict[str, str] = {
 
 
 class RowAggregate(BaseModel):
-    """A select item that is one column's ``MAX`` or ``MIN`` over the rows a ``GROUP BY`` makes one: no row's value of
-    the column, but the greatest or least of the group's.  copyArchive's ``MAX(creationTime)`` of ``jobsDefined4``
-    grouped by ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}``."""
+    """A select item that is one value over the rows a ``GROUP BY`` makes one, not any row's: one column's ``MAX``,
+    ``MIN``, ``SUM`` or ``AVG`` -- copyArchive's ``MAX(creationTime)`` of ``jobsDefined4`` grouped by
+    ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}`` --, how many rows there are
+    (``COUNT(*)``), or how many hold a value in a column: prepareTasksToBeFinished_JEDI's ``SUM(CASE WHEN
+    f_status='finished' THEN 1 ELSE 0 END)``, ``COUNT`` of ``JediFileSpec.status`` with *value* ``'finished'``, over
+    the distinct ``(jediTaskID, status, walltimeUnit, PandaID, status)`` its derived table hands out (*counted*).
 
-    fn: str = Field(description="``MAX`` or ``MIN``.")
-    column: str = Field(description="The column it is of, as the table's class declares it: ``JobSpec.creationTime``.")
+    Where the record spells columns as classes declare them (a hole, a stop), so are these; where it spells
+    ``table.column`` (a guard's or a key's source), so are these."""
+
+    fn: str = Field(description="``MAX``, ``MIN``, ``SUM``, ``AVG`` or ``COUNT``.")
+    column: str = Field(
+        default="",
+        description=(
+            "The column it is of: ``JobSpec.creationTime``; for a ``COUNT`` with *value*, the column tested; empty "
+            "for ``COUNT(*)``."
+        ),
+    )
+    value: str = Field(
+        default="",
+        description="For a ``COUNT`` of the rows holding a value in *column*: the value, as written (``'finished'``).",
+    )
     group_by: list[str] = Field(
         default_factory=list,
         description=(
             "The ``GROUP BY`` columns, as the table's class declares each, else ``table.column`` as written; empty "
             "where the statement groups nothing (one value over every row it selects)."
+        ),
+    )
+    counted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the statement reads one ``DISTINCT`` derived table: its items, spelled as *group_by* -- the rows "
+            "the value is over are one per distinct combination of them; empty where it reads tables."
         ),
     )
 

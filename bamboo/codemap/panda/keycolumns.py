@@ -477,16 +477,21 @@ class Reader:
 
     def _aggregate(self, aggregate) -> Optional[RowAggregate]:
         """*aggregate* (:class:`sqltext.Aggregate`) with its columns as their tables' classes declare them; ``None``
-        where its own column's is not."""
-        column = self._declared(aggregate.table, aggregate.column)
+        where its own column's is not (``COUNT(*)`` has none)."""
+        column = self._declared(aggregate.table, aggregate.column) if aggregate.column else ""
         if column is None:
             return None
         return RowAggregate(
             fn=aggregate.fn,
             column=column,
+            value=aggregate.value,
             group_by=[
                 self._declared(table, name) or (f"{table}.{name}" if table else name)
                 for table, name in aggregate.group_by
+            ],
+            counted=[
+                self._declared(table, name) or (f"{table}.{name}" if table else name)
+                for table, name in aggregate.counted
             ],
         )
 

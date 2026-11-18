@@ -2275,16 +2275,30 @@ ITEM_COLUMN, ITEM_STAR, ITEM_HOLE, ITEM_EXPRESSION, ITEM_AFTER_HOLE = "column", 
 
 
 class Aggregate(NamedTuple):
-    """An :data:`ITEM_EXPRESSION` that is one column's ``MAX`` or ``MIN``: ``MAX(creationTime)`` of ``jobsDefined4``
-    under ``GROUP BY jobDefinitionID, prodUserName, ...`` (:class:`~bamboo.codemap.models.RowAggregate`)."""
+    """An :data:`ITEM_EXPRESSION` that is one value over the rows a group makes one
+    (:class:`~bamboo.codemap.models.RowAggregate`): one column's ``MAX``, ``MIN``, ``SUM`` or ``AVG`` --
+    ``MAX(creationTime)`` of ``jobsDefined4`` under ``GROUP BY jobDefinitionID, prodUserName, ...`` --, how many rows
+    (``COUNT(*)``), or how many hold a value in a column (``SUM(CASE WHEN f_status='finished' THEN 1 ELSE 0 END)``,
+    ``COUNT`` with *value*)."""
 
-    #: ``MAX`` or ``MIN``.
+    #: :data:`AGGREGATES`' one.
     fn: str
-    #: The column's table, as :attr:`SelectItem.table`, and the column, lowered.
+    #: The column's table, as :attr:`SelectItem.table`, and the column, lowered; both ``""`` for ``COUNT(*)``.
     table: str
     column: str
     #: The ``GROUP BY`` columns, ``(table, column)`` lowered, the table ``""`` where none is read.
     group_by: tuple[tuple[str, str], ...] = ()
+    #: For a ``COUNT`` of the rows holding a value: the value, as written (``'finished'``).
+    value: str = ""
+    #: Where the select reads one ``DISTINCT`` derived table: its items, ``(table, column)`` lowered -- one row
+    #: counted per distinct combination of them.
+    counted: tuple[tuple[str, str], ...] = ()
+
+
+#: The functions an :class:`Aggregate` is of.
+AGGREGATES = ("MAX", "MIN", "SUM", "AVG", "COUNT")
+#: One column's aggregate, by the function's node.
+_ONE_COLUMN: dict[type, str] = {exp.Max: "MAX", exp.Min: "MIN", exp.Sum: "SUM", exp.Avg: "AVG"}
 
 
 class SelectItem(NamedTuple):
@@ -2335,12 +2349,11 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
         elif isinstance(column, exp.Star) or (isinstance(column, exp.Column) and isinstance(column.this, exp.Star)):
             items.append(SelectItem(ITEM_STAR))
         elif isinstance(column, exp.Column) and scope is not None:
-            owned, why = _owner(column, scope, root)
-            table = owned[0].lower() if owned and not why else ""
+            table, name = _owned_column(column, scope, root)
             if _NAMED_HOLE.search(column.name):
                 items.append(SelectItem(ITEM_HOLE, table))
             elif table:
-                items.append(SelectItem(ITEM_COLUMN, table, column.name.lower()))
+                items.append(SelectItem(ITEM_COLUMN, table, name))
             else:
                 items.append(SelectItem(ITEM_EXPRESSION))
         else:
@@ -2348,25 +2361,113 @@ def select_items(sql: str) -> Optional[tuple[SelectItem, ...]]:
     return tuple(items)
 
 
+def _owned_column(column: exp.Column, scope, root) -> tuple[str, str]:
+    """``(table, column)`` lowered of what *column* reads: its table as :func:`_owner` reads it (``""`` where none is),
+    and the column's own name there -- an alias a derived table hands out read back to the column it names (sqlEA's
+    ``t_status`` is ``tabT.status``)."""
+    owned, why = _owner(column, scope, root)
+    return (owned[0].lower() if owned and not why else "", _source_name(column, scope, root))
+
+
+def _source_name(column: exp.Column, scope, root, depth: int = 0) -> str:
+    """The name, lowered, of the column *column* reads, followed through each derived table or ``WITH`` clause where
+    :func:`_owner` follows it."""
+    name = column.name.lower()
+    qualifier = (column.table or "").lower()
+    chain = _chain(scope, root)
+    if qualifier:
+        for one in chain:
+            for key, source in one.sources.items():
+                if key.lower() != qualifier or isinstance(source, exp.Table):
+                    continue
+                projected = _projected(name, source)
+                if projected is not None and depth < 8:
+                    return _source_name(projected[0], projected[1], None, depth + 1)
+                return name
+        return name
+    for one in chain:
+        tables = [source for source in one.sources.values() if isinstance(source, exp.Table)]
+        derived = [source for source in one.sources.values() if not isinstance(source, exp.Table)]
+        if (one is chain[0] and len(tables) == 1 and not derived) or _SCHEMA is None:
+            return name
+        having = [table for table in tables if name in _SCHEMA.get(table.name.lower(), ())]
+        handing = [source for source in derived if _projected(name, source) is not None]
+        unknown = [table for table in tables if table.name.lower() not in _SCHEMA]
+        if not having and len(handing) == 1 and not unknown and depth < 8:
+            projected = _projected(name, handing[0])
+            return _source_name(projected[0], projected[1], None, depth + 1)  # type: ignore[index]
+        if having or handing or unknown:
+            return name
+    return name
+
+
 def _aggregate(node: object, select: exp.Select, scope, root) -> Optional[Aggregate]:
-    """*node*, a select item, as one column's ``MAX`` or ``MIN`` with *select*'s grouping, where it is one."""
-    if not isinstance(node, (exp.Max, exp.Min)) or not isinstance(node.this, exp.Column) or scope is None:
-        return None
-    if node.expressions or _NAMED_HOLE.search(node.this.name):
-        return None
-
-    def placed(column: exp.Column) -> tuple[str, str]:
-        owned, why = _owner(column, scope, root)
-        return (owned[0].lower() if owned and not why else "", column.name.lower())
-
-    table, column = placed(node.this)
-    if not table:
+    """*node*, a select item, as an :class:`Aggregate` with *select*'s grouping, where it is one: one column's
+    ``MAX``, ``MIN``, ``SUM`` or ``AVG``, ``COUNT(*)``, or ``SUM(CASE WHEN c = v THEN 1 ELSE 0 END)`` -- a ``COUNT``
+    of the rows whose ``c`` is ``v`` (:func:`_counting`)."""
+    if scope is None:
         return None
     group = select.args.get("group")
     grouped = tuple(
-        placed(one) for one in (group.expressions if isinstance(group, exp.Group) else ()) if isinstance(one, exp.Column)
+        _owned_column(one, scope, root)
+        for one in (group.expressions if isinstance(group, exp.Group) else ())
+        if isinstance(one, exp.Column)
     )
-    return Aggregate("MAX" if isinstance(node, exp.Max) else "MIN", table, column, grouped)
+    counted = _counted(scope)
+    if isinstance(node, exp.Count) and isinstance(node.this, exp.Star):
+        return Aggregate("COUNT", "", "", grouped, counted=counted)
+    when = _counting(node.this) if isinstance(node, exp.Sum) else None
+    if when is not None:
+        table, column = _owned_column(when[0], scope, root)
+        return Aggregate("COUNT", table, column, grouped, when[1], counted) if table else None
+    fn = _ONE_COLUMN.get(type(node))
+    if fn is None or not isinstance(node.this, exp.Column):  # type: ignore[attr-defined]
+        return None
+    if node.expressions or _NAMED_HOLE.search(node.this.name):  # type: ignore[attr-defined]
+        return None
+    table, column = _owned_column(node.this, scope, root)  # type: ignore[attr-defined]
+    return Aggregate(fn, table, column, grouped, counted=counted) if table else None
+
+
+def _counting(node: object) -> Optional[tuple[exp.Column, str]]:
+    """``CASE WHEN c = v THEN 1 ELSE 0 END`` (either side of the ``=``, the ``ELSE`` left out or not): ``(c, v as
+    written)``, what a ``SUM`` of it counts the rows of; ``None`` for any other expression."""
+    if not isinstance(node, exp.Case) or node.this is not None:
+        return None
+    ifs = node.args.get("ifs") or []
+    default = node.args.get("default")
+    if len(ifs) != 1 or not _number(ifs[0].args.get("true"), "1") or (default is not None and not _number(default, "0")):
+        return None
+    test = ifs[0].this
+    if not isinstance(test, exp.EQ):
+        return None
+    left, right = test.this, test.expression
+    if isinstance(left, exp.Column) and isinstance(right, exp.Literal):
+        return left, right.sql()
+    if isinstance(right, exp.Column) and isinstance(left, exp.Literal):
+        return right, left.sql()
+    return None
+
+
+def _number(node: object, digits: str) -> bool:
+    return isinstance(node, exp.Literal) and not node.is_string and node.this == digits
+
+
+def _counted(scope) -> tuple[tuple[str, str], ...]:
+    """The items of the one ``DISTINCT`` derived table *scope* reads, ``(table, column)`` lowered (:attr:`Aggregate.
+    counted`); empty where it reads anything else."""
+    sources = list(scope.sources.values())
+    if len(sources) != 1 or isinstance(sources[0], exp.Table):
+        return ()
+    inner = sources[0]
+    select = getattr(inner, "expression", None)
+    if not isinstance(select, exp.Select) or not select.args.get("distinct"):
+        return ()
+    return tuple(
+        _owned_column(column, inner, None)
+        for projection in select.selects
+        if isinstance(column := projection.unalias(), exp.Column)
+    )
 
 
 def is_hole(name: str) -> bool:

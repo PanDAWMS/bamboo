@@ -115,6 +115,7 @@ from bamboo.codemap.models import (
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
+    RowAggregate,
     SetFrom,
     WriteFrom,
 )
@@ -975,6 +976,24 @@ def _called_at(ways: list[_Way], here: str) -> list[_Way]:
         else one
         for one in ways
     ]
+
+
+def _aggregate_said(aggregate: Optional[Any]) -> Optional[RowAggregate]:
+    """*aggregate* (:class:`sqltext.Aggregate`) as a source's :attr:`HeldSource.aggregate`, its columns spelled as the
+    source's *column* is: ``table.column`` lowered."""
+    if aggregate is None:
+        return None
+
+    def spelled(table: str, column: str) -> str:
+        return f"{table}.{column}" if table else column
+
+    return RowAggregate(
+        fn=aggregate.fn,
+        column=spelled(aggregate.table, aggregate.column) if aggregate.column else "",
+        value=aggregate.value,
+        group_by=[spelled(*one) for one in aggregate.group_by],
+        counted=[spelled(*one) for one in aggregate.counted],
+    )
 
 
 def owner_of(file: str, func: ast.AST) -> str:
@@ -3403,6 +3422,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 elements_stops=elements_stops,
                 sent=one.sent,
                 keyed=[HeldKeyed(at=at, by=by, key=key) for at, by, key in one.keyed],
+                aggregate=_aggregate_said(one.aggregate),
             ),
         )
         # A way the same but for the prints of a call's value: the prints of each, once.

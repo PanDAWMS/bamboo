@@ -1634,3 +1634,41 @@ def test_a_foreign_key_is_read_in_each_form_the_schema_states_it(tmp_path):
         "jedi_datasets": [(("jeditaskid",), "jedi_tasks", ("jeditaskid",))],
         "jedi_dataset_contents": [(("jeditaskid", "datasetid"), "jedi_datasets", ("jeditaskid", "datasetid"))],
     }
+
+
+_COUNTING = (
+    "SELECT jediTaskID,t_status,walltimeUnit, COUNT(*),SUM(CASE WHEN f_status='finished' THEN 1 ELSE 0 END),"
+    "SUM(CASE WHEN f_status='finished' THEN 2 ELSE 0 END) FROM "
+    "(SELECT DISTINCT tabT.jediTaskID,tabT.status as t_status,tabT.walltimeUnit,tabF.PandaID,tabF.status as f_status "
+    "FROM ATLAS_PANDA.JEDI_Tasks tabT,ATLAS_PANDA.JEDI_Dataset_Contents tabF "
+    "WHERE tabT.jediTaskID=tabF.jediTaskID AND tabF.PandaID IS NOT NULL) "
+    "GROUP BY jediTaskID,t_status,walltimeUnit"
+)
+
+
+def test_a_count_over_a_distinct_derived_table_says_what_rows_it_counts_and_which_value():
+    """prepareTasksToBeFinished_JEDI's sqlEA counts, per task, the distinct (task, status, walltimeUnit, PandaID,
+    file status) its derived table hands out, and how many of them have the file status ``'finished'``: ``COUNT(*)``
+    with no column, and the ``SUM`` of a ``CASE`` giving 1 where the column is the value and 0 else, a ``COUNT`` of
+    that column and value -- over *counted*, the derived table's items, grouped as the statement groups.  An alias
+    the derived table hands out is the column it names (``t_status`` is ``jedi_tasks.status``).  A ``CASE`` giving
+    anything but 1 and 0 counts nothing: an expression."""
+    schema = {
+        "jedi_tasks": frozenset({"jeditaskid", "status", "walltimeunit"}),
+        "jedi_dataset_contents": frozenset({"jeditaskid", "pandaid", "status"}),
+    }
+    with sqltext.with_schema(schema):
+        items = sqltext.select_items(_COUNTING)
+    assert items is not None
+    assert [(item.kind, item.table, item.column) for item in items[:3]] == [
+        (sqltext.ITEM_COLUMN, "jedi_tasks", "jeditaskid"),
+        (sqltext.ITEM_COLUMN, "jedi_tasks", "status"),
+        (sqltext.ITEM_COLUMN, "jedi_tasks", "walltimeunit"),
+    ]
+    grouped = (("jedi_tasks", "jeditaskid"), ("jedi_tasks", "status"), ("jedi_tasks", "walltimeunit"))
+    counted = (*grouped, ("jedi_dataset_contents", "pandaid"), ("jedi_dataset_contents", "status"))
+    assert items[3].aggregate == sqltext.Aggregate("COUNT", "", "", grouped, "", counted)
+    assert items[4].aggregate == sqltext.Aggregate(
+        "COUNT", "jedi_dataset_contents", "status", grouped, "'finished'", counted
+    )
+    assert (items[5].kind, items[5].aggregate) == (sqltext.ITEM_EXPRESSION, None)
