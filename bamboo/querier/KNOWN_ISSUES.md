@@ -591,6 +591,25 @@ and the arm.
 value"; else stopped, with what is not read.
 *Revisit:* when an arm that ran writes a name no row after it prints.
 
+### K78. A source the map places inside a value is read where the read's steps reach its place, and stops otherwise
+
+The map's ParameterFrom, GuardFrom and FieldFrom bindings hold two kinds of source: one that is the value, and one
+that says where in the value it sits (`paths`, `[0]`, `.job`, `['error']`).  The second kind was dropped unread
+whenever a source of the first kind was there too (64 ParameterFroms, 127 GuardFroms and 21 FieldFrom bindings on
+x13zns), so a way that hands a container the code builds -- `JediTaskBuffer.updateTask_JEDI`'s `oldStatus` is
+`[taskStatus]` from `TaskRefiner.runImpl`, beside the default `None` of other callers -- vanished from the ways read.
+
+*Changed (K-4a, bundle K, 2026-11-18):* `sources._ways_of_the_value` reads such a source where the read's steps reach
+its place exactly (an index and `[*]` are one place; a quoted key or an attribute only itself; a key held in a name is
+no place known), with the steps after it, and leaves it off where another constant place is read; otherwise -- the read
+takes a value holding it, or the place is not told -- the read stops, named (`parts-only`), whether or not a source of
+the first kind is there.  The map does not tell a part on a way of its own (a literal container) from a note on a value
+another source on the same way is (`x = obj; x.child = obj`), and route does not tell them apart either, so the stop is
+the safe reading; on the 48 cases of 11-17 it moved no case.  `none_ways` reads such a part as an unknown way, and a
+callee's test is not cut on a constant where one is unread.
+*Revisit:* when the map gives a container the code builds a source of its own (asked 2026-11-18 06:39, (D)): a part is
+then always a note on a value another source is, and the stop for a whole read goes.
+
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
 ### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is followed alone
@@ -846,8 +865,20 @@ parent_tid)`; since K-0 (bundle K) a read's constant index after an element step
 there (`KeySource.paths`, `sources._placed`), and a literal None with a step left gives no way (`_none_stepped`), so the
 key comes in from getTasksToRefine_JEDI's two selections alone.  It still does not read NR-T-53646395-assessmentTime's
 goal: the DEFT selection @1147 has no condition the map reads (another schema's table), so it is not shown to return no
-row of the task.  Revisit with the map's reading of that selection's terms, or a showing that its route's writes are
-the task's birth.
+row of the task.  *Next (K-4, bundle K):* the object goal's arms set is kept in the refiner (KEY_KEPT) and persisted by
+`TaskRefiner.runImpl`'s registerTaskInOneShot_JEDI (`status=:preStatus`) and six updateTask_JEDI flushes (`status IN
+(:old___in)`); their status terms, on the 1340 way the literal 'registered', are read at each moment in place of the
+DEFT selection, once the map's KEY_KEPT hops, `each_element` and `flushed_in` are in a dump (asked 2026-11-18 06:27).
+
+*Changed (K-1, bundle K, 2026-11-18):* A-4 (`Rerun._row_value_write`) read the row's value of a time column as its last
+write only where every arm writes the clock with one offset.  Where the arms write other values too (JobSpec.endTime:
+the clock, the pilot's `param['endTime']`, copies of modificationTime, None), the value is matched to the last write the
+records show by an arm writing the clock whose clock then is the value, to its second (the records' host clock and the
+database's taken as within `CLOCKS_APART`, a second), with no write the records show as run after it; the arms writing
+another value are named as having not written the same value again (`timeline-row-value-matched`).  NJ-holding-late's
+endTime 15:35:35 was written by updateJobStatus:233 at 15:35:35.751 as the job went holding, so copyArchive main@381 and
+@405 (`modificationTime<now-3h OR (endTime IS NOT NULL AND endTime<now-3h)`) read as refusing the row all the stay.  A
+value no write in the window matches stays open (NJ-starting-late's columns over a 24 h stay).
 
 ## H steps
 

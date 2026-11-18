@@ -11752,10 +11752,13 @@ def test_s_reads_a_parameter_up_its_callers_to_constants_and_an_apis_argument(tm
         # the outermost call first: the constant's own, then each caller's call into the next
         ["constant", "'60'", "constant", ["p/a.py:226", "p/t.py:1190"]],
         ["api", "", "no_caller", ["p/api.py:513", "p/api.py:572", "p/t.py:1190"]],
+        # K-4a: killJobs' part of the rows is no way of the value, but a way may hand a value holding it (the map gives
+        # a container the code builds no source of its own): read whole, it stops, named, beside the others
+        ["stop", "", "parts-only", ["p/t.py:1138", "p/t.py:1190"]],
     ]
     assert got["loop"] == [["stop", "cycle"]]
     assert got["none"] == [["stop", "no-parameter-from"]]
-    # killJobs' part of the rows is not among killJob's ways above; a parameter with only parts stops, named
+    # a parameter with only parts stops, named
     assert got["parts"] == [["stop", "parts-only", ["p/q.py:5"]]]
     # a print shows a value's str: '60' printed is 60, None is None
     assert got["same"] == [True, True, True, False]
@@ -11849,7 +11852,7 @@ def test_s_ends_each_guard_term_where_the_maps_ways_end_and_a_call_by_its_runnab
         mapdump._FRAGMENT[:] = [N(
             guard_froms=[
                 N(owner=owner, test_line={commit}, name="self", sources=[src("self_field", "self", {commit})], stops=[]),
-                # a part of other rows sitting in res is no way of res
+                # a part of other rows sitting in res is no way of res, but may sit in a value no source is (K-4a)
                 N(owner=owner, test_line={res}, name="res", sources=[src("rows", "panda:" + owner + "@{res - 2}", {res - 2}),
                                                                    src("rows", "panda:other@1", 1, paths=["[0]"])],
                   stops=[]),
@@ -11875,7 +11878,8 @@ def test_s_ends_each_guard_term_where_the_maps_ways_end_and_a_call_by_its_runnab
         ["code", False, [["stop", "parameter", "pandaserver/k.py:3", "code"]]],
         ["cpart", False, [["stop", "parts-only", f"pandaserver/k.py:{code}", ""]]],
         ["self", True, [["database", "database", "pandaserver/b.py:194", ""]]],
-        ["res", True, [["database", "rows", f"pandaserver/k.py:{res - 2}", ""]]],
+        # K-4a: the part read whole stops, named, beside the rows: the term is not ended
+        ["res", False, [["stop", "parts-only", f"pandaserver/k.py:{res}", ""], ["database", "rows", f"pandaserver/k.py:{res - 2}", ""]]],
     ], got
 
 
@@ -15497,7 +15501,7 @@ def test_timeline_reads_a_columns_writes_from_must_prints_under_any_mark(tmp_pat
                     return [w if len(w) == 5 else (*w, ()) for w in got], whole
 
                 r._column_writes = column_writes
-                r._row_value_write = lambda subject, q: None
+                r._row_value_write = lambda subject, q, writes=(): None
                 return r
 
             q = N(subject=S, observed="tobroken", since=t("20:29:16.423630"), moved=t("20:34:45.105988"), writers=[])
@@ -16214,7 +16218,7 @@ def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
             hits = {1441: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))],
                     1443: [(at, "aipanda085.cern.ch", "upd:1483", TL.RAN, (v,))]}
             r._column_writes = lambda j, b, keys, window, ws, missed_out=None, subject="", not_run_out=None: (hits[b.line], True)
-            r._row_value_write = lambda subject, q: None
+            r._row_value_write = lambda subject, q, writes=(): None
             q = N(subject="JediTaskSpec.status", observed="pending", since=D.datetime(2026, 11, 15, 6, 0, 0),
                   moved=D.datetime(2026, 11, 15, 7, 7, 11, 370000), writers=[])
             tl = RR.Rerun._timeline(r, C, q)
@@ -16225,7 +16229,7 @@ def test_a_write_s_value_is_read_off_its_statement_s_printed_bind_map(tmp_path):
             got["opens"] = {}
             for name, rv in (("none", None), ("before", q.since - D.timedelta(days=1)), ("in", q.moved - D.timedelta(minutes=1))):
                 r._timelines = {}
-                r._row_value_write = lambda subject, q, rv=rv: None if rv is None else (rv, rv, ("upd:1441", "upd:1443"), "x")
+                r._row_value_write = lambda subject, q, writes=(), rv=rv: None if rv is None else (rv, rv, ("upd:1441", "upd:1443"), "x")
                 got["opens"][name] = [o.arm for o in RR.Rerun._timeline(r, C, q).opens]
             print(json.dumps(got))
             """,
@@ -16332,6 +16336,26 @@ def test_a_stay_starts_with_the_arm_the_map_ties_and_a_time_column_s_row_value_i
             got["row value"] = [str(w[0]), list(w[2])]
             arms[A] = [*arms[A], N(owner="t.py::cf", branches=[br(1373, "x", amount=six)])]
             got["two offsets"] = RR.Rerun._row_value_write(r, A, q)
+            # K-1: arms writing other values too -- the write the records show whose clock is the value, to its second
+            E = "JobSpec.endTime"
+            r._read = lambda: ({}, {"endTime": "2026-11-13 15:35:35", "as_of": "2026-11-15 09:45:48"})
+            arms[E] = [N(owner="j.py::upd", branches=[br(233, "runtime(CURRENT_DATE)"), br(67, "runtime(param['endTime'])")]),
+                       N(owner="a.py::pjr", branches=[br(450, "runtime(naive_utcnow())")])]
+            qe = N(subject="JobSpec.jobStatus", moved=D.datetime(2026, 11, 13, 15, 57, 7, 534009))
+            t = lambda *a: D.datetime(2026, 11, 13, *a)
+            wr = lambda at, how, arms_: TL.Write(at, TL.LOW, TL.HIGH, how, arms_, "upd:51", "aipanda096")
+            early = wr(t(15, 33, 27, 760000), TL.REACHED, ("upd:233", "upd:67"))
+            move = wr(t(15, 35, 35, 751000), TL.REACHED, ("upd:233", "upd:67"))
+            w1 = RR.Rerun._row_value_write(r, E, qe, [early, move])
+            got["matched"] = [str(w1[0]), str(w1[1]), list(w1[2]), list(w1[4]), list(w1[5])]
+            # a write run after it: what it wrote is not the value read; a value no write's clock is
+            got["ran after"] = RR.Rerun._row_value_write(r, E, qe, [early, move, wr(t(15, 40), TL.RAN, ("upd:67",))])
+            got["no match"] = RR.Rerun._row_value_write(r, E, qe, [early])
+            tle = TL.Timeline(t(15, 35, 35, 755777), qe.moved, (TL.LOW, TL.HIGH), (TL.LOW, TL.HIGH), (move,), (),
+                              row_value=w1)
+            # copyArchive main@381's endTime<now-3h: false all the stay
+            got["false"] = TL.surely_false_all("<", -D.timedelta(hours=3), tle.pieces())
+            got["said"] = T.text(RR._timeline_said(E, tle))
             print(json.dumps(got))
             """,
         )
@@ -16352,6 +16376,12 @@ def test_a_stay_starts_with_the_arm_the_map_ties_and_a_time_column_s_row_value_i
                            "prep:3744 may write it while the value holds"], got
     assert got["row value"] == ["2026-11-14 19:53:41", ["ach:3283", "prep:3744"]], got
     assert got["two offsets"] is None, got
+    assert got["matched"] == ["2026-11-13 15:35:35.751000", "2026-11-13 15:35:35", ["upd:233"], [], ["upd:67"]], got
+    assert got["ran after"] is None and got["no match"] is None, got
+    assert got["false"] is True, got
+    assert ("the row's value 2026-11-13 15:35:35, read at 2026-11-15 09:45:48, was last written at 2026-11-13 15:35:35 by "
+            "upd:233 (its clock then, the write the records show; an arm writing the clock later would hold a later time, "
+            "and upd:67 (writing another value) named as having not written it again), none writing it since") in got["said"], got
 
 
 def test_a_write_whose_statement_s_guard_its_pass_read_false_did_not_run_and_the_selection_printing_the_row_took_it(tmp_path):
@@ -19006,6 +19036,47 @@ def test_k0_an_index_after_an_element_step_keeps_the_put_value_parts_at_that_pla
     assert got["index_then_more"][0] == ["rows", [".x"], False], got
     assert [name for name, _, _ in got["no_index"]] == ["rows", "None", "'registered'", "deeper", "whole", "self"], got
     assert got["none_stepped"] == [True, False, False], got
+
+
+def test_k4a_a_source_placed_in_the_value_is_read_where_the_steps_reach_its_place_and_stops_named_else(tmp_path):
+    """K-4a: JediTaskBuffer.updateTask_JEDI's ``oldStatus`` comes in as the default ``None`` from some callers and as
+    ``[taskStatus]`` from TaskRefiner.runImpl (a source the map places at ``[0]``).  Its elements (``[*]``) read that
+    source with no step left, and the None with the step; read whole, the list is a value holding the source, which
+    stops named beside the None's way (it was dropped unread); an index naming another place leaves it off the way; a
+    key held in a name, or a read ending inside a deeper place, stops; ``()`` is the value itself."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import sources as SR
+
+        old = [N(name="None", paths=[]), N(name="runImpl", paths=["[0]"])]
+        ways = lambda srcs, steps: (lambda r: [[[s.name, list(left)] for s, left in r[0]], r[1]])(SR._ways_of_the_value(srcs, steps))
+        SR._callers = lambda: ({("o", "oldStatus"): N(sources=old, stops=[], line=197)}, {})
+        SR._by_the_path = lambda sources, entered: (sources, [])
+        SR._param_source_ways = lambda s, steps, seen, truth=False: [SR.Way(SR.CONSTANT, s.name + "".join(steps), "constant", ())]
+        pw = lambda steps: [[w.value, w.why] for w in SR.param_ways("o", "oldStatus", steps=steps)]
+        print(json.dumps({
+            "elements": ways(old, ("[*]",)),
+            "whole": ways(old, ()),
+            "other_index": ways(old, ("[1]",)),
+            "named_key": ways([N(name="k", paths=["[key]"])], ("[0]",)),
+            "deeper": [ways([N(name="d", paths=["[0].site"])], ("[0]", ".site", ".x")), ways([N(name="d", paths=["[0].site"])], ("[0]",))],
+            "quoted": [ways([N(name="e", paths=["['error']"])], ("['error']",)), ways([N(name="e", paths=["['error']"])], ("['other']",))],
+            "root": ways([N(name="r", paths=["()"])], ("[0]",)),
+            "param_elements": pw(("[*]",)),
+            "param_whole": pw(()),
+        }))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["elements"] == [[["None", ["[*]"]], ["runImpl", []]], False], got
+    assert got["whole"] == [[["None", []]], True], got
+    assert got["other_index"] == [[["None", ["[1]"]]], False], got
+    assert got["named_key"] == [[], True], got
+    assert got["deeper"] == [[[["d", [".x"]]], False], [[], True]], got
+    assert got["quoted"] == [[[["e", []]], False], [[], True]], got
+    assert got["root"] == [[["r", ["[0]"]]], False], got
+    assert got["param_elements"] == [["None[*]", "constant"], ["runImpl", "constant"]], got
+    assert got["param_whole"] == [["None", "constant"], ["", "parts-only"]], got
 
 
 def test_p16_a_print_of_every_row_after_the_first_loop_tells_a_pass_reached_the_selection(tmp_path):

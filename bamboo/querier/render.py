@@ -739,7 +739,11 @@ TEMPLATES: dict[str, str] = {
     "timeline-birth-write": "{at} by {arms:join=/} ({how}: the row's birth, at {where}{before})",
     "timeline-before-the-stay": ", before the stay",
     "timeline-absent": "; shown not written by {arms:join=, } (judgement 3)",
-    "timeline-row-value": "; the row's value {value}, read at {as_of}, was last written at {at} by {arms:join= or } (each writes the clock with one offset){apart}, none writing it since",
+    "timeline-row-value": "; the row's value {value}, read at {as_of}, was last written at {at} by {arms:join= or } ({how}){apart}, none writing it since",
+    "timeline-row-value-clock": "each writes the clock with one offset",
+    # K-1: a column whose arms write other values too, its value matched to the write the records show
+    "timeline-row-value-matched": "its clock then, the write the records show; an arm writing the clock later would hold a later time, and {named:join=, } (writing another value) named as having not written it again",
+    "timeline-row-value-matched-clock": "its clock then, the write the records show; an arm writing the clock later would hold a later time",
     # bundle F, F-3: a writer M3(a)-1 left out of the stay is not the row value's
     "timeline-row-value-apart": "; not {apart:join=, or }, left out of the stay",
     "timeline-not-run": "; read as not run in their pass: {writes:join=; }",

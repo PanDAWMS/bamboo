@@ -87,7 +87,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1245,16 +1245,18 @@ def _left_writers(row_value: tuple, before: SV.Before, begun: datetime.datetime)
     M3(a)-1 leaves as able to write the column while the value holds (``left``); each other is put apart with why it
     was left out.  NT-scouting-late's assessmentTime 19:53:41 was written by prepareTasksToBeFinished_JEDI:3744, not
     getAchievedTasks_JEDI:3283, whose statement takes running and pending rows only.  Where none of them is left, or
-    the write fell at or before the start, as it was.  ``(written at, value, arms, as_of, (arm, why) put apart)``."""
+    the write fell at or before the start, as it was.  ``(written at, value, arms, as_of, (arm, why) put apart)``, and
+    the arms K-1 names (:meth:`Rerun._row_value_write`) after them where it does."""
     at, value, arms, as_of = row_value[:4]
+    named = tuple(row_value[5:])
     if at <= begun + datetime.timedelta(seconds=1) or not before.left:
-        return (at, value, arms, as_of, ())
+        return (at, value, arms, as_of, (), *named)
     kept = tuple(a for a in arms if a in before.left)
     if not kept or kept == tuple(arms):
-        return (at, value, arms, as_of, ())
+        return (at, value, arms, as_of, (), *named)
     why = dict(before.out)
     apart = tuple((a, why.get(a, "not among the arms that may write it while the value holds")) for a in arms if a not in kept)
-    return (at, value, kept, as_of, apart)
+    return (at, value, kept, as_of, apart, *named)
 
 
 def _timeline_gaps(tl: TL.Timeline) -> list[T.Said]:
@@ -1290,6 +1292,9 @@ def _timeline_said(subject: str, tl: TL.Timeline) -> T.Said:
                                     "rowvalue": T.Said("timeline-row-value", {
                                         "value": f"{tl.row_value[1]:%Y-%m-%d %H:%M:%S}", "as_of": tl.row_value[3],
                                         "at": f"{tl.row_value[0]:%Y-%m-%d %H:%M:%S}", "arms": list(tl.row_value[2]),
+                                        "how": (T.Said("timeline-row-value-clock") if len(tl.row_value) < 6
+                                                else T.Said("timeline-row-value-matched", {"named": list(tl.row_value[5])}) if tl.row_value[5]
+                                                else T.Said("timeline-row-value-matched-clock")),
                                         "apart": T.Said("timeline-row-value-apart", {"apart": [
                                             f"{a} ({why})" for a, why in next(iter(tl.row_value[4:]), ())]})
                                         if next(iter(tl.row_value[4:]), ()) else ""}) if tl.row_value else "",
@@ -2482,6 +2487,9 @@ class Ordered:
 #: the clocks the map names that read one UTC clock: PanDA's Oracle session runs in UTC (WrappedCursor.initialize,
 #: ``ALTER SESSION SET TIME_ZONE='UTC'``); SYSDATE, SYSTIMESTAMP and datetime.now read a host's zone, unknown here
 UTC_CLOCKS = {"naive_utcnow", "datetime.utcnow", "datetime.now(utc)", "CURRENT_DATE", "CURRENT_TIMESTAMP"}
+#: K-1: how far the records' clock (a host's, printing the write) and the database's (CURRENT_DATE as it wrote) may be
+#: apart when a row's value is matched to the write the records show (:meth:`Rerun._row_value_write`)
+CLOCKS_APART = datetime.timedelta(seconds=1)
 #: why a term on a column the row holds NULL fails (SQL's NULL; ``_leaf``, ``_pair_fails``)
 #: movers_of's word for a mover the map's guarded_by gives (a writer whose write requires the value)
 GUARDED = "its write requires the value"
@@ -11407,7 +11415,7 @@ class Rerun:
                 begun_assumed = tuple(sorted(unread_b))
             elif absent_b:
                 a_starts, a_lacking = starts, lacking
-        row_value = None if nulls else self._row_value_write(subject, q)
+        row_value = None if nulls else self._row_value_write(subject, q, writes)
         if row_value is not None:
             row_value = _left_writers(row_value, before, begun)
         if row_value is not None and row_value[0] <= begun:
@@ -11438,7 +11446,8 @@ class Rerun:
             "runtime_unread": list(tl.runtime_unread),
             "row_value": {"at": _iso(str(tl.row_value[0])), "value": _iso(str(tl.row_value[1])), "arms": list(tl.row_value[2]),
                           "as_of": tl.row_value[3],
-                          **({"apart": [a for a, _ in apart]} if (apart := next(iter(tl.row_value[4:]), ())) else {})}
+                          **({"apart": [a for a, _ in apart]} if (apart := next(iter(tl.row_value[4:]), ())) else {}),
+                          **({"named": list(tl.row_value[5])} if len(tl.row_value) > 5 else {})}
             if tl.row_value else None,
             "begun_assumed": list(begun_assumed), **({"first": said(*tl.first), "premised": list(tl.premised)} if nulls else {})}
         return tl
@@ -11469,15 +11478,24 @@ class Rerun:
             return None
         return TL.Write(born, born, born, TL.RAN, tuple(clock), f"its {created}", "")
 
-    def _row_value_write(self, subject: str, q: Missed
-                         ) -> tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str] | None:
+    def _row_value_write(self, subject: str, q: Missed, writes: Sequence[TL.Write] = ()) -> tuple | None:
         """Bundle A, A-4 (P24, out/gm/qk-design.md, tmaeno's OK 2026-11-16): a time column's value as the rows file
         read it (late's ``after``, read at its ``as_of``), where every arm of the column writes the clock with one
         offset (:func:`_written_offset`): its last write was at the value less that offset, and none wrote it from then
         to when the rows file read it -- a later write would hold a later time.  ``(written at, the value, the arms,
         as_of)`` where that write fell before the move; None otherwise.  NT-scouting-late's assessmentTime 2026-11-14
         19:53:41, read on 11-15: written then by prepareTasksToBeFinished_JEDI:3744 or getAchievedTasks_JEDI:3283, each
-        ``CURRENT_DATE``."""
+        ``CURRENT_DATE``.
+
+        K-1 (bundle K, out/gm/qk-design.md): where the column's arms write other values too, the last of the *writes*
+        the records show (the timeline's) by an arm writing the clock with an offset whose clock then is the value, to
+        its second (:data:`CLOCKS_APART`), ran or reached, with no write the records show as run after it: that write
+        left the value.  A later write by an arm writing the clock would hold a later time; one writing another value
+        is named as having not written the same value again (``(written at, the value, the arms, as_of, (), named)``).
+        NJ-holding-late's endTime 15:35:35, read on 11-15, was written by updateJobStatus:233 (``CURRENT_DATE``) at
+        15:35:35.751 as the job went holding; process_job_report:450 and the others writing the clock would have
+        written a later time, and updateJobStatus:67 (the pilot's endTime) and the copies of modificationTime are
+        named."""
         cls, _, attr = subject.partition(".")
         after = self._read()[1]
         if cls != q.subject.partition(".")[0] or attr not in after or not after.get("as_of"):
@@ -11492,12 +11510,26 @@ class Rerun:
         arms = [(j.owner, b) for j in self._subject_writers(subject) for b in j.branches]
         offsets = {_written_offset(b) for _, b in arms}
         offset = next(iter(offsets)) if len(offsets) == 1 else None
-        if not arms or offset is None:
+        if not arms:
             return None
-        at = value - offset
-        if at > q.moved or at > read_at:
-            return None
-        return at, value, tuple(sorted(SV._name(o, b.line) for o, b in arms)), str(after["as_of"])
+        if offset is not None:
+            at = value - offset
+            if at > q.moved or at > read_at:
+                return None
+            return at, value, tuple(sorted(SV._name(o, b.line) for o, b in arms)), str(after["as_of"])
+        by_name = {SV._name(o, b.line): _written_offset(b) for o, b in arms}
+        named = tuple(sorted(n for n, off in by_name.items() if off is None))
+        for w in sorted(writes, key=lambda w: w.at, reverse=True):
+            hits = tuple(n for n in w.arms if (off := by_name.get(n)) is not None
+                         and value - CLOCKS_APART <= w.at + off < value + datetime.timedelta(seconds=1) + CLOCKS_APART)
+            if hits:
+                if w.at > q.moved or w.at > read_at:
+                    return None
+                return w.at, value, hits, str(after["as_of"]), (), named
+            if w.how == TL.RAN:
+                # a write run after any that may have left the value: what it wrote is not the value read
+                return None
+        return None
 
     def _runtime_began(self, q: Missed, before: SV.Before, begun: datetime.datetime) -> list[str]:
         """Bundle A, A-3 (out/gm/qk-design.md, tmaeno's OK 2026-11-16): the arms writing the status from a value known

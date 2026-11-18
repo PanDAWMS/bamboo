@@ -108,7 +108,9 @@ class Timeline:
     #: offset: ``(written at, the value, the arms, when it was read)`` -- the last write was then, and none since
     #: (bundle A, A-4: P24, NT-scouting-late's assessmentTime 19:53:41 by prepareTasksToBeFinished_JEDI:3744 or
     #: getAchievedTasks_JEDI:3283); bundle F, F-3 adds the arms put apart, each with why M3(a)-1 left it out of the
-    #: stay (getAchievedTasks_JEDI:3283's statement takes running and pending rows only)
+    #: stay (getAchievedTasks_JEDI:3283's statement takes running and pending rows only); K-1, where the arms write
+    #: other values too, the write the records show whose clock is the value, with the arms writing another value
+    #: named as having not written it again after them (NJ-holding-late's endTime by updateJobStatus:233)
     row_value: tuple[Any, ...] | None = None
 
     def read(self) -> bool:

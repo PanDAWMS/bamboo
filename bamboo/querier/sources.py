@@ -28,9 +28,11 @@ literal's.  The function's entry ends where no corpus call enters it, at the cal
 chosen way came in by, or at the call a caller's run shows entered it (:data:`CALLER`).
 
 A source with *paths* says where parts of its end sit in the value read (``self.job`` kept at ``.job`` of the plugin
-``self.add_result`` is read off), not that the value is its end: it is no way of the value.  A term with only such
-sources stops, named.  The map drops ``()`` from *paths*, so a source that is both the value and a part reads as a
-part: a stop where there may be an end, never an end where there is none.
+``self.add_result`` is read off), not that the value is its end: it is no way of the value.  A read whose steps reach
+such a place exactly reads the source there with the steps after it (K-4a); one that takes a value holding it, or
+cannot tell the place, stops, named, whether or not another source is the value itself.  The map drops ``()`` from
+*paths*, so a source that is both the value and a part reads as a part: a stop where there may be an end, never an
+end where there is none.
 
 A call in a test (M, 1b-i) is read by the map's ``Runnable`` record of the definition asked at the test's line: the
 map makes one for each corpus definition a call in an arm's path condition can land at.  A runnable definition reads
@@ -287,10 +289,70 @@ def _start(s: Any, route: tuple[str, ...], rest: tuple[str, ...]) -> list[Way]:
     return [] if rest else [Way(CONSTANT, "", MADE_EMPTY, route, end_at=next(iter(getattr(s, "at", None) or ()), ""))]
 
 
-def _ways_of_the_value(sources: list[Any]) -> tuple[list[Any], bool]:
-    """The sources that are ways of the value itself (no *paths*), and whether any source said only where parts sit."""
-    whole = [s for s in sources if not getattr(s, "paths", None)]
-    return whole, len(whole) < len(sources)
+_SEGMENT = re.compile(r"\[[^\]]*\]|\.\w+")
+_INDEX = re.compile(r"\[\d+\]")
+#: a place spelled by a constant: an index, a quoted key, an attribute
+_CONSTANT_PLACE = re.compile(r"\[\d+\]|\[(['\"]).*\1\]|\.\w+")
+
+
+def _same_place(step: str, seg: str) -> bool | None:
+    """K-4a: whether a read's *step* takes the place *seg* of a source's *paths*: an index and every index (``[*]``)
+    are; two places each spelled by a constant are where they are spelled the same; else -- a key held in a name
+    (``[key]``), every element of what is not a list -- unknown."""
+    if step == seg == "[*]" or (step == "[*]" and _INDEX.fullmatch(seg)) or (seg == "[*]" and _INDEX.fullmatch(step)):
+        return True
+    if _CONSTANT_PLACE.fullmatch(step) and _CONSTANT_PLACE.fullmatch(seg):
+        return step == seg
+    return None
+
+
+def _placed_parts(s: Any, steps: tuple[str, ...]) -> tuple[list[tuple[str, ...]], bool]:
+    """K-4a: for a source saying where in the value it sits (*paths*), the steps left after each of its places the
+    read's *steps* reach exactly, and whether one of its places stays unread: *steps* end inside it (the read takes a
+    value holding the source), or a key neither side spells by a constant.  A place another constant spells is not
+    on the read's way."""
+    lefts: list[tuple[str, ...]] = []
+    unread = False
+    for p in getattr(s, "paths", None) or []:
+        if p in ("", "()"):
+            # the value itself, as in _placed
+            lefts.append(steps)
+            continue
+        segs = _SEGMENT.findall(p)
+        if "".join(segs) != p:
+            unread = True
+            continue
+        n = 0
+        same: bool | None = True
+        while n < len(segs) and n < len(steps) and (same := _same_place(steps[n], segs[n])):
+            n += 1
+        if n == len(segs):
+            lefts.append(steps[n:])
+        elif n == len(steps) or same is None:
+            unread = True
+    return lefts, unread
+
+
+def _ways_of_the_value(sources: list[Any], steps: tuple[str, ...] = ()) -> tuple[list[tuple[Any, tuple[str, ...]]], bool]:
+    """The sources a read of the value with *steps* still to take off it reads, each with the steps left: those that
+    are the value itself (no *paths*), with *steps*; and (K-4a, bundle K) those that say where in it they sit, at each
+    place *steps* reach exactly, with the steps after it -- JediTaskBuffer.updateTask_JEDI's ``oldStatus`` comes in as
+    the list TaskRefiner.runImpl builds with self.taskList's ``[2]`` at ``[0]``, beside the default ``None`` of other
+    callers, and its elements (``[*]``) are that ``[2]``.  And whether the read stops for a part it cannot read
+    (:func:`_placed_parts`), or reads no source while one says where a part sits: such a part was dropped unread where
+    another source was the value itself (64 ParameterFroms, 127 GuardFroms and 21 FieldFrom bindings on x13zns)."""
+    read: list[tuple[Any, tuple[str, ...]]] = []
+    unread = False
+    parts = False
+    for s in sources:
+        if not getattr(s, "paths", None):
+            read.append((s, steps))
+            continue
+        parts = True
+        lefts, left_unread = _placed_parts(s, steps)
+        read += [(s, left) for left in lefts]
+        unread = unread or left_unread
+    return read, unread or (parts and not read)
 
 
 @dataclass(frozen=True)
@@ -832,14 +894,14 @@ def field_ways(cls: str, field: str, steps: tuple[str, ...] = (), seen: frozense
              + tuple(h for h in handed if h.at not in made_here))
     ways: list[Way] = []
     for b in bindings:
-        whole, parts = _ways_of_the_value(b.sources)
-        if not whole and parts:
+        placed, unread = _ways_of_the_value(b.sources, steps)
+        if unread:
             ways += _with_changes([Way(STOP, "", PARTS_ONLY, (b.at,))], level)
         entered = chosen.entered_by(b.at) if chosen is not None else ()
-        for s in whole:
+        for s, left in placed:
             # a source read at the binding itself is placed there already
             ways += [w if w.route[:1] == (b.at,) else replace(w, route=(b.at, *w.route))
-                     for w in _binding_ways(s, b, steps, seen, choose, at, keys, entered, level, truth)]
+                     for w in _binding_ways(s, b, left, seen, choose, at, keys, entered, level, truth)]
         ways += _with_changes([Way(STOP, "", st.kind, (b.at,)) for st in b.stops], level)
     # a record's stop at several sites is one, placed at all of them
     ways += _with_changes([Way(STOP, "", st.kind, (", ".join(st.at),) if st.at else ()) for st in ff.stops], level)
@@ -1069,12 +1131,12 @@ def _cut(s: Any) -> str:
             continue
         env = EV.Env()
         for g in on:
-            whole, _parts = _ways_of_the_value(g.sources)
+            placed, unread = _ways_of_the_value(g.sources)
             got = [(True, ast.literal_eval(x.name)) if x.kind == M.KEY_CONSTANT and not getattr(x, "steps", None)
                    and not getattr(x, "through", None) and _literal(x.name)
                    else _handed(owner, x.name, route[k:]) if x.kind == M.KEY_PARAMETER else (False, None)
-                   for x in whole]
-            if got and all(ok for ok, _v in got) and all(repr(v) == repr(got[0][1]) for _ok, v in got):
+                   for x, _left in placed]
+            if got and not unread and all(ok for ok, _v in got) and all(repr(v) == repr(got[0][1]) for _ok, v in got):
                 env.put(g.name, got[0][1], route[k])
         if not env.values:
             continue
@@ -1178,9 +1240,9 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
         return [Way(STOP, "", "cycle", ())]
     seen = seen | {(owner, parameter)}
     ways: list[Way] = []
-    whole, parts = _ways_of_the_value(_by_the_path(pf.sources, entered)[0])
-    for s in whole:
-        got = _param_source_ways(s, steps, seen, truth)
+    placed, unread = _ways_of_the_value(_by_the_path(pf.sources, entered)[0], steps)
+    for s, left in placed:
+        got = _param_source_ways(s, left, seen, truth)
         if getattr(s, "sent", False) and s.route:
             # SND: the value came across a send into *owner*, the client's call last on the source's route; a send
             # read further up (nearer the way's end) is kept
@@ -1188,9 +1250,9 @@ def param_ways(owner: str, parameter: str, seen: frozenset = frozenset(), entere
         ways += got
     kinds = sorted({st.kind for st in pf.stops})
     here = (f"{owner.partition('::')[0]}:{pf.line}",)
-    if not whole and parts:
+    if unread:
         ways.append(Way(STOP, "", ",".join([PARTS_ONLY, *kinds]), here))
-    elif not whole:
+    elif not placed:
         ways.append(Way(API, "", "no_caller", here) if kinds == ["no_caller"] else Way(STOP, "", ",".join(kinds) or "no-source", here))
     elif kinds:
         ways.append(Way(STOP, "", ",".join(kinds), here))
@@ -1292,9 +1354,9 @@ def none_ways(owner: str, parameter: str, seen: frozenset = frozenset()) -> list
     if pf is None or (owner, parameter) in seen:
         return [((), "")]
     seen = seen | {(owner, parameter)}
-    whole, _parts = _ways_of_the_value(pf.sources)
-    out: list[tuple[tuple[str, ...], str]] = [] if whole and not pf.stops else [((), "")]
-    for s in whole:
+    placed, unread = _ways_of_the_value(pf.sources)
+    out: list[tuple[tuple[str, ...], str]] = [] if placed and not unread and not pf.stops else [((), "")]
+    for s, _left in placed:
         # the caller's call that hands it in is the last of the source's route
         call = tuple(s.route[-1:])
         name = s.name or ""
@@ -1473,10 +1535,10 @@ def terms(fn: R.Function, owner: str, guards: list[tuple[str, list[ast.If]]], ch
                 fields: dict[str, list[End]] = {}
                 read_on = False
                 own = {r.name for r in records}
-                whole, parts = _ways_of_the_value(g.sources)
-                if not whole and parts:
+                placed, unread = _ways_of_the_value(g.sources)
+                if unread:
                     ends.append(End(g.name, STOP, PARTS_ONLY, f"{fn.rel}:{one.lineno}"))
-                for s in whole:
+                for s, _left in placed:
                     if _cut(s):
                         # a callee's test rules the way out on its call's constants (CRO (ii))
                         continue
