@@ -6871,9 +6871,40 @@ def test_the_schema_qualifier_says_whose_table_it_is():
 def test_a_foreign_schema_table_is_a_boundary_in_both_directions():
     """A shared table is a channel, and which way is broken is the first question.
 
-    An endpoint is inbound only; ``PRODSYS_COMM`` carries commands out to DEFT
-    and back, so recording one direction would describe half the channel.
+    An endpoint is inbound only; ``T_TASK`` carries a task's state out to DEFT
+    and its definition back, so recording one direction would describe half the
+    channel.
     """
+    source = (
+        "class TaskModule:\n"
+        "    def read_task(self, jediTaskID):\n"
+        "        sqlR = f'SELECT taskid,status FROM {panda_config.schemaDEFT}.T_TASK '\n"
+        "        sqlR += 'WHERE taskid=:taskid '\n"
+        "        varMap = {}\n"
+        "        self.cur.execute(sqlR + comment, varMap)\n"
+        "    def set_status(self, jediTaskID):\n"
+        "        sqlD = f'DELETE FROM {panda_config.schemaDEFT}.T_TASK WHERE TASKID=:t '\n"
+        "        self.cur.execute(sqlD + comment, varMap)\n"
+        "        sqlI = f'INSERT INTO {panda_config.schemaDEFT}.T_TASK "
+        "(TASKID,STATUS) VALUES (:t,:c) '\n"
+        "        self.cur.execute(sqlI + comment, varMap)\n"
+    )
+    channels, _coverage = _channels(source)
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert (channel.system, channel.interface) == ("deft", "ATLAS_DEFT.T_TASK")
+    assert channel.transport == "shared_table"
+    assert channel.carried_values == ["status", "taskid"]
+    assert channel.handed_over == ["STATUS", "TASKID"]
+    # A DELETE next to an INSERT is the finding: a second write silently
+    # replaces one that was never picked up.
+    assert channel.operations == ["DELETE", "INSERT", "SELECT"]
+
+
+def test_a_table_the_other_system_does_not_write_is_no_channel():
+    """DEFT writes no command into PRODSYS_COMM directly: its rows are PanDA's, made for the task API, so reading
+    it is no arrival from DEFT and a reader missing a row there has no other writer to name."""
     source = (
         "class TaskModule:\n"
         "    def exec_command(self, jediTaskID):\n"
@@ -6882,23 +6913,14 @@ def test_a_foreign_schema_table_is_a_boundary_in_both_directions():
         "        varMap = {}\n"
         "        self.cur.execute(sqlR + comment, varMap)\n"
         "    def send_command(self, jediTaskID):\n"
-        "        sqlD = f'DELETE FROM {panda_config.schemaDEFT}.PRODSYS_COMM WHERE COMM_TASK=:t '\n"
-        "        self.cur.execute(sqlD + comment, varMap)\n"
         "        sqlI = f'INSERT INTO {panda_config.schemaDEFT}.PRODSYS_COMM "
         "(COMM_TASK,COMM_CMD) VALUES (:t,:c) '\n"
         "        self.cur.execute(sqlI + comment, varMap)\n"
     )
-    channels, _coverage = _channels(source)
+    channels, coverage = _channels(source)
 
-    assert len(channels) == 1
-    channel = channels[0]
-    assert (channel.system, channel.interface) == ("deft", "ATLAS_DEFT.PRODSYS_COMM")
-    assert channel.transport == "shared_table"
-    assert channel.carried_values == ["comm_cmd", "comm_task"]
-    assert channel.handed_over == ["COMM_CMD", "COMM_TASK"]
-    # A DELETE next to an INSERT on a command table is the finding: a second
-    # command silently replaces one that was never picked up.
-    assert channel.operations == ["DELETE", "INSERT", "SELECT"]
+    assert channels == []
+    assert [(one.candidates, one.explained) for one in coverage] == [(2, 2)]
 
 
 def test_one_column_is_not_two_because_the_case_differs():

@@ -221,6 +221,14 @@ _FOREIGN_SCHEMAS = {
     "EI": "eventindex",
 }
 
+#: Tables in another system's schema that the system does not write: PanDA's own there, no inbound channel.
+#: Stated, as :data:`_FOREIGN_SCHEMAS` is, because who writes a table is a fact of the deployment, not of the source
+#: (tmaeno, 2026-11-18).  DEFT writes no command into PRODSYS_COMM directly -- its rows are PanDA's, made by
+#: sendCommandTaskPanda and insertTaskParamsPanda for the task API -- so a reader missing a row there has no other
+#: writer to name.  T_TASK stays a channel: DEFT inserts the production tasks' rows there, and only that -- PanDA
+#: inserts the user tasks' and makes every later change.
+_NOT_WRITTEN_BY = {"deft": frozenset({"prodsys_comm"})}
+
 _SCHEMA_ATTRIBUTE = "schema"
 
 
@@ -502,6 +510,7 @@ def extract_shared_tables(
             anchor=channel.anchor,
         )
         for channel in sorted(channels.values(), key=lambda c: c.interface)
+        if channel.interface.rpartition(".")[2].lower() not in _NOT_WRITTEN_BY.get(channel.system, ())
     ]
     return boundaries, coverage
 
