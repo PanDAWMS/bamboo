@@ -1845,6 +1845,15 @@ filled from the function's marks the records the walk holds show (`_recorded_hol
 one value there rules over the row's; several leave the head at the hole; none leaves the row's value.  MT-scouting-stuck
 asks again with "vo=None label=user" (26 asks: the machines the listing names).
 
+*Changed (F-4 reads a recorded pass first, 2026-11-19, the harness's reading of those 26 asks):* the records already held
+the pass at the write (aipanda082's JediDBProxy, 13:54:18,200 - 13:54:19,846, files read whole in r2-r4), and F-4 asked
+every machine of the listing and read nothing while an ask was open.  Where the records hold passes at the write, F-4
+reads them (and P25 (i)'s rest on them) and asks nothing; the machines whose logs the records lack are said as not
+read: another pass there writing the column then is not ruled out.  It asks only where no pass is recorded.
+MT-scouting-stuck now reads 082's pass, which printed no key at 3766 (early avalanche's condition false: the count 0).
+*Not read:* a pandajedi-only function's asks still go to the server machines' DBProxy log where no pass is recorded
+(H-3's rule is read for callers, not for the logs a pass prints to).
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row

@@ -841,6 +841,7 @@ TEMPLATES: dict[str, str] = {
     # bundle F, F-4: a take the row's value of a time column the mover's own arms alone wrote shows
     "took-it-by-the-row-value": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass on {machine} from {first} to {last}",
     "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on every machine from {first} to {last} ({n} ask(s))",
+    "took-it-by-the-row-value-others": "{func}'s logs on {n} other machine-file(s) around {at} are not in the records and not asked: another pass of it there writing {column} then is not ruled out",
     "took-it-by-the-row-value-unread": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is not read",
     "unprinted-take": "and that pass printed no key at {line}, which {func} prints for a row it selects and keeps: its condition, {condition}, was false for the row then (read: {read:join=, }; open: {open:join=, }); premises: {premises:join=; }",
     "unprinted-take-count-zero": "and that pass printed no key at {line}, which {func} prints for a row it selects and keeps: its condition, {condition}, holds for every {name} from 1 to {n} (read: {read:join=, }), so {name} was 0 then; premises: {premises:join=; }",

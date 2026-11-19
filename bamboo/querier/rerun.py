@@ -12575,17 +12575,23 @@ class Rerun:
                         if of_mover(run, bare):
                             passes += [p for p in passes_of(fn, run, self.mode)[0]
                                        if W.when(p.first) - datetime.timedelta(seconds=1) <= at <= W.when(p.last) + datetime.timedelta(seconds=1)]
-            if missed:
-                self._keep_unanswered(missed)
-                out.append(T.Said("took-it-by-the-row-value-asked", {**where, "n": len({ask.key for ask, _ in missed}),
-                                                                     "first": window[0], "last": window[1]}))
-            elif passes:
+            if passes:
+                # the records already hold a pass at the write (MT-scouting-stuck's on aipanda082): read it, and leave the
+                # machines whose logs the records lack unasked -- a pass there then is not ruled out (the harness's
+                # reading of r10's 26 asks, 2026-11-19)
                 for p in passes:
                     out.append(T.Said("took-it-by-the-row-value", {**where, "machine": p.machine.split(".")[0],
                                                                    "first": p.first[:23], "last": p.last[:23]}))
                     # P25 (i)'s rest: a take that printed no key at its selection's print
                     if (unprinted := self._unprinted_take(q, fn, p, lines)) is not None:
                         out.append(unprinted)
+                if missed:
+                    out.append(T.Said("took-it-by-the-row-value-others", {
+                        **where, "n": len({(ask.name, ask.machine) for ask, _ in missed})}))
+            elif missed:
+                self._keep_unanswered(missed)
+                out.append(T.Said("took-it-by-the-row-value-asked", {**where, "n": len({ask.key for ask, _ in missed}),
+                                                                     "first": window[0], "last": window[1]}))
             else:
                 out.append(T.Said("took-it-by-the-row-value-unread", where))
         return out
