@@ -29,6 +29,26 @@ import pytest
 _REQUIRED_IMPORTS = ("textual",)
 
 
+@pytest.fixture(autouse=True)
+def _no_panda_in_field_tests(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The field tests never reach PanDA: a part their fakes do not hand in fails here, not on the network.
+
+    ``fetch.Parts`` defaults to panda_client's calls, so a route a test's fake does not cover (a default way of
+    reading that changed under it) would call the production servers (2026-11-19: making the endpoints the default
+    sent four tests' dataset reads to aipanda09x).  A test that stands in for panda_client's transport patches it
+    itself, after this.
+    """
+    if not request.module.__name__.rpartition(".")[2].startswith("test_fieldtest"):
+        return
+    from bamboo.utils import panda_client  # noqa: PLC0415
+
+    def refuse(method: str, endpoint: str, *args: object, **kwargs: object) -> None:
+        raise AssertionError(f"a field test reached PanDA: {method} {endpoint}")
+
+    monkeypatch.setattr(panda_client, "_call_api_full", refuse)
+    monkeypatch.setattr(panda_client, "_call_api", refuse)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     missing = [m for m in _REQUIRED_IMPORTS if importlib.util.find_spec(m) is None]
     if missing:
