@@ -570,6 +570,34 @@ async def test_by_the_endpoint_a_task_with_no_dataset_is_an_entry_too():
     assert [(e["table"], e["rows"]) for e in sections["linked"]] == [("JEDI_Datasets", [])]
 
 
+async def test_by_the_endpoint_datasets_read_in_pages_are_every_pages_as_of_the_last():
+    def page(rows, truncated, at):
+        return {
+            "success": True,
+            "message": "",
+            "data": {"rows": rows, "truncated": truncated, "max_rows": 1, "as_of": T(at)},
+        }
+
+    one, two = (
+        page([{"datasetID": 11, "jediTaskID": TID}], True, "2026-10-13T10:00:00"),
+        page([{"datasetID": 12, "jediTaskID": TID}], False, "2026-10-13T10:00:02"),
+    )
+
+    async def dataset_rows(task_id):
+        # as panda_client.get_task_dataset_rows gives two pages
+        return {**one, "data": {**one["data"], "rows": one["data"]["rows"] + two["data"]["rows"], "truncated": False},
+                "pages": 2, "calls": [one, two]}
+
+    line = _line(S1_ASK)
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES, "endpoint"), FE.Parts(dataset_rows=dataset_rows), TABLES)
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)
+    (entry,) = sections["linked"]
+    assert left_out == [] and [r["datasetID"] for r in entry["rows"]] == [11, 12]
+    assert entry["source"] == (
+        f"task/get_dataset_rows in 2 pages from 2026-10-13 10:00:00 as of 2026-10-13 10:00:02, where {{'jediTaskID': {TID}}}"
+    )
+
+
 async def test_by_the_endpoint_a_cut_answer_is_left_out_and_said():
     got = await _endpoint_answer([{"datasetID": 11, "jediTaskID": TID}], truncated=True)
     sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)

@@ -321,7 +321,7 @@ async def test_task_job_rows_returns_a_refusal_as_it_came_with_the_calls():
     assert got == {**refusal, "calls": [refusal]}
 
 
-async def test_task_dataset_rows_returns_the_whole_response():
+async def test_task_dataset_rows_of_one_page_is_the_response_with_its_call():
     answer = {
         "success": True,
         "message": "",
@@ -334,7 +334,56 @@ async def test_task_dataset_rows_returns_the_whole_response():
 
     ctx, _ = _patched(route)
     with ctx:
-        assert await PC.get_task_dataset_rows("40000001") == answer
+        assert await PC.get_task_dataset_rows("40000001") == {**answer, "pages": 1, "calls": [answer]}
+
+
+def _dataset_rows_server(n_datasets: int, max_rows: int, pages: bool = True):
+    """task/get_dataset_rows as panda-server 47ed0e57 answers: datasetID order, at most max_rows a call,
+    after_dataset_id for the next page (ignored by a server before it, *pages* false), each call its own moment."""
+    datasets = [{"datasetID": 700 + i, "jediTaskID": 40000001} for i in range(n_datasets)]
+    moments = iter(f"2026-11-19T10:00:0{i}" for i in range(10))
+
+    def route(endpoint, data):
+        assert endpoint == "task/get_dataset_rows"
+        after = data.get("after_dataset_id") if pages else None
+        left = [d for d in datasets if after is None or d["datasetID"] > after]
+        return {
+            "success": True,
+            "message": "",
+            "data": {"rows": left[:max_rows], "truncated": len(left) > max_rows, "max_rows": max_rows, "as_of": _when(next(moments))},
+        }
+
+    return route
+
+
+async def test_task_dataset_rows_reads_every_page_by_the_last_datasetid():
+    ctx, calls = _patched(_dataset_rows_server(5, 2))
+    with ctx:
+        got = await PC.get_task_dataset_rows(40000001)
+    assert [d.get("after_dataset_id") for _, d in calls] == [None, 701, 703]
+    assert [r["datasetID"] for r in got["data"]["rows"]] == [700, 701, 702, 703, 704]
+    assert got["success"] and not got["data"]["truncated"] and got["pages"] == 3
+    # max_rows and the moment are the first call's; every response is kept
+    assert (got["data"]["max_rows"], got["data"]["as_of"]) == (2, _when("2026-11-19T10:00:00"))
+    assert len(got["calls"]) == 3
+
+
+async def test_a_server_that_does_not_page_is_read_once_and_said_truncated():
+    ctx, calls = _patched(_dataset_rows_server(5, 2, pages=False))
+    with ctx:
+        got = await PC.get_task_dataset_rows(40000001)
+    # the second page came back from the first row again: kept in the calls, not in the rows
+    assert [d.get("after_dataset_id") for _, d in calls] == [None, 701]
+    assert [r["datasetID"] for r in got["data"]["rows"]] == [700, 701]
+    assert got["data"]["truncated"] and len(got["calls"]) == 2
+
+
+async def test_task_dataset_rows_returns_a_refusal_as_it_came_with_the_calls():
+    refusal = {"success": False, "message": "task_id must be an integer", "data": None}
+    ctx, _ = _patched(lambda endpoint, data: refusal)
+    with ctx:
+        got = await PC.get_task_dataset_rows(40000001)
+    assert got == {**refusal, "calls": [refusal]}
 
 
 def _per_machine_poll(expected, rows):

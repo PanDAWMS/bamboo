@@ -742,9 +742,44 @@ async def get_task_detailed_info(task_id: int) -> dict[str, Any]:
     return {**response, "asked_at": asked_at}
 
 
-#: most pages one read of a task's jobs takes (task/get_job_rows gives at most
-#: 1000 rows a page); a task with more is left truncated
+#: most pages one read of a task's rows takes (task/get_job_rows and
+#: task/get_dataset_rows give at most 1000 rows a page); a task with more is
+#: left truncated
 TASK_JOB_PAGES = 50
+
+
+async def _pages(
+    endpoint: str, request: dict[str, Any], after: str, column: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """*endpoint*'s rows for *request*, page by page: each next page asked with
+    *after* set to the last row's *column*, until a page is not truncated, is
+    cut with no row, or :data:`TASK_JOB_PAGES` were read.
+
+    A page whose first row does not come after that value is a server that
+    does not page: it is kept in the calls but not in the rows, and the read
+    stops there, truncated.
+
+    Returns:
+        Every response in order, the rows of every page read in order, and
+        the first response that failed (None when none did).
+    """
+    calls: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    last: int | None = None
+    while len(calls) < TASK_JOB_PAGES:
+        page = {**request, **({after: last} if last is not None else {})}
+        response = await asyncio.to_thread(_call_api_full, "get", endpoint, page)
+        calls.append(response)
+        got = response.get("data") if response.get("success") else None
+        if not isinstance(got, dict) or "rows" not in got:
+            return calls, rows, response
+        if last is not None and got["rows"] and int(got["rows"][0][column]) <= last:
+            break
+        rows += got["rows"]
+        if not got.get("truncated") or not got["rows"]:
+            break
+        last = int(got["rows"][-1][column])
+    return calls, rows, None
 
 
 async def get_task_job_rows(task_id: int, since: str | None = None) -> dict[str, Any]:
@@ -772,36 +807,24 @@ async def get_task_job_rows(task_id: int, since: str | None = None) -> dict[str,
         every page in order; counts and as_of the first call's, which read its
         rows and counts in one transaction; since, until and retained_from the
         first call's too; truncated whether the last page read was cut (after
-        :data:`TASK_JOB_PAGES` pages, or a cut page with no row).  Otherwise
+        :data:`TASK_JOB_PAGES` pages, a cut page with no row, or a page that
+        did not come after the one before: :func:`_pages`).  Otherwise
         the first response that failed, as it came, with ``calls`` added.
         ``calls`` holds every response, for the record.
     """
     request: dict[str, Any] = {"task_id": int(task_id)}
     if since is not None:
         request["since"] = since
-    calls: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
-    after: int | None = None
-    data: dict[str, Any] = {}
-    while len(calls) < TASK_JOB_PAGES:
-        page = {**request, **({"after_panda_id": after} if after is not None else {})}
-        response = await asyncio.to_thread(
-            _call_api_full, "get", "task/get_job_rows", page
-        )
-        calls.append(response)
-        got = response.get("data") if response.get("success") else None
-        if not isinstance(got, dict) or "rows" not in got:
-            return {**response, "calls": calls}
-        data = got
-        rows += data["rows"]
-        if not data.get("truncated") or not data["rows"]:
-            break
-        after = int(data["rows"][-1]["PandaID"])
+    calls, rows, failed = await _pages(
+        "task/get_job_rows", request, "after_panda_id", "PandaID"
+    )
+    if failed is not None:
+        return {**failed, "calls": calls}
     first = calls[0]["data"]
     return {
         "success": True,
         "rows": rows,
-        "truncated": bool(data.get("truncated")),
+        "truncated": bool(calls[-1]["data"].get("truncated")),
         "counts": first["counts"],
         "as_of": first["as_of"],
         "since": first.get("since"),
@@ -813,15 +836,37 @@ async def get_task_job_rows(task_id: int, since: str | None = None) -> dict[str,
 
 
 async def get_task_dataset_rows(task_id: int) -> dict[str, Any]:
-    """Every JEDI_Datasets column of one task's datasets: the whole response of task/get_dataset_rows.
+    """Every JEDI_Datasets column of one task's datasets: task/get_dataset_rows, page by page.
 
-    panda-server 80134dc2.  On success ``data`` is ``{"rows", "truncated",
-    "max_rows", "as_of"}``: the rows keyed as JediDatasetSpec spells its
-    columns, None for NULL, ordered by datasetID, at most ``max_rows``.
+    panda-server 80134dc2, pages from 47ed0e57.  A call gives at most
+    ``max_rows`` rows keyed as JediDatasetSpec spells its columns, None for
+    NULL, in datasetID order, and ``truncated`` when there are more; the next
+    page is asked with ``after_dataset_id``, the last datasetID before.
+
+    Returns:
+        On success the first call's response with every page's rows in
+        ``data["rows"]`` and the last page's ``truncated`` (after
+        :data:`TASK_JOB_PAGES` pages, or a cut page with no row, it stays
+        true); ``data``'s ``as_of`` and ``max_rows`` are the first call's.
+        Otherwise the first response that failed, as it came.  Either way
+        ``calls`` holds every response, for the record, and on success
+        ``pages`` their number.
     """
-    return await asyncio.to_thread(
-        _call_api_full, "get", "task/get_dataset_rows", {"task_id": int(task_id)}
+    calls, rows, failed = await _pages(
+        "task/get_dataset_rows",
+        {"task_id": int(task_id)},
+        "after_dataset_id",
+        "datasetID",
     )
+    if failed is not None:
+        return {**failed, "calls": calls}
+    first = calls[0]
+    data = {
+        **first["data"],
+        "rows": rows,
+        "truncated": bool(calls[-1]["data"].get("truncated")),
+    }
+    return {**first, "data": data, "pages": len(calls), "calls": calls}
 
 
 async def db_read(

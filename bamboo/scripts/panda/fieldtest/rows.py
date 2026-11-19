@@ -63,7 +63,7 @@ Read through task/get_job_rows instead (fetch ``--via endpoint``), the counts
 are the first page's moment and the rows the last page's, and neither names a
 table (a final job is in jobsArchived4 or the archive, any other in
 jobsDefined4 or jobsActive4); the source says so.  task/get_dataset_rows'
-rows are laid as R's of JEDI_Datasets.
+rows are laid as R's of JEDI_Datasets, every page's, as of the last page.
 
 **What is left out.**  A section whose answer is not complete -- rejected,
 failed, past its deadline, truncated -- is left out, and ``about`` says why: a
@@ -277,14 +277,18 @@ class Laid:
             self.incomplete.setdefault("job_rows", []).append("truncated")
 
     def _dataset_rows(self, response: dict) -> None:
-        """task/get_dataset_rows' answer as R's ``collection`` answer of its one table."""
+        """task/get_dataset_rows' pages as R's ``collection`` answer of its one table, as of the last page."""
         self.rows.setdefault("collection", [])
         self.via["collection"] = "task/get_dataset_rows"
         data = response.get("data") if response.get("success") else None
         if not isinstance(data, dict) or "rows" not in data:
             self.incomplete.setdefault("collection", []).append(_why(response))
             return
-        self.as_of["collection"] = text(data["as_of"])
+        pages = [c["data"] for c in response.get("calls") or [response]]
+        first, last = text(pages[0]["as_of"]), text(pages[-1]["as_of"])
+        if len(pages) > 1:
+            self.via["collection"] = f"task/get_dataset_rows in {len(pages)} pages from {first}"
+        self.as_of["collection"] = last
         self.rows["collection"] += [
             (TASK_DATASET_TABLE, _lowered(r)) for r in data["rows"]
         ]
