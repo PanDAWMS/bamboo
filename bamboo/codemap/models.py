@@ -1145,7 +1145,8 @@ class ConditionAtom(BaseModel):
 class Accumulation(BaseModel):
     """One statement adding to the entry of a container a counter write takes its increment from
     (:attr:`Branch.accumulated`): propagateResultToJEDI's ``datasetContentsStat[datasetID]['nFilesFinished'] += 1``
-    for ``nFilesFinished=nFilesFinished+{}``."""
+    for ``nFilesFinished=nFilesFinished+{}``; or to the attribute a branch sets: setupper's
+    ``tmp_job.nInputDataFiles += 1`` after ``tmp_job.nInputDataFiles = 0``."""
 
     line: int = Field(description="The statement's line.")
     op: str = Field(description="``+`` or ``-``: the statement adds to the entry or takes from it.")
@@ -1156,6 +1157,14 @@ class Accumulation(BaseModel):
     )
     condition_atoms: list[ConditionAtom] = Field(
         default_factory=list, description="The comparisons of *path_condition* with constants (:class:`ConditionAtom`)."
+    )
+    per: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The loops around the statement that are not around the branch's own, outermost first, as ``target in "
+            "iterable``: ``tmp_file in tmp_job.Files``.  It runs once for each of their elements *path_condition* "
+            "admits, for each run of the branch."
+        ),
     )
 
 
@@ -1213,7 +1222,9 @@ class Branch(BaseModel):
             "Where the outcome is a column plus or less a value the statement takes from a container -- "
             "``runtime(nFilesFinished + {})``, the SQL built from datasetContentsStat's keys --: each statement of the "
             "function adding to or taking from the container's entry keyed by the column's name, with when it runs "
-            "(:class:`Accumulation`).  The count moves only where one of them ran."
+            "(:class:`Accumulation`).  The count moves only where one of them ran.  Where the branch sets an "
+            "attribute -- ``tmp_job.nInputDataFiles = 0`` --: each statement after it, in the block holding it, "
+            "adding to or taking from that attribute: the value the object carries on is the branch's plus theirs."
         ),
     )
     row_precondition: list[str] = Field(

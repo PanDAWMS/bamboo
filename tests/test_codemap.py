@@ -23683,6 +23683,102 @@ def test_a_counter_write_says_the_statements_adding_to_the_count_it_takes_and_wh
         (1, "JediFileSpec.status", "in", ["'finished'", "'lost'"], "fileStatus", True),
     ]
     assert [one.accumulated for one in written.branches] == [[], []]
+    assert accumulation.per == []
+
+
+_COUNTER_SPECS = """
+class FileSpec(object):
+    _attributes = ("lfn", "type", "dataset")
+
+class JobSpec(object):
+    _attributes = ("PandaID", "prodSourceLabel", "nInputDataFiles", "specialHandling")
+"""
+
+_ATTRIBUTE_COUNTER = """
+class Setupper:
+    def correct_lfn(self):
+        for tmp_job in self.jobs:
+            if tmp_job.prodSourceLabel not in ["managed", "user"]:
+                continue
+            tmp_job.nInputDataFiles = 0  # RESET
+            for tmp_file in tmp_job.Files:
+                if tmp_file.type == "input" and not tmp_file.lfn.endswith(".lib.tgz"):
+                    tmp_job.nInputDataFiles += 1  # COUNTED
+            tmp_job.nInputDataFiles = tmp_job.nInputDataFiles + 0  # AGAIN
+        other = self.jobs[0]
+        other.nInputDataFiles += 1  # OTHER
+        other.prodSourceLabel = "managed"  # FIRST
+        if other.nInputDataFiles == 0:
+            other.prodSourceLabel = "test"  # SECOND
+            other.prodSourceLabel += "_x"  # SUFFIX
+        if other.PandaID:
+            other.specialHandling = "lb:1"  # ALT
+        else:
+            other.specialHandling += ",lb:1"  # ELSE
+"""
+
+
+def test_an_attribute_a_branch_sets_says_the_statements_adding_to_it_after_and_per_what():
+    """setupper's ``tmp_job.nInputDataFiles = 0``, then ``+= 1`` for each input file of the job's ``Files`` that is
+    not its lib.tgz: the reset's branch says that statement, its path condition, atoms and the loop it runs once an
+    element of -- ``tmp_file in tmp_job.Files`` -- so a reader counts the job's file rows by those tests.  A set of the
+    attribute from itself is no start, and an add to another object's attribute (``other``) or before the reset is
+    not the reset's; nor is one a later set always runs before (event_picker's ``self.user_task_name += "/"`` is the
+    nearer set's), nor one in the ``else`` of the ``if`` whose body sets it (JobSpec.setLumiBlockNr)."""
+    rel = "pandaserver/dataservice/setupper.py"
+    modules = [_module(_COUNTER_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ATTRIBUTE_COUNTER, rel)]
+
+    def line(marker: str) -> int:
+        (found,) = [
+            n for n, text in enumerate(_ATTRIBUTE_COUNTER.splitlines(), 1) if text.rstrip().endswith(f"# {marker}")
+        ]
+        return found
+
+    counter = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.nInputDataFiles", subject="JobSpec.nInputDataFiles",
+        owner=f"{rel}::Setupper.correct_lfn",
+        branches=[
+            Branch(outcome="0", line=line("RESET")),
+            Branch(outcome="runtime(tmp_job.nInputDataFiles + 1)", line=line("COUNTED")),
+            Branch(outcome="runtime(tmp_job.nInputDataFiles + 0)", line=line("AGAIN")),
+        ],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms([counter], modules, progress.equipped_attributor(modules, declarations), declarations)
+
+    reset, counted, again = counter.branches
+    (accumulation,) = reset.accumulated
+    assert (accumulation.line, accumulation.op, accumulation.amount) == (line("COUNTED"), "+", "1")
+    assert accumulation.path_condition == [
+        "tmp_file.type == 'input' and (not tmp_file.lfn.endswith('.lib.tgz'))",
+        "not (tmp_job.prodSourceLabel not in ['managed', 'user'])",
+    ]
+    assert accumulation.per == ["tmp_file in tmp_job.Files"]
+    assert [(a.entry, a.subject, a.op, a.values, a.object) for a in accumulation.condition_atoms] == [
+        (0, "FileSpec.type", "==", ["'input'"], "tmp_file"),
+        (1, "JobSpec.prodSourceLabel", "not in", ["'managed'", "'user'"], "tmp_job"),
+    ]
+    assert counted.accumulated == [] and again.accumulated == []
+
+    label = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.prodSourceLabel", subject="JobSpec.prodSourceLabel",
+        owner=f"{rel}::Setupper.correct_lfn",
+        branches=[Branch(outcome="managed", line=line("FIRST")), Branch(outcome="test", line=line("SECOND"))],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    progress.attach_condition_atoms([label], modules, progress.equipped_attributor(modules, declarations), declarations)
+    first, second = label.branches
+    assert first.accumulated == []
+    assert [(one.line, one.amount, one.per) for one in second.accumulated] == [(line("SUFFIX"), "'_x'", [])]
+
+    handling = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.specialHandling", subject="JobSpec.specialHandling",
+        owner=f"{rel}::Setupper.correct_lfn", branches=[Branch(outcome="lb:1", line=line("ALT"))],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    progress.attach_condition_atoms([handling], modules, progress.equipped_attributor(modules, declarations), declarations)
+    assert handling.branches[0].accumulated == []
 
 
 def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_constants():
