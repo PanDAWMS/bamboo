@@ -468,6 +468,8 @@ TEMPLATES: dict[str, str] = {
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
     "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{before:join=}{kept:join=}{refused}{idle}; premises: {premises:join=; }{unknown:join=}",
+    "for-a-callee-by-a-linked-value": "for {callee}'s runs by the row's linked {column} values, from {start} to {end}",
+    "moved-by-the-caller-through-a-linked-callee": "{caller} moved it: its pass on {machine} ran {callee} (its call at {lines}) from {start}, its run marked by the row's linked {column}, and then {mover} at {at}; of the mover's callers only {caller}'s calls reach {callee} (the map's calls) -- next: what called {caller}; premises: {premises:join=; }",
     "for-the-worker-s-passes-before": "for {worker}'s passes on other rows on {machine}, by {head!r} (its run mark before the key)",
     "the-worker-s-passes-before": "; on {machine}, between the selection's return at {start} and that pass at {end}, {worker} ran on {n} other row(s){span}{how}",
     "the-worker-s-passes-before-asked": "; what ran on {machine} between the selection's return at {start} and that pass at {end} is asked",

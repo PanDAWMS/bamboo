@@ -1846,6 +1846,19 @@ caller's call and is left out of this caller's passes, said: NJ-merging-late's a
 lie in updateUnmergedJobs' run and are not killJobs'.  The premise that a callee's run is the caller's call (how many
 other functions reach it) now covers the mover's own runs too.
 
+*Changed (P13, 2026-11-19, the investigator's u3 MJ-assigned-late 1, delegated design):* `_call_tied` also reads a
+callee whose runs are marked by a column of a row the rows file links to the key's (`_linked_marks`).  Two conditions:
+the column is not that class's identity, and the callee's own statements select rows by it (the map's read-site keys).
+The callee's result must also flow into the caller's call of the mover (`result_reaches`, through the map's
+`bindings` and `call_bindings`).  Such a callee is asked by the linked rows' values of the column, by its mark's text.
+Activator.run's updateInFilesReturnPandaIDs is marked `dataset={}`, the job's files' dispatchDBlock; its result
+panda_ids goes through peekJobs into activateJobs at 81.  Where the pass that moved the row ran that callee before
+the mover, and of the mover's callers only this one's calls reach it, a new END says the moving pass was this
+caller's (`moved-by-the-caller-through-a-linked-callee`), next: what called it.  MJ-assigned-late now asks the two
+dispatch blocks (the records the hand cites hold 13:33:45,782 on aipanda082).  Measures p13m-p13p: a task's linked
+jobs' PandaID (350 asks on NT-ready-late), a site looked up for its power, and a label's job statistics were each asked
+before the conditions were added.
+
 *Changed (A2s, 2026-11-18, out/gm/qk-design.md "A2s", delegated design):* a stuck value's A2 whose wakers wrote no row
 for the key in the window, every waker's log searched whole and the table written here alone (no inbound boundary on
 it), ends: no row the mover takes it by came.  It stopped (K55) before.  The map's DFC (tmaeno's fact through the

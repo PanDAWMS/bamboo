@@ -21156,6 +21156,117 @@ def test_p8_the_worker_s_passes_on_other_rows_before_the_row_s_on_the_take_s_mac
     assert "is asked" in text and kept == 1, got
 
 
+def test_p13_a_callee_marked_by_a_linked_row_s_column_is_asked_by_its_values(tmp_path):
+    """P13: a callee whose run marks hold a column of a class the rows file links to the key's row (the job's files'
+    dispatchDBlock, updateInFilesReturnPandaIDs' ``dataset={}``) gives that column, the linked rows' values of it and
+    the mark texts to ask by; a column of no linked class, or no value, gives None."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+
+            runs = [N(mark="dataset={}", key=[N(columns=["DatasetSpec.name", "FileSpec.dispatchDBlock"])])]
+            RR.R._prints_of = lambda owner, lines=(): N(runs=runs, statements=[])
+            RR.marks_holding = lambda owner, line, holds, value: (f"m < dataset={value} >",)
+            RR.mapdump.fragment = lambda: N(read_sites=[N(owner="a.py::f", keys=["FileSpec.dispatchDBlock", "JobSpec.PandaID"])])
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.data = {"linked": [{"class": "FileSpec", "via": {"from": "JobSpec.PandaID", "to": "FileSpec.PandaID"},
+                                  "rows": [{"type": "input", "dispatchDBlock": "dis_a"}, {"type": "input", "dispatchDBlock": "dis_a"},
+                                           {"type": "log", "dispatchDBlock": None}]}]}
+            got = {"job": r._linked_marks("a.py::f", "JobSpec"), "task": r._linked_marks("a.py::f", "JediTaskSpec")}
+            r.data = {"linked": [{"class": "FileSpec", "via": {"from": "JobSpec.PandaID"}, "rows": [{"dispatchDBlock": None}]}]}
+            got["none"] = r._linked_marks("a.py::f", "JobSpec")
+            # a linked class's identity names other objects: not asked by
+            RR._identity_attrs = lambda cls: ["JobSpec.PandaID"] if cls == "JobSpec" else []
+            runs[:] = [N(mark="PandaID={}", key=[N(columns=["JobSpec.PandaID"])])]
+            r.data = {"linked": [{"class": "JobSpec", "via": {"from": "JediTaskSpec.jediTaskID"}, "rows": [{"PandaID": 7}]}]}
+            got["identity"] = r._linked_marks("a.py::f", "JediTaskSpec")
+            # a column the callee's statements do not select rows by (a site looked up for its power): not asked by
+            runs[:] = [N(mark="siteid={}", key=[N(columns=["JobSpec.computingSite"])])]
+            r.data = {"linked": [{"class": "JobSpec", "via": {"from": "JediTaskSpec.jediTaskID"}, "rows": [{"computingSite": "S"}]}]}
+            got["lookup"] = r._linked_marks("a.py::f", "JediTaskSpec")
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["job"] == ["FileSpec.dispatchDBlock", ["dis_a"], {"dis_a": ["m < dataset=dis_a >"]}], got
+    assert got["task"] is None and got["none"] is None and got["identity"] is None and got["lookup"] is None, got
+
+
+def test_p13_the_mover_s_other_callers_that_reach_a_callee(tmp_path):
+    """P13: of the mover's other callers (U1's), those whose calls reach the callee; the caller itself is left out, and
+    one whose def is not read counts as reaching it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+
+            callers = [N(owner="a.py::Act.run", lines=[81]), N(owner="b.py::Thr.run", lines=[873]),
+                       N(owner="c.py::cb", lines=[128]), N(owner="d.py::gone", lines=[5])]
+            RR.callers_of = lambda entries, cls, key, columns: callers
+            def function(rel, func, lines):
+                if rel == "d.py":
+                    raise LookupError(rel)
+                return N(node=N(name=func))
+            RR.R.function = function
+            RR.pathcond.qualified_name = lambda node: node.name
+            reach = {"a.py::Act.run": {"m.py::M.updateIn": ([70], 1), "t.py::T.activate": ([81], 1)},
+                     "b.py::Thr.run": {"t.py::T.activate": ([873], 1)},
+                     "c.py::cb": {"m.py::M.updateIn": ([120], 2)}}
+            RR._callees_by_line = lambda qual: reach.get(qual, {})
+            r = RR.Rerun.__new__(RR.Rerun)
+            up = N(entries=[], key="7")
+            print(json.dumps(r._others_reaching(N(owner="a.py::Act.run"), up, "m.py::M.updateIn", "JobSpec", set())))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == ["cb", "gone"]
+
+
+def test_p13_a_callee_s_result_reaches_the_mover_s_call_through_the_names_the_map_binds(tmp_path):
+    """P13: Activator.run's updateInFilesReturnPandaIDs result (panda_ids) is handed to peekJobs, whose result's
+    elements fill activate_jobs, handed to activateJobs at 81: it reaches the mover's call; updateDatasets' result
+    does not, nor a call the function does not hold."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+
+            def B(line, name, path, how, to=()):
+                return N(line=line, name=name, path=path, how=how, to=list(to))
+            def C(line, to, parameter, path):
+                return N(line=line, to=to, parameter=parameter, path=path)
+            node = N(owner="a.py::Activator.run", bindings=[
+                B(70, "panda_ids", "", "result", ["t.py::TaskBuffer.updateInFilesReturnPandaIDs"]),
+                B(74, "jobs", "", "result", ["t.py::TaskBuffer.peekJobs"]),
+                B(77, "job", "jobs[]", "element"), B(79, "activate_jobs[]", "job", "fill"),
+                B(85, "done", "", "result", ["t.py::TaskBuffer.updateDatasets"])],
+                call_bindings=[C(70, "t.py::TaskBuffer.updateInFilesReturnPandaIDs", "dataset", "self.dataset.name"),
+                               C(74, "t.py::TaskBuffer.peekJobs", "jobIDs", "panda_ids"),
+                               C(81, "t.py::TaskBuffer.activateJobs", "jobs", "activate_jobs"),
+                               C(85, "t.py::TaskBuffer.updateDatasets", "datasets", "self.dataset")])
+            RR.mapdump.fragment = lambda: N(reach_graph=[node])
+            got = [RR.result_reaches("a.py::Activator.run", "updateInFilesReturnPandaIDs", [81]),
+                   RR.result_reaches("a.py::Activator.run", "updateDatasets", [81]),
+                   RR.result_reaches("a.py::Activator.run", "getJobStatistics", [81]),
+                   RR.result_reaches("b.py::other", "updateInFilesReturnPandaIDs", [81])]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == [True, False, False, False]
+
+
 def test_p69_only_a_run_under_a_mark_its_method_s_calls_share_is_cut(tmp_path):
     """P69: shared_mark_parts cuts a run the door says is under a mark its method's calls share, and leaves any other
     run whole, however long its records pause; a run its entry row cut into one pass (a copy) stays that pass."""

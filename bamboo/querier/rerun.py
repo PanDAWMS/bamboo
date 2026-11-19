@@ -3678,6 +3678,40 @@ def _burst_parts(run, gap: datetime.timedelta = datetime.timedelta(minutes=1)) -
     return out
 
 
+def result_reaches(owner: str, callee: str, lines: Iterable[int]) -> bool:
+    """P13: whether, in *owner* (the map's reach node), the result of its call to *callee* (a method name) flows into an
+    argument of a call at one of *lines* -- through the names the map binds (``bindings``: a call's ``result``, a
+    collection's ``element``, a ``fill``) and the arguments it hands (``call_bindings``).  Activator.run binds
+    updateInFilesReturnPandaIDs' result at 70 to panda_ids, hands it to peekJobs at 74, whose result jobs gives the
+    element job filling activate_jobs, handed to activateJobs at 81.  A call whose result goes nowhere the mover's call
+    reads (a site's power looked up, a label's statistics) does not."""
+    node = next((n for n in getattr(mapdump.fragment(), "reach_graph", None) or []
+                 if _bare(str(getattr(n, "owner", ""))) == _bare(owner)), None)
+    if node is None:
+        return False
+    lines = set(lines)
+    binds = list(getattr(node, "bindings", None) or [])
+    calls = list(getattr(node, "call_bindings", None) or [])
+
+    def root(path: str) -> str:
+        return re.split(r"[\[.(]", str(path or ""), maxsplit=1)[0]
+
+    def method(to: Any) -> str:
+        return str(to).rpartition("::")[2].rpartition(".")[2]
+
+    names = {root(b.name) for b in binds if b.how == "result" and any(method(t) == callee for t in b.to or [])}
+    while names:
+        if any(c.line in lines and root(c.path) in names for c in calls):
+            return True
+        more = {root(b.name) for c in calls if root(c.path) in names
+                for b in binds if b.how == "result" and b.line == c.line and any(method(t) == method(c.to) for t in b.to or [])}
+        more |= {root(b.name) for b in binds if b.how in ("element", "fill") and root(b.path) in names}
+        if more <= names:
+            return False
+        names |= more
+    return False
+
+
 def _bursts(stamps: list[str], gap: datetime.timedelta) -> list[tuple[str, str]]:
     """``(first, last)`` of each run of *stamps* (sorted) cut where they stop for *gap* or more."""
     out: list[tuple[str, str]] = []
@@ -10013,6 +10047,59 @@ class Rerun:
             "after": up.left or "", "premises": [p["why"] for p in premises.values()]}))
         return True
 
+    def _others_reaching(self, c: Caller, up: Callers, callee: str, cls: str, columns: set[str]) -> list[str]:
+        """P13: the mover's other callers (U1's, :func:`callers_of` over *up*'s entries) whose calls reach *callee* (the
+        map's calls, :func:`_callees_by_line`).  A caller whose def is not read counts as reaching it."""
+        out = []
+        for o in callers_of(up.entries, cls, up.key, columns):
+            if _bare(o.owner) == _bare(c.owner):
+                continue
+            rel, func = o.owner.split("::", 1)
+            try:
+                fn = R.function(rel, func, o.lines)
+            except (LookupError, ValueError, SyntaxError):
+                out.append(func)
+                continue
+            reached = _callees_by_line(f"{rel}::{pathcond.qualified_name(fn.node)}")
+            if any(_bare(x) == _bare(callee) for x in reached):
+                out.append(func)
+        return out
+
+    def _linked_marks(self, owner: str, cls: str) -> tuple[str, list[str], dict[str, tuple[str, ...]]] | None:
+        """P13 (the investigator's u3 MJ-assigned-late 1): where *owner*'s run marks hold a column of a class the rows
+        file links to the key's row (``linked``, by a column of *cls*), that column, the linked rows' values of it, and
+        for each value the texts its lines carry around it (:func:`marks_holding`): updateInFilesReturnPandaIDs'
+        ``dataset={}`` holds FileSpec.dispatchDBlock, the job's input files' dispatch block.  A linked class's identity
+        (PandaID, datasetID) is not such a column: it names other objects one by one; nor is one *owner*'s statements do
+        not select rows by (the map's read sites' keys).  None where no such column, or the rows hold no value of it."""
+        found = R._prints_of(owner)
+        # the columns *owner*'s own statements select rows by (the map's read sites' keys): a callee that takes rows by
+        # the value -- not one that looks it up for something else (get_core_power's siteid, p13n)
+        selecting = {k for s in getattr(mapdump.fragment(), "read_sites", None) or []
+                     if VR.bare(getattr(s, "owner", "")) == VR.bare(owner) for k in getattr(s, "keys", None) or []}
+        entries = [e for e in self.data.get("linked") or []
+                   if str((e.get("via") or {}).get("from", "")).partition(".")[0] == cls and e.get("rows")]
+        classes = {str(e.get("class", "")): e for e in entries}
+        for run in getattr(found, "runs", None) or []:
+            for k in run.key or []:
+                for col in k.columns or []:
+                    entry = classes.get(col.partition(".")[0])
+                    # a linked row's identity (a task's jobs' PandaID, its datasets' datasetID) names another object, one
+                    # by one, not a value the rows share that a selection takes them by (p13m: 350 asks on NT-ready-late)
+                    if entry is None or col in _identity_attrs(col.partition(".")[0]) or col not in selecting:
+                        continue
+                    attr = col.partition(".")[2].lower()
+                    values = sorted({str(v) for row in entry["rows"] for a, v in row.items()
+                                     if a.lower() == attr and v not in (None, "", "NULL")})
+                    if not values:
+                        continue
+
+                    def holds(key: Any, col: str = col) -> bool:
+                        return col in (key.columns or [])
+
+                    return col, values, {v: marks_holding(owner, 0, holds, v) for v in values}
+        return None
+
     def _call_tied(self, c: Caller, up: Callers) -> bool:
         """Q1 part 2 (call-tied runs; out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06; P22,
         P8): where the caller's own runs print no key, or its logs are not in the records, its passes on the row are
@@ -10044,6 +10131,8 @@ class Rerun:
         # E-1 (W8): a callee whose runs are marked by a column that references the key's class's identity, with that
         # column and the foreign keys it goes through -- feed_contents_to_tasks' insertFilesForDataset_JEDI
         referenced: dict[str, list[str]] = {}
+        # P13: a callee marked by a linked row's column: (that column, the linked rows' values of it, the mark texts)
+        linked: dict[str, tuple[str, list[str], dict[str, tuple[str, ...]]]] = {}
         cls = up.subject.partition(".")[0]
         for o, (lines, _) in reached.items():
             bare = _bare(o)
@@ -10055,9 +10144,17 @@ class Rerun:
                 continue
             if not (bare == mover or prints_key(o, (), columns) or key_marks(o, 0, cls, up.key)):
                 marks, refs = ref_marks(o, 0, cls, up.key)
-                if not marks:
+                if marks:
+                    referenced[bare] = refs
+                elif (held := self._linked_marks(o, cls)) is not None and result_reaches(
+                        qual, bare.rpartition("::")[2].rpartition(".")[2], c.lines):
+                    # P13 (the investigator's u3 MJ-assigned-late 1): a callee whose runs are marked by a column of a
+                    # row linked to the key's -- updateInFilesReturnPandaIDs' dataset={}, the job's files'
+                    # dispatchDBlock -- and whose result flows into the caller's call of the mover, asked by the
+                    # linked rows' values of it
+                    linked[bare] = held
+                else:
                     continue
-                referenced[bare] = refs
             printing[bare] = (lines, o, {f for st in found.statements for f in st.log_files})
         files = {f for _, _, fs in printing.values() for f in fs}
         to_hand = self.logs.names(sorted(files))
@@ -10068,6 +10165,16 @@ class Rerun:
         asking = W.Asking((start, end), None, T.Said("for-the-callers-callees", {"caller": func, "start": start, "end": end,
                                                                                  "n": len(printing)}))
         runs, missed, _holes = self._ask(up.key, to_hand, asking, {}, quiet=True)
+        for bare, (column, values, texts) in linked.items():
+            names = self.logs.names(sorted(printing[bare][2]))
+            for value in values:
+                by = W.Asking((start, end), None, T.Said("for-a-callee-by-a-linked-value", {
+                    "callee": bare.rpartition("::")[2], "column": column, "start": start, "end": end}),
+                    strings=texts.get(value) or (value,))
+                got, more, _ = self._ask(value, names, by, {}, quiet=True)
+                missed += more
+                for name, rs in got.items():
+                    runs.setdefault(name, []).extend(rs)
         if missed:
             # a callee's log not in the records may hold a pass of the caller on the row: nothing is read without it
             # (NT-assigning-late's panda-AtlasProdTaskBroker.log); the asks are kept and U2 goes on its own way, whose
@@ -10121,6 +10228,28 @@ class Rerun:
             else:
                 grouped.append([p])
         grouped.sort(key=lambda g: min(q[0] for q in g))
+        # P13 (the investigator's u3 MJ-assigned-late 1): the pass that moved the row ran, before the mover, a callee asked
+        # by a linked row's value (Activator.run's updateInFilesReturnPandaIDs on the job's dispatch block); where of
+        # the mover's callers only this one's calls reach that callee, the moving pass is this caller's
+        moving_g = [g for g in grouped if any(q[3] == mover for q in g)]
+        if linked and moving_g:
+            mv = moving_g[-1]
+            at = min(q[0] for q in mv if q[3] == mover)
+            pre = sorted((q for q in mv if q[3] in linked and q[0][:23] <= at[:23]), key=lambda q: q[0])
+            if pre:
+                q = pre[-1]
+                others = self._others_reaching(c, up, q[5], cls, columns)
+                if others:
+                    self.say(f"{func}'s pass that moved it ran {q[3].rpartition('::')[2]} first, but other callers of the "
+                             f"mover reach it too ({', '.join(others)}): whose pass it was is not told (P13)")
+                else:
+                    self.end(T.Said("moved-by-the-caller-through-a-linked-callee", {
+                        "caller": func, "machine": q[2].split(".")[0], "callee": q[3].rpartition("::")[2], "lines": sorted(q[4]),
+                        "start": q[0][:23], "column": linked[q[3]][0], "mover": mover.rpartition("::")[2], "at": at[:23],
+                        "premises": [T.Said("a-callee-run-is-the-caller-s", {
+                            "caller": func, "callee": q[5].rpartition("::")[2].rpartition(".")[2],
+                            "n": _others_reaching(q[5], {qual, *reached})})]}))
+                    return True
         if all(any(q[3] == mover for q in g) for g in grouped):
             # only the pass that moved it: nothing read of the passes before it
             self.say(f"{func}'s callees: no pass on the row but the one that moved it")
