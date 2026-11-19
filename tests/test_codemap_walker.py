@@ -706,3 +706,67 @@ def test_a_statement_passed_whole_diverts_by_a_raise_only_to_a_handler_around_it
     assert walker.may_divert(loop, [handler])
     assert not walker.may_divert(loop, [])
     assert not walker.may_divert(guarded, [handler])
+
+
+def _own_nodes_stacked(root):
+    """The walk :func:`walker.own_nodes` reads, as it read before it kept what it read: *root* first, then depth
+    first, the last child first, no nested definition entered."""
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, walker.DEFS):
+                stack.append(child)
+
+
+def test_own_nodes_kept_per_root_are_what_walking_the_root_gives_in_its_order():
+    """The walk asks a statement's nodes again on every path through it, so :func:`walker.own_nodes` keeps them per
+    root: the same nodes, in the same order, on the first ask and on the next, for every node of a module (the
+    walker's own source) -- each an iterator, as the walk was."""
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(walker.__file__).read_text())
+    asked = list(ast.walk(tree))
+    assert len(asked) > 1000
+    for _ in range(2):
+        for node in asked:
+            walked = walker.own_nodes(node)
+            assert iter(walked) is walked
+            assert [id(one) for one in walked] == [id(one) for one in _own_nodes_stacked(node)]
+
+
+def test_a_statements_readings_kept_per_statement_are_what_reading_it_again_gives():
+    """:func:`walker.contains`, :func:`walker.own_binds`, :func:`walker.deep_binds`, :func:`walker.own_calls` and
+    :func:`walker.mutating_roots` depend on the statement alone, so each is read once per statement: on every
+    statement of a module (the walker's own source), the first ask and the next give what reading it gives, and what
+    one caller does to the list or set it is handed leaves the next ask as it was."""
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(walker.__file__).read_text())
+    statements = [node for node in ast.walk(tree) if isinstance(node, ast.stmt)]
+    assert len(statements) > 500
+    for _ in range(2):
+        for stmt in statements:
+            nodes = list(_own_nodes_stacked(stmt))
+            for kinds in (walker.JUMPS, (ast.Return, ast.Raise)):
+                assert walker.contains(stmt, kinds) == any(isinstance(n, kinds) for n in nodes)
+            walrus = [(ast.unparse(n.target), None) for n in nodes if isinstance(n, ast.NamedExpr)]
+            assert [(t, id(v)) for t, v in walker.own_binds(stmt)] == [
+                (t, id(v)) for t, v in walker.binds(stmt) + walrus
+            ]
+            assert walker.deep_binds(stmt) == {t for n in nodes for t, _ in walker.binds(n)}
+            calls = [n for n in nodes if isinstance(n, ast.Call) and not walker.is_log_call(n)]
+            assert [id(n) for n in walker.own_calls(stmt)] == [id(n) for n in calls]
+            roots = {
+                m.id
+                for n in calls
+                if not (isinstance(n.func, ast.Name) and n.func.id in walker.READERS)
+                for m in ast.walk(n)
+                if isinstance(m, ast.Name)
+            }
+            assert walker.mutating_roots(stmt) == roots
+            walker.own_binds(stmt).append(("handed", None))
+            walker.deep_binds(stmt).add("handed")
+            walker.own_calls(stmt).clear()
+            walker.mutating_roots(stmt).add("handed")

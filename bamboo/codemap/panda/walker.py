@@ -52,7 +52,15 @@ import functools
 import weakref
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Optional,
+)
 
 from bamboo.codemap import callfacts, evaluate, pathcond, reaching
 from bamboo.codemap.callfacts import LOG_LEVELS
@@ -143,19 +151,49 @@ class Partial:
 # ---------------------------------------------------------------- the function's own statements
 
 
-def own_nodes(root: ast.AST) -> Iterable[ast.AST]:
-    """``ast.walk`` that does not go into nested functions, classes or lambdas."""
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        yield node
-        for child in ast.iter_child_nodes(node):
-            if not isinstance(child, DEFS):
-                stack.append(child)
+#: :func:`own_nodes` of each root asked, kept while the root is.  The walk asks a statement's nodes again on every
+#: path through it -- the querier's NJ-starting-late asked 343 million of them in 2235 runs -- and no reader changes
+#: a tree it walks: handlermarks adds statements to fresh copies only, walked with its own walk.
+_OWN: "weakref.WeakKeyDictionary[ast.AST, tuple[ast.AST, ...]]" = weakref.WeakKeyDictionary()
+
+
+def own_nodes(root: ast.AST) -> Iterator[ast.AST]:
+    """``ast.walk`` that does not go into nested functions, classes or lambdas: *root* first, then depth first, the
+    last child first.  Read once per root (:data:`_OWN`)."""
+    held = _OWN.get(root)
+    if held is None:
+        found = []
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            found.append(node)
+            for child in ast.iter_child_nodes(node):
+                if not isinstance(child, DEFS):
+                    stack.append(child)
+        held = _OWN[root] = tuple(found)
+    return iter(held)
+
+
+#: What :func:`contains`, :func:`own_binds`, :func:`deep_binds`, :func:`own_calls` and :func:`mutating_roots` (with no
+#: *kept*) read of each statement, kept as :data:`_OWN` is: each depends on the statement alone, not on the path at
+#: it, and the walk asks each again on every path through it -- in the querier's NJ-starting-late about 13.4
+#: million times.
+_CONTAINS: "weakref.WeakKeyDictionary[ast.AST, dict[tuple, bool]]" = weakref.WeakKeyDictionary()
+_OWN_BINDS: "weakref.WeakKeyDictionary[ast.AST, tuple[tuple[str, Optional[ast.expr]], ...]]" = weakref.WeakKeyDictionary()
+_DEEP_BINDS: "weakref.WeakKeyDictionary[ast.AST, frozenset[str]]" = weakref.WeakKeyDictionary()
+_ROOTS: "weakref.WeakKeyDictionary[ast.AST, frozenset[str]]" = weakref.WeakKeyDictionary()
+_CALLS: "weakref.WeakKeyDictionary[ast.AST, tuple[ast.Call, ...]]" = weakref.WeakKeyDictionary()
 
 
 def contains(stmt: ast.AST, kinds: tuple) -> bool:
-    return any(isinstance(n, kinds) for n in own_nodes(stmt))
+    """Whether a node of *stmt*'s own (:func:`own_nodes`) is one of *kinds*.  Read once per statement and kinds."""
+    held = _CONTAINS.get(stmt)
+    if held is None:
+        held = _CONTAINS[stmt] = {}
+    found = held.get(kinds)
+    if found is None:
+        found = held[kinds] = any(isinstance(n, kinds) for n in own_nodes(stmt))
+    return found
 
 
 def block_of(parent: ast.AST, child: ast.AST) -> Optional[tuple[str, list]]:
@@ -312,19 +350,27 @@ def binds(stmt: ast.AST) -> list[tuple[str, Optional[ast.expr]]]:
 
 
 def own_binds(stmt: ast.AST) -> list[tuple[str, Optional[ast.expr]]]:
-    """What a simple statement binds, walrus included."""
-    out = binds(stmt)
-    out += [
-        (ast.unparse(n.target), None)
-        for n in own_nodes(stmt)
-        if isinstance(n, ast.NamedExpr)
-    ]
-    return out
+    """What a simple statement binds, walrus included.  Read once per statement (:data:`_OWN_BINDS`); a new list each
+    ask."""
+    held = _OWN_BINDS.get(stmt)
+    if held is None:
+        out = binds(stmt)
+        out += [
+            (ast.unparse(n.target), None)
+            for n in own_nodes(stmt)
+            if isinstance(n, ast.NamedExpr)
+        ]
+        held = _OWN_BINDS[stmt] = tuple(out)
+    return list(held)
 
 
 def deep_binds(stmt: ast.AST) -> set[str]:
-    """What *stmt* binds, what is nested in it included (not in a nested definition)."""
-    return {t for n in own_nodes(stmt) for t, _ in binds(n)}
+    """What *stmt* binds, what is nested in it included (not in a nested definition).  Read once per statement
+    (:data:`_DEEP_BINDS`); a new set each ask."""
+    held = _DEEP_BINDS.get(stmt)
+    if held is None:
+        held = _DEEP_BINDS[stmt] = frozenset(t for n in own_nodes(stmt) for t, _ in binds(n))
+    return set(held)
 
 
 def text_of(node: ast.AST) -> str:
@@ -346,19 +392,37 @@ def mutating_roots(
     node: ast.AST, kept: Optional[Callable[[ast.Call], set[int]]] = None
 ) -> set[str]:
     """Names a call in *node* is handed or called on -- what it could change.  *kept*: the ids of the ``Name``
-    nodes of a call that the call only reads."""
+    nodes of a call that the call only reads.  With no *kept*, read once per node (:data:`_ROOTS`); a new set each
+    ask."""
+    if kept is None:
+        held = _ROOTS.get(node)
+        if held is None:
+            held = _ROOTS[node] = frozenset(_mutating_roots(node, None))
+        return set(held)
+    return _mutating_roots(node, kept)
+
+
+def _mutating_roots(node: ast.AST, kept: Optional[Callable[[ast.Call], set[int]]]) -> set[str]:
     out: set[str] = set()
-    for n in own_nodes(node):
-        if isinstance(n, ast.Call) and not is_log_call(n):
-            if isinstance(n.func, ast.Name) and n.func.id in READERS:
-                continue
-            read_only = kept(n) if kept is not None else set()
-            out |= {
-                m.id
-                for m in ast.walk(n)
-                if isinstance(m, ast.Name) and id(m) not in read_only
-            }
+    for n in own_calls(node):
+        if isinstance(n.func, ast.Name) and n.func.id in READERS:
+            continue
+        read_only = kept(n) if kept is not None else set()
+        out |= {
+            m.id
+            for m in ast.walk(n)
+            if isinstance(m, ast.Name) and id(m) not in read_only
+        }
     return out
+
+
+def own_calls(node: ast.AST) -> list[ast.Call]:
+    """The calls of *node*'s own (:func:`own_nodes`) that are no logger's line, in its order.  Read once per node
+    (:data:`_CALLS`); a new list each ask."""
+    held = _CALLS.get(node)
+    if held is None:
+        held = _CALLS[node] = tuple(n for n in own_nodes(node) if isinstance(n, ast.Call) and not is_log_call(n))
+    return list(held)
 
 
 @functools.lru_cache(maxsize=None)
@@ -1236,9 +1300,7 @@ class Walker:
         roots = roots & self.rel_roots
         if not roots:
             return
-        made = [
-            n for n in own_nodes(node) if isinstance(n, ast.Call) and not is_log_call(n)
-        ]
+        made = own_calls(node)
         marks = frozenset(
             change_mark(r, change)
             for r in roots
