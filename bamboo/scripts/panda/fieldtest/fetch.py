@@ -18,11 +18,12 @@ class is written here (:data:`LINKS`) until the map exports it.
 
 **Two ways in.**  A row read by its key -- a job with its files, a task --
 comes from a plain endpoint, answered at once.  The task's jobs and
-their counts are read through ``db_read``, which runs in the async daemon's
-cycle and may wait behind its greps; one batch holds all four of its queries.
-With ``--via endpoint`` they are read through task/get_job_rows instead
-(panda-server 80134dc2, :data:`TASK_JOB_ROWS`): every table in one UNION, page
-by page, no table named, counts by jobStatus alone.
+their counts are read through task/get_job_rows (:data:`TASK_JOB_ROWS`,
+upstream 31f1a14a, in production from 2026-11-19; :data:`DEFAULT_VIA`): every
+table in one UNION, page by page, no table named, counts by jobStatus alone.
+With ``--via db_read`` they are read through ``db_read`` instead, which runs
+in the async daemon's cycle and may wait behind its greps; one batch holds all
+four of its queries, by table.
 
 **The archive.**  ``job/get_description_incl_archive`` looks in the archive
 for the last 90 days only.  The task's jobs are asked of ATLAS_PANDAARCH with
@@ -386,8 +387,11 @@ KEY_ROW = {"JobSpec": _job_row, "JediTaskSpec": _task_row}
 #: the call reading the rows a link names, by where it leads: the rows found
 LINK_ROWS = {"JobSpec.jediTaskID": _task_jobs}
 #: the calls reading a link's rows by the way a fetch reads them: db_read (the async daemon), or the endpoints
-#: that replace it (panda-server 80134dc2; ``--via endpoint``)
+#: that replace it (panda-server 80134dc2, upstream 31f1a14a; ``--via endpoint``)
 VIA = {"db_read": LINK_ROWS, "endpoint": {"JobSpec.jediTaskID": _task_job_rows}}
+#: the way rows are read unless one is named, here and in rowsask: the endpoints, in production from 2026-11-19
+#: 15:17 UTC (#877) and read by the querier from querier-x 5c0476a; db_read stays for a file or a server without them
+DEFAULT_VIA = "endpoint"
 #: the call reading the status histories of a class's rows, from the first one's creation where it takes a bound
 HISTORY = {"JobSpec": _job_history, "JediTaskSpec": _task_history}
 
@@ -438,7 +442,7 @@ async def fetch_key(
     rec: Record,
     parts: Parts,
     tables: Tables,
-    via: str = "db_read",
+    via: str = DEFAULT_VIA,
 ) -> None:
     """The key's row, the rows its links name one step on, then the histories of the key and of the rows found.
 
@@ -472,7 +476,7 @@ async def fetch(
     question: dict,
     tables: Tables,
     parts: Parts | None = None,
-    via: str = "db_read",
+    via: str = DEFAULT_VIA,
 ) -> dict:
     """The record of everything asked for *question*'s key, by the dump's *tables*, a link's rows read *via* (:data:`VIA`)."""
     parts = parts or Parts()
@@ -510,9 +514,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--via",
         choices=sorted(VIA),
-        default="db_read",
-        help="how a task's jobs are read: db_read (the async daemon; the default) or endpoint "
-        "(task/get_job_rows, panda-server 80134dc2: use it once that version runs)",
+        default=DEFAULT_VIA,
+        help="how a task's jobs are read: endpoint (task/get_job_rows, every page; the default) or db_read "
+        "(the async daemon, for a server without the endpoint)",
     )
     a = ap.parse_args(argv)
     case = load_case(Path(a.case))

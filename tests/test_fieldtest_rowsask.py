@@ -65,7 +65,8 @@ def _line(ask: dict) -> dict:
 
 
 def _plan(ask: dict) -> RA.Plan:
-    return RA.plan(_line(ask), TABLES, SITES)
+    """The plan by db_read, the way these tests read rows (the endpoint's are planned with "endpoint")."""
+    return RA.plan(_line(ask), TABLES, SITES, "db_read")
 
 
 def _statement(tables: list[str], binds: dict) -> dict:
@@ -259,7 +260,7 @@ def _doc(*answers: dict) -> dict:
 
 async def test_a_statements_answer_lays_out_as_the_tasks_fetch_lays_out_its_jobs():
     fetched = RB.build(
-        await FE.fetch(TASK_Q, TABLES, _task_panda().parts()), SPELLINGS, TABLES
+        await FE.fetch(TASK_Q, TABLES, _task_panda().parts(), via="db_read"), SPELLINGS, TABLES
     )
     panda = _task_panda()
     line = _line(
@@ -331,7 +332,7 @@ def _db_read(tables: dict[str, list[dict]]):
 
 async def _joined_answer(tables: dict[str, list[dict]]) -> dict:
     line = _line(S1_ASK)
-    p = RA.plan(line, TABLES, SITES)
+    p = RA.plan(line, TABLES, SITES, "db_read")
     return await RA.answer(line, p, FE.Parts(db_read=_db_read(tables)), TABLES)
 
 
@@ -531,8 +532,9 @@ def test_by_the_endpoint_a_tasks_datasets_by_its_key_are_read_by_task_get_datase
         (FE.TASK_DATASET_ROWS, "collection", {"task_id": TID})
     ]
     assert got.histories is None and not got.why
-    # db_read by default, as before
-    assert [c.part for c in RA.plan(line, TABLES, SITES).calls] == ["db_read"]
+    # the endpoint by default (fetch.DEFAULT_VIA), db_read when named
+    assert [c.part for c in RA.plan(line, TABLES, SITES).calls] == [FE.TASK_DATASET_ROWS]
+    assert [c.part for c in RA.plan(line, TABLES, SITES, "db_read").calls] == ["db_read"]
     # rows selected by another column stay db_read's
     via = [{"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.masterID"}]
     other = RA.plan(

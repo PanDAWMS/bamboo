@@ -387,7 +387,8 @@ def _job_panda(job: dict | None = JOB) -> FakePanda:
 
 
 async def _fetch(panda: FakePanda, question: dict) -> dict:
-    return await FE.fetch(question, TABLES, panda.parts())
+    """The fetch by db_read, the way these tests read a task's jobs (the endpoint's are :func:`_fetch_by_endpoint`)."""
+    return await FE.fetch(question, TABLES, panda.parts(), via="db_read")
 
 
 # ------------------------------------------------------------------ a job's key
@@ -926,6 +927,15 @@ JOBS_VIA = {"from": "JediTaskSpec.jediTaskID", "to": "JobSpec.jediTaskID"}
 
 async def _fetch_by_endpoint(panda: FakePanda) -> dict:
     return await FE.fetch(TASK_Q, TABLES, panda.parts(), via="endpoint")
+
+
+async def test_a_tasks_jobs_are_read_by_the_endpoint_unless_db_read_is_named():
+    by_default, by_name = _task_panda(), _task_panda()
+    record = await FE.fetch(TASK_Q, TABLES, by_default.parts())
+    await FE.fetch(TASK_Q, TABLES, by_name.parts(), via="db_read")
+    assert FE.DEFAULT_VIA == record["via"] == "endpoint"
+    assert [c[0] for c in by_default.calls] == ["task", "job_rows", "task_history", "job_history"]
+    assert "db_read" in [c[0] for c in by_name.calls] and "job_rows" not in [c[0] for c in by_name.calls]
 
 
 async def test_by_the_endpoint_a_tasks_jobs_are_one_read_from_its_creation_then_their_histories():

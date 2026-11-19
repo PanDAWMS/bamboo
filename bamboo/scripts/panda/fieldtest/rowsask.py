@@ -56,6 +56,7 @@ from pathlib import Path
 
 from bamboo.scripts.panda.fieldtest.fetch import (
     CLOCK_SLACK,
+    DEFAULT_VIA,
     HISTORY,
     JOB_ROW_COLUMNS,
     KEY_REQUEST,
@@ -95,7 +96,7 @@ KEY_ANSWER = {
     "task": lambda response, request: task_of(response)[0],
 }
 #: the ways a plan reads rows: db_read (the async daemon), or the endpoints that replace it where one reads the
-#: rows asked (panda-server 80134dc2: task/get_dataset_rows, a task's datasets by jediTaskID)
+#: rows asked (task/get_dataset_rows, a task's datasets by jediTaskID; upstream 31f1a14a); fetch.DEFAULT_VIA unless named
 VIAS = ("db_read", "endpoint")
 #: a round's answers in a records directory
 ROUND = re.compile(r"^rows-r(\d+)\.json$")
@@ -133,7 +134,7 @@ class Sites:
         }
 
 
-def plan(line: dict, tables: Tables, sites: Sites, via: str = "db_read") -> Plan:
+def plan(line: dict, tables: Tables, sites: Sites, via: str = DEFAULT_VIA) -> Plan:
     """The plan for one line of a rows-asks file, its rows read *via* (:data:`VIAS`)."""
     ask = line["rows"]
     kind = ask.get("kind")
@@ -160,7 +161,7 @@ def _row(ask: dict, tables: Tables) -> Plan:
     )
 
 
-def _collection(ask: dict, tables: Tables, way: str = "db_read") -> Plan:
+def _collection(ask: dict, tables: Tables, way: str = DEFAULT_VIA) -> Plan:
     cls, attr, element = ask["row"]["entity"], ask["attr"], ask.get("entity")
     key = ask["row"]["key"]
     via = ask.get("via") or []
@@ -197,7 +198,7 @@ def _joined(
     element: str,
     via: list[dict],
     tables: Tables,
-    way: str = "db_read",
+    way: str = DEFAULT_VIA,
 ) -> Plan:
     """The rows of *element* a statement's joins name from the row: where the joins' ``to`` columns hold the row's
     values (the ask's ``where``), each join named in ``via`` from the row's class to *element*."""
@@ -214,7 +215,7 @@ def _joined(
 
 
 def _read(
-    ask: dict, element: str, by: dict, tables: Tables, way: str = "db_read"
+    ask: dict, element: str, by: dict, tables: Tables, way: str = DEFAULT_VIA
 ) -> Plan:
     """The rows of *element* where the columns of *by* hold its values, in every table of the class: the ask's
     ``columns`` with the ones it selects by, or every column; then their histories where a call reads a class's.
@@ -412,9 +413,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--via",
         choices=VIAS,
-        default="db_read",
-        help="how rows are read: db_read (the async daemon; the default) or endpoint (the endpoints that replace "
-        "it where one reads the rows asked, panda-server 80134dc2: use it once that version runs)",
+        default=DEFAULT_VIA,
+        help="how rows are read: endpoint (the endpoints that replace db_read where one reads the rows asked; the "
+        "default) or db_read (the async daemon, for a server without them)",
     )
     a = ap.parse_args(argv)
     dump = json.loads(a.dump.read_text())
