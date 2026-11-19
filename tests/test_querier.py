@@ -20549,8 +20549,8 @@ def test_p14_on_h4_s_row_the_object_a_moving_run_s_mark_names_is_asked_then_read
             def go(data):
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.lines, r.rows_asks, r.hop = [], {}, "U1"
-                r.data = data
-                r._row_of = lambda cls: {"PandaID": {"value": "5"}, "jediTaskID": {"value": "77"}, "computingSite": {"value": "B"}}
+                r.data = {**data, "classes": {"job": "JobSpec"},
+                          "rows": {"job": {"PandaID": {"value": "5"}, "jediTaskID": {"value": "77"}, "computingSite": "B"}}}
                 calls = []
                 r._waited_birth = lambda cls, key, born, states, link, link_column="", start=None: calls.append(
                     [cls, key, f"{born:%H:%M:%S}", len(states), link, link_column, f"{start:%H:%M:%S}"]) or ["said"]
@@ -20840,3 +20840,46 @@ def test_r10_the_record_door_counts_the_marks_its_records_hold_by_their_head(tmp
     )
     got = json.loads(out.splitlines()[-1])
     assert got == {"prep < vo=None label=user >": 2, "prep < vo=None label=managed >": 1}, got
+
+
+def test_p35c_givers_off_by_a_printed_false_guard_and_by_a_constructor_s_other_default(tmp_path):
+    """P35 (c): a binding under a guard the pass's printed values make false gives nothing (commandStr printed
+    'finish' against ``commandStr == 'reassign'``); a binding of a new object of a class whose constructor binds the
+    attribute only to other literals gives nothing (JediTaskSpec's status None or 0, against 'passed')."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.which_ran as WR
+            import bamboo.querier.sources as SR
+            from bamboo.codemap import pathcond
+
+            src = ("def run(self, commandStr):\\n"
+                   "    if commandStr == 'reassign':\\n"
+                   "        spec.status = old\\n"
+                   "    spec = Spec()\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            stmts = {n.lineno: n for n in ast.walk(node) if isinstance(n, ast.stmt)}
+            fn = N(node=node, owner="t.py::run", rows=[])
+            WR.stable_holes = lambda seens, env, cls=None, local_to="": env.put("commandStr", "finish", "printed") or {}
+            WR.class_of = lambda fn: None
+            got = {"guard": [WR._guard_false(fn, stmts[3], None, N()), WR._guard_false(fn, stmts[4], None, N())]}
+            # constructor defaults
+            SR._field_froms = lambda: {("s.py::Spec", "status"): object()}
+            ways = [SR.Way(SR.CONSTANT, "None", "constant", ("s.py:12",)), SR.Way(SR.CONSTANT, "0", "constant", ("s.py:10",)),
+                    SR.Way(SR.CONSTANT, "'pending'", "constant", ("s.py:40",))]
+            SR.field_ways = lambda cls, field: ways
+            WR.R.def_holding = lambda rel, line: N(name="__init__" if line < 20 else "pend")
+            got["ctor"] = [WR._constructed_other(stmts[4], "status", "passed"), WR._constructed_other(stmts[4], "status", "None"),
+                           WR._constructed_other(stmts[3], "status", "passed")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["guard"] == [True, False], got
+    assert got["ctor"] == [True, False, False], got

@@ -9746,7 +9746,11 @@ class Rerun:
             self.say(f"  the {cls} it moved in ({other}) was made "
                      f"{f'at {born:%Y-%m-%d %H:%M:%S}, ' if born else ''}not inside the stay: its life is not read (P14)")
             return
-        own = {str(c).lower(): cell.get("value") for c, cell in self._row_of(cls).items() if isinstance(cell, dict)}
+        # the rows file's own row as fetched (``_row_of`` keeps the key alone before the move; a column the two rows
+        # share is the same through the stay: the task a job belongs to)
+        entity = next((e for e, c in (self.data.get("classes") or {}).items() if c == cls), None)
+        raw = ((self.data.get("rows") or {}).get(entity) or {}) if entity else {}
+        own = {str(c).lower(): (cell.get("value") if isinstance(cell, dict) else cell) for c, cell in raw.items()}
         link, link_column = "", ""
         # a reference whose column a maker's run mark holds first (insertNewJob's JobSpec.jediTaskID, not workQueue_ID)
         marked = {c for o in _row_makers(cls) for r in getattr(R._prints_of(o, []), "runs", None) or []

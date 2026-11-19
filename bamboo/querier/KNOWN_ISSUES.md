@@ -849,6 +849,11 @@ JobSpec.jediTaskID -> JediTaskSpec.jediTaskID), both holding the same value; of 
 maker's run mark holds (insertNewJob's, not workQueue_ID).  Made before the stay, that is said.  Each object once.
 *Premise:* the reading of `references` needs the map's TableRecord to carry them (codemap a3be2a5): querier-x's own
 codemap drops the field and `referencing` reads none there, so only a tree with the map's models reads this.
+The column the two rows share is compared on the rows file's own row as fetched (its `rows` section), not
+`_row_of`, which keeps the key alone before the move.  With rnd11's answer (rows_by_key from fieldtest 02305d5's
+rows.answered), NJ-merging-late says the merge job was made inside the stay, linked by JediTaskSpec.jediTaskID, its
+history (pending 03:28:27 .. finished 05:05:13.904), and asks its birth (1) and its maker's selection's wakers' writes
+over the 10 minutes before (8).
 
 *Changed (A and C, the r10 miss, 2026-11-19):* A2's and P14's reading of a waker's writes (`_waker_writes`) counted a
 write only where a row prints on a path through its line alone (`implying_rows`).  updateUnmergedDatasets' 1971
@@ -2755,6 +2760,18 @@ stops asking a log its records lack, and no run is read.  The time is not compar
 needs the map's reach from the calls between Q and R, and rule R's breaks and keeps in place of the bindings.  A run
 not readable as one call, R in no loop (MT-toincexec-late 5334: `retryTask_JEDI`'s rows printed several times): a
 reading splitting a run into calls.
+
+*Changed (P35 (c), 2026-11-19, the investigator's u12 NT-finishing-late 1, delegated design):* the arm may bind an
+attribute of a local (`tmpTaskSpec.status = JediTaskSpec.commandStatusMap()[commandStr]["done"]`) and a value no
+constant spells: the row shows what was bound (TaskCommando's 200, `set task_status={tmpTaskSpec.status}` through
+`tmpMsg`).  An attribute's bindings are its own assignments and every binding of the local it hangs on.  A record
+two rows of the function find alike (200's and 323's `set task_status=...`) is the row's where the last record before
+it only one row finds is a print from which the row, and none of the others, can run with no print between
+(`_record_of_row`).  Of the bindings that can give the shown value, one under a guard the pass's printed values make
+false gives nothing (`_guard_false`: 181's `not (commandStr != 'reassign')` with commandStr printed 'finish'), and so
+does a binding of the local to a new object of a corpus class whose constructor binds the attribute only to other
+literals (`_constructed_other`, the map's FieldFrom in `__init__`: 154's `JediTaskSpec()`, status None or 0).
+NT-finishing-late: 197 is positive, H2 chooses it, the walk goes on past H2.
 
 ### K73. A kept arm is positive where its call ran the head if, entered no handler around it, and every test down to it holds (J)
 

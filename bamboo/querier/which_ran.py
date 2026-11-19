@@ -1239,6 +1239,74 @@ def _key_values(env: E.Env | None) -> set[str]:
     return {str(held.value) for column in env.keys if (held := row.get(column)) is not None}
 
 
+def _constructed_other(site: Any, attr: str, shown: str) -> bool:
+    """P35 (c): whether *site* binds a local to a new object of a corpus class (``X = C()``) whose constructor binds
+    *attr* only to literals, none of them *shown* -- the map's ``FieldFrom`` of the class's field, its ways whose
+    binding lies in the class's ``__init__``.  JediTaskSpec's ``status`` is None or 0 there."""
+    if not (isinstance(site, ast.Assign) and isinstance(site.value, ast.Call) and isinstance(site.value.func, ast.Name)):
+        return False
+    from bamboo.querier import sources as SR  # sources imports this module
+    owners = sorted({c for c, f in SR._field_froms() if f == attr and c.endswith(f"::{site.value.func.id}")})
+    if len(owners) != 1:
+        return False
+    values: set[str] = set()
+    for w in SR.field_ways(owners[0], attr):
+        site = w.route[0] if len(w.route) == 1 else ""
+        rel, _, line = site.rpartition(":")
+        if not line.isdigit() or "," in rel:
+            continue
+        try:
+            node = R.def_holding(rel, int(line))
+        except (OSError, SyntaxError):
+            continue
+        if node is None or node.name != "__init__":
+            continue
+        if w.end != SR.CONSTANT or w.steps or w.why in SR.NO_LITERAL or not w.value:
+            return False
+        try:
+            values.add(str(ast.literal_eval(w.value)))
+        except (ValueError, SyntaxError):
+            return False
+    return bool(values) and shown not in values
+
+
+def _guard_false(fn: R.Function, site: Any, env: E.Env | None, sn: R.Seen) -> bool:
+    """P35 (c): whether a guard *site* stands under (``pathcond.arm_condition``) is false with the values the pass
+    printed (``stable_holes`` of its run, on a copy of *env* read at the site's line); a guard reading anything not
+    printed is not false here.  TaskCommando's 181 under ``not (commandStr != 'reassign')``, commandStr printed
+    'finish' at 133."""
+    if not isinstance(site, ast.stmt):
+        return False
+    e = (env if env is not None else E.Env()).reading(fn.owner, site.lineno)
+    stable_holes([sn], e, class_of(fn), local_to=fn.owner)
+    for guard in pathcond.arm_condition(site):
+        try:
+            got = E.evaluate(guard, e)
+        except (SyntaxError, ValueError, TypeError):
+            continue
+        if got is not E.UNKNOWN and not got:
+            return True
+    return False
+
+
+def _record_of_row(fn: R.Function, sn: R.Seen, row: R.Row, alike: list, r_i: int) -> bool:
+    """P35 (c): whether record *r_i*, which the rows *alike* of *fn* all find, is *row*'s: the last record before it only
+    one row finds (``Seen.unambiguous``) is a print from which *row* can run with no print between, and none of the
+    others can (``flow.runs_after``).  TaskCommando's 200 and 323 both print ``set task_status=...``; after 188's
+    'updating datasets to finish', only 200 is next."""
+    others = [rw for rw in alike if rw is not row]
+    before = [(i, rw) for rw in fn.rows for i in sn.unambiguous.get(rw.line, ()) if i < r_i]
+    if not others or not before:
+        return False
+    _, prev = max(before, key=lambda x: x[0])
+    prints = [rw.stmt for rw in fn.rows]
+    try:
+        return flow.runs_after(prev.stmt, row.stmt, prints, printed=True) and not any(
+            flow.runs_after(prev.stmt, rw.stmt, prints, printed=True) for rw in others)
+    except (ValueError, AssertionError):
+        return False
+
+
 def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env: E.Env | None,
                   raised_at: set[int] | None) -> str:
     """Why the arm *stmt*, binding a local to the observed value as a constant (``newTaskStatus = "prepared"``), ran in
@@ -1256,7 +1324,10 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
     The map's reaching reads no path's condition, so it is asked from *Q*, a print of the turn, not from the loop's
     head: ``prepareTasksToBeFinished_JEDI``'s loop at 3852 does not bind ``newTaskStatus`` again at its head, and the
     ways skipping 3906's and 4015's bodies, open only when ``toSkip`` is True, reach 4074 unbound."""
-    if (value := _constant_of(stmt)) is _NOT_CONSTANT or str(value) != observed:
+    # P35 (c) (out/gm/qk-design.md, P35 (c)'s walk): a value no constant spells is read too -- the row shows what was
+    # bound -- and an attribute of a local (``tmpTaskSpec.status = commandStatusMap()[commandStr]["done"]``, then 200's
+    # ``set task_status={tmpTaskSpec.status}``) as a local is
+    if (value := _constant_of(stmt)) is not _NOT_CONSTANT and str(value) != observed:
         return ""
     if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
         target = stmt.targets[0]
@@ -1264,14 +1335,24 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         target = stmt.target
     else:
         return ""
-    if not isinstance(target, ast.Name):
+    func = fn.node
+    if isinstance(target, ast.Name):
+        name = target.id
+        if any(isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names for n in R.own_nodes(func)):
+            return ""
+        # a binding's site is a statement, a handler or a ``:=`` (``pathcond.Binding``): the flow reads each as
+        # reaching's writes do, though it is typed for statements
+        binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
+    elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+        name, base = ast.unparse(target), target.value.id
+        if any(isinstance(n, (ast.Global, ast.Nonlocal)) and base in n.names for n in R.own_nodes(func)):
+            return ""
+        # the attribute's own assignments, and every binding of the local it hangs on
+        sites = [n for n in R.own_nodes(func) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                 and any(ast.unparse(t) == name for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        binds = list({id(x): x for x in [*sites, *(b.site for b in pathcond.bindings(func, base) if not b.nested)]}.values())
+    else:
         return ""
-    func, name = fn.node, target.id
-    if any(isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names for n in R.own_nodes(func)):
-        return ""
-    # a binding's site is a statement, a handler or a ``:=`` (``pathcond.Binding``): the flow reads each as reaching's
-    # writes do, though it is typed for statements
-    binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
     records = sn.run.records
     keys = _key_values(env)
     for row in fn.rows:
@@ -1290,9 +1371,16 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         else:
             continue
         at = [i for i in hits if lo < i < hi]
-        if len(at) != 1 or at[0] not in sn.unambiguous.get(row.line, ()):
+        if len(at) != 1:
             continue
         r_i = at[0]
+        # P35 (c): a record two rows of the function find alike (TaskCommando's 199 sendMsg and 200 info of one tmpMsg)
+        # reads as either, where each of them prints the bound name
+        alike = [rw for rw in fn.rows if any(i == r_i for i, _, _ in sn.hits.get(rw.line, ()))]
+        if r_i not in sn.unambiguous.get(row.line, ()) and not (
+                len(alike) > 1 and all(any(e in (name, f"str({name})") for e in rw.capture(records[r_i])) for rw in alike)
+        ) and not _record_of_row(fn, sn, row, alike, r_i):
+            continue
         shown = next((v.strip() for e, v in row.capture(records[r_i]).items() if e in (name, f"str({name})")), None)
         if shown != observed:
             continue
@@ -1312,7 +1400,7 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
             reached = {id(b) for b in reaching.reaching(row.stmt, binds)}
             sources = [b for b in binds if id(b) in reached and flow.runs_after(q[1].stmt, b, turn_stops, printed=True)]
             since = f"row {q[1].line} (at {records[q[0]].span})"
-        elif not loops:
+        elif not loops and isinstance(target, ast.Name):
             held = pathcond.held_at(func, name, row.stmt)  # type: ignore[arg-type]
             if any(getattr(s, "lineno", None) is None for s in held.sites):
                 continue
@@ -1320,6 +1408,14 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         else:
             continue
         givers = [b for b in sources if (c := _constant_of(b)) is _NOT_CONSTANT or str(c) == shown]
+        # P35 (c): a giver under a guard the pass's printed values make false did not run (TaskCommando's 181
+        # ``tmpTaskSpec.status = oldStatus`` in the reassign branch, commandStr printed 'finish')
+        givers = [b for b in givers if b is stmt or not _guard_false(fn, b, env, sn)]
+        # P35 (c): a binding of the local an attribute hangs on to a new object of a corpus class gives the attribute
+        # what that class's constructor binds it to (TaskCommando's 154 ``tmpTaskSpec = JediTaskSpec()``: None or 0)
+        if "." in name:
+            attr = name.rpartition(".")[2]
+            givers = [b for b in givers if b is stmt or not _constructed_other(b, attr, shown)]
         if len(givers) == 1 and givers[0] is stmt:
             lines = sorted(getattr(b, "lineno", 0) for b in sources)
             return (f"P1: row {row.line} printed {name}={shown!r} {where}, at {records[r_i].span}; every way from {since} to "
