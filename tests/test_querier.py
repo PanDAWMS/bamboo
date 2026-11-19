@@ -20759,3 +20759,84 @@ def test_p55_the_lock_s_width_is_read_off_the_route_through_its_caller(tmp_path)
     )
     got = json.loads(out.splitlines()[-1])
     assert got == {"settled": "0:10:00", "other route": None, "needs": None, "two": None}, got
+
+
+def test_r10_a_binding_shown_by_a_later_print_of_its_container_and_mark_holes_from_recorded_marks(tmp_path):
+    """The r10 misses.  A: a binding of a literal into a container (``varMap[":status"] = "ready"``) is shown by a later
+    row of the pass printing the container, no rebinding between, its record holding ``':status': 'ready'``; a row that
+    shows the other branch's literal, or one after a rebinding, does not.  C: a write no row could show (no implying
+    row, no later print of its container) is not showable.  B: a mark hole is filled from the function's marks the
+    records hold, the row's value only where they hold none."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap import pathcond
+
+            src = ("def upd(self, files):\\n"
+                   "    for f in files:\\n"
+                   "        varMap = {}\\n"
+                   "        if f.left > 0:\\n"
+                   "            varMap[':status'] = 'ready'\\n"
+                   "        else:\\n"
+                   "            varMap[':status'] = 'done'\\n"
+                   "        log(sql + str(varMap))\\n"
+                   "        run(sql, varMap)\\n"
+                   "    flag = 'x'\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            stmts = {n.lineno: n for n in ast.walk(node) if isinstance(n, ast.stmt)}
+            row = N(line=8, stmt=stmts[8], capture=lambda rec: {"str(varMap)": rec.v})
+            fn = N(node=node, rows=[row], row_at=lambda s: row if s is stmts[8] else None)
+            RR.R.implying_rows = lambda node, stmt: []
+            p = N(records=[N(v="{':jediTaskID': 7, ':status': 'ready'}")])
+            sn = N(hits={8: [(0, 9, "")]})
+            got = {"ready": RR._bound_shown(fn, stmts[5], sn, p), "done": RR._bound_shown(fn, stmts[7], sn, p),
+                   "showable": [RR._showable(fn, stmts[5]), RR._showable(fn, stmts[10])]}
+            # B: the recorded marks' value for the hole rules over the row's
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.files_of = lambda owner, files, lines: ["db.log"]
+            r.logs = N(names=lambda files: files,
+                       marks_seen=lambda names, head: {"prep < vo=None label=user >": 5, "prep < vo=None label=managed >": 2})
+            got["vo"] = sorted(r._recorded_hole_values("m.py::prep", [1], "prep < vo=", " label="))
+            got["label"] = sorted(r._recorded_hole_values("m.py::prep", [1], "prep < vo=None label=", " >"))
+            r.logs = N(names=lambda files: files)
+            got["no door"] = sorted(r._recorded_hole_values("m.py::prep", [1], "prep < vo=", " label="))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["ready"] == [0, "ready"] and got["done"] is None, got
+    assert got["showable"] == [True, False], got
+    assert got["vo"] == ["None"] and got["label"] == ["managed", "user"] and got["no door"] == [], got
+
+
+def test_r10_the_record_door_counts_the_marks_its_records_hold_by_their_head(tmp_path):
+    """B: RecordedLogs.marks_seen counts, over every record of the named logs, the marks beginning with the head up to
+    their closing '>'; another log's records are not read."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from bamboo.querier.recorded import RecordedLogs
+
+            door = RecordedLogs.__new__(RecordedLogs)
+            lines = ["2026-10-29 13:54:18,1 DEBUG prep < vo=None label=user > start",
+                     "2026-10-29 13:54:18,2 DEBUG prep < vo=None label=user > got 3",
+                     "2026-10-29 13:55:00,0 DEBUG prep < vo=None label=managed > start"]
+            door._records = {
+                "a": {"ask": {"name": "db.log"}, "machines": {"m1": {"files": [{"records": [{"lines": lines}]}]}}},
+                "b": {"ask": {"name": "other.log"}, "machines": {"m1": {"files": [{"records": [{"lines": lines}]}]}}},
+            }
+            print(json.dumps(door.marks_seen(["db.log"], "prep < vo=")))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"prep < vo=None label=user >": 2, "prep < vo=None label=managed >": 1}, got

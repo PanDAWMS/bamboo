@@ -3189,6 +3189,75 @@ def _following(func: ast.AST, stmt: ast.stmt) -> ast.stmt | None:
     return None
 
 
+def _bound_shown(fn: R.Function, stmt: ast.stmt, sn, p) -> tuple[int, str] | None:
+    """A (the r10 miss, out/gm/qk-design.md): a binding *stmt* of a literal -- ``X[K] = literal`` or ``X = literal`` --
+    shown by a later row of its pass printing X: walking on from *stmt* (after it in its block, then after each
+    enclosing statement, not out of a loop), no rebinding of X before, a row whose hole spelling X captured ``K:
+    literal`` (the dict's repr) or the literal itself.  updateUnmergedDatasets' 1971 ``varMap[":status"] = "ready"``,
+    then 1975 ``tmp_log.debug(sqlUDS + comment + str(varMap))`` after the if/else, printing ``':status': 'ready'``.
+    ``(the record's index, the literal)``, or None."""
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.value, ast.Constant)):
+        return None
+    target = stmt.targets[0]
+    if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and isinstance(target.slice, ast.Constant):
+        name, needle = target.value.id, f"{target.slice.value!r}: {stmt.value.value!r}"
+    elif isinstance(target, ast.Name):
+        name, needle = target.id, ""
+    else:
+        return None
+    literal = str(stmt.value.value)
+    spelled = re.compile(rf"\b{re.escape(name)}\b")
+    cur: ast.AST | None = stmt
+    while cur is not None and cur is not fn.node:
+        nxt = _following(fn.node, cur) if isinstance(cur, ast.stmt) else None
+        while nxt is not None:
+            if any(isinstance(x, ast.Name) and x.id == name and isinstance(x.ctx, ast.Store) for x in ast.walk(nxt)):
+                return None
+            for x in ast.walk(nxt):
+                row = fn.row_at(x) if isinstance(x, ast.stmt) else None
+                if row is None:
+                    continue
+                for i, _, _ in sn.hits.get(row.line, ()):
+                    for expr, value in (row.capture(p.records[i]) or {}).items():
+                        if spelled.search(str(expr)) and ((needle and needle in str(value))
+                                                          or (not needle and str(value).strip().strip("'\"") == literal)):
+                            return i, literal
+            nxt = _following(fn.node, nxt)
+        cur = getattr(cur, "parent", None)
+        if isinstance(cur, (ast.For, ast.AsyncFor, ast.While)):
+            return None
+    return None
+
+
+def _showable(fn: R.Function, stmt: ast.stmt) -> bool:
+    """C: whether a run could show that the write *stmt* ran: a row prints only on a path through it
+    (``rows.implying_rows``), or it binds a literal a later row of the function prints the bound name of before a
+    rebinding (:func:`_bound_shown`'s walk, statically)."""
+    if R.implying_rows(fn.node, stmt):
+        return True
+    if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.value, ast.Constant)):
+        return False
+    target = stmt.targets[0]
+    name = target.value.id if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) else (
+        target.id if isinstance(target, ast.Name) else "")
+    if not name:
+        return False
+    cur: ast.AST | None = stmt
+    while cur is not None and cur is not fn.node:
+        nxt = _following(fn.node, cur) if isinstance(cur, ast.stmt) else None
+        while nxt is not None:
+            if any(isinstance(x, ast.Name) and x.id == name and isinstance(x.ctx, ast.Store) for x in ast.walk(nxt)):
+                return False
+            if any(isinstance(x, ast.stmt) and fn.row_at(x) is not None
+                   and any(isinstance(y, ast.Name) and y.id == name for y in ast.walk(x)) for x in ast.walk(nxt)):
+                return True
+            nxt = _following(fn.node, nxt)
+        cur = getattr(cur, "parent", None)
+        if isinstance(cur, (ast.For, ast.AsyncFor, ast.While)):
+            return False
+    return False
+
+
 def _site(hop: str) -> str | None:
     """The ``file:line`` a ``called_from`` hop starts with, without what the map writes after it."""
     m = re.match(r"[\w./-]+\.py:\d+", hop.strip())
@@ -8395,6 +8464,7 @@ class Rerun:
         missed_all = [m for a in asked for m in a[7]]
         if missed_all:
             return [], missed_all, None
+        unshown: list[str] = []
         for owner, wlines, rel, wfunc, to_hand, asking, runs, _, holes in asked:
             whole = self._searched_whole(to_hand, asking, asking, [], holes, None)
             every = every_log_asked(owner, wlines, to_hand)
@@ -8402,6 +8472,9 @@ class Rerun:
                 return [], [], (f"{wfunc}'s runs of the key in the stay are not all read ({T.text(whole['why'])}; "
                                 f"{T.text(every['why'])}): its writes are not read (A2)")
             fn = R.function(rel, wfunc, wlines)
+            # C: a write no row could show is not shown absent by finding none (said only where none is found)
+            unshown += [f"{wfunc}:{line}" for line in wlines
+                        if (st := R.statement_at(fn.node, line)) is None or not _showable(fn, st)]
             for name in to_hand:
                 for run in runs.get(name, []):
                     if not of_mover(run, owner):
@@ -8413,11 +8486,18 @@ class Rerun:
                             implying = [r for s in (R.implying_rows(fn.node, stmt) if stmt is not None else [])
                                         if (r := fn.row_at(s)) is not None and sn.proven(r)]
                             if not implying:
+                                # A: a later row printing the bound container shows the binding's literal
+                                if stmt is not None and (shown_at := _bound_shown(fn, stmt, sn, p)) is not None:
+                                    i, literal = shown_at
+                                    writes.append((W.when(p.records[i].stamp), p, owner, line, [literal] if literal in values else []))
                                 continue
                             hits = [(i, r) for r in implying for i, _, _ in sn.hits.get(r.line, ())]
                             i, r = min(hits, key=lambda h: h[0])
                             shown = {v.strip().strip("'\"") for v in r.capture(p.records[i]).values()} & values
                             writes.append((W.when(p.records[i].stamp), p, owner, line, sorted(shown)))
+        if not writes and unshown:
+            return [], [], (f"the write(s) {unshown} print no row a run would show them by: that none was written is not "
+                            "shown (A2)")
         return writes, [], None
 
     def _hop_turn(self, owner: str, subject: str, since: str, before: str | None, until: str | None, func: str) -> bool:
@@ -14527,12 +14607,40 @@ class Rerun:
                              r.prefix_holes or [])
                 for hole, after in zip(holes, parts[1:], strict=False):
                     held = next(((c, v) for c in hole.columns or [] if (v := self._label_of(c, c.partition(".")[2]))), None)
+                    # B (the r10 miss): the values the records hold for this hole in the function's own marks rule over
+                    # the row's -- prepareTasksToBeFinished_JEDI's vo is handed None, not the task's 'atlas'
+                    seen = self._recorded_hole_values(owner, lines, text, after)
+                    if seen and (held is None or held[1] not in seen):
+                        if len(seen) != 1:
+                            break
+                        text += next(iter(seen)) + after
+                        continue
                     if held is None:
                         break
                     used[held[0]] = held[1]
                     text += held[1] + after
                 out.add(text)
         return tuple(sorted(out)), used
+
+    def _recorded_hole_values(self, owner: str, lines: list[int], text: str, after: str) -> set[str]:
+        """B: the values the records the walk holds show in the hole after *text* of *owner*'s marks, up to *after* --
+        read off every line of its logs the records hold (``RecordedLogs.marks_seen``); empty where the door reads no
+        records, or none holds such a mark."""
+        seen_of = getattr(self.logs, "marks_seen", None)
+        if seen_of is None or not text:
+            return set()
+        names = self.logs.names(self.files_of(owner, [], lines))
+        cache = self.__dict__.setdefault("_marks_seen", {})
+        if (tuple(names), text) not in cache:
+            cache[(tuple(names), text)] = seen_of(names, text)
+        stop = after.strip()
+        out: set[str] = set()
+        for mark in cache[(tuple(names), text)]:
+            rest = mark[len(text):]
+            value = rest.split(stop, 1)[0] if stop and stop in rest else rest.rstrip(" >")
+            if value.strip():
+                out.add(value.strip())
+        return out
 
     def _fill(self, st, q: Missed) -> tuple[Any, list[str]]:
         """*st* with each amount that waits for a parameter of its own function filled (P29): a value the map settles

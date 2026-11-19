@@ -850,6 +850,16 @@ maker's run mark holds (insertNewJob's, not workQueue_ID).  Made before the stay
 *Premise:* the reading of `references` needs the map's TableRecord to carry them (codemap a3be2a5): querier-x's own
 codemap drops the field and `referencing` reads none there, so only a tree with the map's models reads this.
 
+*Changed (A and C, the r10 miss, 2026-11-19):* A2's and P14's reading of a waker's writes (`_waker_writes`) counted a
+write only where a row prints on a path through its line alone (`implying_rows`).  updateUnmergedDatasets' 1971
+(`varMap[":status"] = "ready"`) and 1973 ('done') have none: 1975 prints `str(varMap)` after the if/else.  (A) A
+binding of a literal into a container, or to a name, is shown by a later row of the pass printing that container or
+name, no rebinding between, its record holding `':status': 'ready'` (`_bound_shown`; not out of a loop).
+NT-scouting-late's trigger line now names updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099, where it
+said "no waker of it wrote".  (C) Where no write is found and a waker's write prints no row a run could show it by
+(`_showable`), that none was written is not said: the reading is not read (A2), not "none".
+*Not read:* a write found beside an unshowable waker's still lets "no earlier write" stand.
+
 *Changed (P19, 2026-11-19, the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv
 2616f94, delegated design):* the carriers are read by function (a function recording the status reaches a writer of the
 term's columns), so 'merging' counts among the values that move the term.  The END now says, column by column, under
@@ -1827,6 +1837,13 @@ columns its statements compare with the clock, over the stay from the statuslog 
 rows file read the row, then F-4's reading of the take's pass and P25 (i)'s rest on it.  MT-scouting-stuck: sqlEA
 wrote assessmentTime at 13:54:18 (getAchievedTasks_JEDI's selection refuses 'scouting'); its pass is asked by its
 mark on every machine, 13:44:18 to 14:04:18 (28 asks).  The asks are kept for a records round; they do not stop S1.
+
+*Changed (B, the r10 miss, 2026-11-19):* those 28 asks searched "prepareTasksToBeFinished_JEDI < vo=atlas label=user"
+and r10 answered none of them: the function's runs are marked vo=None.  `_row_mark_heads` filled the mark's hole (the
+parameter vo, which the callers hand) with the row's JediTaskSpec.vo, the column the map names for it.  A hole is now
+filled from the function's marks the records the walk holds show (`_recorded_hole_values`, `RecordedLogs.marks_seen`):
+one value there rules over the row's; several leave the head at the hole; none leaves the row's value.  MT-scouting-stuck
+asks again with "vo=None label=user" (26 asks: the machines the listing names).
 
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
