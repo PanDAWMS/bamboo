@@ -527,8 +527,9 @@ def answered(
 
     A statement's rows, their histories and counts are the sections a task's fetch gives (``job_rows``,
     ``job_statuslog``, ``counts``); the key's job's ``Files``, its ``files`` and ``collections``; the rows of
-    a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`).  The rows of
-    another row's attribute have no section yet, and are left out; an sql ask no call answers is left out with
+    a class joined to a row by the ask's one pair (``via``), ``linked`` entries (:func:`joined`); another row
+    a row ask read by its key, in ``rows_by_key`` (:func:`_row_by_key`).  The rows of another row's attribute
+    have no section yet, and are left out; an sql ask no call answers is left out with
     its why (a hand's answer is laid by :func:`hand_answers`).  *spellings* holds the classes the answers'
     rows are of, those it can.  Every status history an answer read is in ``statuslogs``, by its class and
     the key of its row (:func:`statuslogs`; a job's task's and a task's parent's, design H).
@@ -540,7 +541,7 @@ def answered(
     for doc in docs:
         for a in doc["answers"]:
             ask = a["ask"]["rows"]
-            name = f"{ask['kind']} {ask.get('name') or ask.get('method') or ask.get('attr') or ask.get('entity')}"
+            name = f"{ask['kind']} {ask.get('name') or ask.get('method') or ask.get('attr') or ask.get('entity') or (ask.get('row') or {}).get('entity')}"
             if a["why"]:
                 left_out.append(f"{name}: {a['why']}")
                 continue
@@ -548,6 +549,8 @@ def answered(
             logs = lay_statuslogs(logs, statuslogs(a["steps"], key, tables))
             if ask["kind"] == "statement":
                 _task_sections(out, laid, left_out)
+            elif ask["kind"] == "row":
+                _row_by_key(out, laid, ask["row"], spellings, left_out)
             elif ask["kind"] == "collection":
                 row = ask["row"]
                 mine = row["entity"] == key_class == "JobSpec" and [
@@ -574,6 +577,35 @@ def answered(
     if logs:
         out["statuslogs"] = logs
     return out, left_out
+
+
+def _row_by_key(
+    out: dict,
+    laid: Laid,
+    row: dict,
+    spellings: dict[str, dict[str, str]],
+    left_out: list[str],
+) -> None:
+    """Another row a row ask read by its key, in ``rows_by_key`` by its class and key: when it was read, its columns as
+    the class spells them, and a job's ``Files`` its answer holds; a key with no row is left out with its why."""
+    cls, ((attr, key),) = row["entity"], row["key"].items()
+    raw, read, why = key_row(laid, cls, str(key))
+    if raw is None:
+        left_out.append(f"row {cls} {attr}={key}: no {cls} row for {attr} {key}: {why}")
+        return
+    entry = {
+        **read,
+        "row": columns(
+            {k: v for k, v in raw.items() if k not in (FILES, RAW_TASK_PARAMS)},
+            spellings[cls],
+            set(),
+        ),
+    }
+    if cls == "JobSpec":
+        entry["files"] = [
+            columns(f, spellings["FileSpec"], set()) for f in raw.get(FILES) or []
+        ]
+    out.setdefault("rows_by_key", {}).setdefault(cls, {})[str(key)] = entry
 
 
 #: a hand's answers to the querier's sql asks in a records directory, round by round

@@ -33,6 +33,10 @@ writes the round's answers to ``rows-r<n>.json`` there, ``n`` one past the direc
 - ``sql`` -- an answer L3 lacks (``{"name", "sql", "binds", "question"}``), a window over the history no call
   reads: listed for a hand, whose answer goes in the records directory as ``hand-r<n>.json``
   (:func:`~bamboo.scripts.panda.fieldtest.rows.hand_answers`).
+- ``row`` -- another row of a class a fetch reads by its key (``{"row": {"entity", "key"}}``: a job a mark
+  names by its ``PandaID``, a task by its ``jediTaskID``), read as a fetch reads its own key's
+  (:data:`~bamboo.scripts.panda.fieldtest.fetch.KEY_REQUEST`), then its status history from its creation
+  (:data:`~bamboo.scripts.panda.fieldtest.fetch.HISTORY`).
 
 An ask no rule answers says why (``why``); stage 2's record keeps it, so the asks no API answers are counted
 from the runs.
@@ -61,11 +65,13 @@ from bamboo.scripts.panda.fieldtest.fetch import (
     Parts,
     Record,
     Tables,
+    job_of,
     links_from,
     made,
     query,
     rows_of,
     since,
+    task_of,
     value_of,
 )
 from bamboo.scripts.panda.fieldtest.run import sha256
@@ -82,6 +88,11 @@ CALLS = {
     "jobs": lambda parts, request: parts.jobs(request["job_ids"]),
     "task": lambda parts, request: parts.task(request["task_id"]),
     TASK_DATASET_ROWS: lambda parts, request: parts.dataset_rows(request["task_id"]),
+}
+#: the row in the answer of a part reading a row by its key (fetch.KEY_REQUEST), from its request; None where none
+KEY_ANSWER = {
+    "jobs": lambda response, request: job_of(response, request["job_ids"][0])[0],
+    "task": lambda response, request: task_of(response)[0],
 }
 #: the ways a plan reads rows: db_read (the async daemon), or the endpoints that replace it where one reads the
 #: rows asked (panda-server 80134dc2: task/get_dataset_rows, a task's datasets by jediTaskID)
@@ -132,7 +143,21 @@ def plan(line: dict, tables: Tables, sites: Sites, via: str = "db_read") -> Plan
         return _statement(ask, tables, sites)
     if kind == "sql":
         return _sql(ask)
+    if kind == "row":
+        return _row(ask, tables)
     return Plan(ask, why=f"no rule for an ask of kind {kind!r}")
+
+
+def _row(ask: dict, tables: Tables) -> Plan:
+    """Another row of a class read by its key: the call a fetch reads its key's row by, then its history."""
+    cls, key = ask["row"]["entity"], ask["row"]["key"]
+    if cls not in KEY_REQUEST or list(key) != [tables.key.get(cls)]:
+        return Plan(ask, why=f"no call reads a {cls} by {sorted(key)}")
+    part, request = KEY_REQUEST[cls]
+    (value,) = key.values()
+    return Plan(
+        ask, [Call(part, "row", request(int(value)))], histories=cls, rows_role="row"
+    )
 
 
 def _collection(ask: dict, tables: Tables, way: str = "db_read") -> Plan:
@@ -334,9 +359,11 @@ async def answer(line: dict, p: Plan, parts: Parts, tables: Tables) -> dict:
     rec = Record(line)
     batch = [(c.role, c.request) for c in p.calls if c.part == "db_read"]
     got = await rec.read(parts, batch) if batch else []
-    for c in p.calls:
-        if c.part != "db_read":
-            await rec.call(c.part, CALLS[c.part](parts, c.request), c.request)
+    called = [
+        (c, await rec.call(c.part, CALLS[c.part](parts, c.request), c.request))
+        for c in p.calls
+        if c.part != "db_read"
+    ]
     if p.histories:
         role, key = p.rows_role, tables.key[p.histories]
         found = [
@@ -344,6 +371,12 @@ async def answer(line: dict, p: Plan, parts: Parts, tables: Tables) -> dict:
             for (r_role, _), a in zip(batch, got, strict=True)
             if r_role == role
             for _, r in rows_of(a) or []
+        ] + [
+            r
+            for c, response in called
+            if c.role == role
+            and c.part in KEY_ANSWER
+            and (r := KEY_ANSWER[c.part](response, c.request)) is not None
         ]
         if ids := sorted({int(value_of(r, key)) for r in found}):
             created = made(tables.created[p.histories], found)
