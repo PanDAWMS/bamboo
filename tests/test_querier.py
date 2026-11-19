@@ -20883,3 +20883,125 @@ def test_p35c_givers_off_by_a_printed_false_guard_and_by_a_constructor_s_other_d
     got = json.loads(out.splitlines()[-1])
     assert got["guard"] == [True, False], got
     assert got["ctor"] == [True, False, False], got
+
+
+def test_p69_a_run_no_entry_row_cut_is_cut_where_its_records_stop_for_a_minute_and_a_bare_key_mark(tmp_path):
+    """P69: a run no entry row cut is cut where its records stop for a minute, each part with its own records and the
+    key's records among them; one burst stays the run itself.  A function whose every run mark is the key alone (its
+    hole holding the key's column) puts the key on every line."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.which_ran as WR
+            import bamboo.querier.rerun as RR
+            from bamboo.querier.records import Run
+
+            recs = [N(stamp=s) for s in ("2026-11-13 14:12:19,297", "2026-11-13 14:12:20,001",
+                                         "2026-11-13 14:20:00,000", "2026-11-13 21:00:15,403")]
+            run = Run(log=N(name="j.log"), token="f < vo=None >", records=recs, found_by=[recs[1], recs[3]])
+            parts, how = WR.minute_parts(run, "the run is not split")
+            one = Run(log=N(name="j.log"), token="f < vo=None >", records=recs[:2], found_by=recs[:1])
+            same, how1 = WR.minute_parts(one, "the run is not split")
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(mark="{}", key=[N(columns=["JobSpec.PandaID"])])])
+            bare = [RR.bare_key_mark("a.py::f", [1], {"JobSpec.PandaID"}), RR.bare_key_mark("a.py::f", [1], {"JobSpec.jediTaskID"})]
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(mark="PandaID={}", key=[N(columns=["JobSpec.PandaID"])])])
+            bare.append(RR.bare_key_mark("a.py::f", [1], {"JobSpec.PandaID"}))
+            print(json.dumps({"parts": [[len(p.records), len(p.found_by)] for p in parts], "said": "P69" in how,
+                              "one": [same[0] is one, how1 == "the run is not split"], "bare": bare}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["parts"] == [[2, 1], [1, 0], [1, 1]] and got["said"], got
+    assert got["one"] == [True, True], got
+    assert got["bare"] == [True, False, False], got
+
+
+def test_p69_an_uncut_run_holding_an_edge_is_read_as_one_execution_only_with_no_pause_of_a_minute(tmp_path):
+    """P69: at an edge of the value's time, a run its entry row did not cut is read as one execution -- the pass whose
+    call recorded the row -- where its records pause less than a minute (the Adder's run on a job); one that pauses a
+    minute or more (ContentsFeeder waiting on its file listing, or several executions under one mark) stays undecided
+    (K76), and the recorder is not looked for in it."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier.records import Run
+
+            states = [{"status": s, "time": t, "time_extended": e, "host": "h1"} for s, t, e in (
+                ("running", "2026-01-01 00:00:01", "2026-01-01 00:00:01.000000"),
+                ("transferring", "2026-01-01 00:00:05", "2026-01-01 00:00:05.500000"),
+                ("finished", "2026-01-01 01:00:00", "2026-01-01 01:00:00.300000"))]
+
+            def run(*stamps):
+                recs = [N(stamp=t, machine="h1") for t in stamps]
+                return Run(log=N(name="a.log", partial={}), token="7", records=recs, found_by=recs)
+
+            got = {}
+            for label, stamps in (("no pause", ("2026-01-01 00:00:04,900", "2026-01-01 00:00:05,600")),
+                                  ("paused", ("2025-12-31 23:58:00,000", "2026-01-01 00:00:05,600"))):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines = []
+                r.args = N(observed="transferring", since="2026-01-01 00:00:05.500000")
+                r.data = {"statuslog": {"states": states}}
+                looked = []
+
+                def recording(owner, arms, subject, key, edge, found, entered=False, looked=looked):
+                    looked.append([p.first for p in found])
+                    p = next((x for x in found if x.first <= "2026-01-01 00:00:05,500" <= x.last), None)
+                    return (p, "a call of it recorded the row") if p is not None and edge["status"] == "transferring" else None
+
+                r._recording_pass = recording
+                edge_run = run(*stamps)
+                other = run("2026-01-01 00:30:00,000", "2026-01-01 00:30:01,000")
+                kept, moving = r._stay_edges(None, "a.py::f", [1], "JobSpec.jobStatus", "7", [edge_run, other],
+                                             "2026-01-01 00:00:05", {id(edge_run)})
+                said = [ln for ln in r.lines if "not cut by an entry row" in str(ln)]
+                got[label] = [[p.first for p in kept], looked[0], ["read as one execution" in str(x) for x in said],
+                              ["K76" in str(x) for x in said]]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # no pause: read as one execution, looked in for the recorder, and taken off the value's time as the pass it moved in
+    assert got["no pause"] == [["2026-01-01 00:30:00,000"], ["2026-01-01 00:00:04,900", "2026-01-01 00:30:00,000"],
+                               [True], [False]], got
+    # a pause of a minute: kept as it was, the recorder not looked for in it, said undecided
+    assert got["paused"] == [["2025-12-31 23:58:00,000", "2026-01-01 00:30:00,000"], ["2026-01-01 00:30:00,000"],
+                             [False], [True]], got
+
+
+def test_p69_only_a_run_under_a_mark_its_method_s_calls_share_is_cut(tmp_path):
+    """P69: shared_mark_parts cuts a run the door says is under a mark its method's calls share, and leaves any other
+    run whole, however long its records pause; a run its entry row cut into one pass (a copy) stays that pass."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.which_ran as WR
+            from bamboo.querier.records import Run
+
+            recs = [N(stamp=s, machine="m1") for s in ("2026-11-13 14:12:19,297", "2026-11-13 14:20:00,000")]
+            shared = Run(log=N(name="j.log", partial={("m1", "f < vo=None >"): "a mark the method's calls share"}),
+                         token="f < vo=None >", records=recs, found_by=recs)
+            other = Run(log=N(name="c.log", partial={}), token="<jediTaskID=7>", records=recs, found_by=recs)
+            import dataclasses
+            copy = dataclasses.replace(shared)
+            kept = WR.shared_mark_parts([copy], shared, "x")[0]
+            print(json.dumps({"shared": len(WR.shared_mark_parts([shared], shared, "x")[0]),
+                              "other": len(WR.shared_mark_parts([other], other, "x")[0]),
+                              "copy": [len(kept), kept[0] is copy]}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"shared": 2, "other": 1, "copy": [1, True]}, got

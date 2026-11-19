@@ -52,7 +52,7 @@ import functools
 import itertools
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -202,6 +202,44 @@ def cut_passes(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     return parts, how
 
 
+def minute_parts(run: Run, how: str, gap: datetime.timedelta = datetime.timedelta(minutes=1)) -> tuple[list[Run], str]:
+    """P69 (the investigator's u13): a run no entry row cut, cut where its records stop for *gap* or more, each part a
+    pass -- a premise, said: no run of the function pauses that long, and no two of its runs fall within it.
+    getTasksToExecCommand_JEDI's runs under the mark its calls share hold hours of calls (aipanda088's 14:12 .. 21:00);
+    the Adder's run on a job, one burst, stays whole.  ``([run], how)`` where there is no such gap."""
+    try:
+        stamps = [r.stamp for r in run.records]
+        cuts = [i for i in range(1, len(stamps)) if W.when(stamps[i]) - W.when(stamps[i - 1]) >= gap]
+    except (TypeError, AttributeError, ValueError):
+        return [run], how
+    if not cuts:
+        return [run], how
+    bounds = [0, *cuts, len(stamps)]
+    parts = []
+    for lo, hi in zip(bounds, bounds[1:], strict=False):
+        records = run.records[lo:hi]
+        held = {id(r) for r in records}
+        parts.append(replace(run, records=records, found_by=[r for r in run.found_by if id(r) in held]))
+    return parts, (f"{how}; cut where its records stop for a minute into {len(parts)} part(s) (P69, a premise: no run "
+                   "of it pauses that long, no two fall within it)")
+
+
+def shared_mark_parts(parts: list[Run], run: Run, how: str) -> tuple[list[Run], str]:
+    """P69: :func:`minute_parts` for a run no entry row cut (*parts* is ``[run]``, the run itself: a cut into one pass
+    is a copy, and stays as it is) under a mark its method's calls share (the door's ``Log.partial``: the key's records
+    under it come EDGE or more apart, so its run is every call in the window) -- getTasksToExecCommand_JEDI's
+    ``< vo=None label=None >``.  Any other run stays whole: one execution of a function with no entry row may pause a
+    minute (ContentsFeeder's feed_contents_to_tasks waits on its file listing: 2127 records in 14 minutes, a pause of
+    60 s between "get files" and "got ... files"), and where it holds an edge of the value's time with no such pause it
+    is read there as one execution (``rerun._stay_edges``)."""
+    if len(parts) != 1 or parts[0] is not run:
+        return parts, how
+    partial = getattr(getattr(run, "log", None), "partial", None) or {}
+    if partial.get((getattr(run, "machine", None), getattr(run, "token", None))) != "a mark the method's calls share":
+        return [run], how
+    return minute_parts(run, how)
+
+
 def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     """*run* cut into *fn*'s passes (:func:`cut_passes`), with a word on how.  A run kept whole that holds no record only
     *fn*'s rows can have printed (:func:`_rows_shown`), under a mark that does not name *fn*, is *fn*'s pass only where
@@ -216,11 +254,12 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
         return parts, how
     m = re.match(r"([A-Za-z_]\w*) <", run.token)
     if m is not None and m[1] == fn.name:
-        return parts, how
+        return shared_mark_parts(parts, run, how)
     if _rows_shown(fn, run, mode):
-        return parts, how
+        return shared_mark_parts(parts, run, how)
     shown = called_in(fn, run, mode)
     if shown:
+        parts, how = shared_mark_parts(parts, run, how)
         return parts, f"{how}; no record only {fn.shown} prints, its call shown by {shown}"
     return [], f"{how}; no record only {fn.shown} prints, nor a caller's row after its call: not shown to be a pass of it"
 

@@ -3629,6 +3629,28 @@ def _same_function(a: str, b: str) -> bool:
     return ra == rb and fa.split(".")[-1] == fb.split(".")[-1]
 
 
+def bare_key_mark(owner: str, lines, columns: set[str]) -> bool:
+    """P69: whether every run mark the map records for *owner* is the key alone (``'{}'``, its hole holding one of
+    *columns*): each line of its runs then begins with the key, as a mark holding it does (AdderGen's
+    ``LogWrapper(_logger, str(self.job_id))``)."""
+    runs = getattr(R._prints_of(owner, list(lines)), "runs", None) or []
+    return bool(runs) and all(str(getattr(r, "mark", "")).strip() == "{}" and len(r.key or []) == 1
+                              and columns & set(r.key[0].columns or []) for r in runs)
+
+
+def _burst_parts(run, gap: datetime.timedelta = datetime.timedelta(minutes=1)) -> list:
+    """P69: *run* cut where its records stop for *gap* or more, each part the run with that burst's records (and the
+    key's records among them) -- one part where no gap is there."""
+    out = []
+    try:
+        for lo, hi in _bursts([r.stamp for r in run.records], gap):
+            records = [r for r in run.records if lo <= r.stamp <= hi]
+            out.append(replace(run, records=records, found_by=[r for r in run.found_by if lo <= r.stamp <= hi]))
+    except (TypeError, AttributeError):
+        return [run]
+    return out
+
+
 def _bursts(stamps: list[str], gap: datetime.timedelta) -> list[tuple[str, str]]:
     """``(first, last)`` of each run of *stamps* (sorted) cut where they stop for *gap* or more."""
     out: list[tuple[str, str]] = []
@@ -8396,8 +8418,13 @@ class Rerun:
                        str(b.interface).lower().rpartition(".")[2] == t.lower() for r, _ in readers for t in r.tables)]
         wakers_said = sorted({f"{w.owner.split('::')[-1].rpartition('.')[2]}:{w.line}" for w in wakers})
         told = T.Said("written-outside-too", {"writers": outside}) if outside else T.Said("written-here-alone")
+        unshown = list(self.__dict__.get("_waker_unshown") or [])
         if not stay:
-            if q.before is None and not outside:
+            if q.before is None and not outside and unshown:
+                # C: a waker whose write no row could show may have written in the window
+                self.say(f"no write of the wakers the runs show is in the window, but {unshown} print no row a run would "
+                         "show their write by: that none was written is not shown (A2s, C)")
+            if q.before is None and not outside and not unshown:
                 # A2s (out/gm/qk-design.md "A2s", delegated design; tmaeno's fact through the harness, 2026-11-18: DEFT
                 # writes no command into PRODSYS_COMM, the map's DFC): a stuck value whose mover takes the row only by
                 # the rows its wakers write, none of which was written for the key in the window, every waker's log
@@ -8436,6 +8463,7 @@ class Rerun:
             "line": line, "what": what, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
             "through": through, "reader": where, "column": said_column, "earlier": earlier,
             "premises": [*outside, T.Said("its-first-pass-after-the-write", {"mover": func}),
+                         *([T.Said("waker-writes-unshown", {"writes": unshown})] if unshown else []),
                          *([T.Said("the-key-from-the-callers", {"reader": where, "callers": [c.split("::")[-1] for c in via]})]
                            if via else [])]}))
         return True
@@ -8495,6 +8523,8 @@ class Rerun:
                             i, r = min(hits, key=lambda h: h[0])
                             shown = {v.strip().strip("'\"") for v in r.capture(p.records[i]).values()} & values
                             writes.append((W.when(p.records[i].stamp), p, owner, line, sorted(shown)))
+        # what a found write's reader may not claim of the others (A2s's "none in the window", an END's "no earlier one")
+        self.__dict__["_waker_unshown"] = list(unshown)
         if not writes and unshown:
             return [], [], (f"the write(s) {unshown} print no row a run would show them by: that none was written is not "
                             "shown (A2)")
@@ -9055,9 +9085,24 @@ class Rerun:
         for kind, edge in [*([("in", row)] if moved_in else []), *([("on", nxt)] if nxt is not None else [])]:
             edge_at = W.when(edge.get("time_extended") or str(edge["time"]))
             if uncut := [p for p in kept if id(p) in whole and W.when(p.first) <= edge_at <= W.when(p.last)]:
-                self.say(f"{len(uncut)} run(s) not cut into passes hold the row of {edge['status']!r} at "
-                         f"{edge.get('time_extended') or edge['time']}: whether one holds the pass the value moved "
-                         f"{'in' if kind == 'in' else 'on in'} is not decided (KNOWN_ISSUES.md K76)")
+                # P69 (the investigator's u13): a run its entry row did not cut, with no pause of a minute, is read as
+                # one execution -- a premise, said -- and is then a pass like any other (NJ-merging-late's Adder run on
+                # aipanda099, 05:05:05 .. 05:05:14).  One that pauses may be one execution waiting on a call
+                # (NT-defined-late's ContentsFeeder between "get files" and "got ... files") or several under one mark
+                # (MT-scouting-stuck's JobGenerator from 08:42 to 14:46): not decided, as before
+                at = f"the row of {edge['status']!r} at {edge.get('time_extended') or edge['time']}"
+                for p in uncut:
+                    parts = _burst_parts(p)
+                    if len(parts) == 1:
+                        kept = [parts[0] if y is p else y for y in kept]
+                        self.say(f"run {p.first} .. {p.last} ({len(p.records)} record(s)), not cut by an entry row, "
+                                 f"holds {at} with no pause of a minute: read as one execution (P69, a premise: no two "
+                                 "runs of it within a minute)")
+                    else:
+                        self.say(f"run {p.first} .. {p.last} ({len(p.records)} record(s)), not cut by an entry row, "
+                                 f"holds {at} and pauses a minute or more {len(parts) - 1} time(s): one execution may "
+                                 "pause on a call and several may be under its mark, so whether it holds the pass the "
+                                 f"value moved {'in' if kind == 'in' else 'on in'} is not decided (KNOWN_ISSUES.md K76)")
             got = self._recording_pass(owner, arms, subject, key, edge, [p for p in kept if id(p) not in whole],
                                        entered=kind == "in")
             if got is None:
@@ -10251,6 +10296,9 @@ class Rerun:
         premises: dict[str, dict[str, Any]] = {"window": self._searched_whole(to_hand, asking, asking, [], holes, None),
                     "logs": every_log_asked(c.owner, c.lines, to_hand),
                     "prints": {"held": True, "why": T.Said("caller-marks-hold-the-key", {"marks": list(c.marks)})} if c.marks
+                    # P69: a mark that is the key alone puts it on every line (the Adder's str(job_id))
+                    else {"held": True, "why": T.Said("caller-bare-mark-holds-the-key")}
+                    if bare_key_mark(c.owner, c.lines, self._key_columns(up.subject, up.key))
                     else {"held": None, "why": T.Said("caller-asked-by-the-key-alone")}}
         failing = [T.Said("premise-why", {"premise": k, "why": p["why"]}) for k, p in premises.items() if not p["held"]]
         if premises["window"]["held"] and premises["logs"]["held"] and len(c.lines) > 1:

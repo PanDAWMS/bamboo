@@ -862,8 +862,10 @@ binding of a literal into a container, or to a name, is shown by a later row of 
 name, no rebinding between, its record holding `':status': 'ready'` (`_bound_shown`; not out of a loop).
 NT-scouting-late's trigger line now names updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099, where it
 said "no waker of it wrote".  (C) Where no write is found and a waker's write prints no row a run could show it by
-(`_showable`), that none was written is not said: the reading is not read (A2), not "none".
-*Not read:* a write found beside an unshowable waker's still lets "no earlier write" stand.
+(`_showable`), that none was written is not said: the reading is not read (A2), not "none".  Where writes are found
+but a waker's write is unshowable (`_waker_unshown`), a stuck A2s does not end on "no row its wakers wrote in the
+window" (it stops, K55: NJ-transferring-stuck's updateEventRanges:578 and updateWorkers:1016, measure p69m), and a
+late A2 END carries "the writes ... print no row ...: an earlier one of theirs is not ruled out" as a premise.
 
 *Changed (P19, 2026-11-19, the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv
 2616f94, delegated design):* the carriers are read by function (a function recording the status reaches a writer of the
@@ -3225,3 +3227,20 @@ Premises not read:
   caller's logs (JediDBProxy.log for getTasksToExecCommand_JEDI).
 - *Nothing else writes the key's row on the host in the milliseconds around a silent call.*  recordStatusChange
   prints nothing: the row between updateJobStatus's prints around 484 is the call's place only.
+
+*Changed (P69, 2026-11-19, the investigator's u13 NJ-merging-late 2, NJ-starting-late 2, NT-finishing-late 3, delegated
+design):* a run no entry row cut under a mark its method's calls share (the door's `Log.partial`) is cut where its
+records stop for a minute, each part a pass (`which_ran.shared_mark_parts`, `minute_parts`, in `passes_of`; a
+premise, said: no two calls fall within a minute): getTasksToExecCommand_JEDI's runs under `< vo=None label=None >`
+hold hours of calls (aipanda088's 14:12 .. 21:00).  A run its entry row cut into one pass is that pass (a copy, not
+the run), and is not cut again.  Any other uncut run stays whole -- one execution of a function with no entry row may
+pause a minute (ContentsFeeder's feed_contents_to_tasks waits on its file listing: 2127 records in 14 minutes, 60 s
+between "get files" and "got ... files"; cutting every uncut run split it, measure p69m) -- and where it holds an edge
+of the value's time with no pause of a minute it is read as one execution there (`_stay_edges`, `_burst_parts`; the
+same premise), not left undecided: NJ-merging-late's Adder run on aipanda099 (05:05:05 .. 05:05:14) holding the move
+at 05:05:12.903.  One that pauses there stays undecided (K76): NT-defined-late's ContentsFeeder run on aipanda086
+(15:57 .. 16:21, five pauses, each after a "get files"; cutting it there read its parts as passes, measure p69n),
+MT-scouting-stuck's JobGenerator run (08:42 .. 14:46, several executions under one mark).  A caller whose every run mark is the key alone (`'{}'`, its
+hole holding the key's column: the Adder's `str(self.job_id)`) has the key on every line, judgement 3's prints premise
+held (`bare_key_mark`): NJ-merging-late now says process_job_report did not run on the merge job before that run, and
+stops on what made it run then (K55).
