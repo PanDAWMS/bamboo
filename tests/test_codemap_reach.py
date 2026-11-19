@@ -1394,6 +1394,49 @@ def test_an_operator_s_dunder_no_operation_enters_is_run_by_none(tmp_path):
     assert "3 more have edges into them, or are an operator's" in result.note
 
 
+_HEARTBEAT = (
+    "def now():\n"
+    "    return 1\n\n"
+    "class Heartbeat:\n"
+    "    def __enter__(self):\n"
+    "        self.started = now()\n"
+    "        return self\n\n"
+    "    def __exit__(self, exc_type, exc_value, traceback):\n"
+    "        return False\n"
+)
+
+
+def test_a_with_runs_its_manager_s_enter_and_exit(tmp_path):
+    """``with Heartbeat():`` runs ``Heartbeat.__enter__`` -- asyncprocess's ``_ResultHeartbeat`` starts the thread
+    refreshing the result row there -- and ``__exit__`` leaving the block: edges, ``with``.  A manager no class of the
+    corpus is (``open(path)``) has none.  Without them the gate finds an ``__enter__`` that writes and that nothing
+    enters."""
+    from bamboo.codemap import gates
+
+    record = _record(
+        tmp_path,
+        mod=_HEARTBEAT
+        + (
+            "\n"
+            "def handle(path):\n"
+            "    with Heartbeat() as beat, open(path) as f:\n"
+            "        return f.read()\n"
+        ),
+    )
+
+    withs = [(call.to, call.lines) for call in record.rows["pkg/mod.py::handle"].calls if call.how == reach.HOW_WITH]
+    assert withs == [("pkg/mod.py::Heartbeat.__enter__", [13]), ("pkg/mod.py::Heartbeat.__exit__", [13])]
+    assert [one.function for one in record.reach(["pkg/mod.py::handle"], _writing("pkg/mod.py::now")).writes] == [
+        "pkg/mod.py::now"
+    ]
+    entered = gates.implicit_dunders_reach_no_write(_fragment(record, [_junction("pkg/mod.py::now", 2, [("done", [])])]))
+    assert entered.passed
+
+    alone = _record(tmp_path / "alone", mod=_HEARTBEAT)
+    unentered = gates.implicit_dunders_reach_no_write(_fragment(alone, [_junction("pkg/mod.py::now", 2, [("done", [])])]))
+    assert unentered.failures == ["pkg/mod.py::Heartbeat.__enter__ reaches ['pkg/mod.py::now']"]
+
+
 #: A class defining the methods the tests below call, so that a call on an unknown receiver is a hole, not settled as
 #: a method no class of the corpus defines.
 _TAKER = (

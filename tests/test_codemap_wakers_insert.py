@@ -276,3 +276,116 @@ def test_an_insert_giving_a_column_the_value_on_a_route_wakes_the_rows_it_makes(
 def test_without_the_corpuss_calls_no_insert_is_read(tmp_path: Path) -> None:
     fragment = _fragment()
     assert wakers.attach(fragment) == 0
+
+
+def _poll(name: str, line: int, keys: list[str]) -> ReadSiteNode:
+    """listJobOutputReport's 2401: unlocked or with an expired lock, older than the grace; a label kept out where a
+    caller hands one."""
+    clock = {"base": "naive_utcnow", "needs": []}
+    return ReadSiteNode(
+        name=ReadSiteNode.make_name("m", f"{REL}::{name}", line),
+        map_id="m",
+        derived_from="v",
+        owner=f"{REL}::{name}",
+        tables=["Report"],
+        keys=keys,
+        conditions=["lockedBy IS NULL OR lockedTime<:lockedTime@1", "timeStamp<:timeStamp@2"],
+        condition_trees=[
+            ConditionReading(
+                entry="lockedBy IS NULL OR lockedTime<:lockedTime@1",
+                tree=ConditionNode(
+                    node="any",
+                    items=[
+                        ConditionNode(node="null", text="lockedBy IS NULL", subject="Report.lockedBy", settled=True),
+                        ConditionNode(
+                            node="compare",
+                            text="lockedTime<:lockedTime",
+                            subject="Report.lockedTime",
+                            op="<",
+                            values=[
+                                ConditionValue(
+                                    kind="bind", text=":lockedTime", scale_seconds=-60.0, **clock | {"needs": ["poll.time_limit"]}
+                                )
+                            ],
+                        ),
+                    ],
+                ),
+            ),
+            ConditionReading(
+                entry="timeStamp<:timeStamp@2",
+                tree=ConditionNode(
+                    node="compare",
+                    text="timeStamp<:timeStamp",
+                    subject="Report.timeStamp",
+                    op="<",
+                    values=[
+                        ConditionValue(
+                            kind="bind", text=":timeStamp", scale_seconds=-1.0, **clock | {"needs": ["poll.grace_period"]}
+                        )
+                    ],
+                ),
+            ),
+            ConditionReading(
+                entry="prodSourceLabel NOT IN (:al___in@3)",
+                tree=ConditionNode(
+                    node="unequal",
+                    text="prodSourceLabel NOT IN (:al___in)",
+                    subject="Report.prodSourceLabel",
+                    op="NOT IN",
+                    values=[ConditionValue(kind="bind", text=":al___in", constant="user")],
+                    settled=True,
+                ),
+            ),
+        ],
+        anchor=Anchor(package=PACKAGE, file=REL, line_start=line),
+    )
+
+
+def _report(function: str, columns: list[WrittenValue]) -> ReachNode:
+    return ReachNode(
+        name=f"m:{REL}::DBProxy.{function}",
+        map_id="m",
+        derived_from="v",
+        owner=f"{REL}::DBProxy.{function}",
+        named_as=f"{REL}::{function}",
+        cls=f"{REL}::DBProxy",
+        function=function,
+        anchor=Anchor(package=PACKAGE, file=REL, line_start=_def_line(function)),
+        writes=[DbWrite(lines=[_def_line(function) + 1], table="Report", kind="insert", columns=columns)],
+    )
+
+
+def test_an_insert_whose_new_row_a_polls_terms_take_is_born_into_it(tmp_path: Path) -> None:
+    """updateWorkers' INSERT into Job_Output_Report: lockedBy left NULL (no default), timeStamp stamped with the
+    clock the poll's bind counts back from -- taken once the grace has passed --, the label a parameter the row's own
+    value decides where a caller adds ``NOT IN``.  An INSERT locking its row is not taken (a NULL lockedTime is not
+    older than anything), and one stamped by another clock is not read; a lookup by a bound key has none."""
+    _modules, calls = _corpus(tmp_path)
+    stamped = [
+        WrittenValue(column="PandaID", path="task_id"),
+        WrittenValue(column="jobStatus", value="'failed'"),
+        WrittenValue(column="prodSourceLabel", path="command"),
+        WrittenValue(column="timeStamp", value="naive_utcnow()"),
+    ]
+    fragment = MapFragment(
+        map_id="m",
+        derived_from="v",
+        read_sites=[_poll("poll", 30, []), _poll("lookup", 31, ["Report.PandaID"])],
+        reach_graph=[
+            _report("send", stamped),
+            _report("kill_one", [*stamped, WrittenValue(column="lockedBy", value="'me'")]),
+            _report("finish_achieved", [*stamped[:3], WrittenValue(column="timeStamp", value="CURRENT_DATE")]),
+        ],
+    )
+    assert wakers.attach(fragment, calls, {"report": {"jobstatus": "'waiting'"}}) == 1
+    poll, lookup = fragment.read_sites
+    assert lookup.wakers == []
+    (born,) = poll.wakers
+    assert (born.kind, born.owner, born.subject, born.stated) == ("born", f"{REL}::send", "Report", True)
+    assert born.term == "lockedBy IS NULL AND timeStamp<:timeStamp"
+    assert born.routes == [[f"{REL}:{_line('FINISH')}"], [f"{REL}:{_line('KILL')}"]]
+    assert [(one.term, one.holds, one.value, one.scale_seconds, one.needs, one.added) for one in born.born] == [
+        ("lockedBy IS NULL", "default", "NULL", None, [], False),
+        ("timeStamp<:timeStamp", "after", "naive_utcnow", -1.0, ["poll.grace_period"], False),
+        ("prodSourceLabel NOT IN (:al___in)", "open", "command", None, [], True),
+    ]

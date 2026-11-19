@@ -65,7 +65,8 @@ def _line(ask: dict) -> dict:
 
 
 def _plan(ask: dict) -> RA.Plan:
-    return RA.plan(_line(ask), TABLES, SITES)
+    """The plan by db_read, the way these tests read rows (the endpoint's are planned with "endpoint")."""
+    return RA.plan(_line(ask), TABLES, SITES, "db_read")
 
 
 def _statement(tables: list[str], binds: dict) -> dict:
@@ -259,7 +260,7 @@ def _doc(*answers: dict) -> dict:
 
 async def test_a_statements_answer_lays_out_as_the_tasks_fetch_lays_out_its_jobs():
     fetched = RB.build(
-        await FE.fetch(TASK_Q, TABLES, _task_panda().parts()), SPELLINGS, TABLES
+        await FE.fetch(TASK_Q, TABLES, _task_panda().parts(), via="db_read"), SPELLINGS, TABLES
     )
     panda = _task_panda()
     line = _line(
@@ -331,7 +332,7 @@ def _db_read(tables: dict[str, list[dict]]):
 
 async def _joined_answer(tables: dict[str, list[dict]]) -> dict:
     line = _line(S1_ASK)
-    p = RA.plan(line, TABLES, SITES)
+    p = RA.plan(line, TABLES, SITES, "db_read")
     return await RA.answer(line, p, FE.Parts(db_read=_db_read(tables)), TABLES)
 
 
@@ -501,3 +502,158 @@ def test_the_rows_steps_statuslogs_are_laid_over_the_fetchs_by_class_and_key():
     }
     # the fetch's is not changed in place
     assert fetched["JediTaskSpec"]["by_key"] == {"1": {"states": ["a"]}}
+
+
+# ------------------------------------------------------------------ a task's datasets through task/get_dataset_rows
+
+
+def _dataset_rows(rows: list[dict], truncated: bool = False):
+    """task/get_dataset_rows (panda-server 80134dc2): the columns as JediDatasetSpec spells them."""
+
+    async def dataset_rows(task_id):
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "rows": rows,
+                "truncated": truncated,
+                "max_rows": 1000,
+                "as_of": T(AS_OF),
+            },
+        }
+
+    return dataset_rows
+
+
+def test_by_the_endpoint_a_tasks_datasets_by_its_key_are_read_by_task_get_dataset_rows():
+    line = _line(S1_ASK)
+    got = RA.plan(line, TABLES, SITES, "endpoint")
+    assert [(c.part, c.role, c.request) for c in got.calls] == [
+        (FE.TASK_DATASET_ROWS, "collection", {"task_id": TID})
+    ]
+    assert got.histories is None and not got.why
+    # the endpoint by default (fetch.DEFAULT_VIA), db_read when named
+    assert [c.part for c in RA.plan(line, TABLES, SITES).calls] == [FE.TASK_DATASET_ROWS]
+    assert [c.part for c in RA.plan(line, TABLES, SITES, "db_read").calls] == ["db_read"]
+    # rows selected by another column stay db_read's
+    via = [{"from": "JediTaskSpec.jediTaskID", "to": "JediDatasetSpec.masterID"}]
+    other = RA.plan(
+        _line({**S1_ASK, "where": {"masterID": 9}, "via": via}), TABLES, SITES, "endpoint"
+    )
+    assert [c.part for c in other.calls] == ["db_read"]
+
+
+async def _endpoint_answer(rows: list[dict], truncated: bool = False) -> dict:
+    line = _line(S1_ASK)
+    p = RA.plan(line, TABLES, SITES, "endpoint")
+    parts = FE.Parts(dataset_rows=_dataset_rows(rows, truncated))
+    return await RA.answer(line, p, parts, TABLES)
+
+
+async def test_by_the_endpoint_a_tasks_datasets_lay_out_as_rs():
+    by_r = await _joined_answer(
+        {"JEDI_Datasets": [{"datasetid": 11, "jeditaskid": TID, "type": "input"}]}
+    )
+    by_e = await _endpoint_answer([{"datasetID": 11, "jediTaskID": TID, "type": "input"}])
+    assert [s["part"] for s in by_e["steps"]] == [FE.TASK_DATASET_ROWS]
+    (r_entry,) = RB.answered([_doc(by_r)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)[0]["linked"]
+    (e_entry,) = RB.answered([_doc(by_e)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)[0]["linked"]
+    assert e_entry["source"] == f"task/get_dataset_rows as of 2026-10-13 10:00:00, where {{'jediTaskID': {TID}}}"
+    assert {k: v for k, v in e_entry.items() if k != "source"} == {
+        k: v for k, v in r_entry.items() if k != "source"
+    }
+    assert e_entry["table"] == "JEDI_Datasets"
+
+
+async def test_by_the_endpoint_a_task_with_no_dataset_is_an_entry_too():
+    sections, _ = RB.answered(
+        [_doc(await _endpoint_answer([]))], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES
+    )
+    assert [(e["table"], e["rows"]) for e in sections["linked"]] == [("JEDI_Datasets", [])]
+
+
+async def test_by_the_endpoint_datasets_read_in_pages_are_every_pages_as_of_the_last():
+    def page(rows, truncated, at):
+        return {
+            "success": True,
+            "message": "",
+            "data": {"rows": rows, "truncated": truncated, "max_rows": 1, "as_of": T(at)},
+        }
+
+    one, two = (
+        page([{"datasetID": 11, "jediTaskID": TID}], True, "2026-10-13T10:00:00"),
+        page([{"datasetID": 12, "jediTaskID": TID}], False, "2026-10-13T10:00:02"),
+    )
+
+    async def dataset_rows(task_id):
+        # as panda_client.get_task_dataset_rows gives two pages
+        return {**one, "data": {**one["data"], "rows": one["data"]["rows"] + two["data"]["rows"], "truncated": False},
+                "pages": 2, "calls": [one, two]}
+
+    line = _line(S1_ASK)
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES, "endpoint"), FE.Parts(dataset_rows=dataset_rows), TABLES)
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)
+    (entry,) = sections["linked"]
+    assert left_out == [] and [r["datasetID"] for r in entry["rows"]] == [11, 12]
+    assert entry["source"] == (
+        f"task/get_dataset_rows in 2 pages from 2026-10-13 10:00:00 as of 2026-10-13 10:00:02, where {{'jediTaskID': {TID}}}"
+    )
+
+
+async def test_by_the_endpoint_a_cut_answer_is_left_out_and_said():
+    got = await _endpoint_answer([{"datasetID": 11, "jediTaskID": TID}], truncated=True)
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), DS_SPELLINGS, TABLES)
+    assert "linked" not in sections and left_out == ["collection JediDatasetSpec: truncated"]
+
+
+# ------------------------------------------------------------------ another row by its key (kind "row")
+
+
+def _row_ask(cls: str, key: dict) -> dict:
+    return {"kind": "row", "row": {"entity": cls, "key": key}}
+
+
+def test_a_row_ask_reads_the_row_by_the_call_a_fetch_reads_its_key_by_then_its_history():
+    for cls, key in (("JobSpec", {"PandaID": str(PID)}), ("JediTaskSpec", {"jediTaskID": TID})):
+        got = _plan(_row_ask(cls, key))
+        part, request = FE.KEY_REQUEST[cls]
+        assert (got.why, got.histories, got.rows_role) == ("", cls, "row")
+        assert [(c.part, c.request) for c in got.calls] == [(part, request(int(*key.values())))]
+
+
+def test_a_row_ask_by_a_column_other_than_the_classs_key_says_why():
+    for cls, key in (("JobSpec", {"jediTaskID": TID}), ("JediDatasetSpec", {"datasetID": 11})):
+        got = _plan(_row_ask(cls, key))
+        assert got.calls == [] and got.why == f"no call reads a {cls} by {sorted(key)}"
+
+
+async def test_another_jobs_row_lays_out_in_rows_by_key_as_the_jobs_fetch_lays_out_its_own():
+    fetching = _job_panda()
+    fetched = RB.build(await FE.fetch(JOB_Q, TABLES, fetching.parts()), SPELLINGS, TABLES)
+    panda = _job_panda()
+    line = _line(_row_ask("JobSpec", {"PandaID": PID}))
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
+    assert panda.calls == fetching.calls  # the row, then its history from its creation
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), SPELLINGS, TABLES)
+    assert left_out == [] and set(sections) == {"rows_by_key", "statuslogs"}
+    entry = sections["rows_by_key"]["JobSpec"][str(PID)]
+    own = fetched["rows"][RB.ENTITY["JobSpec"]]
+    assert entry["row"] == {c: v["value"] for c, v in own.items()}
+    assert {k: entry[k] for k in ("source", "as_of", "clock")} == {
+        k: v for k, v in own["PandaID"].items() if k != "value"
+    }
+    assert entry["files"] == [{c: v["value"] for c, v in f.items()} for f in fetched["files"]]
+    log = sections["statuslogs"]["JobSpec"]["by_key"][str(PID)]
+    assert log["states"] == fetched["statuslog"]["states"]
+
+
+async def test_another_job_with_no_row_asks_no_history_and_is_left_out_with_its_why():
+    panda = _job_panda()
+    line = _line(_row_ask("JobSpec", {"PandaID": 1}))
+    got = await RA.answer(line, RA.plan(line, TABLES, SITES), panda.parts(), TABLES)
+    assert panda.calls == [("jobs", [1])]
+    sections, left_out = RB.answered([_doc(got)], "JediTaskSpec", str(TID), SPELLINGS, TABLES)
+    assert "rows_by_key" not in sections
+    assert left_out == [
+        "row JobSpec PandaID=1: no JobSpec row for PandaID 1: in no live table, nor in the archive's last 90 days"
+    ]

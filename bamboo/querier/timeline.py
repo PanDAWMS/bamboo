@@ -115,16 +115,32 @@ class Timeline:
     #: K-2 (a): writes a print reached, read as run, the statuslog showing their statement's own status value then:
     #: ``(at, "func:line", what showed it)`` each (prepareTasksToBeFinished_JEDI's 4075, lockedBy NULL with 'tobroken')
     confirmed: tuple[tuple[datetime.datetime, str, Any], ...] = ()
+    #: K-3 (b): stretches a print of the column's value shows it held: ``(since, until, value, the arms, the print
+    #: "func:line", the print's machine, the write's machine)`` -- the write the records show whose clock the printed
+    #: value is ran at *since*, and nothing wrote the column from then to the print at *until* (NT-defined-late's
+    #: lockedTime 14:56:41, written by getTaskWithID_JEDI:1818 on aipanda082 and printed by unlockTasks_JEDI:897 on
+    #: aipanda081 at 15:57:05.666)
+    witnessed: tuple[tuple[datetime.datetime, datetime.datetime, datetime.datetime, tuple[str, ...], str, str, str],
+                     ...] = ()
+    #: K-3 (c): stretches where open arms did not write the column, their statements writing another column a print
+    #: shows held a value then: ``(since, until, the arms, that column)`` (lockedBy's unlock arms, which null
+    #: lockedTime too, while lockedTime held 14:56:41)
+    quiet: tuple[tuple[datetime.datetime, datetime.datetime, tuple[str, ...], str], ...] = ()
+    #: K-3 (c): writes a print reached, read as run, their statement's write of another column of the row read as run
+    #: by a print of that column (*witnessed* of its timeline): ``(at, "func:line", what showed it)`` each
+    #: (getTaskWithID_JEDI:1847's lockedBy at 14:56:41.571, by its 1818's lockedTime)
+    tied: tuple[tuple[datetime.datetime, str, Any], ...] = ()
 
     def read(self) -> bool:
         """Whether the records or the row read anything of the column: a write, an arm shown not to, the row's value."""
-        return bool(self.writes or self.absent or self.row_value)
+        return bool(self.writes or self.absent or self.row_value or self.witnessed)
 
     def pieces(self, assume: bool = False) -> list[tuple[datetime.datetime, datetime.datetime, datetime.datetime,
                                                           datetime.datetime, tuple[Opening, ...]]]:
         """``(from, to, lo, hi, opens)`` over [start, end], cut at each write read: the bounds the writes read leave,
         and the arms that may write it in the piece (none where *assume* names them as having not).  From the row's
-        value's write on (*row_value*), the column holds that value and no arm writes it."""
+        value's write on (*row_value*), the column holds that value and no arm writes it; so too inside each stretch a
+        print shows (*witnessed*); inside each *quiet* stretch, the arms it names do not write it."""
         out = []
         lo, hi = self.first_assumed if assume else self.first
         at = self.start
@@ -136,18 +152,32 @@ class Timeline:
             lo, hi = (w.lo, w.hi) if w.how == RAN else (min(lo, w.lo), max(hi, w.hi))
             at = w.at
         out.append((at, self.end, lo, hi, opens))
-        if self.row_value is None:
-            return out
-        since, value = self.row_value[0], self.row_value[1]
-        held = []
-        for a, z, plo, phi, popens in out:
-            if z <= since:
-                held.append((a, z, plo, phi, popens))
-            elif a >= since:
-                held.append((a, z, value, value, ()))
-            else:
-                held += [(a, since, plo, phi, popens), (since, z, value, value, ())]
-        return held
+        if self.row_value is not None:
+            since, value = self.row_value[0], self.row_value[1]
+            out = _within(out, since, HIGH, lambda p: (value, value, ()))
+        for since, until, value, *_ in self.witnessed:
+            out = _within(out, since, until, lambda p, v=value: (v, v, ()))
+        for since, until, arms, _ in self.quiet:
+            out = _within(out, since, until, lambda p, n=arms: (p[2], p[3], tuple(o for o in p[4] if o.arm not in n)))
+        return out
+
+
+def _within(pieces, since: datetime.datetime, until: datetime.datetime, change):
+    """*pieces* with their parts inside [*since*, *until*) changed: *change* takes a piece and gives its ``(lo, hi,
+    opens)`` there; a piece across either end is cut at it."""
+    out = []
+    for p in pieces:
+        a, z = p[0], p[1]
+        if z <= since or a >= until:
+            out.append(p)
+            continue
+        if a < since:
+            out.append((a, since, *p[2:]))
+        inner = (max(a, since), min(z, until), *p[2:])
+        out.append((inner[0], inner[1], *change(inner)))
+        if z > until:
+            out.append((until, z, *p[2:]))
+    return out
 
 
 def fold(writes, lo: datetime.datetime, hi: datetime.datetime) -> tuple[datetime.datetime, datetime.datetime]:

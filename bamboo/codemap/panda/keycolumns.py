@@ -441,8 +441,9 @@ class Reader:
     ) -> None:
         """The reading of *node* stopped at its binding *site* (*stop*): the binding read again as a statement's rows
         (:attr:`row_items`).  A way that is a select item whole is its column, spelled as the table's class declares
-        it (:meth:`_column`); one that is the rows but no one item whole says so (``row_item``); *stop* stands unless
-        every way is the rows."""
+        it (:meth:`_column`) -- where the statement's texts give the item different columns, the one attribute their
+        classes all declare them (:meth:`_texts_attribute`); one that is the rows but no one item whole says so
+        (``row_item``); *stop* stands unless every way is the rows."""
         items: list = []
         every = False
         if self.row_items is not None:
@@ -459,6 +460,8 @@ class Reader:
                 self._column(table, column, where, found, stops)
             elif item.whole and item.attr and self.holds_rows(item.attr):
                 found.add(item.attr)
+            elif item.whole and (attribute := self._texts_attribute(item.texts)):
+                found.add(attribute)
             else:
                 what = item.why or (
                     f"a value made from {item.column} ({item.made})"
@@ -474,16 +477,21 @@ class Reader:
 
     def _aggregate(self, aggregate) -> Optional[RowAggregate]:
         """*aggregate* (:class:`sqltext.Aggregate`) with its columns as their tables' classes declare them; ``None``
-        where its own column's is not."""
-        column = self._declared(aggregate.table, aggregate.column)
+        where its own column's is not (``COUNT(*)`` has none)."""
+        column = self._declared(aggregate.table, aggregate.column) if aggregate.column else ""
         if column is None:
             return None
         return RowAggregate(
             fn=aggregate.fn,
             column=column,
+            value=aggregate.value,
             group_by=[
                 self._declared(table, name) or (f"{table}.{name}" if table else name)
                 for table, name in aggregate.group_by
+            ],
+            counted=[
+                self._declared(table, name) or (f"{table}.{name}" if table else name)
+                for table, name in aggregate.counted
             ],
         )
 
@@ -492,6 +500,13 @@ class Reader:
         cls = self.tables.get(table.rpartition(".")[2].lower())
         attribute = self.declared.get(cls, {}).get(column.lower()) if cls is not None else None
         return f"{cls}.{attribute}" if attribute is not None else None
+
+    def _texts_attribute(self, texts: tuple[str, ...]) -> str:
+        """The one ``Class.attribute`` the columns *texts* (``table.column``, each text's) are all declared as --
+        ``jobsDefined4``'s and ``jobsActive4``'s ``PandaID`` are ``JobSpec.PandaID`` --, else ``""``: a text with no
+        such item, a column no class declares, or two attributes."""
+        declared = {self._declared(*text.rsplit(".", 1)) if "." in text else None for text in texts}
+        return declared.pop() or "" if len(declared) == 1 else ""
 
     def _handed(
         self,

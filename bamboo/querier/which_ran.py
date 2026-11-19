@@ -52,7 +52,7 @@ import functools
 import itertools
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -202,6 +202,44 @@ def cut_passes(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     return parts, how
 
 
+def minute_parts(run: Run, how: str, gap: datetime.timedelta = datetime.timedelta(minutes=1)) -> tuple[list[Run], str]:
+    """P69 (the investigator's u13): a run no entry row cut, cut where its records stop for *gap* or more, each part a
+    pass -- a premise, said: no run of the function pauses that long, and no two of its runs fall within it.
+    getTasksToExecCommand_JEDI's runs under the mark its calls share hold hours of calls (aipanda088's 14:12 .. 21:00);
+    the Adder's run on a job, one burst, stays whole.  ``([run], how)`` where there is no such gap."""
+    try:
+        stamps = [r.stamp for r in run.records]
+        cuts = [i for i in range(1, len(stamps)) if W.when(stamps[i]) - W.when(stamps[i - 1]) >= gap]
+    except (TypeError, AttributeError, ValueError):
+        return [run], how
+    if not cuts:
+        return [run], how
+    bounds = [0, *cuts, len(stamps)]
+    parts = []
+    for lo, hi in zip(bounds, bounds[1:], strict=False):
+        records = run.records[lo:hi]
+        held = {id(r) for r in records}
+        parts.append(replace(run, records=records, found_by=[r for r in run.found_by if id(r) in held]))
+    return parts, (f"{how}; cut where its records stop for a minute into {len(parts)} part(s) (P69, a premise: no run "
+                   "of it pauses that long, no two fall within it)")
+
+
+def shared_mark_parts(parts: list[Run], run: Run, how: str) -> tuple[list[Run], str]:
+    """P69: :func:`minute_parts` for a run no entry row cut (*parts* is ``[run]``, the run itself: a cut into one pass
+    is a copy, and stays as it is) under a mark its method's calls share (the door's ``Log.partial``: the key's records
+    under it come EDGE or more apart, so its run is every call in the window) -- getTasksToExecCommand_JEDI's
+    ``< vo=None label=None >``.  Any other run stays whole: one execution of a function with no entry row may pause a
+    minute (ContentsFeeder's feed_contents_to_tasks waits on its file listing: 2127 records in 14 minutes, a pause of
+    60 s between "get files" and "got ... files"), and where it holds an edge of the value's time with no such pause it
+    is read there as one execution (``rerun._stay_edges``)."""
+    if len(parts) != 1 or parts[0] is not run:
+        return parts, how
+    partial = getattr(getattr(run, "log", None), "partial", None) or {}
+    if partial.get((getattr(run, "machine", None), getattr(run, "token", None))) != "a mark the method's calls share":
+        return [run], how
+    return minute_parts(run, how)
+
+
 def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
     """*run* cut into *fn*'s passes (:func:`cut_passes`), with a word on how.  A run kept whole that holds no record only
     *fn*'s rows can have printed (:func:`_rows_shown`), under a mark that does not name *fn*, is *fn*'s pass only where
@@ -216,11 +254,12 @@ def passes_of(fn: R.Function, run: Run, mode: str) -> tuple[list[Run], str]:
         return parts, how
     m = re.match(r"([A-Za-z_]\w*) <", run.token)
     if m is not None and m[1] == fn.name:
-        return parts, how
+        return shared_mark_parts(parts, run, how)
     if _rows_shown(fn, run, mode):
-        return parts, how
+        return shared_mark_parts(parts, run, how)
     shown = called_in(fn, run, mode)
     if shown:
+        parts, how = shared_mark_parts(parts, run, how)
         return parts, f"{how}; no record only {fn.shown} prints, its call shown by {shown}"
     return [], f"{how}; no record only {fn.shown} prints, nor a caller's row after its call: not shown to be a pass of it"
 
@@ -1239,6 +1278,144 @@ def _key_values(env: E.Env | None) -> set[str]:
     return {str(held.value) for column in env.keys if (held := row.get(column)) is not None}
 
 
+def _constructed_other(site: Any, attr: str, shown: str) -> bool:
+    """P35 (c): whether *site* binds a local to a new object of a corpus class (``X = C()``) whose constructor binds
+    *attr* only to literals, none of them *shown* -- the map's ``FieldFrom`` of the class's field, its ways whose
+    binding lies in the class's ``__init__``.  JediTaskSpec's ``status`` is None or 0 there."""
+    if not (isinstance(site, ast.Assign) and isinstance(site.value, ast.Call) and isinstance(site.value.func, ast.Name)):
+        return False
+    from bamboo.querier import sources as SR  # sources imports this module
+    owners = sorted({c for c, f in SR._field_froms() if f == attr and c.endswith(f"::{site.value.func.id}")})
+    if len(owners) != 1:
+        return False
+    values: set[str] = set()
+    for w in SR.field_ways(owners[0], attr):
+        site = w.route[0] if len(w.route) == 1 else ""
+        rel, _, line = site.rpartition(":")
+        if not line.isdigit() or "," in rel:
+            continue
+        try:
+            node = R.def_holding(rel, int(line))
+        except (OSError, SyntaxError):
+            continue
+        if node is None or node.name != "__init__":
+            continue
+        if w.end != SR.CONSTANT or w.steps or w.why in SR.NO_LITERAL or not w.value:
+            return False
+        try:
+            values.add(str(ast.literal_eval(w.value)))
+        except (ValueError, SyntaxError):
+            return False
+    return bool(values) and shown not in values
+
+
+def _guard_false(fn: R.Function, site: Any, env: E.Env | None, sn: R.Seen) -> bool:
+    """P35 (c): whether a guard *site* stands under (``pathcond.arm_condition``) is false with the values the pass
+    printed (``stable_holes`` of its run, on a copy of *env* read at the site's line); a guard reading anything not
+    printed is not false here.  TaskCommando's 181 under ``not (commandStr != 'reassign')``, commandStr printed
+    'finish' at 133."""
+    if not isinstance(site, ast.stmt):
+        return False
+    e = (env if env is not None else E.Env()).reading(fn.owner, site.lineno)
+    stable_holes([sn], e, class_of(fn), local_to=fn.owner)
+    for guard in pathcond.arm_condition(site):
+        try:
+            got = E.evaluate(guard, e)
+        except (SyntaxError, ValueError, TypeError):
+            continue
+        if got is not E.UNKNOWN and not got:
+            return True
+    return False
+
+
+def _bound_targets(stmt: ast.AST) -> list[ast.expr]:
+    """The expressions an assignment binds, a tuple's or a list's elements too (``(spec.userName,) = tmp_res``)."""
+    if isinstance(stmt, ast.Assign):
+        tops: list[ast.expr] = list(stmt.targets)
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        tops = [stmt.target]
+    else:
+        return []
+    out: list[ast.expr] = []
+    while tops:
+        t = tops.pop(0)
+        if isinstance(t, (ast.Tuple, ast.List)):
+            tops.extend(t.elts)
+        elif isinstance(t, ast.Starred):
+            tops.append(t.value)
+        else:
+            out.append(t)
+    return out
+
+
+def taken_back(fn: R.Function, line: int, subject: str, back: Any, value: str) -> str:
+    """P41 (the investigator's u4 NR-T userName cases): why the arm at *line* of *fn* did not write *value* of
+    *subject* into its row, by the map's ``Branch.taken_back`` (*back*: ``resets``, ``open``, ``open_prints``); '' where
+    that is not read.  Every way from the arm takes the change back before its object is written or handed on (no
+    ``open``); or every way that does not passes a print (``open_prints``) under a guard false with the arm's target
+    holding *value*, no other binding of the target reaching that print.
+
+    ``_check_task_with_unprocessed_inputs`` sets ``original_task_spec.userName`` to the user's DN at 2272, takes it back
+    with ``resetChangedAttr("userName")`` at 2286, and keeps it only where ``original_task_spec.userName in ["",
+    None]`` holds, where it prints "has an empty DN" at 2277 first: a value that is not empty did not go to the row by
+    it.  A premise, said: a later write of the object takes its changed attributes only (a reset changes what is
+    written as changed; a write of the whole row would take the value)."""
+    resets = sorted(getattr(back, "resets", None) or [])
+    if not resets:
+        return ""
+    premise = "a premise: a later write of its object takes the changed attributes only"
+    if not getattr(back, "open", None):
+        return (f"every way from it takes the change back at {resets} before its object is written or handed on: it did "
+                f"not write the value ({premise})")
+    prints = sorted(getattr(back, "open_prints", None) or [])
+    arm = R.statement_at(fn.node, line)
+    if not prints or arm is None:
+        return ""
+    attribute = subject.rpartition(".")[2]
+    texts = {ast.unparse(t) for t in _bound_targets(arm) if isinstance(t, ast.Attribute) and t.attr == attribute}
+    if len(texts) != 1:
+        return ""
+    target = texts.pop()
+    base = target.rpartition(".")[0]
+    binds = [n for n in R.own_nodes(fn.node) if any(ast.unparse(t) == target for t in _bound_targets(n))]
+    if base.isidentifier():
+        binds += [b.site for b in pathcond.bindings(fn.node, base) if not b.nested]
+    binds = list({id(b): b for b in binds}.values())
+    for p in prints:
+        row = next((rw for rw in fn.rows if rw.line == p), None)
+        if row is None or {id(b) for b in reaching.reaching(row.stmt, binds)} != {id(arm)}:
+            continue
+        env = E.Env()
+        env.put(target, value, f"the value the arm at {line} would have written")
+        for guard in pathcond.arm_condition(row.stmt):
+            try:
+                got = E.evaluate(guard, env.reading(fn.owner, p))
+            except (SyntaxError, ValueError, TypeError):
+                continue
+            if got is not E.UNKNOWN and not got:
+                return (f"every way from it that does not take the change back at {resets} first prints {p}, under "
+                        f"`{guard}`, false where {target} holds the value: it did not write the value ({premise})")
+    return ""
+
+
+def _record_of_row(fn: R.Function, sn: R.Seen, row: R.Row, alike: list, r_i: int) -> bool:
+    """P35 (c): whether record *r_i*, which the rows *alike* of *fn* all find, is *row*'s: the last record before it only
+    one row finds (``Seen.unambiguous``) is a print from which *row* can run with no print between, and none of the
+    others can (``flow.runs_after``).  TaskCommando's 200 and 323 both print ``set task_status=...``; after 188's
+    'updating datasets to finish', only 200 is next."""
+    others = [rw for rw in alike if rw is not row]
+    before = [(i, rw) for rw in fn.rows for i in sn.unambiguous.get(rw.line, ()) if i < r_i]
+    if not others or not before:
+        return False
+    _, prev = max(before, key=lambda x: x[0])
+    prints = [rw.stmt for rw in fn.rows]
+    try:
+        return flow.runs_after(prev.stmt, row.stmt, prints, printed=True) and not any(
+            flow.runs_after(prev.stmt, rw.stmt, prints, printed=True) for rw in others)
+    except (ValueError, AssertionError):
+        return False
+
+
 def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env: E.Env | None,
                   raised_at: set[int] | None) -> str:
     """Why the arm *stmt*, binding a local to the observed value as a constant (``newTaskStatus = "prepared"``), ran in
@@ -1256,7 +1433,10 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
     The map's reaching reads no path's condition, so it is asked from *Q*, a print of the turn, not from the loop's
     head: ``prepareTasksToBeFinished_JEDI``'s loop at 3852 does not bind ``newTaskStatus`` again at its head, and the
     ways skipping 3906's and 4015's bodies, open only when ``toSkip`` is True, reach 4074 unbound."""
-    if (value := _constant_of(stmt)) is _NOT_CONSTANT or str(value) != observed:
+    # P35 (c) (out/gm/qk-design.md, P35 (c)'s walk): a value no constant spells is read too -- the row shows what was
+    # bound -- and an attribute of a local (``tmpTaskSpec.status = commandStatusMap()[commandStr]["done"]``, then 200's
+    # ``set task_status={tmpTaskSpec.status}``) as a local is
+    if (value := _constant_of(stmt)) is not _NOT_CONSTANT and str(value) != observed:
         return ""
     if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
         target = stmt.targets[0]
@@ -1264,14 +1444,24 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         target = stmt.target
     else:
         return ""
-    if not isinstance(target, ast.Name):
+    func = fn.node
+    if isinstance(target, ast.Name):
+        name = target.id
+        if any(isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names for n in R.own_nodes(func)):
+            return ""
+        # a binding's site is a statement, a handler or a ``:=`` (``pathcond.Binding``): the flow reads each as
+        # reaching's writes do, though it is typed for statements
+        binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
+    elif isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+        name, base = ast.unparse(target), target.value.id
+        if any(isinstance(n, (ast.Global, ast.Nonlocal)) and base in n.names for n in R.own_nodes(func)):
+            return ""
+        # the attribute's own assignments, and every binding of the local it hangs on
+        sites = [n for n in R.own_nodes(func) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                 and any(ast.unparse(t) == name for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+        binds = list({id(x): x for x in [*sites, *(b.site for b in pathcond.bindings(func, base) if not b.nested)]}.values())
+    else:
         return ""
-    func, name = fn.node, target.id
-    if any(isinstance(n, (ast.Global, ast.Nonlocal)) and name in n.names for n in R.own_nodes(func)):
-        return ""
-    # a binding's site is a statement, a handler or a ``:=`` (``pathcond.Binding``): the flow reads each as reaching's
-    # writes do, though it is typed for statements
-    binds: list[Any] = list({id(b.site): b.site for b in pathcond.bindings(func, name) if not b.nested}.values())
     records = sn.run.records
     keys = _key_values(env)
     for row in fn.rows:
@@ -1290,9 +1480,16 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         else:
             continue
         at = [i for i in hits if lo < i < hi]
-        if len(at) != 1 or at[0] not in sn.unambiguous.get(row.line, ()):
+        if len(at) != 1:
             continue
         r_i = at[0]
+        # P35 (c): a record two rows of the function find alike (TaskCommando's 199 sendMsg and 200 info of one tmpMsg)
+        # reads as either, where each of them prints the bound name
+        alike = [rw for rw in fn.rows if any(i == r_i for i, _, _ in sn.hits.get(rw.line, ()))]
+        if r_i not in sn.unambiguous.get(row.line, ()) and not (
+                len(alike) > 1 and all(any(e in (name, f"str({name})") for e in rw.capture(records[r_i])) for rw in alike)
+        ) and not _record_of_row(fn, sn, row, alike, r_i):
+            continue
         shown = next((v.strip() for e, v in row.capture(records[r_i]).items() if e in (name, f"str({name})")), None)
         if shown != observed:
             continue
@@ -1312,7 +1509,7 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
             reached = {id(b) for b in reaching.reaching(row.stmt, binds)}
             sources = [b for b in binds if id(b) in reached and flow.runs_after(q[1].stmt, b, turn_stops, printed=True)]
             since = f"row {q[1].line} (at {records[q[0]].span})"
-        elif not loops:
+        elif not loops and isinstance(target, ast.Name):
             held = pathcond.held_at(func, name, row.stmt)  # type: ignore[arg-type]
             if any(getattr(s, "lineno", None) is None for s in held.sites):
                 continue
@@ -1320,6 +1517,14 @@ def printed_local(fn: R.Function, sn: R.Seen, stmt: ast.stmt, observed: str, env
         else:
             continue
         givers = [b for b in sources if (c := _constant_of(b)) is _NOT_CONSTANT or str(c) == shown]
+        # P35 (c): a giver under a guard the pass's printed values make false did not run (TaskCommando's 181
+        # ``tmpTaskSpec.status = oldStatus`` in the reassign branch, commandStr printed 'finish')
+        givers = [b for b in givers if b is stmt or not _guard_false(fn, b, env, sn)]
+        # P35 (c): a binding of the local an attribute hangs on to a new object of a corpus class gives the attribute
+        # what that class's constructor binds it to (TaskCommando's 154 ``tmpTaskSpec = JediTaskSpec()``: None or 0)
+        if "." in name:
+            attr = name.rpartition(".")[2]
+            givers = [b for b in givers if b is stmt or not _constructed_other(b, attr, shown)]
         if len(givers) == 1 and givers[0] is stmt:
             lines = sorted(getattr(b, "lineno", 0) for b in sources)
             return (f"P1: row {row.line} printed {name}={shown!r} {where}, at {records[r_i].span}; every way from {since} to "
@@ -1395,8 +1600,33 @@ def printed_binds(fn: R.Function, sn: R.Seen, wp: Any, keys: set[str], raised_at
     return None
 
 
-def _same_value(value: Any, text: str) -> bool:
+def _value_match(value: Any, text: str) -> bool | None:
+    """Whether a value a statement ran with is the row's value *text*: True, False, or None where it may be either.
+
+    P66 (the investigator's u9 W12): a time printed to the microsecond is the row's value at the precision the row
+    holds it.  A DATE column keeps its seconds, the fraction cut or rounded (which, is not read here), so a fraction
+    below half a second is the same second either way: updateTask_JEDI's 1483 printed ``':modificationTime':
+    datetime.datetime(2026, 11, 15, 4, 37, 31, 304478)``, the row's '2026-11-15 04:37:31'.  From half a second on,
+    either of the two seconds may be it."""
+    if isinstance(value, datetime.datetime):
+        try:
+            seen = datetime.datetime.fromisoformat(str(text).strip())
+        except ValueError:
+            return str(value).strip() == str(text).strip()
+        if value == seen:
+            return True
+        if seen.microsecond or not value.microsecond:
+            return False
+        cut = value.replace(microsecond=0)
+        if value.microsecond < 500000:
+            return cut == seen
+        return None if seen in (cut, cut + datetime.timedelta(seconds=1)) else False
     return str(value).strip() == str(text).strip()
+
+
+def _same_value(value: Any, text: str) -> bool:
+    """:func:`_value_match` where it is sure the value is the row's."""
+    return _value_match(value, text) is True
 
 
 def _names_read(node: ast.AST) -> set[str]:
@@ -1484,7 +1714,7 @@ def _not_by(fn: R.Function, sn: R.Seen, stmt: ast.stmt, shown: PrintedBinds, bin
             got = E.evaluate(ast.unparse(value), tenv)
         except SyntaxError:
             got = E.UNKNOWN
-        if got is not E.UNKNOWN and not _same_value(got, observed):
+        if got is not E.UNKNOWN and _value_match(got, observed) is False:
             return f"P35: it gives {bind} {ast.unparse(value)}, {got!r} {shown.where} ({_used(tenv, ast.unparse(value))})"
     for guard in pathcond.arm_condition(stmt):
         if E.read_elsewhere(guard):

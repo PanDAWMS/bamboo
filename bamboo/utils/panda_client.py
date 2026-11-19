@@ -24,13 +24,14 @@ import json
 import logging
 import os
 import re
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from bamboo.utils.narrator import say, thinking
 
-import warnings
 from urllib3.exceptions import InsecureRequestWarning
+
+from bamboo.utils.narrator import say, thinking
 
 warnings.filterwarnings('ignore', category=InsecureRequestWarning)
 
@@ -622,6 +623,20 @@ async def get_task_status_history(task_id: int) -> dict[str, Any]:
     )
 
 
+async def get_task_command_history(task_id: int) -> dict[str, Any]:
+    """The task commands TASKS_COMMANDLOG holds for one task: the whole response.
+
+    task/get_command_history (panda-server c41d36d, in production since
+    2026-11-18): a row per command a task_api endpoint received for the task,
+    written before the command ran, with its status (received, responded,
+    error, queued, accepted, rejected, superseded).  On success ``data`` holds
+    the rows with ``as_of`` and ``retained_from``.
+    """
+    return await asyncio.to_thread(
+        _call_api_full, "get", "task/get_command_history", {"task_id": int(task_id)}
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rows read by key, without the async daemon
 # ---------------------------------------------------------------------------
@@ -725,6 +740,133 @@ async def get_task_detailed_info(task_id: int) -> dict[str, Any]:
         _call_api_full, "get", "task/get_detailed_info", {"task_id": int(task_id)}
     )
     return {**response, "asked_at": asked_at}
+
+
+#: most pages one read of a task's rows takes (task/get_job_rows and
+#: task/get_dataset_rows give at most 1000 rows a page); a task with more is
+#: left truncated
+TASK_JOB_PAGES = 50
+
+
+async def _pages(
+    endpoint: str, request: dict[str, Any], after: str, column: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """*endpoint*'s rows for *request*, page by page: each next page asked with
+    *after* set to the last row's *column*, until a page is not truncated, is
+    cut with no row, or :data:`TASK_JOB_PAGES` were read.
+
+    A page whose first row does not come after that value is a server that
+    does not page: it is kept in the calls but not in the rows, and the read
+    stops there, truncated.
+
+    Returns:
+        Every response in order, the rows of every page read in order, and
+        the first response that failed (None when none did).
+    """
+    calls: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    last: int | None = None
+    while len(calls) < TASK_JOB_PAGES:
+        page = {**request, **({after: last} if last is not None else {})}
+        response = await asyncio.to_thread(_call_api_full, "get", endpoint, page)
+        calls.append(response)
+        got = response.get("data") if response.get("success") else None
+        if not isinstance(got, dict) or "rows" not in got:
+            return calls, rows, response
+        if last is not None and got["rows"] and int(got["rows"][0][column]) <= last:
+            break
+        rows += got["rows"]
+        if not got.get("truncated") or not got["rows"]:
+            break
+        last = int(got["rows"][-1][column])
+    return calls, rows, None
+
+
+async def get_task_job_rows(task_id: int, since: str | None = None) -> dict[str, Any]:
+    """A task's jobs and their number by jobStatus: task/get_job_rows, page by page.
+
+    The endpoint (panda-server 80134dc2, pages from 2c915d4e) reads
+    jobsDefined4, jobsActive4, jobsArchived4 and ATLAS_PANDAARCH.jobsArchived
+    in one UNION, a row the same in two tables once (two copies of a job that
+    differ in a column are two rows), and names no table:
+    a job in a final state is in jobsArchived4 or the archive, any other in
+    jobsDefined4 or jobsActive4 (tmaeno, 2026-11-18).  jobsArchived4 and the
+    archive are read from *since* (the task's creation without it), widened by
+    the server to whole UTC days.  A call gives at most ``max_rows`` rows in
+    PandaID order and ``truncated`` when there are more; the next page is asked
+    with ``after_panda_id``, the last PandaID before.  Every call counts every
+    job of the window by jobStatus.
+
+    Args:
+        task_id: the JEDI task ID.
+        since: the start of the window, in UTC (``2026-10-12 14:30:45``).
+
+    Returns:
+        On success ``{"success": True, "rows", "truncated", "counts", "as_of",
+        "since", "until", "retained_from", "pages", "calls"}``: the rows of
+        every page in order; counts and as_of the first call's, which read its
+        rows and counts in one transaction; since, until and retained_from the
+        first call's too; truncated whether the last page read was cut (after
+        :data:`TASK_JOB_PAGES` pages, a cut page with no row, or a page that
+        did not come after the one before: :func:`_pages`).  Otherwise
+        the first response that failed, as it came, with ``calls`` added.
+        ``calls`` holds every response, for the record.
+    """
+    request: dict[str, Any] = {"task_id": int(task_id)}
+    if since is not None:
+        request["since"] = since
+    calls, rows, failed = await _pages(
+        "task/get_job_rows", request, "after_panda_id", "PandaID"
+    )
+    if failed is not None:
+        return {**failed, "calls": calls}
+    first = calls[0]["data"]
+    return {
+        "success": True,
+        "rows": rows,
+        "truncated": bool(calls[-1]["data"].get("truncated")),
+        "counts": first["counts"],
+        "as_of": first["as_of"],
+        "since": first.get("since"),
+        "until": first.get("until"),
+        "retained_from": first.get("retained_from"),
+        "pages": len(calls),
+        "calls": calls,
+    }
+
+
+async def get_task_dataset_rows(task_id: int) -> dict[str, Any]:
+    """Every JEDI_Datasets column of one task's datasets: task/get_dataset_rows, page by page.
+
+    panda-server 80134dc2, pages from 47ed0e57.  A call gives at most
+    ``max_rows`` rows keyed as JediDatasetSpec spells its columns, None for
+    NULL, in datasetID order, and ``truncated`` when there are more; the next
+    page is asked with ``after_dataset_id``, the last datasetID before.
+
+    Returns:
+        On success the first call's response with every page's rows in
+        ``data["rows"]`` and the last page's ``truncated`` (after
+        :data:`TASK_JOB_PAGES` pages, or a cut page with no row, it stays
+        true); ``data``'s ``as_of`` and ``max_rows`` are the first call's.
+        Otherwise the first response that failed, as it came.  Either way
+        ``calls`` holds every response, for the record, and on success
+        ``pages`` their number.
+    """
+    calls, rows, failed = await _pages(
+        "task/get_dataset_rows",
+        {"task_id": int(task_id)},
+        "after_dataset_id",
+        "datasetID",
+    )
+    if failed is not None:
+        return {**failed, "calls": calls}
+    first = calls[0]
+    data = {
+        **first["data"],
+        "rows": rows,
+        "truncated": bool(calls[-1]["data"].get("truncated")),
+    }
+    return {**first, "data": data, "pages": len(calls), "calls": calls}
 
 
 async def db_read(

@@ -23,6 +23,9 @@ import pytest
 from bamboo.codemap import diff, evidence, gates, pathcond, values
 from bamboo.codemap.gitsource import blob_sha
 from bamboo.codemap.models import (
+    HOP_HANDED,
+    HOP_KEPT,
+    HOP_RETURNED,
     KEY_BOUND,
     KEY_CONSTANT,
     KEY_HANDED,
@@ -6868,9 +6871,40 @@ def test_the_schema_qualifier_says_whose_table_it_is():
 def test_a_foreign_schema_table_is_a_boundary_in_both_directions():
     """A shared table is a channel, and which way is broken is the first question.
 
-    An endpoint is inbound only; ``PRODSYS_COMM`` carries commands out to DEFT
-    and back, so recording one direction would describe half the channel.
+    An endpoint is inbound only; ``T_TASK`` carries a task's state out to DEFT
+    and its definition back, so recording one direction would describe half the
+    channel.
     """
+    source = (
+        "class TaskModule:\n"
+        "    def read_task(self, jediTaskID):\n"
+        "        sqlR = f'SELECT taskid,status FROM {panda_config.schemaDEFT}.T_TASK '\n"
+        "        sqlR += 'WHERE taskid=:taskid '\n"
+        "        varMap = {}\n"
+        "        self.cur.execute(sqlR + comment, varMap)\n"
+        "    def set_status(self, jediTaskID):\n"
+        "        sqlD = f'DELETE FROM {panda_config.schemaDEFT}.T_TASK WHERE TASKID=:t '\n"
+        "        self.cur.execute(sqlD + comment, varMap)\n"
+        "        sqlI = f'INSERT INTO {panda_config.schemaDEFT}.T_TASK "
+        "(TASKID,STATUS) VALUES (:t,:c) '\n"
+        "        self.cur.execute(sqlI + comment, varMap)\n"
+    )
+    channels, _coverage = _channels(source)
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert (channel.system, channel.interface) == ("deft", "ATLAS_DEFT.T_TASK")
+    assert channel.transport == "shared_table"
+    assert channel.carried_values == ["status", "taskid"]
+    assert channel.handed_over == ["STATUS", "TASKID"]
+    # A DELETE next to an INSERT is the finding: a second write silently
+    # replaces one that was never picked up.
+    assert channel.operations == ["DELETE", "INSERT", "SELECT"]
+
+
+def test_a_table_the_other_system_does_not_write_is_no_channel():
+    """DEFT writes no command into PRODSYS_COMM directly: its rows are PanDA's, made for the task API, so reading
+    it is no arrival from DEFT and a reader missing a row there has no other writer to name."""
     source = (
         "class TaskModule:\n"
         "    def exec_command(self, jediTaskID):\n"
@@ -6879,23 +6913,14 @@ def test_a_foreign_schema_table_is_a_boundary_in_both_directions():
         "        varMap = {}\n"
         "        self.cur.execute(sqlR + comment, varMap)\n"
         "    def send_command(self, jediTaskID):\n"
-        "        sqlD = f'DELETE FROM {panda_config.schemaDEFT}.PRODSYS_COMM WHERE COMM_TASK=:t '\n"
-        "        self.cur.execute(sqlD + comment, varMap)\n"
         "        sqlI = f'INSERT INTO {panda_config.schemaDEFT}.PRODSYS_COMM "
         "(COMM_TASK,COMM_CMD) VALUES (:t,:c) '\n"
         "        self.cur.execute(sqlI + comment, varMap)\n"
     )
-    channels, _coverage = _channels(source)
+    channels, coverage = _channels(source)
 
-    assert len(channels) == 1
-    channel = channels[0]
-    assert (channel.system, channel.interface) == ("deft", "ATLAS_DEFT.PRODSYS_COMM")
-    assert channel.transport == "shared_table"
-    assert channel.carried_values == ["comm_cmd", "comm_task"]
-    assert channel.handed_over == ["COMM_CMD", "COMM_TASK"]
-    # A DELETE next to an INSERT on a command table is the finding: a second
-    # command silently replaces one that was never picked up.
-    assert channel.operations == ["DELETE", "INSERT", "SELECT"]
+    assert channels == []
+    assert [(one.candidates, one.explained) for one in coverage] == [(2, 2)]
 
 
 def test_one_column_is_not_two_because_the_case_differs():
@@ -20497,19 +20522,22 @@ def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_
     (kept,) = [one for one in froms if one.unread == KEY_KEPT and one.owner.endswith("::Refiner.extract")]
     assert kept.object == "taskSpec"
     hops = [
-        (hop.via, hop.owner.rpartition("::")[2], hop.held, [(w.statement, w.object) for w in hop.persisted], hop.open)
+        (
+            hop.way,
+            hop.via,
+            hop.owner.rpartition("::")[2],
+            hop.held,
+            [(w.statement, w.object) for w in hop.persisted],
+            hop.open,
+        )
         for hop in kept.kept_hops
     ]
-    # ``impl`` is a ``Prod``: its ``extract`` is the subclass's, which keeps the object in its ``self`` again.
+    # ``impl`` is a ``Prod``: its ``extract`` is the subclass's, which keeps the object in its ``self`` again; ``run``
+    # hands it to ``note``, which neither persists it nor hands it on: named, no hop of its own.
+    up = [f"{rel}:{at['Refiner.extract(self']}", f"{rel}:{at['impl.extract(']}"]
     assert hops == [
-        ([f"{rel}:{at['Refiner.extract(self']}"], "Prod.extract", ["self.taskSpec"], [], ""),
-        (
-            [f"{rel}:{at['Refiner.extract(self']}", f"{rel}:{at['impl.extract(']}"],
-            "run",
-            ["impl.taskSpec"],
-            [(at["(spec,"], "spec")],
-            "",
-        ),
+        (HOP_KEPT, up[:1], "Prod.extract", ["self.taskSpec"], [], ""),
+        (HOP_KEPT, up, "run", ["impl.taskSpec"], [(at["(spec,"], "spec")], ""),
     ]
     assert kept.kept_hops[1].handed_to == [f"{rel}::note"]
 
@@ -20525,6 +20553,91 @@ def test_an_object_kept_in_what_it_was_handed_names_the_writes_persisting_it_in_
         (at["(spec,"], "status IN (:old___in)", False, method, [update]),
         (at["(other,"], 'jediTaskID=criteria["jediTaskID"]', False, method, [update]),
         (at["(other,"], "status IN (:old___in)", True, method, [update]),
+    ]
+
+
+_FILE_PROXY = '''
+_logger = PandaLogger().getLogger("DBProxy")
+
+
+class FileModule:
+    def updateFile_JEDI(self, fileSpec: JediFileSpec, criteria):
+        sqlU = f"UPDATE {panda_config.schemaJEDI}.JEDI_Dataset_Contents SET {fileSpec.bindUpdateChangesExpression()} "
+        sql = "WHERE "
+        varMap = {}
+        for tmpKey, tmpVal in criteria.items():
+            crKey = f":cr_{tmpKey}"
+            sql += f"{tmpKey}={crKey} AND "
+            varMap[crKey] = tmpVal
+        sql = sql[:-4]
+        self.cur.execute(sqlU + sql + comment, varMap)
+'''
+
+_HOPPED = '''
+class Maker:
+    def gen(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "ready"
+        return taskSpec
+
+    def hand(self, jediTaskID):
+        taskSpec = JediTaskSpec()
+        taskSpec.jediTaskID = jediTaskID
+        taskSpec.status = "pending"
+        self.store(taskSpec, jediTaskID)
+
+    def store(self, spec: JediTaskSpec, jediTaskID):
+        self.taskBufferIF.setTaskStatus_JEDI(spec, {"jediTaskID": jediTaskID}, ["registered"])
+        fileSpec: JediFileSpec = JediFileSpec()
+        fileSpec.status = spec.status
+        self.taskBufferIF.updateFile_JEDI(fileSpec, {"jediTaskID": jediTaskID})
+
+
+class Runner:
+    def run(self, jediTaskID):
+        maker = Maker()
+        made = maker.gen(jediTaskID)
+        maker.store(made, jediTaskID)
+'''
+
+
+def test_an_object_returned_or_handed_on_names_the_writes_persisting_it_up_and_down_the_calls(tmp_path):
+    """``JobGenerator.doGenerate`` sets ``prodSourceLabel`` on the jobs it makes and returns them, and its caller hands
+    them on to be inserted: the object a function returns is followed to each caller holding the call's value, and
+    the object a function -- or a caller a hop reaches -- hands to a call into each function the call lands in, its
+    parameter holding it, where the writes persisting it are read as a caller's are: a file given the task's status
+    is another class's object, no write of the task."""
+    rel = "pandajedi/jediorder/Runner.py"
+    froms, _keys = _flushed(
+        tmp_path,
+        _HOPPED,
+        rel,
+        more={
+            "pandaserver/taskbuffer/db_proxy_mods/status_module.py": _KEPT_PROXY,
+            "pandaserver/taskbuffer/db_proxy_mods/file_module.py": _FILE_PROXY,
+        },
+    )
+    lines = _HOPPED.split("\n")
+    at = {
+        text: next(n for n, line in enumerate(lines, 1) if text in line)
+        for text in ("maker.gen(", "maker.store(", "self.store(", "setTaskStatus_JEDI(spec")
+    }
+
+    def hops(owner: str, unread: str) -> list:
+        (record,) = [one for one in froms if one.unread == unread and one.owner.endswith(f"::{owner}")]
+        return [
+            (hop.way, hop.via, hop.owner.rpartition("::")[2], hop.held, [(w.statement, w.object) for w in hop.persisted])
+            for hop in record.kept_hops
+        ]
+
+    flush = [(at["setTaskStatus_JEDI(spec"], "spec")]
+    assert hops("gen", KEY_RETURNED) == [
+        (HOP_RETURNED, [f"{rel}:{at['maker.gen(']}"], "run", [], []),
+        (HOP_HANDED, [f"{rel}:{at['maker.gen(']}", f"{rel}:{at['maker.store(']}"], "store", ["spec"], flush),
+    ]
+    assert hops("hand", KEY_HANDED) == [
+        (HOP_HANDED, [f"{rel}:{at['self.store(']}"], "store", ["spec"], flush),
     ]
 
 
@@ -22324,6 +22437,25 @@ def test_the_ddl_says_a_tables_partition_and_the_schema_creating_it(tmp_path):
     }
 
 
+def test_the_ddl_says_what_a_column_an_insert_leaves_out_holds(tmp_path):
+    """A column's DEFAULT as written, none where it gives none (NULL); a column a BEFORE INSERT trigger's body
+    assigns is not said -- JEDI_TASKS' realModificationTime --, an UPDATE-only trigger's is."""
+    (tmp_path / "ATLAS_PANDA.sql").write_text(
+        'CREATE TABLE "ATLAS_PANDA"."JOB_OUTPUT_REPORT"\n(\n    "PANDAID" NUMBER(11) NOT NULL,\n'
+        '    "TIMESTAMP" DATE NOT NULL,\n    "LOCKEDBY" VARCHAR2(40),\n    "ATTEMPTNR" NUMBER(3) DEFAULT \'0\' NOT NULL,\n'
+        '    "STATUS" VARCHAR2(20) DEFAULT NULL,\n    "CREATED" DATE DEFAULT sysdate\n);\n'
+        'CREATE TABLE "ATLAS_PANDA"."JEDI_TASKS"\n(\n    "JEDITASKID" NUMBER(11),\n    "REALMODIFICATIONTIME" TIMESTAMP\n);\n'
+        'CREATE OR REPLACE TRIGGER "ATLAS_PANDA"."T1"\nBEFORE UPDATE OR INSERT OF MODIFICATIONTIME ON "ATLAS_PANDA"."JEDI_TASKS"\n'
+        'FOR EACH ROW\nBEGIN\n    :NEW."REALMODIFICATIONTIME" := SYS_EXTRACT_UTC(systimestamp);\nEND;\n/\n'
+        'CREATE OR REPLACE TRIGGER "ATLAS_PANDA"."T2"\nBEFORE UPDATE OF PANDAID ON "ATLAS_PANDA"."JOB_OUTPUT_REPORT"\n'
+        'FOR EACH ROW\nBEGIN\n    :NEW."LOCKEDBY" := NULL;\nEND;\n/\n'
+    )
+    assert sqltext.read_defaults(tmp_path) == {
+        "job_output_report": {"attemptnr": "\'0\'", "status": "NULL", "created": "sysdate"},
+        "jedi_tasks": {"realmodificationtime": None},
+    }
+
+
 def test_a_union_pairs_the_tables_its_arms_read_in_one_place():
     """The arms' one sources, or the sources of one alias -- not every table of a joined arm with every other, not
     a WITH name."""
@@ -23437,3 +23569,164 @@ def test_a_received_key_is_the_column_of_the_terms_the_receiver_names_rows_by_wi
 
     assert edge.received_as == {"taskid": ["JediTaskSpec.jediTaskID"]}
     assert elsewhere.received_as == {}
+
+
+_ATOMS = '''
+class Proxy:
+    def propagate(self, jobSpec: JobSpec, fileSpec: JediFileSpec, other):
+        if (jobSpec.jobStatus == "finished" or jobSpec.jobSubStatus == "fg_done") and fileSpec.status != "skipped":
+            fileSpec.status = "finished"
+        if "lost" == jobSpec.jobStatus and other.state in ("a", "b") and jobSpec.PandaID > len(other.ids):
+            fileSpec.status = "lost"
+'''
+
+
+def test_a_branch_names_each_attribute_its_path_condition_compares_with_constants_by_class():
+    """propagateResultToJEDI writes an input file ``finished`` under ``jobSpec.jobStatus == 'finished'``, ``jobSpec``
+    its parameter: each comparison of an object's attribute with constants in a branch's path condition is said as
+    ``Class.attr``, the operator and the constants -- either side of it --, with the parameter the object is, so a
+    reader evaluates the condition way by way on a row's columns.  An attribute the class does not declare, or an
+    object no class is known for, is said with no subject; a comparison with anything but constants is none."""
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ATOMS, "pandaserver/taskbuffer/Proxy.py")]
+    _subjects, junctions, _c, _d, _e = progress.extract(modules, MAP_ID, VERSION)
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms(
+        junctions, modules, progress.equipped_attributor(modules, declarations), declarations
+    )
+    (junction,) = [one for one in junctions if one.subject == "JediFileSpec.status"]
+    atoms = {
+        branch.outcome: [
+            (atom.subject, atom.op, atom.values, atom.object, atom.parameter) for atom in branch.condition_atoms
+        ]
+        for branch in junction.branches
+    }
+    lost = [
+        ("", "in", ["'a'", "'b'"], "other", "other"),
+        ("JobSpec.jobStatus", "==", ["'lost'"], "jobSpec", "jobSpec"),
+    ]
+    assert sorted(atoms["lost"]) == lost
+    # The first write's value stands where the second does not run: its condition holds the second's negated, whose
+    # comparisons are listed with the entry that negates them.
+    assert sorted(atoms["finished"]) == sorted(
+        [
+            ("", "==", ["'fg_done'"], "jobSpec", "jobSpec"),
+            ("JediFileSpec.status", "!=", ["'skipped'"], "fileSpec", "fileSpec"),
+            ("JobSpec.jobStatus", "==", ["'finished'"], "jobSpec", "jobSpec"),
+            *lost,
+        ]
+    )
+    for branch in junction.branches:
+        for atom in branch.condition_atoms:
+            assert atom.text in branch.path_condition[atom.entry]
+
+
+_ACCUMULATED = """
+class Proxy:
+    def propagate(self, jobSpec: JobSpec, fileSpec: JediFileSpec):
+        stat = {}
+        varMap = {}
+        if jobSpec.jobStatus == "finished":
+            varMap[":status"] = "finished"  # FINISHED
+        else:
+            varMap[":status"] = "failed"  # FAILED
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status", varMap)
+        fileStatus = varMap[":status"]
+        stat[fileSpec.fileID] = {"nFilesFinished": 0, "nFilesFailed": 0}
+        if fileSpec.status == "merging":
+            pass
+        elif fileStatus in ["finished", "lost"]:
+            stat[fileSpec.fileID]["nFilesFinished"] += 1  # COUNTED
+        else:
+            stat[fileSpec.fileID]["nFilesFailed"] += 1
+        for key in stat[fileSpec.fileID]:
+            self.cur.execute(f"UPDATE ATLAS_PANDA.JEDI_Datasets SET {key}={key}+{stat[fileSpec.fileID][key]}")
+"""
+
+
+def test_a_counter_write_says_the_statements_adding_to_the_count_it_takes_and_when_they_run():
+    """propagateResultToJEDI's ``nFilesFinished=nFilesFinished+{}`` takes datasetContentsStat's count, which only
+    ``fileStatus in ['finished', 'lost']`` adds to: the branch says that statement, its path condition and atoms --
+    ``fileStatus``, defined once from the UPDATE's bind, placed on the JediFileSpec.status that run writes (the
+    junction whose branches fill ``:status``), so a reader can go on to the job statuses that write it; a merging
+    file is not counted.  A branch of another outcome has none."""
+    rel = "pandaserver/taskbuffer/Proxy.py"
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ACCUMULATED, rel)]
+
+    def line(marker: str) -> int:
+        (found,) = [n for n, text in enumerate(_ACCUMULATED.splitlines(), 1) if text.rstrip().endswith(f"# {marker}")]
+        return found
+
+    def junction(subject: str, branches: list[Branch]) -> JunctionNode:
+        return JunctionNode(
+            map_id=MAP_ID, derived_from=VERSION, name=f"n:{subject}", subject=subject, owner=f"{rel}::propagate",
+            branches=branches, anchor=Anchor(package="p", file=rel, line_start=3),
+        )
+
+    written = junction(
+        "JediFileSpec.status",
+        [Branch(outcome="finished", line=line("FINISHED")), Branch(outcome="failed", line=line("FAILED"))],
+    )
+    counter = junction("JediDatasetSpec.nFilesFinished", [Branch(outcome="runtime(nFilesFinished + {})", line=22)])
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms(
+        [written, counter], modules, progress.equipped_attributor(modules, declarations), declarations
+    )
+
+    (accumulation,) = counter.branches[0].accumulated
+    assert (accumulation.line, accumulation.op, accumulation.amount) == (line("COUNTED"), "+", "1")
+    assert accumulation.path_condition == [
+        "not (fileSpec.status == 'merging')",
+        "fileStatus in ['finished', 'lost']",
+    ]
+    assert [(a.entry, a.subject, a.op, a.values, a.object, a.written) for a in accumulation.condition_atoms] == [
+        (0, "JediFileSpec.status", "==", ["'merging'"], "fileSpec", False),
+        (1, "JediFileSpec.status", "in", ["'finished'", "'lost'"], "fileStatus", True),
+    ]
+    assert [one.accumulated for one in written.branches] == [[], []]
+
+
+def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_constants():
+    """An SQL write's branch and an alias call site's carry their comparisons as an attribute write's do -- a signed
+    number a constant too --, the function their junction's owner names read; the callee's own test an alias's
+    branch holds (``[in setOnHold()]``) is the callee's ``self``, no atom of the caller's."""
+    writer = (
+        "class M:\n"
+        "    def f(self, taskSpec: JediTaskSpec, jediTaskID):\n"
+        "        if taskSpec.status == 'running' and taskSpec.jediTaskID != -1:\n"
+        "            sql = 'UPDATE ATLAS_PANDA.JEDI_Tasks SET oldStatus=:oldStatus WHERE jediTaskID=:jediTaskID '\n"
+        "            varMap = {}\n"
+        "            varMap[':jediTaskID'] = jediTaskID\n"
+        "            varMap[':oldStatus'] = 'paused'\n"
+        "            self.cur.execute(sql + comment, varMap)\n"
+    )
+    caller = (
+        "def generate(self, taskSpec: JediTaskSpec, inputChunk):\n"
+        "    if taskSpec.oldStatus is None and not inputChunk.hasCandidates():\n"
+        "        taskSpec.setOnHold()\n"
+    )
+    modules = [
+        _module(_ON_HOLD, "pandaserver/taskbuffer/JediTaskSpec.py"),
+        _module(writer, "pandaserver/taskbuffer/db_proxy_mods/task_module.py"),
+        _module(caller, "pandajedi/jediorder/JobGenerator.py"),
+    ]
+    declarations = progress.spec_attributes(modules)
+    attributor = progress.equipped_attributor(modules, declarations)
+    attributor.learn_table_classes(modules)
+    _s, written, _c, _u, _d, _x, _stops = sqlwrite.extract(modules, MAP_ID, VERSION, attributor)
+    _subjects, called, _cov = alias.extract(modules, MAP_ID, VERSION, declarations, attributor)
+    junctions = [*written, *called]
+
+    assert progress.attach_condition_atoms(junctions, modules, attributor, declarations) == 2
+    atoms = {
+        junction.subject: [
+            (atom.subject, atom.op, atom.values, atom.parameter)
+            for branch in junction.branches
+            for atom in branch.condition_atoms
+        ]
+        for junction in junctions
+    }
+    assert sorted(atoms["JediTaskSpec.oldStatus"]) == [
+        ("JediTaskSpec.jediTaskID", "!=", ["-1"], "taskSpec"),
+        ("JediTaskSpec.status", "==", ["'running'"], "taskSpec"),
+    ]
+    assert atoms["JediTaskSpec.status"] == [("JediTaskSpec.oldStatus", "is", ["None"], "taskSpec")]

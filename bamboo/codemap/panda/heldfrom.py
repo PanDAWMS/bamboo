@@ -79,6 +79,7 @@ from bamboo.codemap.models import (
     FIELD_SETATTR,
     KEY_ATTRIBUTE,
     KEY_CALL,
+    KEY_COLUMN_TEXTS,
     KEY_CONSTANT,
     KEY_CONTAINER,
     KEY_DATABASE,
@@ -110,9 +111,11 @@ from bamboo.codemap.models import (
     HeldSource,
     HeldThrough,
     JunctionNode,
+    KeySource,
     KeyStop,
     ParameterFrom,
     ReadSiteNode,
+    RowAggregate,
     SetFrom,
     WriteFrom,
 )
@@ -187,6 +190,16 @@ class _Way(NamedTuple):
     aggregate: Optional[Any] = None
     #: In the order met going back from the read (:attr:`HeldSource.printed`, :meth:`_Reader._return_printed`).
     printed: tuple["_Printed", ...] = ()
+    #: Where the end is a statement's rows read as no one select item (no *column*): ``(position, paths)`` of each
+    #: select item, the parts of the value it sits at, spelled as *paths* and cut by each step as they are
+    #: (:func:`_items_cut`).  A position the steps take whole is the item the value is (:meth:`_Reader._item_read`):
+    #: a callee's ``return self.cur.fetchall()`` is the rows whole, and its caller's ``for id, lockedby in res``
+    #: takes ``[*]`` then ``[0]``, the first select item.
+    items: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    #: Where the end is a statement's select item whose texts give it different columns (*column_unread* ``texts
+    #: differ``): the column, ``table.column`` lowered, on each select list, empty on one with no such item
+    #: (:meth:`_Reader._text_columns`).
+    texts: tuple[str, ...] = ()
 
 
 class _Printed(NamedTuple):
@@ -226,6 +239,9 @@ class RowItem(NamedTuple):
     made: str = ""
     #: The item is one column's ``MAX`` or ``MIN`` (:class:`sqltext.Aggregate`): that.
     aggregate: Optional[Any] = None
+    #: Where the statement's texts give the item different columns: each text's (:attr:`_Way.texts`) -- a reader
+    #: whose classes declare them one attribute reads that (``jobsDefined4``'s or ``jobsActive4``'s ``PandaID``).
+    texts: tuple[str, ...] = ()
 
 
 def _placed_in(ways: list[_Way], file: str, func: ast.AST) -> list[_Way]:
@@ -412,8 +428,10 @@ def _step(
         and way.through[0].steps == len(way.steps)
     ):
         return [way._replace(through=way.through[1:])]
-    if not way.paths or step == _ENTER:
+    if step == _ENTER:
         return [way._replace(steps=way.steps + (step,))]
+    if not way.paths:
+        return [_items_cut(way._replace(steps=way.steps + (step,)), step, element, keys)]
     if select is not None and step == "[*]" and not way.loose:
         return _selected(way, select, element, keys)
     return _cut(way, step, element, unread, keys)
@@ -429,6 +447,20 @@ def _cut(way: _Way, step: str, element: bool, unread: Optional[_Way], keys: bool
     if "()" in under:
         found.insert(0, unread or _unread_part(way, step) if way.loose else way._replace(paths=()))
     return found
+
+
+def _items_cut(way: _Way, step: str, element: bool, keys: bool) -> _Way:
+    """*way*, whose value is its source itself (no *paths*), with its select items' parts (:attr:`_Way.items`, where
+    each sits in the source) cut by *step*: an item no part of which is under the step is gone.  While the source
+    sits at parts of the value, a step takes those parts and leaves the items as they are."""
+    if not way.items:
+        return way
+    from bamboo.codemap.panda.recognizers.sqlwrite import paths_under
+
+    items = tuple(
+        (position, under) for position, paths in way.items if (under := tuple(paths_under(step, paths, element, keys)))
+    )
+    return way._replace(items=items)
 
 
 def _path_key(path: str) -> Optional[str]:
@@ -946,6 +978,24 @@ def _called_at(ways: list[_Way], here: str) -> list[_Way]:
     ]
 
 
+def _aggregate_said(aggregate: Optional[Any]) -> Optional[RowAggregate]:
+    """*aggregate* (:class:`sqltext.Aggregate`) as a source's :attr:`HeldSource.aggregate`, its columns spelled as the
+    source's *column* is: ``table.column`` lowered."""
+    if aggregate is None:
+        return None
+
+    def spelled(table: str, column: str) -> str:
+        return f"{table}.{column}" if table else column
+
+    return RowAggregate(
+        fn=aggregate.fn,
+        column=spelled(aggregate.table, aggregate.column) if aggregate.column else "",
+        value=aggregate.value,
+        group_by=[spelled(*one) for one in aggregate.group_by],
+        counted=[spelled(*one) for one in aggregate.counted],
+    )
+
+
 def owner_of(file: str, func: ast.AST) -> str:
     return f"{file}::{def_name(func) or '<module>'}"
 
@@ -1091,8 +1141,15 @@ def _declared_or_unread(func: ast.AST) -> tuple[frozenset[str], dict[str, str]]:
 def _binds(func: ast.AST, name: str) -> bool:
     """Whether *func*'s own statements bind *name* by any form -- an import, a ``def``, a ``match`` capture too --,
     which makes it *func*'s own by Python's rule, or, declared ``global`` or ``nonlocal``, read by those bindings
-    (:meth:`_Reader._bound`).  A name it binds by none is a module's."""
+    (:meth:`_Reader._bound`).  A name it binds by none is an enclosing function's that holds it
+    (:func:`pathcond.closure_scope`), else a module's."""
     return _bound_here(func, name) or name in _declared_or_unread(func)[1]
+
+
+def _holds(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* holds *name* for a function it encloses (:func:`pathcond.closure_scope`): a parameter of
+    it, or a binding of its own statements by any form (:func:`_binds`)."""
+    return name in _parameters(scope) or _binds(scope, name)
 
 
 def _index(expr: ast.expr) -> Optional[int]:
@@ -1157,6 +1214,9 @@ class _Reader:
         for site in sites:
             self.sites_of.setdefault(site.owner, []).append(site)
         self._filled: dict[int, object] = {}
+        #: A read site's name -> ``(the _Filled of its function, the site)``, as :meth:`_sources` met it: the select
+        #: lists a way's :attr:`_Way.items` are of (:meth:`_item_read`).
+        self._row_sites: dict[str, tuple[Any, ReadSiteNode]] = {}
         self._cursor_fields: dict[int, set[str]] = {}
         #: What a callee returns or yields, by the function and the classes ``self`` is there (:data:`_Selves`).
         self._returns: dict[tuple[int, tuple, Optional[str]], list[_Way]] = {}
@@ -1269,13 +1329,16 @@ class _Reader:
         found = []
         cursors = self._cursors(file, func)
         read = ast.unparse(expr) if isinstance(expr, ast.Attribute) else ""
-        for source in self.filled(file, func).sources(expr, at):
+        filled = self.filled(file, func)
+        for source in filled.sources(expr, at):
             if source.kind == KEY_SELF_FIELD and source.name in cursors:
                 continue
             parts = tuple(path for path in source.paths if path != "()")
             if source.kind == KEY_SELF_FIELD and source.name == read:
                 parts = ()
             loose = source.kind not in (KEY_ROWS, KEY_SEQUENCE)
+            # Where each select item sits in the value, which the way with no paths is: the source itself.
+            items = self._row_items(filled, source, expr, at) if source.kind == KEY_ROWS and not source.column else ()
             # The value itself and parts of it too: two ways, the whole (no paths) and the parts -- a way with paths
             # sits at those parts only.
             for paths in ([()] if "()" in source.paths or not parts else []) + ([parts] if parts else []):
@@ -1296,9 +1359,62 @@ class _Reader:
                         attr=source.attr,
                         column_unread=source.column_unread,
                         loose=bool(paths) and loose,
+                        items=() if paths else items,
                     )
                 )
         return found
+
+    def _row_items(
+        self, filled: Any, source: KeySource, expr: ast.expr, at: ast.AST
+    ) -> tuple[tuple[int, tuple[str, ...]], ...]:
+        """:attr:`_Way.items` of *source*, a statement's rows *expr* holds where *at* runs and no one select item of
+        them: where each select item sits in *expr*'s value, as the carry of that item alone reads it
+        (:meth:`sqlwrite._Filled.column` reads the same carries for the item *expr* is)."""
+        site = next((one for one in filled.sites if one.name == source.name), None)
+        if site is None:
+            return ()
+        self._row_sites.setdefault(site.name, (filled, site))
+        found = []
+        for position in self._sqlwrite._positions(filled.items(site)):
+            paths = filled._item(site, position).held(expr, at)
+            if paths:
+                found.append((position, tuple(self._sqlwrite._spelled_paths(paths))))
+        return tuple(found)
+
+    def _item_read(self, way: _Way) -> _Way:
+        """*way*, a statement's rows its steps took one select item of whole (:attr:`_Way.items`), as that item: its
+        column, as :meth:`sqlwrite._Filled.column` chooses it on the statement's select lists, with no steps or
+        parts left -- the value is the item, as where the function reading it ran the statement itself.  Any other
+        way as it is."""
+        if way.kind != KEY_ROWS or way.column or not way.items:
+            return way
+        held = [position for position, paths in way.items if "()" in paths]
+        found = self._row_sites.get(way.name)
+        if not held or found is None:
+            return way
+        filled, site = found
+        lists = filled.items(site)
+        column, attr, unread = self._sqlwrite._column_choice(lists, held, None, site, filled.attr)
+        aggregate = self._sqlwrite._column_aggregate(lists, held) if not column else None
+        return way._replace(
+            column=column,
+            attr=attr or way.attr,
+            column_unread=unread,
+            aggregate=aggregate,
+            steps=(),
+            paths=(),
+            loose=False,
+            items=(),
+            texts=self._text_columns(lists, held, site) if unread == KEY_COLUMN_TEXTS else (),
+        )
+
+    def _text_columns(self, lists: tuple, held: list[int], site: ReadSiteNode) -> tuple[str, ...]:
+        """The column, ``table.column`` lowered, the select item at *held* is on each of *lists* (:attr:`_Way.texts`),
+        as :func:`sqlwrite._column_choice` chooses it on one; empty on a list with none."""
+        return tuple(
+            self._sqlwrite._item_choice(items, [number for number in held if number < len(items)], None, site)[0]
+            for items in lists
+        )
 
     def _cursors(self, file: str, func: ast.AST) -> set[str]:
         held = self._cursor_fields.get(id(func))
@@ -1330,8 +1446,9 @@ class _Reader:
         """The ways of *expr*, read where *at* runs in *func*; one ending at *func*'s own parameter is kind
         ``parameter``.  Each end made here is placed in *file* (:func:`_placed_in`).  *selves*: the classes ``self``
         can be in *func*, as the call entering it placed it (:data:`_Selves`); a call there is placed, and what may
-        change a name's object in place is read, for them."""
-        return _placed_in(self._ways_of(expr, at, file, func, selves=selves), file, func)
+        change a name's object in place is read, for them.  A statement's rows whose steps took one select item whole
+        are that item (:meth:`_item_read`)."""
+        return [self._item_read(one) for one in _placed_in(self._ways_of(expr, at, file, func, selves=selves), file, func)]
 
     def binding_rows(self, expr: ast.Name, site: ast.AST, file: str, func: ast.AST) -> tuple[list[RowItem], bool]:
         """What the binding *site* of *func*, reaching the read *expr*, gives it, read as a statement's rows: a
@@ -1340,14 +1457,16 @@ class _Reader:
         a call's value -- where the same value is the select item a guard's way names (``for (id,) in res``).  A way
         through a call or an operator that makes another value of the item -- a text holding it, a sum -- is not the
         item whole; a copy and the same value as another type (``int(row[0])``) are (:data:`_SAME_VALUE`)."""
-        ways = [one for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
+        ways = [self._item_read(one) for one in self._bound(expr, expr, site, file, func) if one.kind != KEY_CONTAINER]
         items = []
         for one in ways:
             if one.kind != KEY_ROWS:
                 continue
             made = next((through.gives for through in one.through if through.gives not in _SAME_VALUE), "")
             whole = not made and not one.steps and not one.loose and all(path in ("", "()") for path in one.paths)
-            items.append(RowItem(one.name, one.column, one.attr, one.column_unread, whole, made, one.aggregate))
+            items.append(
+                RowItem(one.name, one.column, one.attr, one.column_unread, whole, made, one.aggregate, one.texts)
+            )
         return items, bool(ways) and len(items) == len(ways)
 
     def _ways_of(self, expr: ast.expr, at: ast.AST, file: str, func: ast.AST, selves: _Selves = ()) -> list[_Way]:
@@ -1649,6 +1768,13 @@ class _Reader:
             and not _binds(func, expr.id)
             and pathcond.comprehension_clause(func, expr.id, point) is None
         ):
+            outer = (
+                None
+                if expr.id in pathcond.declared_names(func)[0]
+                else pathcond.closure_scope(func, expr.id, _holds)
+            )
+            if outer is not None:
+                return self._closure(expr, file, outer)
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         last = _statement_of(point)
         if any(one.kind == pathcond.BIND_WALRUS and not one.nested for one in pathcond.bindings(func, expr.id)):
@@ -1660,6 +1786,26 @@ class _Reader:
         for site in sites:
             ways = self._site_ways(expr, point, site, file, func, last, selves=selves)
             found += _chosen(ways, file, site) if len(sites) > 1 else ways
+        return found
+
+    def _closure(self, expr: ast.Name, file: str, outer: ast.AST) -> list[_Way]:
+        """The ways of a name *expr*'s function reads from *outer*, the enclosing function holding it
+        (:func:`pathcond.closure_scope`): *outer*'s parameter, read as its own, where it is one, and each binding
+        of *outer*'s own statements -- the nested function may run after any of them, so none is chosen by where the
+        name is read --, each read where it is made, what changes the object in place after it not carried.
+        ``AdderThread.run``'s ``time_limit=lock_interval`` is ``add_main.main``'s ``lock_interval = 10`` at 57.  A
+        binding by a form not read (an import, a ``def``) is a stop ``unread_binding``, as at a function's entry
+        (:meth:`_bound`).  The read's ``self`` bindings are not *outer*'s, so none is carried there."""
+        held = expr.id in _parameters(outer)
+        sites = [one.site for one in pathcond.bindings(outer, expr.id) if not one.nested]
+        several = len(sites) + held > 1
+        found: list[_Way] = [self._parameter(file, outer, expr.id)] if held else []
+        for site in sites:
+            ways = self._site_ways(expr, site, site, file, outer, None)
+            found += _chosen(ways, file, site) if several else ways
+        form = _declared_or_unread(outer)[1].get(expr.id)
+        if form is not None:
+            found.append(_stop("unread_binding", expr.id, what=form, at=f"{file}:{expr.lineno}"))
         return found
 
     def _site_ways(
@@ -1698,15 +1844,23 @@ class _Reader:
         read of a local not a parameter, gives none: that way raises ``UnboundLocalError`` or is never taken (a
         test the binding's own test rules out, a statement before it that cannot raise) -- no value comes by it
         (``return retVal`` in the handler of a ``try`` whose first statement binds ``retVal``).  A name the
-        function declares ``global`` or ``nonlocal`` is the module's by that way, and a binding of the function that
-        reaches the read gives its own value, no other writer being read between (``global_task_buffer =
-        task_buffer`` read on the next statement).  Where the function binds the name by a form not read
-        (:func:`_declared_or_unread`), a stop ``unread_binding``."""
+        function declares ``global`` is the module's by that way, one it declares ``nonlocal`` the enclosing
+        function's that holds it (:meth:`_closure`), and a binding of the function that reaches the read gives its
+        own value, no other writer being read between (``global_task_buffer = task_buffer`` read on the next
+        statement).  Where the function binds the name by a form not read (:func:`_declared_or_unread`), a stop
+        ``unread_binding``."""
         if site is func.args:  # type: ignore[attr-defined]
             if expr.id in _parameters(func):
                 return [self._parameter(file, func, expr.id)]
             declared, unread = _declared_or_unread(func)
             if expr.id in declared:
+                outer = (
+                    pathcond.closure_scope(func, expr.id, _holds)
+                    if expr.id in pathcond.declared_names(func)[1]
+                    else None
+                )
+                if outer is not None:
+                    return self._closure(expr, file, outer)
                 return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
             form = unread.get(expr.id)
             if form is not None:
@@ -1861,7 +2015,8 @@ class _Reader:
         items = filled.items(site)
         column, attr, unread = self._sqlwrite._column_choice(items, [slot], expr, site, filled.attr)
         aggregate = self._sqlwrite._column_aggregate(items, [slot]) if not column else None
-        return way._replace(column=column, attr=attr or way.attr, column_unread=unread, aggregate=aggregate)
+        texts = self._text_columns(items, [slot], site) if unread == KEY_COLUMN_TEXTS else ()
+        return way._replace(column=column, attr=attr or way.attr, column_unread=unread, aggregate=aggregate, texts=texts)
 
     def _changed(
         self,
@@ -3309,6 +3464,7 @@ def _said(ways: list[_Way]) -> tuple[list[HeldSource], list[KeyStop]]:
                 elements_stops=elements_stops,
                 sent=one.sent,
                 keyed=[HeldKeyed(at=at, by=by, key=key) for at, by, key in one.keyed],
+                aggregate=_aggregate_said(one.aggregate),
             ),
         )
         # A way the same but for the prints of a call's value: the prints of each, once.
@@ -3569,8 +3725,9 @@ def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
 
 
 def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
-    """The names *test* reads that are *func*'s parameters or locals -- not a module's name or a comprehension's
-    own -- each at its first read; and each object rooted at ``self`` or ``cls`` that a field or method is read off,
+    """The names *test* reads that are *func*'s parameters or locals, or an enclosing function's it reads as a
+    closure (:func:`_enclosed`) -- not a module's name or a comprehension's own -- each at its first read; and each
+    object rooted at ``self`` or ``cls`` that a field or method is read off,
     by its path: ``self`` for ``self.splitRule is None``, ``self.taskSpec`` for ``self.taskSpec.usePrePro()`` -- the
     object a :class:`WriteFrom` of an arm writing ``self.splitRule`` or ``self.taskSpec.splitRule`` writes."""
     inner = {
@@ -3593,9 +3750,15 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
             and node.id not in ("self", "cls")
             and node.id not in inner
         ):
-            if node.id in own or _binds(func, node.id):
+            if node.id in own or _binds(func, node.id) or _enclosed(func, node.id):
                 found.setdefault(node.id, node)
     return found
+
+
+def _enclosed(func: ast.AST, name: str) -> bool:
+    """Whether *func* reads *name* as a closure: it neither binds nor declares it ``global``, and an enclosing
+    function holds it (:func:`pathcond.closure_scope`)."""
+    return name not in pathcond.declared_names(func)[0] and pathcond.closure_scope(func, name, _holds) is not None
 
 
 def _self_values(test: ast.expr) -> list[str]:

@@ -313,6 +313,8 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "rewrites_open",
     "copied_from",
     "copied_open",
+    "condition_atoms",
+    "accumulated",
     "unset_default",
     "amount",
     "handed",

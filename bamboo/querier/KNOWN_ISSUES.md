@@ -35,6 +35,15 @@ fetched).  The general form would be parts: the map's tables and conditions of t
 time, per row kind, from its status history and the tables it moves through; the conditions evaluated
 on those rows.  Reading 2 is that with job rows and no condition but the key.
 
+*Changed (2026-11-19, the harness's switch from db_read to task/get_job_rows, upstream 31f1a14a, delegated design):*
+the endpoint's counts and job rows name no table, and a job the same in two tables is one row.  Such a row is placed
+by its jobStatus, as the rows file's source says (`tables_by_status`, `placed_in`: a final job in jobsArchived4 or the
+archive, any other in jobsDefined4 or jobsActive4).  Reading 2's assumption is then that word, not read at the counts'
+moment, and the output says so.  A call that reads only one of the two tables a job not yet final may be in stops
+(`at_one_moment`'s fourth part, "the counts to place every job").  The endpoint's counts are its first page's moment
+and its rows every page's, as of the last: rows naming no table are needed read at or after the counts' moment, not at
+it, and the rows-to-counts check that follows stays.  Rows a db_read file names tables for are read as before.
+
 ### K2. S5's premise is not checked
 
 The premise: the count a pass printed is the number of rows the statement returned by the key.  A
@@ -613,6 +622,33 @@ source that is the value, so a part the read does not reach is a note and the re
 read whole is a value made of the literal (a constant-through way, never None), and a step into it takes the parts
 beside it, not the literal.  On a dump without containers (x13zns, x13znd) the stop stays.
 
+*Changed (P55's first piece, 2026-11-19, the investigator's u12 NJ-holding-late 2, delegated design):* S2 reads a pass
+whose run holds no record after a row of the mover whose next statement makes a call (no print), the statement after
+that printing a row the run would show, as stopped in that call: it did not come back from the call, and a raise from
+it printed nothing in the run (`Rerun._stopped_in_call`, `_following`).  Where the statuslog holds no row from the
+pass's start to the run that moved the value (L1's), what it set before the call did not reach the row: it moved
+nothing, and S2 goes on as for a pass that took none of its candidates.  S3 stops on passes that all stopped
+(`Blocked.stopped`): no guard kept them, and what kept another pass from taking the row between -- a lock its caller
+takes -- is the lock timeline's question, not read yet.  NJ-holding-late: the Adder's pass on aipanda098 printed
+'updating DB' (adder_gen 471), called updateJobs at 472, and never printed 'retU' (479).
+*Premise:* a raise from the call would have printed in the run (AdderGen.run's handler logs it with the same mark); a
+call that came back after the window's last record is not told from one that stopped.
+
+*Changed (P55's lock timeline, 2026-11-19, delegated design):* where every pass stopped so, S3 reads the lock a caller
+takes on the way into the mover (`agents.lock_before`: up the map's calls into it, a caller whose call into the chain
+stands under a guard naming a local bound to a call of a database module's function with a lock write,
+`agents.lock_writes`, an UPDATE setting lockedBy) on the row over the stay: its calls, each a take where it printed a
+row every way to which runs the lock write first (`agents.take_rows`), else a refusal.  Where some call took it and
+the first call was a take, the stop names the takes, their spacing and the refusals between (`_lock_timeline`):
+NJ-holding-late's lockJobOutputReport took the row at 15:35:38 (093), 15:46:24 (098) and 15:56:45 (090), 0:10:46 and
+0:10:21 apart, and refused it 13 times.  The width is the settled clock offset of the lock's lockedTime compare on the
+map's readings of the routes through that caller (`_lock_width`, `call_readings`); where it is settled and every
+refusal came within it of the take before, every later take past it after the one before, the stop says the lock a
+pass took kept the others off for its width.  On x14ks it is not settled -- the map's condition value needs
+lockJobOutputReport.time_limit: add_main's `taskBuffer: Any` stops the call (a PanDA annotation), and `lock_interval`
+is a closure read (the map's CLO) -- so the stop says why each later take came when it did is not read.  On the map's
+probe x14ou (both in) the route [TaskBuffer.py:2506, add_main.py:115] settles it at 600 s.  No unlock's runs are read.
+
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
 ### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is followed alone
@@ -776,8 +812,85 @@ that injects both: of the 8 live cases reaching 3694, MT-running-late STOP -> EN
 6 the same (their movers' passes are found, so S2 reads them first; a stuck case's term is not read there).  The
 next question is named, not run; the rows a job's task and a task's parent need come by rows asks once the harness
 reads their histories (its stage 1).
+P25 (i) (the investigator's u3/u10; 2026-11-18): a count the taking selection groups (the map's AGC,
+``RowAggregate`` COUNT of a column holding a value, on a guard's sources) is read in the same way.  Where the selection
+that took the row printed it in the moving pass (A-5's ``TookBy``, its record), a guard in its row loop over such a count
+that holds at the counts printed and fails at one fewer (the map's evaluator; a constant source's literal, a source of
+the row's own status column its value in the stay) turned at the k-th of the counted rows: the rows file's linked rows
+of a class with a history, made by the move, each at the first status under which an arm of the carriers' writers
+writes the counted value -- the arm's path condition with its atoms on that status set to each candidate and its atoms
+on the row's own columns from the row (the map's ``Branch.condition_atoms``; NULL is a value held), entries read
+elsewhere left out, an entry false ruling the candidate out (``_counted_states``).  The rows that got it by the move
+must be the printed k, else nothing is said; the arm's atoms left open are said as premises.  MT-scouting-late: sqlEA's
+'5/10 finished for early avalanche', 3759 (``totFinished >= totJobs * minSuccessScouts / 10``) true at 5, false at 4,
+the fifth scout job finished 109.8 s before the take.  *Premise:* the linked rows of the class stand for the counted
+rows, one each (the counted DISTINCT items hold its key); the arithmetic needs the map's evaluator of codemap-xliv
+f7bbf96 on (before it the guard reads unknown and nothing is said).
 *Revisit:* when the map's H-a lands (the shape read here is its proposal); when EXISTS or IN terms are met; when a
 next question is to be run in the same process.
+
+*Changed (P14's first form, 2026-11-18, the investigator's u11 NT-scouting-late 4, delegated design):* where the END's
+row was made inside the stay (the merge job JobGenerator made at 17:45:57), its birth and its life are said after the
+END (`_waited_birth`).  Its birth: the runs of the map's INSERTs making a row of its class (``KeyFrom.new_row``:
+insertNewJob, ppEventServiceJob, makeFakeCoJumbo) holding its key, over its creation less and plus EDGE on every
+machine, each whole.  They are asked by the value linking it to the asked row first (the task's ID: the maker's mark
+holds it, so the records the walk holds answer), then by its own key.  Its life: its history rows with their times
+and machines.  NT-scouting-late: made by insertNewJob's run at 17:45:57,966 on aipanda089; pending 17:45:58 on 089 ...
+finished 20:03:00 on 090.  Why its maker made it then (`_waited_trigger`): the maker's functions are the one holding
+the INSERT's ``new_row_at`` (TaskBuffer.storeJobs) and those reaching it within two calls (JobGeneratorThread.runImpl);
+its selections are read sites with wakers whose ``crosses_to`` reaches one of them and whose keys hold the linking
+column (``_get_tasks_datasets_with_unprocessed_inputs@1872``, keyed by the task); their wakers' writes for the linking
+value over the birth less EDGE are read as A2 reads them (`_waker_writes`, now A2's own), the last before the birth
+said.  EDGE, not the stay: a maker that polls takes a row a waker wrote within its round, and the day-long stay asked
+whole by the wakers' marks was 32 asks.  NT-scouting-late: 10 asks of the 10 minutes before 17:45:57; with them the
+line should name updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099.
+*Premise:* a write the maker took is a waker write within EDGE before the birth; one older than its round is not read.
+
+*Changed (P14 on H-4's row, 2026-11-19, the investigator's u12 NJ-merging-late 3, delegated design):* where H-4 reads
+the run that moved a late value as marked by another object of the row's class, the row moved in that object's pass
+and the stay waited on it: the unmerged job on its merge job's end.  U1 reads that object as the waited row above
+(`Rerun._mark_row_life`): its row and history from the rows file's `rows_by_key[cls][key]` and
+`statuslogs[cls]["by_key"][key]` (the harness's rows ask kind `row`, by the class's identity, the key the run's mark
+printed); where they are not there, it asks them (place `row`, which codes no stop) and says so.  With its row made
+inside the stay, its birth, life and maker's trigger are read by `_waited_birth`, the two rows linked by a column of
+theirs holding another class's identity by a reference the schema declares (`_references_from`, `referencing`:
+JobSpec.jediTaskID -> JediTaskSpec.jediTaskID), both holding the same value; of two such, the one whose column a
+maker's run mark holds (insertNewJob's, not workQueue_ID).  Made before the stay, that is said.  Each object once.
+*Premise:* the reading of `references` needs the map's TableRecord to carry them (codemap a3be2a5): querier-x's own
+codemap drops the field and `referencing` reads none there, so only a tree with the map's models reads this.
+The column the two rows share is compared on the rows file's own row as fetched (its `rows` section), not
+`_row_of`, which keeps the key alone before the move.  With rnd11's answer (rows_by_key from fieldtest 02305d5's
+rows.answered), NJ-merging-late says the merge job was made inside the stay, linked by JediTaskSpec.jediTaskID, its
+history (pending 03:28:27 .. finished 05:05:13.904), and asks its birth (1) and its maker's selection's wakers' writes
+over the 10 minutes before (8).
+
+*Changed (A and C, the r10 miss, 2026-11-19):* A2's and P14's reading of a waker's writes (`_waker_writes`) counted a
+write only where a row prints on a path through its line alone (`implying_rows`).  updateUnmergedDatasets' 1971
+(`varMap[":status"] = "ready"`) and 1973 ('done') have none: 1975 prints `str(varMap)` after the if/else.  (A) A
+binding of a literal into a container, or to a name, is shown by a later row of the pass printing that container or
+name, no rebinding between, its record holding `':status': 'ready'` (`_bound_shown`; not out of a loop).
+NT-scouting-late's trigger line now names updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099, where it
+said "no waker of it wrote".  (C) Where no write is found and a waker's write prints no row a run could show it by
+(`_showable`), that none was written is not said: the reading is not read (A2), not "none".  Where writes are found
+but a waker's write is unshowable (`_waker_unshown`), a stuck A2s does not end on "no row its wakers wrote in the
+window" (it stops, K55: NJ-transferring-stuck's updateEventRanges:578 and updateWorkers:1016, measure p69m), and a
+late A2 END carries "the writes ... print no row ...: an earlier one of theirs is not ruled out" as a premise.
+
+*Changed (P19, 2026-11-19, the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv
+2616f94, delegated design):* the carriers are read by function (a function recording the status reaches a writer of the
+term's columns), so 'merging' counts among the values that move the term.  The END now says, column by column, under
+which of those values the writers' accumulations move it (`_carried_values`): an increment of a counter write
+(``Branch.accumulated``), its written atoms (``ConditionAtom.written``: propagateResultToJEDI's fileStatus, the
+JediFileSpec.status it writes) set to each value the same owner's junction of that subject writes under the candidate,
+read with `_entries_possible` (each subject's atoms take one value: a literal they name or one they do not; the linked
+row's own columns fix its atoms, a fine-grained job's jobSubStatus 'fg_done' among them).  A run-time write is the
+candidate where it is the status itself (the output files' ``jobSpec.jobStatus``), else read through both paths
+(``fileSpec.status`` under ``== 'nooutput'``, which the accumulation's ``not in ('nooutput')`` refuses).
+NT-scouting-late: "nFilesFinished by finished, not by cancelled, closed, failed, merging".  *Not read:* the term's
+direction (which columns' increments make it hold: nFilesUsed's ``= 0`` clause too); nFilesFailed, which 'merging' may
+move by an input file whose attempts ran out (the database's values) or an output file (the term's dataset type leaves
+it out once the counted file's type is tied to the dataset's).  The reading of which row reached what when still uses
+every recorded value.
 
 ## Row values at a step's time (`held.py`)
 
@@ -898,6 +1011,29 @@ of them does (`rerun._copied_offset`).  updateJob's 509 `job.stateChangeTime = j
 `naive_utcnow()`, so NJ-starting-late's open stateChangeTime arms all write the clock.  A copy on some ways only
 (`before`), of another object's field, or of a row's column in SQL (`SET a=b`) stays a value not read.
 
+*Changed (P10, the investigator's u9/u10, 2026-11-18; the map's 3d30ddc, `KeptHop.way` returned / handed):* late's
+`after` is read as held all the stay where every arm writing the column is a birth (`_born_only`), now also one that
+sets it on an object its function returns or hands on whose kept hops persist it by a statement the map marks as making
+a new row (`made_then_born`): JobGenerator's doGenerate:1227 / doGenerateBuild:1983 / doGeneratePrePro:2165 set a job's
+prodSourceLabel before TaskBuffer.storeJobs hands it to insertNewJob's INSERT at 3200, so NJ-merging-late's
+copyArchive main@170 (`prodSourceLabel='managed'`) compares the row's value.  One way of the object to a birth is
+enough (doGenerate also hands the job to helpers at 1277, which persist nothing).  A way persisting it by a write of a
+row of the class that is no birth may write a row that existed (the map's caution): it counts only where it leaves the
+birth's way, in the function both pass, at a later call line (`_after_on_its_way`: setupper's activateJobs, keepJobs,
+updateJobs and archiveJob from storeJobs' 540, after its INSERT at 455/510) -- read by the lines' order, a premise.
+Those later writes persist the value the row was born with, no other arm writing the column; hops the map leaves open
+(too deep) are not read.
+
+*Changed (P24, 2026-11-19, the investigator's u11 MJ-assigned-late 4, delegated design):* M3(a)-1 leaves a writer of
+the time column out where its statement takes the rows of a selection restricting another column of the row to values
+the row did not hold all the stay (`stay_value._other_off`, by `held`): getCoJumboJobsToBeFinished's 1489 writes
+prodDBUpdateTime by the PandaIDs its 1455 selects at eventService 5, and MJ-assigned-late's job held NULL, so the
+row's prodDBUpdateTime 13:20:49 was lockJobsForActivator:941's.  The value all the stay is what `_held` knows, else
+`_held_since_birth`: a column `after` holds that no arm but a birth can write (every other arm writes a literal of
+another value: eventService's 6, 2 and 4) held that value from the birth.  An arm writing a value at run time, or the
+row's own, leaves it not known.  A column read on the way to another's reading is not known (`_held_off`), so no
+reading waits on itself.
+
 ### K79. A write a print reached is read as run where the statuslog shows its statement's status, and as none of the row's where its key's selection takes other states
 
 A timeline (Q1) reads a write of a lock or time column as `reached` where a print shows the pass reached it but not its
@@ -915,8 +1051,55 @@ lock takes 1644's rows (prepared, scouted, breaking, toabort, passed) while the 
 subject's state is read at that moment, not the selections' other terms (K17).  NT-breaking-late's END now says the
 lock term was true for the row before the take.
 *Not read:* an unlock whose statement writes no status (NT-passed-late's updateDatasetsToFinishTask_JEDI 4352); a
-copy of another column not tied to the write it copies (updateJob 509, the map's (E)); a later run's selection as a
-witness of an earlier state (NT-defined-late's unlockTasks_JEDI@872).
+copy of another column not tied to the write it copies (updateJob 509, the map's (E)).
+
+*Changed (K-3, bundle K, 2026-11-18):* a later print of the row's value is a witness of an earlier write.  (b) A must or
+count print read as a write shows, in holes the map names columns of the row's class (`SkeletonHole.columns`), the
+row's other columns as its pass read them (`_printed_columns`); a time column's printed value, earlier than the print
+by more than two seconds, is matched as K-1 matches the row's value to the last write before the print whose clock it
+is (`_clock_write`): that write ran, and the column held the value from it to the print, no arm writing it there
+(`Timeline.witnessed`, `Rerun._printed_witnesses`).  NT-defined-late: unlockTasks_JEDI's 897 printed lockedTime
+14:56:41 on aipanda081 at 15:57:05.666, so getTaskWithID_JEDI's 1818 lock on aipanda082 at 14:56:41.571 ran and
+`lockedTime<:lockTimeLimit` held from 15:06:41.  (c) The statement of that write (`KeyFrom.writes`) ran: its write of
+another column at that print is read as run (`Timeline.tied`, `_tied_witness`: 1847's lockedBy), and an open arm whose
+every statement writes the witnessed column too, by NULL or a clock, did not run while it held -- save near where its
+clock could be the value (`Timeline.quiet`, `_tied_quiet`).  (a) A term `IS NULL`/`IS NOT NULL` is said on its column's
+states where it surely held and where it surely failed (`_timeline_state_term`), its states' timeline said once where
+no other line says the column and it shows a write in the stay or a term on it reads something sure, read from the
+records at hand (`_states_at_hand`: such a note asks no log): `tabT.lockedBy IS NULL` at
+getDatasetsToFeedContents_JEDI@130 surely false from
+14:56:41.571 to 15:57:05.666.  (d) A term comparing a time column with the clock is said where it surely failed too
+(`_timeline_failed_spans`, `timeline-term-failed`), and, where nowhere, where it did with the open arms named:
+NT-exhausted-late's kickExhaustedTasks_JEDI@1968 `modificationTime<:timeLimit` (240 h, its marks print it) over an
+eleven-hour stay.  (e) A write a print reached is read in its pass as the judge reads a run, one candidate on that pass
+(`_judged_in_pass`): a must row of the arm missing there (rule 4), it did not write (`timeline-not-run`); a row
+printing only on a path through it, it ran, at that row's record -- where its statement picks its row by the key
+alone (`_picks_beyond_key`: lockTask_JEDI's and updateDatasetsToFinishTask_JEDI's `lockedBy=:lockedBy` ran without
+the run showing they took the row, so their writes stay reached).  NT-running-late: propagateResultToJEDI's 4404
+`SET walltimeUnit=NULL` under `if numDone in [5, 100]:` ran only in the 17:20:30 pass, the one printing its 4406
+'trigger recalculation', so `walltimeUnit IS NULL` held from 17:20:30.555 to the 17:20:39.615 take.  An arm writing
+the clock is never None (`_none_premised`).  The moment the pass read the
+value is not in its records: it is said at the print.  *Not read:* a selection's terms as a witness where no print of
+the value is (a multi-row select's `lockedBy IS NOT NULL`); a printed value no write the records show matches; an
+entry built under a test every route settles (`if not force_read:`), which `_false_between`/`_false_spans` still leave
+out (the notes read it).
+
+*Changed (W13, the investigator's u10, 2026-11-18):* the IS NULL notes said `lockedBy IS NULL` surely false over
+stretches where the records show JobGenerator's unlocks (updateTask_JEDI's printed binds `:lockedBy None`, 'updated 1
+rows'; NT-pending-late, NT-scouting-late): E-3 (`stay_value._moves_only`) had put runImpl:941/946 out of the stay, their
+statement at 949 "writing the status too".  949 flushes taskSpec's changed fields (the map's `KeyFrom.flushed_in`),
+so an unlock pass writes no status.  A flush now puts an arm out that way only where the map ties it to a status arm
+(`_writes_status_with`, `stay_value.tied`: doBasicPostProcess's 76 with its 77, flushed together at 116); a SQL
+statement as before.
+
+*Changed (P67, the investigator's u10, 2026-11-18):* an arm whose every statement is a flush is read off the flush's
+printed binds (`Rerun._flushed_writes`): the WritePrint of the flushed statement (`object_map`) prints the statement
+and its bind map in a run of the row's key; a record whose map holds the column's bind with the arm's value (None for
+an arm writing None, another for one writing a value) is its write then, `ran`, unless the statement's count print
+says no row changed; with the logs searched whole and every log asked, the arm is read whole.  NT-pending-late's
+lockedBy is NULL from each JobGenerator pass's unlock (updateTask_JEDI's 1483 at 06:07:06.797, 06:26:45.347,
+06:46:49.944) to the next lock; NT-scouting-late's from 17:45:58.478 to 20:03:00.  *Not read:* which caller's pass ran
+the flush -- every arm writing that value by a flush of the same statement reads the record.
 
 ## H steps
 
@@ -1023,9 +1206,29 @@ guards in (by elimination; its conditions: ...)".  A status's arm its run shows 
 its guards held on come from, its run showing it ran (...)" (K54; "the values its guard reads at its run" for one no
 run of its own shows), and with no guard at "<arm> has no guard of its own to read: what made it run is its callers'"
 (both "a method the guard reads through" before querier-q; the analyzer handover's todo, 2026-11-02 22:47:54).
-*Revisit:* when the map follows an object back to its caller (the JobGenerator way); when F3 is to read a writer
-marking its runs by another object's key (the job's jediTaskID, which its row holds); when a writer only reads the
-row into its spec (getTasksToRefine_JEDI and the like) is told apart.
+P43 (the investigator's u10; 2026-11-18): the map now follows the object (codemap-xliv's ``KeptHop.way`` returned and
+handed), and an arm that sets the value on an object a birth then persists is a birth too (``rerun.birth_arm``: born,
+or P10's made then born) -- JobGenerator's doGenerate:1248/1250 (cloud), 1301 (gshare) on the job insertNewJob's
+INSERT at 3200 makes.  On a subject no history records as its own, such arms on no history row leave the statuslog
+row's try for a birth's try at the row's making (``_births_apart``): the row shows the value, not their write.  A
+birth's try now asks the run that made the row: the logs of the INSERTs' functions (``birth_statements``), for the key,
+over the making less and plus EDGE, on every machine, whole; a run there is said ("the run that made it: ...") and
+which arm wrote is still not read; an ask no record answers is kept, with no stop.  *Premise:* the making's time is the
+row's creation column, and the INSERT's function prints the key in its run (insertNewJob's ``inserted <PandaID>``).
+*Revisit:* when F3 is to read a writer marking its runs by another object's key (the job's jediTaskID, which its row
+holds; the birth's run's mark holds it too); when a writer only reads the row into its spec (getTasksToRefine_JEDI and
+the like) is told apart.
+
+*Changed (P41, 2026-11-19, the investigator's u4 NR-T-53653646-userName and NR-T-53655760-userName, delegated design):*
+a writer whose change the map says is taken back (`Branch.taken_back`, read by `which_ran.taken_back`) is dropped
+before the arms are placed, with a word.  Either every way from it takes the change back (`resetChangedAttr`) before
+its object is written or handed on, or every way that keeps the change prints a line (`open_prints`) under a guard
+false with the arm's target holding the value, no other binding of the target reaching that print.
+`_check_task_with_unprocessed_inputs` sets `original_task_spec.userName` to the user's DN at 2272 and takes it back at
+2286; it keeps it only where `original_task_spec.userName in ["", None]`, printing "has an empty DN" at 2277 first.
+A value that is not empty did not go to the row by 2272.  *Premise, said:* a later write of the object takes its changed
+attributes only (a reset changes what is written as changed; a write of the whole row would take the value).
+*Revisit:* when the map says whether the object's later writes are changed-only.
 
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and each walks on where none is the one
 
@@ -1105,6 +1308,22 @@ walking on (KNOWN_ISSUES.md K38)", then the row as the scan reads it.
 the scan reads it, one-of: tmaeno's OK 2026-11-14, a step after H2-1, measured first); a log no record shows naming the
 key, asked over the object's life (H2-1's arms not read); when the map says what fills a print's prefix (then ask a
 writer's log by its mark's key).
+
+*Changed (P66, 2026-11-18; the investigator's u9 W12):* a write statement's printed bind map (P35, `printed_write_arms`)
+compared a printed time with the row's value as text, so a time printed to the microsecond never was the row's DATE
+value: NR-T-53655760-modificationTime's 'done' pass printed `':modificationTime': datetime.datetime(2026, 11, 15, 4, 37,
+31, 304478)` at updateTask_JEDI's 1483, its 1443 stayed kept, and the scan went on to the 'prepared' row, whose branch
+END said 3839 "written last" though updateTask_JEDI's 'done' write followed.  A printed time is now the row's value at
+the precision the row holds it (`which_ran._value_match`): a fraction below half a second is the row's second whether
+the column cuts or rounds it; from half a second on either second may be it, so it is neither the same (no positive)
+nor another (no arm excluded by it).  The END is 1443's, in the 'done' pass.
+
+*Changed (W10, 2026-11-18; the investigator's u8/u9):* an arm H2 left among others whose run no record shows ran and
+which has no guard of its own ended its branch as "written last ... (no run shows the line ran; it has no guard)" with
+nothing read for it: NR-J-7423807701-cloud's doGeneratePrePro:2174, for an evgen job.  Such a branch now ends
+"written last by ... if it ran (...; it has no guard of its own, and its callers' conditions, which made it run or not,
+are not read)": the branch still ends, and one left alone when the others are excluded is still the answer, as the
+K38 design reads it; an arm left by elimination or on the only way ends as before.
 
 ### K39. S1 names what a mover's rows wait on only where the map states it, and does not ask whether it ran
 
@@ -1582,6 +1801,17 @@ lines carry no mark (ContentsFeeder's, K70), or where the list is not made of a 
 label is a premise its lines cannot show (two whose short cycles take turns overlap nowhere), and a message
 processor's way in is named, not read.
 
+*Changed (P8, 2026-11-19, the investigator's u1 NT-toincexec-late step 3 and u2 NT-breaking-late step 5, delegated
+design):* the END says two more things, read from the records, with no reading of the code's list hand-out.
+- A machine with no selection for the row's label from the stay's start to the first take is named
+  (`agents.idle_cycles`).  Its cycle printed a line before that span and its next line after it, nothing between: it
+  was in the agent's calls in its loop between those two lines' rows.  PostProcessor's cycles on aipanda081, 087 and
+  089 were in prepareTasksToBeFinished_JEDI for about 10 minutes while six machines selected.
+- Between the selection's return and the worker's pass on the row, the worker's passes on other rows on that machine
+  are said (`Rerun._worker_before`), each other key's records one pass.  They are asked by the worker's run mark's text
+  before the key's hole, on that machine alone, over those seconds; an ask no record answers is kept, with no stop.
+  TaskCommando on aipanda089 got 5 tasks at 16:16:36,033, and its pass on the row began at 16:16:45,041.
+
 *Changed (A2, 2026-11-15, out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* where no pass of a late mover took
 the row before the one that moved it on, and the key each write of its arms takes the row by comes only from rows of
 selections on another table the map's `wakers` write -- getTasksToExecCommand_JEDI's 4483 by 4339's
@@ -1597,6 +1827,70 @@ key, or a waker's log not searched whole, leaves it to U1 as before.  MT-exhaust
 reads is the table between the act and the mover (tmaeno, 2026-11-15).  A stuck value's stay is read alike up to the
 window's end, the statuslog's as_of: none in it stops the branch the same way (MT-exhausted-stuck: no command row for
 the task from 08:31:31 to 13:58:02); a write in it with the value not moved on is not read here (U1 as before).
+
+*Changed (P45, 2026-11-18, out/gm/qk-design.md "P45", delegated design):* A2 also reads a mover whose writes carry no key
+of their own -- no KeyFrom of them has a source, and one keeps the object it was handed -- by the selections on another
+table whose rows the map's `crosses_to` hands to the mover or a caller of it within two calls (`agents.crossed_readers`;
+a selection keyed by the object's identity reads by the key and gives none): listJobOutputReport@2401's rows reach
+process_job_report, whose AdderGen the Adder's parse_job_output_report keeps the job of.  The wakers read are the
+inserting ones, the map's `insert` and its new `born` (codemap-xliv: an INSERT whose new row a poll's terms take,
+Job_Output_Report's three).  The END names the premise: that the key is a row the selection gives is read from
+`crosses_to`, not from the arm's KeyFrom.  Every waker's logs are asked before the branch stops, so that one record
+round answers them all (before, A2 stopped at the first waker whose logs the records lacked: Job_Output_Report's
+three would have taken three rounds).
+
+*Changed (W14, 2026-11-18, the investigator's u11, P68):* where U2 reads a caller's passes by its callees' runs
+(`_call_tied`), a run of the mover inside the run that moved the row (L1's, `result["moved_by"]`), on its machine within a
+second, whose function is another caller of the mover one call up (the map's closure on the mover's own name), is that
+caller's call and is left out of this caller's passes, said: NJ-merging-late's archiveJob runs on aipanda099 at 05:05:11
+lie in updateUnmergedJobs' run and are not killJobs'.  The premise that a callee's run is the caller's call (how many
+other functions reach it) now covers the mover's own runs too.
+
+*Changed (A2s, 2026-11-18, out/gm/qk-design.md "A2s", delegated design):* a stuck value's A2 whose wakers wrote no row
+for the key in the window, every waker's log searched whole and the table written here alone (no inbound boundary on
+it), ends: no row the mover takes it by came.  It stopped (K55) before.  The map's DFC (tmaeno's fact through the
+harness: DEFT writes no command into PRODSYS_COMM) takes PRODSYS_COMM's inbound node away, so MT-paused-stuck's
+command rows are PanDA's alone.  A late value with no write in its stay still stops.  The premise names the map's
+wakers as every writer of the rows the selection takes.
+
+*Changed (P45's endpoint part, 2026-11-18):* A2's END says an outside request made the row where every way into the
+waker enters from a function the map's endpoints say the server runs for a request (updateWorkers' harvester and
+pilot ways): `_entry_requests`.
+
+*Changed (P25 (i)'s rest, 2026-11-18, out/gm/qk-design.md, the section on P25 (i)'s rest, delegated design; the investigator's u11
+NT-scouting-late u3:4):* where F-4 reads a pass that took the row by the row's time-column value and that pass printed
+no key at its selection's print for a row it selects and keeps, the print's condition was false for the row then
+(`_unprinted_take`).  The condition is the print's tests less those the key's line ran under, with a flag (a name
+bound to True and False only) read as the tests of its True bindings (`_flag_tests`; the map's guard_froms list a
+flag's constants by value, 3761's True and not 3764's).  Its names are bound by the map's guard_froms: constants, the
+row's status as in the stay, and another column of the row only where no statuslog row lies between the pass and the
+rows file's read (K22).  The pass's own values (a rowcount, a container, a parameter) are put the way the print needs
+them, as premises.  Where the print would hold for every count of 1 or more of the name counting a value, that count
+was 0; else the condition and its open atoms are said.  NT-scouting-late: walltimeUnit was read after the move, so
+the count stays open.  F-4 also says a take once where the timeline cache keeps two readings of its column.
+
+*Changed (P25 (i)'s rest, stuck side, 2026-11-18):* a stuck value's mover that judgement 3 found no run of an arm of the
+value for is read for a take the row's own time column names (`_stuck_value_takes`): M3(a)-1's timelines of the
+columns its statements compare with the clock, over the stay from the statuslog row that began it to the moment the
+rows file read the row, then F-4's reading of the take's pass and P25 (i)'s rest on it.  MT-scouting-stuck: sqlEA
+wrote assessmentTime at 13:54:18 (getAchievedTasks_JEDI's selection refuses 'scouting'); its pass is asked by its
+mark on every machine, 13:44:18 to 14:04:18 (28 asks).  The asks are kept for a records round; they do not stop S1.
+
+*Changed (B, the r10 miss, 2026-11-19):* those 28 asks searched "prepareTasksToBeFinished_JEDI < vo=atlas label=user"
+and r10 answered none of them: the function's runs are marked vo=None.  `_row_mark_heads` filled the mark's hole (the
+parameter vo, which the callers hand) with the row's JediTaskSpec.vo, the column the map names for it.  A hole is now
+filled from the function's marks the records the walk holds show (`_recorded_hole_values`, `RecordedLogs.marks_seen`):
+one value there rules over the row's; several leave the head at the hole; none leaves the row's value.  MT-scouting-stuck
+asks again with "vo=None label=user" (26 asks: the machines the listing names).
+
+*Changed (F-4 reads a recorded pass first, 2026-11-19, the harness's reading of those 26 asks):* the records already held
+the pass at the write (aipanda082's JediDBProxy, 13:54:18,200 - 13:54:19,846, files read whole in r2-r4), and F-4 asked
+every machine of the listing and read nothing while an ask was open.  Where the records hold passes at the write, F-4
+reads them (and P25 (i)'s rest on them) and asks nothing; the machines whose logs the records lack are said as not
+read: another pass there writing the column then is not ruled out.  It asks only where no pass is recorded.
+MT-scouting-stuck now reads 082's pass, which printed no key at 3766 (early avalanche's condition false: the count 0).
+*Not read:* a pandajedi-only function's asks still go to the server machines' DBProxy log where no pass is recorded
+(H-3's rule is read for callers, not for the logs a pass prints to).
 
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
@@ -1631,6 +1925,33 @@ both (the map's `flow.together`, the loops around both read as going round once:
 reactivatePendingTasks_JEDI's execute writes the status by 4715 or 4728 and modificationtime only by 4723, in 4715's
 arm of the `if`: 4728, which began NT-registered-late's stay of 'registered', wrote no modificationtime, and the term
 starts at the write's value plus 10 min again (03:16:37.913168).
+
+*Changed (P9, the investigator's u9, 2026-11-18):* U1 reads a caller's call lines one by one as G-5 reads callers: a
+line every way through which hands a parameter the mover's moving run printed another literal goes, where one is left
+(`Rerun._callers_by_printed`): copyArchive's main calls killJobs from 21 lines, and killJob printed `code=51`; 15 hand
+other codes.  And U2, where no pass of a caller holding the key is found in a window searched whole with every log
+asked, says its call lines every way to which prints the row's key first (a hole the map names a key column by, a list
+of them too) are none of the call (`_calls_printing_key`): copyArchive's 707 'reassignJobs for JEDI at inactive site
+... ([PandaIDs])' before its call at 708.  The prints at 739, 779, 810 and 842 list the same PandaIDs, but the map names
+no column for their holes (a list appended from a select's rows: stops `element`, `row_item`), so NJ-defined-late's
+call is said at [740, 780, 811, 843, 1179], not the rebrokerage's 1179 alone -- the map's part.
+
+*Changed (P20, the investigator's u11 NJ-merging-late 2, 2026-11-19, delegated design):* the ways the moving run of a
+late value came in by are read by the parameters it printed over the whole way, not its first call alone
+(`Rerun._ways_in`): a way handing another literal is not its (G-5's reading); a way ending at a binding no literal is
+(a dict), in the function of the way's outermost call, under a guard naming a parameter of that function, is
+lengthened by that parameter's ways, less those whose literal makes the guard false (`guarded_ways`, the guard's other
+atoms unknown); a way around a cycle stays.  The hop up from an absent hop-1 caller keeps to those ways
+(`_outer_on_ways`): a call only ways ruled out go through goes, said; a call on a kept way into a function printing
+nothing is read with the call on that way into it.  NJ-merging-late's updateUnmergedJobs printed async_params as a
+dict at 1177: of archiveJob's callers, killJobs (1131) and archiveJobs (827) hand None; TaskBuffer.py:656 makes the
+dict only where async_dataset_update holds, which adder_gen.py:472 alone hands True, so the hop goes through
+TaskBuffer.updateJobs to AdderGen.process_job_report, asked by the merge job's key (its log, panda-adder.log, is not in
+the records).  `prints_key` reads the map's run marks too: the Adder's mark is '{}' holding JobSpec.PandaID, the key
+alone before every line.  `_key_columns` gives the class's identity columns for a key no column of the row holds (H-4's
+merge job key), where it gave none.  *Not read:* whether a caller off the moving run's ways could have moved the row
+earlier (U2 reads the moving run's caller's earlier passes, as G-5); the cycle's way (updateUnmergedJobs:1253 calling
+archiveJob on another merge job's unmerged job) stays a branch.
 
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
@@ -2216,6 +2537,15 @@ job questions dropped none.
 *Risk:* a print of another class's column holding the key's value (a file's or dataset's jediTaskID), in a run that
 writes the key's row without printing it, would lose that run.  None of the four kinds writes the task's row.
 
+*Changed (P43's redo, 2026-11-18, the investigator's u11 NR-J cloud 1, gshare 1, delegated design):* a row no machine
+is known for -- H2's row from a new job's creation to its first status, "on every machine (no row says which run wrote
+it)" -- was left as it was: `_recorded` read only a row with a machine.  Now its recording methods' runs of the key
+are asked of every machine over the row less and plus EDGE (`_recorder_anywhere`).  Runs on one machine alone make it
+the host, and the reading goes on there as above.  None, in logs read whole, each method printing the key first, is
+"not its row" as on a host.  Runs on two machines say nothing.  NR-J cloud: JobGenerator's doGenerate arms writing
+cloud are recorded by insertNewJob's "inserted <PandaID>" in runImpl's storeJobs; panda-DBProxy.log and
+panda-JediDBProxy.log are asked of every machine (2 asks).  NR-J gshare stops at H2 on reassignShare (P40) before.
+
 ### K68. A local printed before an arm on every path is read by the arm's guards, through a conversion too
 
 H2's step 5 (`which_ran.judge`) reads an arm's guards (`pathcond.arm_condition`) in what the run printed: a column
@@ -2463,6 +2793,18 @@ stops asking a log its records lack, and no run is read.  The time is not compar
 needs the map's reach from the calls between Q and R, and rule R's breaks and keeps in place of the bindings.  A run
 not readable as one call, R in no loop (MT-toincexec-late 5334: `retryTask_JEDI`'s rows printed several times): a
 reading splitting a run into calls.
+
+*Changed (P35 (c), 2026-11-19, the investigator's u12 NT-finishing-late 1, delegated design):* the arm may bind an
+attribute of a local (`tmpTaskSpec.status = JediTaskSpec.commandStatusMap()[commandStr]["done"]`) and a value no
+constant spells: the row shows what was bound (TaskCommando's 200, `set task_status={tmpTaskSpec.status}` through
+`tmpMsg`).  An attribute's bindings are its own assignments and every binding of the local it hangs on.  A record
+two rows of the function find alike (200's and 323's `set task_status=...`) is the row's where the last record before
+it only one row finds is a print from which the row, and none of the others, can run with no print between
+(`_record_of_row`).  Of the bindings that can give the shown value, one under a guard the pass's printed values make
+false gives nothing (`_guard_false`: 181's `not (commandStr != 'reassign')` with commandStr printed 'finish'), and so
+does a binding of the local to a new object of a corpus class whose constructor binds the attribute only to other
+literals (`_constructed_other`, the map's FieldFrom in `__init__`: 154's `JediTaskSpec()`, status None or 0).
+NT-finishing-late: 197 is positive, H2 chooses it, the walk goes on past H2.
 
 ### K73. A kept arm is positive where its call ran the head if, entered no handler around it, and every test down to it holds (J)
 
@@ -2916,3 +3258,20 @@ Premises not read:
   caller's logs (JediDBProxy.log for getTasksToExecCommand_JEDI).
 - *Nothing else writes the key's row on the host in the milliseconds around a silent call.*  recordStatusChange
   prints nothing: the row between updateJobStatus's prints around 484 is the call's place only.
+
+*Changed (P69, 2026-11-19, the investigator's u13 NJ-merging-late 2, NJ-starting-late 2, NT-finishing-late 3, delegated
+design):* a run no entry row cut under a mark its method's calls share (the door's `Log.partial`) is cut where its
+records stop for a minute, each part a pass (`which_ran.shared_mark_parts`, `minute_parts`, in `passes_of`; a
+premise, said: no two calls fall within a minute): getTasksToExecCommand_JEDI's runs under `< vo=None label=None >`
+hold hours of calls (aipanda088's 14:12 .. 21:00).  A run its entry row cut into one pass is that pass (a copy, not
+the run), and is not cut again.  Any other uncut run stays whole -- one execution of a function with no entry row may
+pause a minute (ContentsFeeder's feed_contents_to_tasks waits on its file listing: 2127 records in 14 minutes, 60 s
+between "get files" and "got ... files"; cutting every uncut run split it, measure p69m) -- and where it holds an edge
+of the value's time with no pause of a minute it is read as one execution there (`_stay_edges`, `_burst_parts`; the
+same premise), not left undecided: NJ-merging-late's Adder run on aipanda099 (05:05:05 .. 05:05:14) holding the move
+at 05:05:12.903.  One that pauses there stays undecided (K76): NT-defined-late's ContentsFeeder run on aipanda086
+(15:57 .. 16:21, five pauses, each after a "get files"; cutting it there read its parts as passes, measure p69n),
+MT-scouting-stuck's JobGenerator run (08:42 .. 14:46, several executions under one mark).  A caller whose every run mark is the key alone (`'{}'`, its
+hole holding the key's column: the Adder's `str(self.job_id)`) has the key on every line, judgement 3's prints premise
+held (`bare_key_mark`): NJ-merging-late now says process_job_report did not run on the merge job before that run, and
+stops on what made it run then (K55).

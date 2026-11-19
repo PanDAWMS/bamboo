@@ -87,6 +87,47 @@ def enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFun
     return None
 
 
+def declared_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
+    """The names *scope*'s own statements declare ``global``, and those they declare ``nonlocal`` -- not a nested
+    function's or class's."""
+    globals_: set[str] = set()
+    nonlocals: set[str] = set()
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Global):
+            globals_.update(node.names)
+        elif isinstance(node, ast.Nonlocal):
+            nonlocals.update(node.names)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return frozenset(globals_), frozenset(nonlocals)
+
+
+def closure_scope(
+    func: ast.AST, name: str, holds: Callable[[ast.AST, str], bool]
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """The function a name *func* reads, and neither binds nor declares ``global``, is looked up in before the
+    module, by Python's rule: the nearest function enclosing *func* whose own scope holds *name* (*holds*: a
+    parameter or a binding of its own statements), a class's body passed over -- a method's free name is never its
+    class's --, and so is a function declaring the name ``global`` or ``nonlocal``, which holds none of its own.
+    ``AdderThread.run``, a method of a class ``add_main.main`` makes, reads ``lock_interval``, which ``main`` binds
+    to ``10``: ``main``.  ``None`` where no enclosing function holds it: the module's name.  A ``lambda`` is not
+    looked into: no ``def`` sits in one."""
+    for ancestor in ancestors(func):
+        if not isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        globals_, nonlocals = declared_names(ancestor)
+        if name in globals_:
+            return None
+        if name in nonlocals:
+            continue
+        if holds(ancestor, name):
+            return ancestor
+    return None
+
+
 def targets_of(node: ast.AST) -> list[ast.expr]:
     """What an ``=`` statement writes to, or ``[]`` if *node* is not one.
 

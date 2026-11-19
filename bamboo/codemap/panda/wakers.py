@@ -54,14 +54,23 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from typing import TYPE_CHECKING, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, Optional
 
 from bamboo.codemap import pathcond
 from bamboo.codemap.models import (
+    BORN_AFTER,
+    BORN_DEFAULT,
+    BORN_NOT,
+    BORN_OPEN,
+    BORN_UNDECIDED,
+    BORN_UNTIL,
+    BORN_WRITTEN,
     KEY_PARAMETER,
     KEY_ROWS,
+    BornTerm,
     Branch,
     ConditionNode,
+    ConditionValue,
     MapFragment,
     ReadSiteNode,
     Waker,
@@ -78,10 +87,16 @@ CONJUNCTIONS_CAP = 256
 
 WAKER_BRANCH = "branch"
 WAKER_INSERT = "insert"
+WAKER_BORN = "born"
 
 
-def attach(fragment: MapFragment, calls: Optional["Calls"] = None) -> int:
-    """Set every read site's ``wakers``; return how many read sites have one."""
+def attach(
+    fragment: MapFragment,
+    calls: Optional["Calls"] = None,
+    defaults: Optional[dict[str, dict[str, Optional[str]]]] = None,
+) -> int:
+    """Set every read site's ``wakers``; return how many read sites have one.  *defaults* -- the DDL's
+    (:func:`sqltext.read_defaults`) -- with *calls*, read the ``born`` ones."""
     cuts = {subject.name: subject.truncated_to for subject in fragment.subjects}
     writes: dict[str, list[tuple[str, Branch]]] = defaultdict(list)
     for junction in fragment.junctions:
@@ -97,8 +112,11 @@ def attach(fragment: MapFragment, calls: Optional["Calls"] = None) -> int:
     sites = {site.name: site for site in fragment.read_sites}
     inserts = _Inserts(fragment, calls) if calls is not None else None
     count = 0
+    born = _Born(inserts, defaults) if inserts is not None and defaults is not None else None
     for site in fragment.read_sites:
         site.wakers = _wakers(site, writes, cuts, keyed, sites, inserts)
+        if born is not None:
+            site.wakers += born.of(site)
         count += bool(site.wakers)
     return count
 
@@ -447,3 +465,251 @@ def _admits(term: ConditionNode, value: str) -> bool:
     if term.node == "unequal" and term.settled:
         return value not in held
     return True
+
+
+# -- a row born taken ----------------------------------------------------------- #
+
+#: The database's clocks, as a :class:`~bamboo.codemap.models.ConditionValue`'s ``base`` names them.
+_DATABASE_CLOCKS = ("CURRENT_DATE", "SYSDATE", "CURRENT_TIMESTAMP", "SYSTIMESTAMP")
+#: Python's, by what the call resolves to, as the base names them.
+_PYTHON_CLOCKS = ("naive_utcnow", "datetime.utcnow", "datetime.now")
+#: SQL's ``NULL`` in the new row: a column the ``INSERT`` leaves to a DDL that gives no default, or writes ``None``.
+_NULL = object()
+
+
+class _OnRow(NamedTuple):
+    """What a column holds in the row an ``INSERT`` makes."""
+
+    how: str  # BORN_WRITTEN, BORN_DEFAULT, BORN_OPEN or BORN_UNDECIDED
+    value: Any  # a literal, _NULL, or None where open or undecided
+    clock: str  # the clock the column is stamped with, or ""
+    spelled: str
+
+
+def _clock(text: str) -> str:
+    """The clock *text* reads, named as a base names it -- ``naive_utcnow()`` is ``naive_utcnow``, a DDL's
+    ``sysdate`` ``SYSDATE`` --, or ``""``.  Clocks are named, not equated."""
+    spelled = text.strip()
+    if spelled.upper() in _DATABASE_CLOCKS:
+        return spelled.upper()
+    called = spelled[:-2].replace("datetime.datetime.", "datetime.") if spelled.endswith("()") else ""
+    return called if called in _PYTHON_CLOCKS else ""
+
+
+def _literal_value(text: str) -> Any:
+    """A literal as the reach record or the DDL spells it -- ``'failed'``, ``0``, ``None``, ``NULL`` -- or ``...``."""
+    if text.strip().upper() == "NULL":
+        return _NULL
+    try:
+        held = ast.literal_eval(text.strip())
+    except (ValueError, SyntaxError):
+        return ...
+    if held is None:
+        return _NULL
+    return held if isinstance(held, (str, int, float)) and not isinstance(held, bool) else ...
+
+
+def _spelled(value: Any) -> str:
+    """A literal as ``selects`` spells values: ``user``, ``800``."""
+    return value if isinstance(value, str) else str(value)
+
+
+class _Born:
+    """The ``INSERT``s whose new rows a poll's terms take (:data:`WAKER_BORN`)."""
+
+    def __init__(self, inserts: _Inserts, defaults: dict[str, dict[str, Optional[str]]]):
+        self.inserts = inserts
+        self.defaults = defaults
+        self.by_table: dict[str, list] = defaultdict(list)
+        for (table, _column), held in inserts.columns.items():
+            for node, write, _one in held:
+                if all(write is not seen for _node, seen in self.by_table[table]):
+                    self.by_table[table].append((node, write))
+
+    def of(self, site: ReadSiteNode) -> list[Waker]:
+        """The ``born`` wakers of *site*: a poll of one table, no key bound, a term every row it takes holds."""
+        if len(site.tables) != 1 or site.keys:
+            return []
+        unconditional = set(site.conditions)
+        trees = [reading.tree for reading in site.condition_trees if reading.entry in unconditional]
+        added = [reading.tree for reading in site.condition_trees if reading.entry not in unconditional]
+        if not trees and not site.restricts:
+            return []
+        conjunctions: list[list[ConditionNode]] = [[]]
+        for tree in trees:
+            found = _expand(tree)
+            if found is None:
+                return []
+            conjunctions = [left + right for left in conjunctions for right in found]
+            if len(conjunctions) > CONJUNCTIONS_CAP:
+                return []
+        restricted: dict[str, set[str]] = defaultdict(set)
+        for pair in site.restricts:
+            subject, _, value = pair.partition("=")
+            restricted[subject].add(value)
+        table = site.tables[0].lower()
+        held: dict[tuple[str, int], tuple[list[BornTerm], set[tuple[str, ...]], set[str], list[str]]] = {}
+        for node, write in self.by_table.get(table, []):
+            columns = {one.column.lower(): one for one in write.columns}
+            best: Optional[tuple[tuple[int, int, int], list[BornTerm]]] = None
+            for conjunction in conjunctions:
+                terms = [self._term(term, columns, table) for term in conjunction]
+                terms += [self._restricted(subject, values, columns, table) for subject, values in restricted.items()]
+                if any(verdict in (BORN_NOT, BORN_UNDECIDED) for verdict, _term in terms):
+                    continue
+                said = [one for _verdict, one in terms]
+                rank = (
+                    sum(one.holds == BORN_OPEN for one in said),
+                    sum(one.holds in (BORN_AFTER, BORN_UNTIL) for one in said),
+                    len(said),
+                )
+                if best is None or rank < best[0]:
+                    best = (rank, said)
+            if best is None:
+                continue
+            said = best[1] + [
+                one.model_copy(update={"added": True})
+                for tree in added
+                for _verdict, one in (self._term(term, columns, table) for term in _terms(tree))
+            ]
+            read = self.inserts._routes(node)
+            routes = {tuple(chain) for chain, _constants in read[0]} if read is not None else set()
+            others = {one.path for one in write.columns if one.path}
+            by = self.inserts._keyed_by(node.named_as, others, sorted(routes))
+            pairs = [pair for pair in site.selects if self._admits(pair, columns, table)]
+            for line in write.lines:
+                terms_held, ways, names, kept = held.setdefault((node.named_as, line), (said, set(), set(), pairs))
+                ways.update(routes)
+                names.update(by)
+        out = []
+        for (owner, line), (said, ways, names, pairs) in held.items():
+            met = [one.term for one in said if not one.added]
+            out.append(
+                Waker(
+                    pairs=sorted(pairs),
+                    term=" AND ".join(met),
+                    subject=site.tables[0],
+                    value="",
+                    owner=owner,
+                    line=line,
+                    stated=not any(one.holds == BORN_OPEN for one in said if not one.added),
+                    kind=WAKER_BORN,
+                    routes=[list(route) for route in sorted(ways)],
+                    keyed_by=sorted(names),
+                    born=said,
+                )
+            )
+        return sorted(out, key=lambda w: (w.owner, w.line))
+
+    def _on_row(self, subject: str, columns: dict, table: str) -> _OnRow:
+        """What *subject*'s column holds in the new row: the ``INSERT``'s value, else the DDL's default."""
+        column = subject.rpartition(".")[2].lower()
+        written = columns.get(column)
+        if written is not None:
+            if written.path:
+                return _OnRow(BORN_OPEN, None, "", written.path)
+            spelled = written.value or ""
+            clock = _clock(spelled)
+            if clock:
+                return _OnRow(BORN_WRITTEN, None, clock, clock)
+            value = _literal_value(spelled)
+            if value is ...:
+                return _OnRow(BORN_OPEN, None, "", spelled)
+            return _OnRow(BORN_WRITTEN, value, "", spelled)
+        default = self.defaults.get(table, {}).get(column, "NULL")
+        if default is None:
+            return _OnRow(BORN_UNDECIDED, None, "", "a BEFORE INSERT trigger's")
+        text = default
+        clock = _clock(text)
+        if clock:
+            return _OnRow(BORN_DEFAULT, None, clock, clock)
+        value = _literal_value(text)
+        if value is ...:
+            return _OnRow(BORN_UNDECIDED, None, "", text)
+        return _OnRow(BORN_DEFAULT, value, "", "NULL" if value is _NULL else text)
+
+    def _term(self, term: ConditionNode, columns: dict, table: str) -> tuple[str, BornTerm]:
+        """Whether *term* holds on the new row -- the verdict ``holds``, :data:`BORN_NOT`, :data:`BORN_OPEN` or
+        :data:`BORN_UNDECIDED` -- and how, said."""
+        row = self._on_row(term.subject, columns, table) if term.subject else _OnRow(BORN_UNDECIDED, None, "", "")
+
+        def said(verdict: str, holds: str, value=None) -> tuple[str, BornTerm]:
+            return verdict, BornTerm(
+                term=term.text,
+                subject=term.subject,
+                holds=holds,
+                value=row.spelled,
+                offset_seconds=value.offset_seconds if value is not None else None,
+                scale_seconds=value.scale_seconds if value is not None else None,
+                needs=list(value.needs) if value is not None else [],
+            )
+
+        if row.how == BORN_UNDECIDED:
+            return said(BORN_UNDECIDED, BORN_UNDECIDED)
+        if term.node in ("null", "not_null"):
+            if row.how == BORN_OPEN:
+                return said(BORN_OPEN, BORN_OPEN)
+            empty = row.value is _NULL and not row.clock
+            return said("holds", row.how) if empty == (term.node == "null") else said(BORN_NOT, BORN_NOT)
+        if term.node in ("equal", "unequal"):
+            constants = {one.constant for one in term.values}
+            if not term.settled or not term.values or "" in constants:
+                return said(BORN_UNDECIDED, BORN_UNDECIDED)
+            if row.how == BORN_OPEN:
+                return said(BORN_OPEN, BORN_OPEN)
+            if row.clock:
+                return said(BORN_UNDECIDED, BORN_UNDECIDED)
+            if row.value is _NULL:
+                return said(BORN_NOT, BORN_NOT)  # NULL is neither in a list nor out of it
+            inside = _spelled(row.value) in constants
+            return said("holds", row.how) if inside == (term.node == "equal") else said(BORN_NOT, BORN_NOT)
+        if term.node == "compare" and len(term.values) == 1:
+            value = term.values[0]
+            if value.base in _DATABASE_CLOCKS or value.base in _PYTHON_CLOCKS:
+                if value.offset_seconds is None and value.scale_seconds is None:
+                    return said(BORN_UNDECIDED, BORN_UNDECIDED)
+                if row.how == BORN_OPEN:
+                    return said(BORN_OPEN, BORN_OPEN, value)
+                if row.value is _NULL and not row.clock:
+                    return said(BORN_NOT, BORN_NOT)
+                if row.clock and row.clock == value.base:
+                    return said("holds", BORN_AFTER if term.op in ("<", "<=") else BORN_UNTIL, value)
+                return said(BORN_UNDECIDED, BORN_UNDECIDED)
+            number = _literal_value(value.constant) if value.constant and not value.base else ...
+            if isinstance(number, (int, float)):
+                if row.how == BORN_OPEN:
+                    return said(BORN_OPEN, BORN_OPEN)
+                if row.value is _NULL and not row.clock:
+                    return said(BORN_NOT, BORN_NOT)
+                if isinstance(row.value, (int, float)) and not row.clock:
+                    holds = _COMPARE_OPS[term.op](row.value, number)
+                    return said("holds", row.how) if holds else said(BORN_NOT, BORN_NOT)
+        return said(BORN_UNDECIDED, BORN_UNDECIDED)
+
+    def _restricted(self, subject: str, values: set[str], columns: dict, table: str) -> tuple[str, BornTerm]:
+        """A plain conjunct :attr:`ReadSiteNode.restricts` holds, read on the new row as an ``IN`` of its values."""
+        term = ConditionNode(
+            node="equal",
+            text=", ".join(f"{subject}={one}" for one in sorted(values)),
+            subject=subject,
+            op="IN",
+            values=[ConditionValue(kind="constant", text=one, constant=one) for one in sorted(values)],
+            settled=True,
+        )
+        return self._term(term, columns, table)
+
+    def _admits(self, pair: str, columns: dict, table: str) -> bool:
+        """Whether the new row can be at the ``selects`` *pair*: not where it holds another literal there."""
+        subject, _, value = pair.partition("=")
+        row = self._on_row(subject, columns, table)
+        if row.how in (BORN_OPEN, BORN_UNDECIDED) or row.clock:
+            return True
+        return row.value is not _NULL and _spelled(row.value) == value
+
+
+_COMPARE_OPS: dict[str, Callable[[Any, Any], bool]] = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+}

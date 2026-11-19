@@ -428,7 +428,7 @@ class _Judge:
             return value is None or self._expression(file, cls, value, seen, frozenset(), index)
         if before is not None:
             return False
-        for base in cls.bases:
+        for base in self.types.run_bases(file, cls):
             named = self.types.class_named(file, base)
             if named is not None and self._class_attribute(named[0], named[1], attr, seen):
                 return True

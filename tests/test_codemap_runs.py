@@ -2637,14 +2637,119 @@ def test_a_message_hole_printing_a_list_of_a_select_item_s_values_is_that_item_s
     assert (more.columns, more.listed) == ([], False)
 
 
+CALLED_ROWS = """\
+from pandacommon.pandalogger.LogWrapper import LogWrapper
+
+from pkg.proxy import DBProxy
+
+_logger = None
+
+
+class Rows(DBProxy):
+    def lock(self, use):
+        if use:
+            sql = "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s"
+        else:
+            sql = "SELECT PandaID FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s"
+        self.cur.execute(sql, {":s": "defined"})
+        resList = self.cur.fetchall()
+        retList = []
+        for tmpItem in resList:
+            retList.append(tmpItem)
+        retList.sort()
+        return True, retList
+
+    def one(self):
+        self.cur.execute("SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s", {":s": "sent"})
+        res = self.cur.fetchone()
+        return res
+
+    def pick(self, defined):
+        tmp_log = LogWrapper(_logger, "<pick>")
+        if defined:
+            sql = "SELECT PandaID,jobStatus FROM ATLAS_PANDA.jobsDefined4 WHERE jobStatus=:s"
+        else:
+            sql = "SELECT PandaID,modificationTime FROM ATLAS_PANDA.jobsActive4 WHERE jobStatus=:s"
+        self.cur.execute(sql, {":s": "defined"})
+        res = self.cur.fetchall()
+        for (own, also) in res:
+            tmp_log.debug(f"own {own} {also}")  # C6
+        return res
+
+    def sent(self):
+        tmp_log = LogWrapper(_logger, "<sent>")
+        status, res = self.lock(True)
+        jediJobs = []
+        for id, job_status in res:
+            if job_status == "defined":
+                jediJobs.append(id)
+        iJob = 0
+        while iJob < len(jediJobs):
+            tmp_log.debug(f"reassign ({jediJobs[iJob:iJob + 100]})")  # C1
+            iJob += 100
+        for row in res:
+            tmp_log.debug(f"row {row}")  # C2
+        (first, state) = self.one()
+        tmp_log.debug(f"one {first} in {state}")  # C3
+        for (panda_id, second) in res:
+            tmp_log.debug(f"second {second}")  # C4
+        for (picked, other) in self.pick(True):
+            tmp_log.debug(f"picked {picked} {other}")  # C5
+"""
+
+
+def test_a_message_hole_printing_a_callee_s_rows_item_is_that_item_s_column(tmp_path: Path) -> None:
+    """copyArchive's ``reassignJobs for JEDI defined jobs ({jediJobs[iJob:iJob + nJob]})``: ``jediJobs`` is filled
+    with the ``id`` of each row ``taskBuffer.lockJobsForReassign`` returns, ``SELECT PandaID,lockedby`` run in the
+    callee.  The callee's rows come back as the rows whole, and the caller's loop takes a row and then its first
+    item: that item is ``PandaID``, as where the caller ran the statement itself -- through the tuple returned, the
+    list the rows are appended to and the statement's two texts, whose first items agree.  A row whole is still no
+    one item, nor is a second item only one of the texts has; the items of a fetched row a callee returns are
+    theirs."""
+    fragment = _build(tmp_path, [], read_rows=True, spec=SPEC, proxy=PROXY, rows=CALLED_ROWS)
+    (node,) = [one for one in fragment.function_prints if one.owner.endswith("Rows.sent")]
+    holes = {(hole.expression, hole.line): hole for st in node.statements for row in st.rows for hole in row.holes}
+    kill = holes[("jediJobs[iJob:iJob + 100]", _line(CALLED_ROWS, "C1"))]
+    assert (kill.columns, kill.listed, [stop.kind for stop in kill.stops]) == (["JobSpec.PandaID"], True, ["no_use"])
+    row = holes[("row", _line(CALLED_ROWS, "C2"))]
+    assert (row.columns, [(stop.kind, stop.what) for stop in row.stops][:1]) == ([], [("row_item", "no item")])
+    assert holes[("first", _line(CALLED_ROWS, "C3"))].columns == ["JobSpec.PandaID"]
+    assert holes[("state", _line(CALLED_ROWS, "C3"))].columns == ["JobSpec.jobStatus"]
+    second = holes[("second", _line(CALLED_ROWS, "C4"))]
+    assert (second.columns, [stop.what for stop in second.stops][:1]) == ([], ["texts differ"])
+
+
+def test_a_select_item_whose_texts_name_one_attribute_by_several_tables_is_that_attribute(tmp_path: Path) -> None:
+    """lockJobsForReassign picks its table by the statuses it is asked for, ``jobsDefined4`` or ``jobsActive4``: the
+    first select item is ``jobsdefined4.pandaid`` on one text and ``jobsactive4.pandaid`` on the other, both
+    ``JobSpec.PandaID`` -- read so in the function and in its caller.  An item the texts give two attributes, or one
+    no class declares, is none."""
+    defined = EntityNode(name="jobsdefined4", map_id="m", derived_from="v", spec_class="JobSpec", tables=["jobsDefined4"])
+    fragment = _build(
+        tmp_path, [], entities=[*ENTITIES, defined], read_rows=True, spec=SPEC, proxy=PROXY, rows=CALLED_ROWS
+    )
+    holes = {
+        (hole.expression, hole.line): hole
+        for node in fragment.function_prints
+        for st in node.statements
+        for row in st.rows
+        for hole in row.holes
+    }
+    for name, marker in (("own", "C6"), ("picked", "C5")):
+        assert holes[(name, _line(CALLED_ROWS, marker))].columns == ["JobSpec.PandaID"]
+    for name, marker in (("also", "C6"), ("other", "C5")):
+        hole = holes[(name, _line(CALLED_ROWS, marker))]
+        assert (hole.columns, [stop.what for stop in hole.stops if stop.kind == "row_item"]) == ([], ["texts differ"])
+
+
 def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_not_the_column(
     tmp_path: Path,
 ) -> None:
     """copyArchive's ``maxModTime={maxModificationTime}``: the item is ``MAX(creationTime)`` of ``jobsDefined4``
     grouped by ``jobDefinitionID, ...`` -- the greatest of a group's values, no row's.  So the hole names no column,
     and says the aggregate (:attr:`SkeletonHole.aggregate`): the function, the column and the grouping, as the
-    classes declare them.  A ``COUNT`` is no column's value at all and says nothing; the grouping column itself is
-    that column."""
+    classes declare them.  A ``COUNT(*)`` is no column's value either: how many rows the group has, no column; the
+    grouping column itself is that column."""
     holes = _row_holes(tmp_path, read_rows=True)
     line = _line(ROWS, "W9")
     newest = holes[("newest", line)]
@@ -2655,7 +2760,14 @@ def test_a_message_hole_printing_a_column_s_max_over_a_group_is_that_aggregate_n
         "JobSpec.PandaID",
         ["JobSpec.jobStatus"],
     )
-    assert holes[("n", line)].aggregate is None
+    counted = holes[("n", line)]
+    assert counted.columns == []
+    assert counted.aggregate is not None
+    assert (counted.aggregate.fn, counted.aggregate.column, counted.aggregate.group_by) == (
+        "COUNT",
+        "",
+        ["JobSpec.jobStatus"],
+    )
     assert (holes[("status", line)].columns, holes[("status", line)].aggregate) == (["JobSpec.jobStatus"], None)
 
 
@@ -2938,7 +3050,7 @@ def test_a_copy_names_the_writes_of_its_pass_it_copies(tmp_path: Path) -> None:
     markers = [f"passthrough(JobSpec.modificationTime) T{n}" for n in range(1, 5)]
     owners = ["Proxy.updateJob", "Proxy.finish", "Proxy.other", "Proxy.reset"]
     subjects = ["JobSpec.stateChangeTime", "JobSpec.endTime", "JobSpec.endTime", "JobSpec.stateChangeTime"]
-    arms = [("copies", owner, marker, subject) for owner, marker, subject in zip(owners, markers, subjects)]
+    arms = [("copies", owner, marker, subject) for owner, marker, subject in zip(owners, markers, subjects, strict=True)]
     fragment = _build(tmp_path, arms, spec=COPY_SPEC, copies=COPIES)
     line = lambda marker: _line(COPIES, marker)  # noqa: E731
     read = [(_branch(fragment, marker).copied_from, _branch(fragment, marker).copied_open) for marker in markers]

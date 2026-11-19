@@ -38,7 +38,7 @@ import re
 import weakref
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
@@ -948,9 +948,9 @@ class Calls:
             self._stores[id(store)] = held
         return held
 
-    def operated(self, operation: ast.AST, receiver: ast.expr, dunder: str, other: Optional[ast.expr]) -> ast.Call:
+    def operated(self, operation: ast.AST, receiver: ast.expr, dunder: str, arguments: Sequence[ast.expr]) -> ast.Call:
         """The call Python makes on one operand of an operation -- ``a * b``, ``a *= b``, ``-a`` -- for *dunder*:
-        ``type(a).__mul__(a, b)``.
+        ``type(a).__mul__(a, b)``; or on the manager of a ``with``: ``type(m).__enter__(m)``.
 
         Spelled ``a.__mul__(b)``, its receiver the operand, so :meth:`callees` places it as it places any method call
         on ``a``, as :meth:`stored` does for a store: at a corpus class's dunder where ``a`` can be one that defines
@@ -961,7 +961,7 @@ class Calls:
         if held is None:
             held = ast.Call(
                 func=ast.Attribute(value=receiver, attr=dunder, ctx=ast.Load()),
-                args=[other] if other is not None else [],
+                args=list(arguments),
                 keywords=[],
             )
             ast.copy_location(held, operation)
@@ -1134,14 +1134,25 @@ class Calls:
             return None
         return Target(file, node, cls)
 
-    def _method_of(self, declared: tuple[str, ast.ClassDef], name: str) -> Placed:
-        """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order."""
+    def _method_of(self, declared: tuple[str, ast.ClassDef], name: str, depth: int = 0) -> Placed:
+        """Where *name* lands on an object whose class is *declared* itself: the first definition in its method resolution order.
+
+        Where none defines it, and the class names another only for a type
+        checker (:meth:`Types.forwarded`) -- ``class TaskBuffer(_DBProxyAPI)``
+        -- the call is that class's: its ``__getattr__`` hands it to an object
+        of that class, which runs the method as its own (``self`` a DBProxy,
+        not the TaskBuffer).
+        """
         file, cls = declared
         order = self.types.mro(file, cls)
         for where, holder in order:
             found = self._declared_in(where, holder, name)
             if found is not None:
                 return Placed((found._replace(bound=(declared,)),))
+        for forwarded in self.types.forwarded(file, cls) if depth < Types.FORWARDS else ():
+            placed = self._method_of(forwarded, name, depth + 1)
+            if placed.targets:
+                return placed
         for hook, reason in (("__getattr__", UNPLACED_FORWARDED), ("__getattribute__", UNPLACED_GETATTRIBUTE)):
             if any(self._declared_in(where, holder, hook) is not None for where, holder in order):
                 return Placed((), reason)
@@ -1181,8 +1192,9 @@ class Calls:
         At the method each class finds first in its method resolution order,
         once per definition, with the classes that find it as its
         :attr:`Target.bound`.  A class that supplies the
-        name only by forwarding it -- ``JediTaskBufferInterface``'s
-        ``__getattr__``, ``WrappedOracleConn``'s ``__getattribute__`` -- adds
+        name only by forwarding it, and names no class it forwards to
+        (:meth:`Types.forwarded`) -- a ``__getattr__`` alone,
+        ``WrappedOracleConn``'s ``__getattribute__`` -- adds
         no definition: what runs is somewhere this reading does not follow, so
         the placement is open beside the definitions found.  Where no class
         has the method, the reason is the forwarding one if any class
@@ -2726,19 +2738,34 @@ def _union_members(annotation: ast.expr) -> Optional[list[ast.expr]]:
 
 def _module_statements(body: list[ast.stmt]):
     """Every statement run at module level: the module's own, and those under its ``if``, ``try`` and ``with``."""
+    return (node for node, _checking in _checked_statements(body))
+
+
+def _checking_test(test: ast.expr) -> Optional[bool]:
+    """``True`` for the test of ``if TYPE_CHECKING:``, ``False`` for ``if not TYPE_CHECKING:``, ``None`` for any other."""
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    inner = test.operand if isinstance(test, ast.UnaryOp) and negated else test
+    named = inner.id if isinstance(inner, ast.Name) else inner.attr if isinstance(inner, ast.Attribute) else None
+    return None if named != "TYPE_CHECKING" else not negated
+
+
+def _checked_statements(body: list[ast.stmt], checking: bool = False):
+    """:func:`_module_statements`, each with whether only a type checker runs it: under ``if TYPE_CHECKING:``, or in
+    the ``else`` of ``if not TYPE_CHECKING:`` -- ``TYPE_CHECKING`` is ``False`` when Python runs the module."""
     for node in body:
-        yield node
+        yield node, checking
         if isinstance(node, ast.If):
-            yield from _module_statements(node.body)
-            yield from _module_statements(node.orelse)
+            test = _checking_test(node.test)
+            yield from _checked_statements(node.body, checking or test is True)
+            yield from _checked_statements(node.orelse, checking or test is False)
         elif isinstance(node, ast.Try):
-            yield from _module_statements(node.body)
+            yield from _checked_statements(node.body, checking)
             for handler in node.handlers:
-                yield from _module_statements(handler.body)
-            yield from _module_statements(node.orelse)
-            yield from _module_statements(node.finalbody)
+                yield from _checked_statements(handler.body, checking)
+            yield from _checked_statements(node.orelse, checking)
+            yield from _checked_statements(node.finalbody, checking)
         elif isinstance(node, ast.With):
-            yield from _module_statements(node.body)
+            yield from _checked_statements(node.body, checking)
 
 
 class Types:
@@ -2775,6 +2802,9 @@ class Types:
     #: ``proxy.<method>()`` calls read as "the declared class has no such
     #: method".
     LINEAGE = 40
+    #: How many classes named only for a type checker a lookup follows one after another (:meth:`forwarded`): the
+    #: corpus has two, ``TaskBufferInterfaceChild`` -> ``TaskBuffer`` -> ``OraDBProxy.DBProxy``.
+    FORWARDS = 4
 
     def __init__(
         self,
@@ -2792,6 +2822,10 @@ class Types:
         self._dotted: dict[str, frozenset[str]] = {}
         #: :meth:`_module_bound` per file.
         self._module_bindings: dict[str, dict[str, list[ast.expr]]] = {}
+        #: ``id`` of each value :meth:`_module_bound` reads that only a type checker binds, per file (:meth:`type_only`).
+        self._checked_values: dict[str, frozenset[int]] = {}
+        #: :meth:`type_only` per (file, name).
+        self._type_only: dict[tuple[str, str], bool] = {}
         self._assigned: dict[int, dict[str, list[ast.expr]]] = {}
         #: :meth:`bound` per function.
         self._bound: dict[int, dict[str, list[ast.expr]]] = {}
@@ -3057,7 +3091,9 @@ class Types:
         is what the name is, whatever the annotation says: ``Any`` says
         nothing.  A binding to no class of the corpus -- ``_Proxied =
         object`` in the other branch -- is passed over; two bindings to two
-        corpus classes name neither.
+        corpus classes name neither.  That base is one for a type checker
+        only (:meth:`type_only`): the class's order leaves it out, and a
+        method found through it runs on its object (:meth:`forwarded`).
         """
         if depth > self.DEPTH:
             return None
@@ -3115,22 +3151,81 @@ class Types:
         return found.pop() if len(found) == 1 else None
 
     def _module_bound(self, file: str) -> dict[str, list[ast.expr]]:
-        """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``."""
+        """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``
+        -- quoted, for a ``TypeAlias``."""
         if file not in self._module_bindings:
             found: dict[str, list[ast.expr]] = {}
+            checked: set[int] = set()
             tree = self.tree(file)
-            for node in _module_statements(tree.body) if tree is not None else ():
+            for node, checking in _checked_statements(tree.body) if tree is not None else ():
                 if isinstance(node, ast.Assign):
                     names = [target.id for target in node.targets if isinstance(target, ast.Name)]
                 elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
                     names = [node.target.id]
                 else:
                     continue
-                if isinstance(node.value, (ast.Name, ast.Attribute)):
+                value = node.value
+                if isinstance(node, ast.AnnAssign) and _head_name(node.annotation) == "TypeAlias":
+                    # ``TaskBufferLike: TypeAlias = "TaskBuffer"``: an alias names what it quotes.
+                    value = _unquoted(value)
+                if isinstance(value, (ast.Name, ast.Attribute)):
                     for one in names:
-                        found.setdefault(one, []).append(node.value)
+                        found.setdefault(one, []).append(value)
+                    if checking:
+                        checked.add(id(value))
             self._module_bindings[file] = found
+            self._checked_values[file] = frozenset(checked)
         return self._module_bindings[file]
+
+    def type_only(self, file: str, base: ast.expr) -> bool:
+        """Whether the base clause *base* of a class of *file* names a class only for a type checker.
+
+        ``class TaskBuffer(_DBProxyAPI)``, the module binding ``_DBProxyAPI =
+        OraDBProxy.DBProxy`` under ``if TYPE_CHECKING:`` and ``_DBProxyAPI =
+        object`` otherwise: a type checker reads a TaskBuffer as a DBProxy,
+        Python builds the class on ``object``.  So is ``_Proxied: Any =
+        JediTaskBuffer``.  A name the module declares a class with, imports,
+        or binds to a corpus class at run time too is a base at run time.
+        """
+        if not isinstance(base, ast.Name):
+            return False
+        key = (file, base.id)
+        if key not in self._type_only:
+            self._type_only[key] = False
+            tree = self.tree(file)
+            if tree is not None and base.id not in self.imports(file):
+                declared = any(isinstance(node, ast.ClassDef) and node.name == base.id for node in tree.body)
+                values = self._module_bound(file).get(base.id, [])
+                checked = self._checked_values[file]
+                self._type_only[key] = (
+                    not declared
+                    and any(id(value) in checked for value in values)
+                    and not any(id(value) not in checked and self.class_named(file, value, 1) is not None for value in values)
+                )
+        return self._type_only[key]
+
+    def run_bases(self, file: str, cls: ast.ClassDef) -> list[ast.expr]:
+        """*cls*'s base clauses Python builds it on: all but those naming a class only for a type checker (:meth:`type_only`)."""
+        return [base for base in cls.bases if not self.type_only(file, base)]
+
+    def forwarded(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
+        """The classes *cls*'s order names only for a type checker (:meth:`type_only`), nearest first.
+
+        What a type checker reads an object of *cls* as besides its own
+        classes: the class whose object its ``__getattr__`` hands a call --
+        a TaskBuffer's pool proxy, ``OraDBProxy.DBProxy``; a
+        ``JediTaskBufferInterface``'s ``JediTaskBuffer`` in the process that
+        runs it.  A method none of *cls*'s own order defines is that object's.
+        """
+        found: list[tuple[str, ast.ClassDef]] = []
+        for where, holder in self.mro(file, cls):
+            for base in holder.bases:
+                if not self.type_only(where, base):
+                    continue
+                named = self.class_named(where, base)
+                if named is not None and all(one[1] is not named[1] for one in found):
+                    found.append(named)
+        return found
 
     def annotated(self, file: str, annotation: Optional[ast.expr]) -> Optional[tuple[str, ast.ClassDef]]:
         """The class an annotation states, where it states exactly one -- :meth:`annotated_all`."""
@@ -3435,7 +3530,7 @@ class Types:
     def lineage(self, file: str, cls: ast.ClassDef) -> list[tuple[str, ast.ClassDef]]:
         """*cls* and its bases, nearest first, followed across files through imports."""
         order: list[tuple[str, ast.ClassDef]] = [(file, cls)]
-        queue = [(file, base) for base in cls.bases]
+        queue = [(file, base) for base in self.run_bases(file, cls)]
         seen = {(file, cls.name)}
         while queue and len(order) < self.LINEAGE:
             where, base = queue.pop(0)
@@ -3444,7 +3539,7 @@ class Types:
                 continue
             seen.add((found[0], found[1].name))
             order.append(found)
-            queue.extend((found[0], one) for one in found[1].bases)
+            queue.extend((found[0], one) for one in self.run_bases(*found))
         return order
 
     def built_outside(self, file: str, cls: ast.ClassDef) -> bool:
@@ -3590,7 +3685,7 @@ class Types:
 
         direct: list[object] = []
         sequences: list[list[object]] = []
-        for base in cls.bases:
+        for base in self.run_bases(file, cls):
             found = self.class_named(file, pathcond.unsubscripted(base))
             if found is None:
                 outside = f"<outside>{ast.unparse(base)}"
@@ -3622,13 +3717,18 @@ class Types:
         return (found[0], found[2]) if found is not None else None
 
     def _method_in(
-        self, file: str, cls: ast.ClassDef, name: str
+        self, file: str, cls: ast.ClassDef, name: str, depth: int = 0
     ) -> Optional[tuple[str, ast.ClassDef, ast.FunctionDef | ast.AsyncFunctionDef]]:
-        """:meth:`method`, with the class of the lineage that defines it."""
+        """:meth:`method`, with the class of the lineage that defines it -- or, where none does, of the lineage of a
+        class *cls* names only for a type checker, whose object runs it (:meth:`forwarded`)."""
         for where, holder in self.lineage(file, cls):
             node = _function_binding(holder.body, name)
             if node is not None:
                 return where, holder, node
+        for forwarded in self.forwarded(file, cls) if depth < self.FORWARDS else ():
+            found = self._method_in(*forwarded, name, depth + 1)
+            if found is not None:
+                return found
         return None
 
     # -- declarations ------------------------------------------------------

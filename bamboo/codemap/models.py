@@ -1105,6 +1105,60 @@ class HandedParameter(BaseModel):
     )
 
 
+class ConditionAtom(BaseModel):
+    """One comparison of an object's attribute with constants in a branch's path condition, the object placed in its
+    class: propagateResultToJEDI's ``jobSpec.jobStatus == 'finished'`` is ``JobSpec.jobStatus`` ``==``
+    ``'finished'``, ``jobSpec`` its parameter -- so a reader evaluates the condition way by way on the row's own
+    columns, not by the attribute's spelling."""
+
+    entry: int = Field(description="The index of the :attr:`Branch.path_condition` entry the comparison is in.")
+    text: str = Field(description="The comparison as the entry spells it: ``jobSpec.jobStatus == 'finished'``.")
+    subject: str = Field(
+        default="",
+        description="``Class.attr`` of the attribute compared; empty where the object's class, or its attribute, is "
+        "not one the map knows.",
+    )
+    op: str = Field(description="``==``, ``!=``, ``in``, ``not in``, ``is``, ``is not``, ``<``, ``<=``, ``>``, ``>=``.")
+    values: list[str] = Field(
+        default_factory=list, description="The constants compared with, as written: ``'finished'``, ``None``."
+    )
+    object: str = Field(
+        description=(
+            "The object whose attribute is compared, as spelled: ``jobSpec``, ``self.job``; for a ``written`` atom, "
+            "the local compared: ``fileStatus``."
+        )
+    )
+    parameter: str = Field(
+        default="",
+        description="Where the object is a parameter of the branch's function: its name (a caller hands it).",
+    )
+    written: bool = Field(
+        default=False,
+        description=(
+            "The comparison is of a bare local defined once from an SQL bind -- propagateResultToJEDI's ``fileStatus "
+            "= varMap[':status']`` --, and ``subject`` is the column of the one junction of the function whose "
+            "branches fill that bind: the value this run writes there, not the row's current one."
+        ),
+    )
+
+
+class Accumulation(BaseModel):
+    """One statement adding to the entry of a container a counter write takes its increment from
+    (:attr:`Branch.accumulated`): propagateResultToJEDI's ``datasetContentsStat[datasetID]['nFilesFinished'] += 1``
+    for ``nFilesFinished=nFilesFinished+{}``."""
+
+    line: int = Field(description="The statement's line.")
+    op: str = Field(description="``+`` or ``-``: the statement adds to the entry or takes from it.")
+    amount: str = Field(description="What it adds or takes, as written: ``1``, ``tmpNumEvents``.")
+    path_condition: list[str] = Field(
+        default_factory=list,
+        description="When the statement runs, read as a write's branch's path condition is: its tests and the exits above it.",
+    )
+    condition_atoms: list[ConditionAtom] = Field(
+        default_factory=list, description="The comparisons of *path_condition* with constants (:class:`ConditionAtom`)."
+    )
+
+
 class Branch(BaseModel):
     """One possible outcome of a junction and the condition that selects it.
 
@@ -1146,6 +1200,22 @@ class Branch(BaseModel):
         ),
     )
     path_condition: list[str] = Field(default_factory=list)
+    condition_atoms: list[ConditionAtom] = Field(
+        default_factory=list,
+        description=(
+            "Each comparison of an object's attribute with constants in *path_condition*, the object placed in its "
+            "class where the map can (:class:`ConditionAtom`); the arms the attribute slice reads."
+        ),
+    )
+    accumulated: list[Accumulation] = Field(
+        default_factory=list,
+        description=(
+            "Where the outcome is a column plus or less a value the statement takes from a container -- "
+            "``runtime(nFilesFinished + {})``, the SQL built from datasetContentsStat's keys --: each statement of the "
+            "function adding to or taking from the container's entry keyed by the column's name, with when it runs "
+            "(:class:`Accumulation`).  The count moves only where one of them ran."
+        ),
+    )
     row_precondition: list[str] = Field(
         default_factory=list,
         description=(
@@ -2619,6 +2689,54 @@ RESULT_AGGREGATE = "aggregate"
 RESULT_VARIES = "varies"
 
 
+#: :attr:`BornTerm.holds`: how a term holds on the row an ``INSERT`` makes.
+BORN_WRITTEN = "written"
+BORN_DEFAULT = "default"
+BORN_AFTER = "after"
+BORN_UNTIL = "until"
+BORN_OPEN = "open"
+BORN_NOT = "not"
+BORN_UNDECIDED = "undecided"
+
+
+class BornTerm(BaseModel):
+    """One term of a statement read on the new row an ``INSERT`` makes (:attr:`Waker.born`)."""
+
+    term: str = Field(description="The term as the statement writes it: ``lockedBy IS NULL``.")
+    subject: str = Field(description="The column it tests, as :attr:`ConditionNode.subject` spells it.")
+    holds: str = Field(
+        description=(
+            "``written`` -- by the value the ``INSERT`` writes there, a literal; ``default`` -- by the column's DDL "
+            "default, the ``INSERT`` not naming it (``NULL`` where the DDL gives none); ``after`` / ``until`` -- the "
+            "column stamped with the clock the term's value counts from, compared with that clock less an offset: "
+            "it holds once the offset has passed since the stamp, or until it has; ``open`` -- the column takes a "
+            "parameter or an expression, and the row's own value decides.  In an entry ``added`` on some routes "
+            "only, also ``not`` -- the new row fails it -- and ``undecided``."
+        )
+    )
+    value: str = Field(
+        default="",
+        description=(
+            "The new row's value as spelled: the literal, the default (``NULL``), the clock (``naive_utcnow``); the "
+            "parameter or expression where ``open``."
+        ),
+    )
+    offset_seconds: Optional[float] = Field(
+        default=None, description="``after`` / ``until``: the term's value's offset from the clock, where settled."
+    )
+    scale_seconds: Optional[float] = Field(
+        default=None,
+        description="``after`` / ``until``: seconds per unit of the one value the offset waits for (``needs``).",
+    )
+    needs: list[str] = Field(
+        default_factory=list,
+        description="``after`` / ``until``: ``<function>.<parameter>`` the offset waits for: ``listJobOutputReport.grace_period``.",
+    )
+    added: bool = Field(
+        default=False, description="In an entry the statement adds under a test, on the routes that add it only."
+    )
+
+
 class Waker(BaseModel):
     """A branch whose write can make a row a statement selects meet one of its terms on another column.
 
@@ -2653,7 +2771,10 @@ class Waker(BaseModel):
         default="branch",
         description=(
             "``branch`` -- a junction's branch writes the value; ``insert`` -- a reach record's ``INSERT`` gives a new "
-            "row the value (:attr:`ReachNode.writes`): sendCommandTaskPanda's 4038, the commands 4339 selects."
+            "row the value (:attr:`ReachNode.writes`): sendCommandTaskPanda's 4038, the commands 4339 selects; "
+            "``born`` -- an ``INSERT`` makes a row the statement's terms take, every one of a conjunction holding on "
+            "the new row or left to its own values (:attr:`born`): updateWorkers' 1016 a job output report "
+            "listJobOutputReport's 2401 takes once its grace has passed."
         ),
     )
     routes: list[list[str]] = Field(
@@ -2680,6 +2801,14 @@ class Waker(BaseModel):
             "handed rows at the value a reader asks about -- 1830 selects ``JediTaskSpec.status=defined``, so 1844 "
             "wakes the tasks 130 would take at ``defined``.  Not this statement: a write its own rows key is its "
             "mover's, on rows it took."
+        ),
+    )
+    born: list[BornTerm] = Field(
+        default_factory=list,
+        description=(
+            "A ``born`` waker's terms on the new row: the conjunction it meets, then the entries added on some routes "
+            "(``added``).  Its ``term`` is the conjunction, ``subject`` the table, ``value`` empty, ``stated`` that no "
+            "term is ``open``, ``routes`` every route into the ``INSERT``'s function."
         ),
     )
 
@@ -3863,8 +3992,14 @@ KEY_NO_USE = "no use found"
 KEPT_NO_CALL = "no call placed"
 KEPT_NOT_A_NAME = "not a name"
 KEPT_TOO_DEEP = "too deep"
-#: How many calls up a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
+#: How many calls up or down a :class:`KeptHop` is read: as a parameter is (:class:`RunKey`).
 KEPT_DEPTH = 6
+#: How the object reached a :class:`KeptHop`'s owner (:attr:`KeptHop.way`): kept in what the call handed (the caller
+#: holds it after), returned by the call (the caller holds the call's value), or handed by the call (the callee holds
+#: it in a parameter).
+HOP_KEPT = "kept"
+HOP_RETURNED = "returned"
+HOP_HANDED = "handed"
 #: Why an ``INSERT`` makes a row or writes one that was a row of its class before (:attr:`KeyFrom.new_row_by`).
 #: New: a key column filled from a sequence, by ``RETURNING``, with a literal, with a value computed here, or with
 #: one carried from something not of the table's class (a scalar handed in, a parent's row).
@@ -4158,6 +4293,15 @@ class HeldSource(KeySource):
     """Where one way a :class:`GuardFrom` or :class:`ParameterFrom` reads ends: a :class:`KeySource`, its *kind* one
     of :data:`HELD_KINDS` and its *line* where the way ends, with what the way went through on the way to the read."""
 
+    aggregate: Optional[RowAggregate] = Field(
+        default=None,
+        description=(
+            f"``rows`` whose item is ``{KEY_COLUMN_EXPRESSION}`` that is one value over a group's rows "
+            "(:class:`RowAggregate`), the same on every text of the statement: prepareTasksToBeFinished_JEDI's "
+            "``totFinished``.  Its columns are spelled as *column* is: ``table.column`` lowered."
+        ),
+    )
+
     steps: list[str] = Field(
         default_factory=list,
         description=(
@@ -4377,8 +4521,22 @@ class KeptHop(BaseModel):
     ``TaskRefiner.runImpl``'s ``impl.extractCommon(...)`` at 211, ``impl.taskSpec`` holds it, and runImpl's flushes of
     it (``updateTask_JEDI`` at 226, ..., ``registerTaskInOneShot_JEDI`` at 602) persist it -- *persisted*; a subclass's
     ``extractCommon`` calling the base keeps it in its own ``self`` again, so its hop goes one call further up.  A
-    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer."""
+    caller that keeps or returns it again has a hop of its own for each of its callers, *via* one call longer.
 
+    So for an object a function returns (:data:`KEY_RETURNED`): each caller holds the call's value.  And for one it,
+    or a caller a hop reaches, hands to a call (:data:`KEY_HANDED`): each function the call lands in holds it in a
+    parameter, its writes persisting it read as a caller's are, and a call it hands it to again one hop further
+    down.  ``JobGenerator.doGenerate`` makes the jobs it sets ``prodSourceLabel`` on and returns them; its caller hands
+    them to ``TaskBuffer.storeJobs``, which hands each to ``insertNewJob``, whose ``INSERT`` persists it."""
+
+    way: str = Field(
+        default="",
+        description=(
+            f"How the object reached *owner*: ``{HOP_KEPT}`` in what the last call of *via* handed, "
+            f"``{HOP_RETURNED}`` as its value, ``{HOP_HANDED}`` in a parameter of *owner* (the call into it); empty "
+            "where *open*."
+        ),
+    )
     via: list[str] = Field(
         default_factory=list,
         description="The calls, ``file:line``, from the call into the record's function up to *owner*'s.",
@@ -4409,6 +4567,9 @@ class KeptHop(BaseModel):
         default="",
         description=f"Why the hop is not read: ``{KEPT_NO_CALL}``, ``{KEPT_NOT_A_NAME}``, ``{KEPT_TOO_DEEP}``.",
     )
+    #: While the build reads it: ``(file, carry, calls)`` of a caller that hands the object on, where the hops down
+    #: start (:func:`bamboo.codemap.panda.recognizers.sqlwrite._down_hops`).  Not dumped.
+    _down: Optional[tuple] = PrivateAttr(default=None)
 
 
 class KeyFrom(BaseModel):
@@ -4530,8 +4691,9 @@ class KeyFrom(BaseModel):
     kept_hops: list[KeptHop] = Field(
         default_factory=list,
         description=(
-            f"Where *unread* is ``{KEY_KEPT}``: where the object goes in the callers (:class:`KeptHop`), one per "
-            "caller reached; empty for any other record."
+            f"Where *unread* is ``{KEY_KEPT}`` or ``{KEY_RETURNED}``: where the object goes in the callers, and where "
+            f"it is ``{KEY_HANDED}`` or a caller hands it on, in the functions the calls land in (:class:`KeptHop`), "
+            "one per function reached; empty for any other record."
         ),
     )
     reads: bool = Field(
@@ -7167,17 +7329,40 @@ KEY_STOPS: dict[str, str] = {
 
 
 class RowAggregate(BaseModel):
-    """A select item that is one column's ``MAX`` or ``MIN`` over the rows a ``GROUP BY`` makes one: no row's value of
-    the column, but the greatest or least of the group's.  copyArchive's ``MAX(creationTime)`` of ``jobsDefined4``
-    grouped by ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}``."""
+    """A select item that is one value over the rows a ``GROUP BY`` makes one, not any row's: one column's ``MAX``,
+    ``MIN``, ``SUM`` or ``AVG`` -- copyArchive's ``MAX(creationTime)`` of ``jobsDefined4`` grouped by
+    ``jobDefinitionID, prodUserName, ...`` printed as ``maxModTime={maxModificationTime}`` --, how many rows there are
+    (``COUNT(*)``), or how many hold a value in a column: prepareTasksToBeFinished_JEDI's ``SUM(CASE WHEN
+    f_status='finished' THEN 1 ELSE 0 END)``, ``COUNT`` of ``JediFileSpec.status`` with *value* ``'finished'``, over
+    the distinct ``(jediTaskID, status, walltimeUnit, PandaID, status)`` its derived table hands out (*counted*).
 
-    fn: str = Field(description="``MAX`` or ``MIN``.")
-    column: str = Field(description="The column it is of, as the table's class declares it: ``JobSpec.creationTime``.")
+    Where the record spells columns as classes declare them (a hole, a stop), so are these; where it spells
+    ``table.column`` (a guard's or a key's source), so are these."""
+
+    fn: str = Field(description="``MAX``, ``MIN``, ``SUM``, ``AVG`` or ``COUNT``.")
+    column: str = Field(
+        default="",
+        description=(
+            "The column it is of: ``JobSpec.creationTime``; for a ``COUNT`` with *value*, the column tested; empty "
+            "for ``COUNT(*)``."
+        ),
+    )
+    value: str = Field(
+        default="",
+        description="For a ``COUNT`` of the rows holding a value in *column*: the value, as written (``'finished'``).",
+    )
     group_by: list[str] = Field(
         default_factory=list,
         description=(
             "The ``GROUP BY`` columns, as the table's class declares each, else ``table.column`` as written; empty "
             "where the statement groups nothing (one value over every row it selects)."
+        ),
+    )
+    counted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where the statement reads one ``DISTINCT`` derived table: its items, spelled as *group_by* -- the rows "
+            "the value is over are one per distinct combination of them; empty where it reads tables."
         ),
     )
 

@@ -3093,3 +3093,53 @@ def test_an_object_whose_class_hands_out_a_field_holds_as_elements_what_its_cons
     assert elements("pair") == [set()]
     assert elements("wrapped") == [set()]
     assert [(one.kind, one.steps, one.elements) for one in held["field"]] == [("object", [".dataList"], [])]
+
+
+CLOSURE = {
+    BASE: """\
+        def main(argv, tbuf):
+            lock_interval = 10  # L1
+            retries = 1  # W1
+            retries = 2  # W2
+
+            class Worker:
+                def run(self, flag):
+                    if lock_interval > 5:  # T1
+                        self.a = 1  # R1
+                    if tbuf is None:  # T2
+                        self.a = 2  # R2
+                    if retries:  # T3
+                        self.a = 3  # R3
+                    if unknown_name:  # T4
+                        self.a = 4  # R4
+        """,
+}
+
+
+def test_a_name_a_nested_function_reads_from_its_enclosing_function_is_read_there(
+    tmp_path: Path,
+) -> None:
+    """``add_main.main``'s ``AdderThread.run`` reads ``lock_interval``, which ``main`` binds to ``10``: by Python's
+    rule a name the method neither binds nor declares is the nearest enclosing function's that holds it, the
+    class's body passed over -- not the module's, where it was read before and gave no guard at all.  Each binding
+    of the enclosing function is a way (the method may run after any of them), its parameter its ParameterFrom; a
+    name no function holds is still the module's, with no guard."""
+    fragment = _build(tmp_path, CLOSURE, (("run", "R1"), ("run", "R2"), ("run", "R3"), ("run", "R4")))
+
+    def ways(marker: str) -> set[tuple]:
+        (guard,) = [one for one in fragment.guard_froms if one.test_line == _line(BASE, marker, CLOSURE)]
+        assert guard.stops == []
+        return {(one.kind, one.name, tuple(one.at), one.site_owner, tuple(one.chosen)) for one in guard.sources}
+
+    def at(marker: str) -> str:
+        return f"{BASE}:{_line(BASE, marker, CLOSURE)}"
+
+    assert ways("T1") == {("constant", "10", (at("L1"),), "", ())}
+    assert ways("T2") == {("parameter", "tbuf", (), f"{BASE}::main", ())}
+    assert ways("T3") == {
+        ("constant", "1", (at("W1"),), "", (at("W1"),)),
+        ("constant", "2", (at("W2"),), "", (at("W2"),)),
+    }
+    assert not [one for one in fragment.guard_froms if one.test_line == _line(BASE, "T4", CLOSURE)]
+    (parameter,) = [one for one in fragment.parameter_froms if one.owner == f"{BASE}::main"]
+    assert parameter.parameter == "tbuf"
