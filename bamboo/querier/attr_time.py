@@ -48,6 +48,8 @@ class Arm:
     after_prints: tuple = field(default=(), compare=False)
     #: the branch's ``amount`` (a clock plus a settled offset; Q3's P42, ``rerun._written_offset``), not compared
     amount: object = field(default=None, compare=False)
+    #: the branch's ``taken_back`` (the resets that take its change back; P41, ``which_ran.taken_back``), not compared
+    taken_back: object = field(default=None, compare=False)
 
 
 def arms(fragment, subject: str, readings: list, born: Callable[[str, object], bool] | None = None) -> list[Arm]:
@@ -73,7 +75,8 @@ def arms(fragment, subject: str, readings: list, born: Callable[[str, object], b
             placed = tuple(p for p in pairs if p.row in ON_THE_ROW)
             why = "" if placed else _unplaced(pairs, b.history_hole)
             out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(owner, b)),
-                           tuple(getattr(b, "after_prints", None) or ()), getattr(b, "amount", None)))
+                           tuple(getattr(b, "after_prints", None) or ()), getattr(b, "amount", None),
+                           getattr(b, "taken_back", None)))
     return out
 
 

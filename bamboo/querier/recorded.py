@@ -514,6 +514,24 @@ class RecordedLogs:
     def names(self, wanted: list[str]) -> list[str]:
         return list(dict.fromkeys(wanted))
 
+    def marks_seen(self, names: list[str], head: str) -> dict[str, int]:
+        """The marks beginning with *head* (``prepareTasksToBeFinished_JEDI < vo=``) the records of the logs *names*
+        hold, each up to its closing ``>``, with how many lines hold it -- every record read, whatever it was asked
+        for (B, the r10 miss: a mark's hole the callers fill, read off the runs the records hold)."""
+        out: dict[str, int] = {}
+        found = re.compile(re.escape(head) + r"[^>\n]*>")
+        wanted = set(names)
+        for record in self._records.values():
+            if record.get("ask", {}).get("name") not in wanted:
+                continue
+            for got in (record.get("machines") or {}).values():
+                for f in got.get("files", []) or []:
+                    for r in f.get("records", []) or []:
+                        for line in r.get("lines", []) or []:
+                            for m in found.finditer(line):
+                                out[m.group(0)] = out.get(m.group(0), 0) + 1
+        return out
+
     def log(
         self, name: str, key: str, window: Window | None = None, *, machine: str | None = None, owners: Owners | None = None,
         strings: tuple[str, ...] = (), whole: bool = False,

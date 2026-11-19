@@ -319,6 +319,76 @@ def selections(records: list, crows: CycleRows, mode: str, log: str = "") -> tup
     return picks, spans
 
 
+@dataclass(frozen=True)
+class Idle:
+    """P8: a cycle that printed nothing while other machines' cycles selected: its line before (row *line* at *start*),
+    its next line after (row *next_line* at *end*), and the agent's calls in its loop between the two rows (*calls*)."""
+
+    machine: str
+    mark: str
+    start: str
+    line: int
+    end: str
+    next_line: int
+    calls: tuple[str, ...]
+
+
+def idle_cycles(sel: Selection, crows: CycleRows, records: dict[str, list], mode: str, machines: set[str], lo: str,
+                hi: str, label: str = "") -> list[Idle]:
+    """P8 (the investigator's u2 NT-breaking-late step 5): on each of *machines*, which selected nothing from *lo* to
+    *hi*, the agent's cycles (one mark each) whose lines straddle that span -- a line at or before *lo*, the next at or
+    after *hi*, none between -- each with the agent's calls in its loop between the two lines' rows, where it was
+    meanwhile.  PostProcessor's cycle on aipanda081 printed "preparing tasks to be finished" at 04:02:41 and its next
+    line, "getting tasks to be finished", at 04:12:44: it was in prepareTasksToBeFinished_JEDI while six other machines
+    selected.  *records*: the agent's lines by log, as :func:`selections` reads them; *label*: the row's, where the
+    cycle's lines print one -- a cycle for another label is not the one that would have selected the row."""
+    fn = R.function(sel.rel, sel.agent_name.split(".")[-1], within=[sel.call])
+    stmt = R.statement_at(fn.node, sel.call)
+    loop = next((a for a in pathcond.ancestors(stmt) if isinstance(a, (ast.For, ast.AsyncFor, ast.While))), None) if stmt else None
+    if loop is None:
+        return []
+    rows = [*crows.before, *crows.after]
+    printing = {id(n) for r in fn.rows for n in ast.walk(r.stmt)}
+    by_mark: dict[tuple[str, str], list] = {}
+    for log, recs in records.items():
+        for r in recs:
+            if r.machine in machines and r.token and not unmarked(log, r.token, r.text):
+                by_mark.setdefault((r.machine, r.token), []).append(r)
+    out = []
+    for (machine, mark), recs in sorted(by_mark.items()):
+        recs.sort(key=lambda r: r.stamp)
+        before = [r for r in recs if r.stamp[:23] <= lo[:23]]
+        after = [r for r in recs if r.stamp[:23] >= hi[:23]]
+        if not before or not after or any(lo[:23] < r.stamp[:23] < hi[:23] for r in recs):
+            continue
+        row1 = next((row for row in rows if row.matches(before[-1], mode)[0]), None)
+        row2 = next((row for row in rows if row.matches(after[0], mode)[0]), None)
+        if row1 is None or row2 is None or row1.line >= row2.line:
+            continue
+        held = ""
+        for r in before:
+            for row in crows.before:
+                if crows.label and row.matches(r, mode)[0] and crows.label in (got := row.capture(r)):
+                    held = got[crows.label].strip()
+        if label and held and held != label:
+            continue
+        calls = tuple(dict.fromkeys(
+            name for n in ast.walk(loop) if isinstance(n, ast.Call) and row1.line < n.lineno < row2.line
+            and id(n) not in printing and (name := _called(n)) and name not in _BUILTINS))
+        if calls:
+            out.append(Idle(machine, mark, before[-1].stamp, row1.line, after[0].stamp, row2.line, calls))
+    return out
+
+
+_BUILTINS = frozenset(dir(__import__("builtins")))
+
+
+def _called(call: ast.Call) -> str:
+    """The name a call calls: an attribute's, or a bare name's."""
+    f = call.func
+    return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+
 def one_process(picks: list[Pick], spans: dict[str, tuple[str, str]]) -> bool:
     """Whether the cycles *picks* come from follow one another: no two of their marks' spans overlap.  What P1 can be
     checked by, not P1: two processes whose short cycles take turns overlap nowhere, so P1 stays a premise."""
@@ -371,6 +441,101 @@ def lock_of(sel: Selection) -> Lock | None:
         if span is not None:
             return Lock(span, f"lockedTime<:{term}", ast.unparse(b.site).strip(), sets)
     return None
+
+
+def lock_writes(func: ast.AST) -> list[ast.stmt]:
+    """P55 (out/gm/qk-design.md, the lock timeline's draft): the statements of *func* that run a SQL text setting the
+    lock column (``UPDATE ... SET lockedBy=``), read off the string bound to the name the execute's first argument
+    starts with -- lockJobOutputReport's ``self.cur.execute(sqlUL + comment, varMap)``."""
+    texts: dict[str, str] = {}
+    for n in ast.walk(func):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            parts = [c.value for c in ast.walk(n.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+            if parts:
+                texts[n.targets[0].id] = " ".join(parts)
+    out: list[ast.stmt] = []
+    for n in ast.walk(func):
+        if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and getattr(n.value.func, "attr", "") == "execute"
+                and n.value.args):
+            continue
+        first = n.value.args[0]
+        name = first.left if isinstance(first, ast.BinOp) else first
+        text = texts.get(name.id, "") if isinstance(name, ast.Name) else ""
+        if re.search(r"\bUPDATE\b", text, re.I) and re.search(r"\bSET\b[^;]*\blockedBy\s*=", text, re.I):
+            out.append(n)
+    return out
+
+
+def lock_before(mover: str, hops: int = 3) -> tuple[str, str, int] | None:
+    """P55 (out/gm/qk-design.md, the lock timeline's draft): the lock function whose result guards a call on the way
+    into *mover* (``file::qualname``): up the map's calls into it (:func:`sources.calls_into`), at most *hops*, a caller
+    whose call into the chain stands under a guard (``pathcond.arm_condition``, early exits too) naming a local bound to
+    a call of a database module's function with a lock write (:func:`lock_writes`).  add_main's AdderThread.run calls
+    AdderGen.run at 150 only past ``if not got_lock: continue``, ``got_lock = taskBuffer.lockJobOutputReport(...)``.
+    ``(the lock function, the caller, the call line)``, or None."""
+    frontier, seen = [mover], {mover}
+    for _ in range(hops):
+        found: list[str] = []
+        for owner in frontier:
+            rel, _, qual = owner.partition("::")
+            for caller, lines in SR.calls_into(rel, qual):
+                if caller in seen:
+                    continue
+                seen.add(caller)
+                found.append(caller)
+                crel, _, cqual = caller.partition("::")
+                try:
+                    fn = R.function(crel, cqual.split(".")[-1], list(lines))
+                except (LookupError, ValueError, SyntaxError):
+                    continue
+                for line in lines:
+                    stmt = R.statement_at(fn.node, line)
+                    if stmt is None:
+                        continue
+                    for guard in pathcond.arm_condition(stmt):
+                        try:
+                            tree = ast.parse(guard, mode="eval").body
+                        except SyntaxError:
+                            continue
+                        for name in sorted({x.id for x in ast.walk(tree) if isinstance(x, ast.Name)}):
+                            for b in pathcond.bindings(fn.node, name):
+                                value = getattr(b, "value", None)
+                                if not isinstance(value, ast.Call):
+                                    continue
+                                callee = str(getattr(value.func, "attr", None) or getattr(value.func, "id", "") or "")
+                                for o in _defs_named(callee):
+                                    if "/db_proxy_mods/" not in o:
+                                        continue
+                                    lrel, _, lqual = o.partition("::")
+                                    try:
+                                        lf = R.function(lrel, lqual.split(".")[-1])
+                                    except (LookupError, ValueError, SyntaxError):
+                                        continue
+                                    if lock_writes(lf.node):
+                                        return o, caller, line
+        frontier = found
+    return None
+
+
+def take_rows(func: ast.AST, rows: list[int]) -> set[int]:
+    """P55: of the print lines *rows* of *func*, those every way to which runs a lock write (:func:`lock_writes`) first:
+    a statement holding the row, or holding a statement that does, sits in the same block as a lock write and after it.
+    A call printing one took the lock; one printing none did not -- lockJobOutputReport's 'successfully locked record
+    by ...' after the UPDATE in its loop, not its 'done' after the loop."""
+    writes = lock_writes(func)
+    out: set[int] = set()
+    for n in ast.walk(func):
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(n, name, None)
+            if not isinstance(block, list):
+                continue
+            for i, s in enumerate(block):
+                if not any(w is s for w in writes):
+                    continue
+                for later in block[i + 1:]:
+                    out.update(line for line in rows if any(getattr(x, "lineno", None) == line and isinstance(x, ast.stmt)
+                                                            for x in ast.walk(later)))
+    return out
 
 
 def passed_over(picks: dict[str, list[Pick]], first: Pick, label: str, since: str) -> list[Pick]:
@@ -449,8 +614,63 @@ def waker_readers(key_froms: list, read_sites: list, row_tables: set[str], owner
             readers.append((site, s.column))
     if not readers or any({t.lower() for t in r.tables} & row_tables for r, _ in readers):
         return None
-    wakers = [w for r, _ in readers for w in getattr(r, "wakers", None) or [] if w.kind == "insert"]
+    wakers = _inserting(readers)
     return (readers, wakers) if wakers else None
+
+
+#: the wakers that make a row: an insert of a value the selection asks for, or a new row its terms take (the map's
+#: ``born``, codemap-xliv's P45 part: Job_Output_Report's INSERTs for listJobOutputReport@2401)
+INSERTING = ("insert", "born")
+
+
+def _inserting(readers: list[tuple[Any, str]]) -> list:
+    """The inserting wakers of *readers*' selections, one per writer's line."""
+    out: dict[tuple, Any] = {}
+    for r, _ in readers:
+        for w in getattr(r, "wakers", None) or []:
+            if w.kind in INSERTING:
+                out.setdefault((w.owner, w.line, w.value), w)
+    return list(out.values())
+
+
+def crossed_readers(key_froms: list, read_sites: list, reach_graph: list, row_tables: set[str], owner: str, subject: str,
+                    lines: set[int], kept_kind: str, ident: set[str], depth: int = 2) -> tuple[list[tuple[Any, str]], list, list[str]] | None:
+    """P45 (the investigator's u10; A2 widened): where *owner*'s writes of *subject* at *lines* carry no key of their own
+    -- no KeyFrom of them has a source, and one keeps the object it was handed (*kept_kind*; another may hand it to a
+    helper, as P10 reads doGenerate's 1277) -- the key came with the object from its callers: the selections on another table (none of *row_tables*) whose rows the map's
+    ``crosses_to`` hands to *owner* or a caller of it within *depth* calls (the reach graph), with the inserts their
+    ``wakers`` name, and the callers reached.  A selection keyed by the object's identity (a key whose column is
+    one of *ident*, lower case: peekJob's files by ``FileSpec.PandaID``) reads by the key, so gives none.  The Adder's parse_job_output_report keeps the job its AdderGen was handed;
+    listJobOutputReport@2401's rows cross to process_job_report.  None where any write has a key of its own, no such
+    selection is found, or none has an inserting waker."""
+
+    def bare(o: str) -> str:
+        return R.named(o)
+
+    mine = [kf for kf in key_froms if bare(kf.owner) == bare(owner) and set(kf.writes.get(subject, [])) & lines]
+    if (not mine or any(getattr(kf, "sources", None) for kf in mine)
+            or not any(getattr(kf, "unread", "") == kept_kind for kf in mine)):
+        return None
+    callers: dict[str, set[str]] = {}
+    for node in reach_graph:
+        for c in getattr(node, "calls", None) or []:
+            callers.setdefault(bare(c.to), set()).add(bare(node.owner))
+    reach = level = {bare(owner)}
+    for _ in range(depth):
+        level = {c for f in level for c in callers.get(f, ())} - reach
+        reach = reach | level
+    readers: list[tuple[Any, str]] = []
+    via: set[str] = set()
+    for r in read_sites:
+        hit = {bare(c) for c in getattr(r, "crosses_to", None) or []} & reach
+        if not hit or {t.lower() for t in getattr(r, "tables", None) or []} & row_tables:
+            continue
+        if {str(k).rpartition(".")[2].lower() for k in getattr(r, "keys", None) or []} & ident:
+            continue
+        readers.append((r, ""))
+        via |= hit
+    wakers = _inserting(readers)
+    return (readers, wakers, sorted(via)) if readers and wakers else None
 
 
 def cap_rows(limits: list[str]) -> int | None:
