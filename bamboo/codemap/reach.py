@@ -157,7 +157,9 @@ _OPERATORS = callfacts.OPERATOR_DUNDERS
 #: ``__setattr__``, whose edges are recorded (:data:`HOW_SETATTR`):
 #: ``JobSpec.__setattr__`` sets ``stateChangeTime`` when ``jobStatus``
 #: changes; and for an operator's, whose edges are recorded too
-#: (:data:`HOW_OPERATOR`): ``Share.__mul__`` multiplies the share's ``value``.  Those edges are the reach record's alone -- :meth:`calls.Calls.callers`,
+#: (:data:`HOW_OPERATOR`): ``Share.__mul__`` multiplies the share's ``value``; and for a ``with``'s manager's
+#: ``__enter__`` / ``__exit__`` (:data:`HOW_WITH`): ``_ResultHeartbeat.__enter__`` starts the thread refreshing an
+#: async result row.  Those edges are the reach record's alone -- :meth:`calls.Calls.callers`,
 #: and the walk and the trace with it, do not see the call, so a junction in a
 #: ``__setattr__`` has no ``called_from`` -- and a store on an object no
 #: reading says anything of has none (167 stores on pin k, 9 of them of
@@ -168,6 +170,8 @@ IMPLICIT_DUNDERS = callfacts.IMPLICIT_DUNDERS
 HOW_SETATTR = "setattr"
 #: How a reach edge says an operation runs an operand's dunder (:meth:`calls.Calls.operated`).
 HOW_OPERATOR = "operator"
+#: How a reach edge says a ``with`` runs its manager's ``__enter__`` or ``__exit__`` (:func:`_withs_in`).
+HOW_WITH = "with"
 #: The operators' dunders, whose edges the record reads: one no edge enters is run by no operation.
 OPERATOR_DUNDER_NAMES = frozenset(name for names in _OPERATORS.values() for name in names)
 
@@ -2577,22 +2581,33 @@ def _stores_in(func: ast.AST) -> Iterator[tuple[ast.Attribute | ast.Call, ast.ex
             yield written.call, written.name, written.value
 
 
-def _operations_in(
-    func: ast.AST,
-) -> Iterator[tuple[ast.BinOp | ast.AugAssign | ast.UnaryOp, ast.expr, str, Optional[ast.expr]]]:
-    """``(operation, operand, dunder, other)`` for each dunder an operation *func* makes itself may run on an operand:
-    ``a * b`` runs ``a.__mul__(b)``, and ``b.__rmul__(a)`` where that gives nothing back; ``a *= b`` runs
-    ``a.__imul__(b)``, else those two; ``-a`` runs ``a.__neg__()`` (:data:`callfacts.OPERATOR_DUNDERS`)."""
+def _operations_in(func: ast.AST) -> Iterator[tuple[ast.AST, ast.expr, str, list[ast.expr], str]]:
+    """``(operation, operand, dunder, arguments, how)`` for each dunder an operation *func* makes itself may run on an
+    operand: ``a * b`` runs ``a.__mul__(b)``, and ``b.__rmul__(a)`` where that gives nothing back; ``a *= b`` runs
+    ``a.__imul__(b)``, else those two; ``-a`` runs ``a.__neg__()`` (:data:`callfacts.OPERATOR_DUNDERS`).  *how* is
+    :data:`HOW_OPERATOR`."""
     for node in C.own_nodes(func):
         if isinstance(node, (ast.BinOp, ast.AugAssign)) and type(node.op) in _OPERATORS:
             forward, reflected, inplace = _OPERATORS[type(node.op)]
             left, right = (node.left, node.right) if isinstance(node, ast.BinOp) else (node.target, node.value)
             if isinstance(node, ast.AugAssign):
-                yield node, left, inplace, right
-            yield node, left, forward, right
-            yield node, right, reflected, left
+                yield node, left, inplace, [right], HOW_OPERATOR
+            yield node, left, forward, [right], HOW_OPERATOR
+            yield node, right, reflected, [left], HOW_OPERATOR
         elif isinstance(node, ast.UnaryOp) and type(node.op) in _OPERATORS:
-            yield node, node.operand, _OPERATORS[type(node.op)][0], None
+            yield node, node.operand, _OPERATORS[type(node.op)][0], [], HOW_OPERATOR
+
+
+def _withs_in(func: ast.AST) -> Iterator[tuple[ast.AST, ast.expr, str, list[ast.expr], str]]:
+    """:func:`_operations_in`'s tuples for each ``with`` *func* makes itself: ``with m:`` runs ``m.__enter__()`` and,
+    leaving the block, ``m.__exit__(None, None, None)`` -- an exception's type, value and traceback where one leaves
+    it; ``async with`` runs ``__aenter__`` and ``__aexit__``.  *how* is :data:`HOW_WITH`."""
+    for node in C.own_nodes(func):
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            enter, leave = ("__aenter__", "__aexit__") if isinstance(node, ast.AsyncWith) else ("__enter__", "__exit__")
+            for item in node.items:
+                yield node, item.context_expr, enter, [], HOW_WITH
+                yield node, item.context_expr, leave, [ast.Constant(value=None) for _ in range(3)], HOW_WITH
 
 
 def _targets(statement: ast.Assign | ast.AugAssign | ast.AnnAssign) -> list[ast.expr]:
@@ -2792,13 +2807,16 @@ def graph(
                         row.edge(implicit, store, to, HOW_SETATTR, for_classes, runs_as, False)
         # An operation runs its operands' dunders with no call naming them:
         # ``share * 2`` runs ``Share.__mul__``, which multiplies the share's
-        # ``value``.  Placed as the calls Python may make, where an operand can
-        # be a class of the corpus that defines the dunder; a dunder no class
-        # defines is not placed, and has no edge (:data:`IMPLICIT_DUNDERS`).
-        for operation, receiver, dunder, other in _operations_in(func):
+        # ``value``; so does a ``with`` its manager's: ``with
+        # _ResultHeartbeat(tb, ...):`` runs its ``__enter__``, which starts the
+        # thread refreshing the result row.  Placed as the calls Python may
+        # make, where an operand can be a class of the corpus that defines the
+        # dunder; a dunder no class defines is not placed, and has no edge
+        # (:data:`IMPLICIT_DUNDERS`).
+        for operation, receiver, dunder, arguments, how in (*_operations_in(func), *_withs_in(func)):
             if dunder not in defined:
                 continue
-            implicit = calls.operated(operation, receiver, dunder, other)
+            implicit = calls.operated(operation, receiver, dunder, arguments)
             for for_classes, bound in _groups(objects, classes, C._reads_self(implicit)):
                 try:
                     placed = calls.callees(file, func, implicit, bound)
@@ -2810,7 +2828,7 @@ def graph(
                         runs_as = [
                             spelled for one in target.bound if (spelled := names.of(one[1])) is not None
                         ]
-                        row.edge(implicit, operation, to, HOW_OPERATOR, for_classes, runs_as, False)
+                        row.edge(implicit, operation, to, how, for_classes, runs_as, False)
         settled = Counter(assumption for _line, _column, assumption in row.settled)
         nodes.append(
             ReachNode(

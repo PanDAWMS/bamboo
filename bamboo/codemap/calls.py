@@ -38,7 +38,7 @@ import re
 import weakref
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
@@ -948,9 +948,9 @@ class Calls:
             self._stores[id(store)] = held
         return held
 
-    def operated(self, operation: ast.AST, receiver: ast.expr, dunder: str, other: Optional[ast.expr]) -> ast.Call:
+    def operated(self, operation: ast.AST, receiver: ast.expr, dunder: str, arguments: Sequence[ast.expr]) -> ast.Call:
         """The call Python makes on one operand of an operation -- ``a * b``, ``a *= b``, ``-a`` -- for *dunder*:
-        ``type(a).__mul__(a, b)``.
+        ``type(a).__mul__(a, b)``; or on the manager of a ``with``: ``type(m).__enter__(m)``.
 
         Spelled ``a.__mul__(b)``, its receiver the operand, so :meth:`callees` places it as it places any method call
         on ``a``, as :meth:`stored` does for a store: at a corpus class's dunder where ``a`` can be one that defines
@@ -961,7 +961,7 @@ class Calls:
         if held is None:
             held = ast.Call(
                 func=ast.Attribute(value=receiver, attr=dunder, ctx=ast.Load()),
-                args=[other] if other is not None else [],
+                args=list(arguments),
                 keywords=[],
             )
             ast.copy_location(held, operation)
