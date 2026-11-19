@@ -10688,6 +10688,7 @@ class Rerun:
         picks: dict[str, list] = {}
         spans: dict[str, dict] = {}
         n_lines = 0
+        cycle_records: dict[str, list] = {}
         for name in self.logs.names(files):
             try:
                 records = self.logs.log(name, self.args.key, window, machine=None, strings=strings).records
@@ -10695,6 +10696,7 @@ class Rerun:
                 unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
                 continue
             n_lines += len(records)
+            cycle_records[name] = list(records)
             got, at = AG.selections(records, crows, self.mode, name)
             for m, qs in got.items():
                 picks.setdefault(m, []).extend(qs)
@@ -10754,6 +10756,19 @@ class Rerun:
                          f"{max(first.after or first.at, since)} did not take it: why ({sel.callee}'s lock by another, its count's "
                          "cap, a bound on the key) is not read")
                 return False
+        # P8 (the investigator's u2 NT-breaking-late step 5): a machine whose cycle selected nothing while the others did
+        # was inside the agent's calls between two of its lines
+        busy = {m for m, qs in picks.items()
+                if any(since[:23] <= q.at[:23] <= first.at[:23] and (not label or q.label == label) for q in qs)}
+        idle = AG.idle_cycles(sel, crows, cycle_records, self.mode, {m for m in spans if m not in busy}, since, first.at, label)
+        idle_said: T.Said | str = T.Said("idle-cycles", {
+            "machines": sorted({i.machine.split(".")[0] for i in idle}), "start": since[:19], "end": first.at[:19],
+            "items": [T.Said("an-idle-cycle", {"machine": i.machine.split(".")[0], "mark": i.mark, "line": i.line,
+                                               "start": i.start[:23], "next_line": i.next_line, "end": i.end[:23],
+                                               "calls": list(i.calls)}) for i in idle]}) if idle else ""
+        # P8 (the investigator's u1 NT-toincexec-late step 3): what the worker ran on the take's machine between the
+        # selection's return and its pass on the row -- the other rows of the part handed out, before this one
+        before = [s for pick, p in takes if p is not None and (s := self._worker_before(c, fn, pick, p))]
         host = self._move_host(up.before)
         left = {id(pick): w for pick, w in unrun}
         said = [T.Said("an-agent-s-take", {"machine": pick.machine.split(".")[0], "mark": pick.mark, "callee": sel.callee,
@@ -10801,9 +10816,48 @@ class Rerun:
             not_known.append(T.Said("why-a-cycle-left-it", {"machine": w.machine, "files": files, "at": pick.at[:19]}))
         if sel.others:
             premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": list(sel.others)}))
-        self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said, "kept": kept,
-                                                             "refused": refused, "premises": premises, "unknown": not_known}))
+        self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said,
+                                                             "before": before, "kept": kept, "refused": refused,
+                                                             "idle": idle_said, "premises": premises, "unknown": not_known}))
         return True
+
+    def _worker_before(self, c: Caller, fn: R.Function, pick, p) -> T.Said | str:
+        """P8 (the investigator's u1 NT-toincexec-late step 3): the worker *c*'s passes on other rows on the machine of
+        its pass *p*, from the selection *pick*'s return to *p*'s start, asked by its run mark's text before the key's
+        hole (``' < jediTaskID={} >'`` -> ``< jediTaskID=``) on that machine alone; each other key's records one pass.
+        TaskCommando's cycle on aipanda089 got 5 tasks at 16:16:36,033 and its pass on the row began at 16:16:45,041:
+        the passes on the four before it fill the 9 s, one after another.  An ask no record answers is kept, with no
+        stop; "" where the mark has no text before its hole."""
+        runs = getattr(R._prints_of(c.owner, list(c.lines)), "runs", None) or []
+        heads = sorted({str(r.mark).split("{}")[0].strip() for r in runs if "{}" in str(getattr(r, "mark", ""))} - {""})
+        files = sorted({f for row in fn.rows for f in (row.log_files or [])})
+        if len(heads) != 1 or not files or W.when(p.first) <= W.when(pick.at):
+            return ""
+        lo, hi = pick.at[:19], p.first[:19]
+        asking = W.Asking((lo, hi), p.machine, T.Said("for-the-worker-s-passes-before", {
+            "worker": c.owner.split("::")[-1], "machine": p.machine.split(".")[0], "head": heads[0]}), strings=(heads[0],))
+        window = self.window(asking)
+        found: dict[str, list] = {}
+        unanswered: list = []
+        for name in self.logs.names(files):
+            try:
+                records = self.logs.log(name, self.args.key, window, machine=p.machine, strings=asking.strings).records
+            except Unrecorded as e:
+                unanswered += [(ask, why or T.text(asking.why)) for ask, why in e.asks]
+                continue
+            for r in records:
+                if r.machine == p.machine and r.token and pick.at[:23] < r.stamp[:23] < p.first[:23] and self.args.key not in r.token:
+                    found.setdefault(r.token, []).append(r.stamp)
+        if unanswered:
+            self._keep_unanswered(unanswered)
+            return T.Said("the-worker-s-passes-before-asked", {"machine": p.machine.split(".")[0], "start": pick.at[:23],
+                                                               "end": p.first[:23]})
+        spans = sorted((min(v), max(v)) for v in found.values())
+        apart = all(a[1] <= b[0] for a, b in zip(spans, spans[1:], strict=False))
+        return T.Said("the-worker-s-passes-before", {
+            "machine": p.machine.split(".")[0], "worker": c.owner.split("::")[-1], "n": len(spans), "start": pick.at[:23],
+            "end": p.first[:23], "span": f" from {spans[0][0][:23]} to {spans[-1][1][:23]}" if spans else "",
+            "how": (", one after another" if apart else ", some at once") if len(spans) > 1 else ""})
 
     def _unrun_takes(self, sel, picks: dict, spans: dict, label: str, up: Callers, lock, takes: list) -> list:
         """Q1 P17 (out/gm/qk-design.md, the Q1 design summary, tmaeno's OK 2026-11-15 23:06): the agent's selections

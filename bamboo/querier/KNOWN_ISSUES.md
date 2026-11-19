@@ -1801,6 +1801,17 @@ lines carry no mark (ContentsFeeder's, K70), or where the list is not made of a 
 label is a premise its lines cannot show (two whose short cycles take turns overlap nowhere), and a message
 processor's way in is named, not read.
 
+*Changed (P8, 2026-11-19, the investigator's u1 NT-toincexec-late step 3 and u2 NT-breaking-late step 5, delegated
+design):* the END says two more things, read from the records, with no reading of the code's list hand-out.
+- A machine with no selection for the row's label from the stay's start to the first take is named
+  (`agents.idle_cycles`).  Its cycle printed a line before that span and its next line after it, nothing between: it
+  was in the agent's calls in its loop between those two lines' rows.  PostProcessor's cycles on aipanda081, 087 and
+  089 were in prepareTasksToBeFinished_JEDI for about 10 minutes while six machines selected.
+- Between the selection's return and the worker's pass on the row, the worker's passes on other rows on that machine
+  are said (`Rerun._worker_before`), each other key's records one pass.  They are asked by the worker's run mark's text
+  before the key's hole, on that machine alone, over those seconds; an ask no record answers is kept, with no stop.
+  TaskCommando on aipanda089 got 5 tasks at 16:16:36,033, and its pass on the row began at 16:16:45,041.
+
 *Changed (A2, 2026-11-15, out/gm/qk-design.md, design A, tmaeno "OK" 2026-11-15):* where no pass of a late mover took
 the row before the one that moved it on, and the key each write of its arms takes the row by comes only from rows of
 selections on another table the map's `wakers` write -- getTasksToExecCommand_JEDI's 4483 by 4339's

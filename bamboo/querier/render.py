@@ -467,7 +467,12 @@ TEMPLATES: dict[str, str] = {
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
-    "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{kept:join=}{refused}; premises: {premises:join=; }{unknown:join=}",
+    "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{before:join=}{kept:join=}{refused}{idle}; premises: {premises:join=; }{unknown:join=}",
+    "for-the-worker-s-passes-before": "for {worker}'s passes on other rows on {machine}, by {head!r} (its run mark before the key)",
+    "the-worker-s-passes-before": "; on {machine}, between the selection's return at {start} and that pass at {end}, {worker} ran on {n} other row(s){span}{how}",
+    "the-worker-s-passes-before-asked": "; what ran on {machine} between the selection's return at {start} and that pass at {end} is asked",
+    "idle-cycles": "; on {machines:join=, } no cycle selected from {start} to {end}: {items:join=; }",
+    "an-idle-cycle": "{machine}'s cycle {mark} printed its line {line} at {start} and its next, {next_line}, at {end}: it was in {calls:join=, } meanwhile",
     "passed-over-refused": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} before the take did not take it: {callee}'s statement refused the row then ({terms:join=; })",
     # Q1 batch 2 part 2: the passed-over selections P5 does not read all of
     "passed-over-left": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} before the take did not take it{parts:join=}",

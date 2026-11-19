@@ -21048,6 +21048,114 @@ def test_p41_a_writer_whose_change_is_taken_back_did_not_write_the_value(tmp_pat
                    "open, no prints": "", "bound again": ""}, got
 
 
+def test_p8_a_machine_whose_cycle_printed_nothing_was_in_the_calls_between_its_lines(tmp_path):
+    """P8 (a): on a machine with no selection for the row's label in the span, the agent's cycle whose lines straddle it
+    -- one at or before its start, the next at or after its end, none between -- was in the agent's calls between those
+    two lines' rows (PostProcessor on aipanda081: "preparing ..." at 04:02:41, next at 04:12:44, in
+    prepareTasksToBeFinished_JEDI); a cycle with a line inside the span, or for another label, says nothing."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json, re
+            from types import SimpleNamespace as N
+            import bamboo.querier.agents as AG
+            from bamboo.codemap import pathcond
+
+            src = ("def start(self):\\n"
+                   "    while True:\\n"
+                   "        for label in self.labels:\\n"
+                   "            log.info(f'preparing for label={label}')\\n"
+                   "            self.tb.prepare(label, len(self.labels))\\n"
+                   "            log.info('getting')\\n"
+                   "            got = self.tb.get_tasks(label)\\n"
+                   "            log.info(f'got {len(got)}')\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            stmts = {n.lineno: n for n in ast.walk(node) if isinstance(n, ast.stmt) and n is not node}
+
+            class Row:
+                def __init__(self, line, pattern):
+                    self.line, self.stmt, self.pattern = line, stmts[line], re.compile(pattern)
+                def matches(self, r, mode):
+                    return (bool(self.pattern.search(r.text)), "")
+                def capture(self, r):
+                    m = self.pattern.search(r.text)
+                    return m.groupdict() if m else {}
+
+            rows = [Row(4, r"preparing for label=(?P<label>\\w+)"), Row(6, r"getting$"), Row(8, r"got \\d+")]
+            AG.R.function = lambda rel, name, within=(): N(node=node, rows=rows)
+            AG.R.statement_at = lambda n, line: stmts.get(line)
+            sel = N(rel="a.py", agent_name="Agent.start", call=7)
+            crows = AG.CycleRows(tuple(rows[:2]), tuple(rows[2:]), "label")
+            def rec(machine, token, stamp, text):
+                return N(machine=machine, token=token, stamp=stamp, text=text)
+            records = {"a.log": [
+                rec("m1", "c1", "2026-01-01 04:02:41,600", "preparing for label=managed"),
+                rec("m1", "c1", "2026-01-01 04:12:44,864", "getting"),
+                rec("m2", "c2", "2026-01-01 04:02:00,000", "preparing for label=managed"),
+                rec("m2", "c2", "2026-01-01 04:03:30,000", "getting"),
+                rec("m2", "c2", "2026-01-01 04:12:00,000", "got 0"),
+                rec("m3", "c3", "2026-01-01 04:01:00,000", "preparing for label=user"),
+                rec("m3", "c3", "2026-01-01 04:10:00,000", "getting"),
+            ]}
+            got = AG.idle_cycles(sel, crows, records, "", {"m1", "m2", "m3"}, "2026-01-01 04:03:05", "2026-01-01 04:04:44,919", "managed")
+            print(json.dumps([[i.machine, i.line, i.next_line, list(i.calls)] for i in got]))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # m2 printed inside the span, m3's cycle is another label's: only m1, in the agent's calls between rows 4 and 6
+    assert got == [["m1", 4, 6, ["prepare"]]], got
+
+
+def test_p8_the_worker_s_passes_on_other_rows_before_the_row_s_on_the_take_s_machine(tmp_path):
+    """P8 (b): between a selection's return and the worker's pass on the row, the worker's passes on other rows on that
+    machine, asked by its run mark's text before the key's hole on that machine alone, each other key's records one
+    pass; an ask no record answers is kept with no stop."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import rerun as RR
+            from bamboo.querier.records import Unrecorded
+
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(mark=" < jediTaskID={} >")])
+            def rec(token, stamp):
+                return N(machine="h1", token=token, stamp=stamp)
+            got = {}
+            for label, answered in (("answered", True), ("asked", False)):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.unanswered, r.hop, r.windows_said = [], [], "U2", set()
+                r.args = N(key="7")
+                asked = []
+                def log(name, key, window, machine=None, strings=(), answered=answered, asked=asked):
+                    asked.append([name, machine, list(window), list(strings)])
+                    if not answered:
+                        raise Unrecorded([(N(key=("x",)), "")])
+                    return N(records=[rec("< jediTaskID=1 >", "2026-01-01 16:16:37,000"), rec("< jediTaskID=1 >", "2026-01-01 16:16:39,500"),
+                                      rec("< jediTaskID=2 >", "2026-01-01 16:16:40,000"), rec("< jediTaskID=2 >", "2026-01-01 16:16:44,900"),
+                                      rec("< jediTaskID=7 >", "2026-01-01 16:16:45,041")])
+                r.logs = N(names=lambda files: files, log=log, needs_window=False)
+                said = r._worker_before(N(owner="t.py::W.runImpl", lines=[1]), N(rows=[N(log_files=["t.log"])]),
+                                        N(at="2026-01-01 16:16:36,033"), N(first="2026-01-01 16:16:45,041", machine="h1"))
+                got[label] = [RR.T.text(said), asked, len(r.unanswered)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    text, asked, kept = got["answered"]
+    assert asked == [["t.log", "h1", ["2026-01-01 16:16:36", "2026-01-01 16:16:45"], ["< jediTaskID="]]], asked
+    assert "ran on 2 other row(s) from 2026-01-01 16:16:37,000 to 2026-01-01 16:16:44,900, one after another" in text, text
+    assert kept == 0
+    text, _, kept = got["asked"]
+    assert "is asked" in text and kept == 1, got
+
+
 def test_p69_only_a_run_under_a_mark_its_method_s_calls_share_is_cut(tmp_path):
     """P69: shared_mark_parts cuts a run the door says is under a mark its method's calls share, and leaves any other
     run whole, however long its records pause; a run its entry row cut into one pass (a copy) stays that pass."""

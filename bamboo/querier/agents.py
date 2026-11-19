@@ -319,6 +319,76 @@ def selections(records: list, crows: CycleRows, mode: str, log: str = "") -> tup
     return picks, spans
 
 
+@dataclass(frozen=True)
+class Idle:
+    """P8: a cycle that printed nothing while other machines' cycles selected: its line before (row *line* at *start*),
+    its next line after (row *next_line* at *end*), and the agent's calls in its loop between the two rows (*calls*)."""
+
+    machine: str
+    mark: str
+    start: str
+    line: int
+    end: str
+    next_line: int
+    calls: tuple[str, ...]
+
+
+def idle_cycles(sel: Selection, crows: CycleRows, records: dict[str, list], mode: str, machines: set[str], lo: str,
+                hi: str, label: str = "") -> list[Idle]:
+    """P8 (the investigator's u2 NT-breaking-late step 5): on each of *machines*, which selected nothing from *lo* to
+    *hi*, the agent's cycles (one mark each) whose lines straddle that span -- a line at or before *lo*, the next at or
+    after *hi*, none between -- each with the agent's calls in its loop between the two lines' rows, where it was
+    meanwhile.  PostProcessor's cycle on aipanda081 printed "preparing tasks to be finished" at 04:02:41 and its next
+    line, "getting tasks to be finished", at 04:12:44: it was in prepareTasksToBeFinished_JEDI while six other machines
+    selected.  *records*: the agent's lines by log, as :func:`selections` reads them; *label*: the row's, where the
+    cycle's lines print one -- a cycle for another label is not the one that would have selected the row."""
+    fn = R.function(sel.rel, sel.agent_name.split(".")[-1], within=[sel.call])
+    stmt = R.statement_at(fn.node, sel.call)
+    loop = next((a for a in pathcond.ancestors(stmt) if isinstance(a, (ast.For, ast.AsyncFor, ast.While))), None) if stmt else None
+    if loop is None:
+        return []
+    rows = [*crows.before, *crows.after]
+    printing = {id(n) for r in fn.rows for n in ast.walk(r.stmt)}
+    by_mark: dict[tuple[str, str], list] = {}
+    for log, recs in records.items():
+        for r in recs:
+            if r.machine in machines and r.token and not unmarked(log, r.token, r.text):
+                by_mark.setdefault((r.machine, r.token), []).append(r)
+    out = []
+    for (machine, mark), recs in sorted(by_mark.items()):
+        recs.sort(key=lambda r: r.stamp)
+        before = [r for r in recs if r.stamp[:23] <= lo[:23]]
+        after = [r for r in recs if r.stamp[:23] >= hi[:23]]
+        if not before or not after or any(lo[:23] < r.stamp[:23] < hi[:23] for r in recs):
+            continue
+        row1 = next((row for row in rows if row.matches(before[-1], mode)[0]), None)
+        row2 = next((row for row in rows if row.matches(after[0], mode)[0]), None)
+        if row1 is None or row2 is None or row1.line >= row2.line:
+            continue
+        held = ""
+        for r in before:
+            for row in crows.before:
+                if crows.label and row.matches(r, mode)[0] and crows.label in (got := row.capture(r)):
+                    held = got[crows.label].strip()
+        if label and held and held != label:
+            continue
+        calls = tuple(dict.fromkeys(
+            name for n in ast.walk(loop) if isinstance(n, ast.Call) and row1.line < n.lineno < row2.line
+            and id(n) not in printing and (name := _called(n)) and name not in _BUILTINS))
+        if calls:
+            out.append(Idle(machine, mark, before[-1].stamp, row1.line, after[0].stamp, row2.line, calls))
+    return out
+
+
+_BUILTINS = frozenset(dir(__import__("builtins")))
+
+
+def _called(call: ast.Call) -> str:
+    """The name a call calls: an attribute's, or a bare name's."""
+    f = call.func
+    return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+
 def one_process(picks: list[Pick], spans: dict[str, tuple[str, str]]) -> bool:
     """Whether the cycles *picks* come from follow one another: no two of their marks' spans overlap.  What P1 can be
     checked by, not P1: two processes whose short cycles take turns overlap nowhere, so P1 stays a premise."""
