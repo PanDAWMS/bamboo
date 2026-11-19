@@ -20633,3 +20633,129 @@ def test_p55_a_pass_whose_run_ends_before_the_print_after_a_call_stopped_in_that
     assert got["record after"] is None and got["came back"] is None and got["no call next"] is None, got
     assert got["a move between"] is None and got["no moving run"] is None, got
     assert got["following"] == [5, None], got
+
+
+def test_p55_the_lock_function_s_rows_printed_only_after_its_lock_write_tell_a_take(tmp_path):
+    """P55: a lock function's execute of a SQL text setting lockedBy is its lock write; the rows every way to which runs
+    it first (later in the same block) are a take's; a row after the loop holding it, or in the refusal's branch, is not."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            import bamboo.querier.agents as AG
+
+            src = ("def lock(self, pid, take_over_from=None):\\n"
+                   "    log('start')\\n"
+                   "    sqlGL = ('SELECT PandaID FROM T WHERE PandaID=:PandaID '\\n"
+                   "             'AND (lockedBy IS NULL OR lockedTime<:lockedTime) FOR UPDATE NOWAIT ')\\n"
+                   "    sqlUL = 'UPDATE T SET lockedBy=:lockedBy, lockedTime=:lockedTime WHERE PandaID=:PandaID '\\n"
+                   "    self.cur.execute(sqlGL + comment, varMap)\\n"
+                   "    res = self.cur.fetchall()\\n"
+                   "    if not res:\\n"
+                   "        log('record already locked by other thread, skipped')\\n"
+                   "    for r in res:\\n"
+                   "        self.cur.execute(sqlUL + comment, varMap)\\n"
+                   "        if take_over_from is None:\\n"
+                   "            log(f'successfully locked record by {pid}')\\n"
+                   "        else:\\n"
+                   "            log('took over')\\n"
+                   "        break\\n"
+                   "    log('done')\\n")
+            node = ast.parse(src).body[0]
+            print(json.dumps({"writes": [w.lineno for w in AG.lock_writes(node)],
+                              "takes": sorted(AG.take_rows(node, [2, 9, 13, 15, 17]))}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["writes"] == [11], got
+    assert got["takes"] == [13, 15], got
+
+
+def test_p55_the_lock_a_caller_takes_before_the_mover_is_read_as_takes_and_refusals_with_their_spacing(tmp_path):
+    """P55: where every pass stopped in a call, the lock a caller takes on the way into the mover is read on the row
+    over the stay: its calls, a take where a take's row printed, else a refusal; said with the takes' spacing where some
+    call took it and the first call was a take; a refusal before the first take, or no take: nothing said."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            node = ast.parse("def process(self):\\n    pass\\n").body[0]
+            RR.AG.lock_before = lambda mover: ("j.py::lockX", "a.py::main.T.run", 150)
+            RR.R.function = lambda rel, func, lines=(): N(node=node, rows=[N(line=2), N(line=5)])
+            RR.AG.take_rows = lambda node, rows: {5}
+            RR.R._prints_of = lambda owner, lines: N(statements=[N(log_files=["db.log"])])
+            RR.of_mover = lambda run, owner: True
+            RR.passes_of = lambda fn, run, mode: (run.parts, "")
+            RR.R.seen = lambda fn, part, mode: N(hits=part.hits)
+            RR.owners_of = lambda owners: None
+            RR.T.text = lambda said: str(said)
+
+            def part(at, take):
+                return N(first=f"2026-11-13 {at},000", hits={5: [(0, 9, "")]} if take else {2: [(0, 9, "")]})
+
+            def go(parts):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.mode, r.unanswered = [], None, []
+                r.args = N(key="7")
+                r._missed_q = N(since=datetime.datetime(2026, 11, 13, 9, 55), moved=datetime.datetime(2026, 11, 13, 10, 20))
+                r.files_of = lambda owner, files, lines: files
+                r.logs = N(names=lambda files: files)
+                r._ask = lambda key, names, asking, owners, quiet=False: ({"db.log": [N(machine="m1.x", parts=parts)]}, [], {})
+                q = RR.Blocked(N(rel="g.py", node=node, shown="g.py::process"), None, [1], [], [], stopped=("g.py:472",))
+                said = r._lock_timeline(q)
+                return None if said is None else {k: said.facts[k] for k in ("takes", "gaps", "refused", "caller", "lock")}
+
+            print(json.dumps({
+                "read": go([part("10:00:00", True), part("10:01:00", False), part("10:05:00", False), part("10:11:00", True)]),
+                "refused first": go([part("09:58:00", False), part("10:00:00", True)]),
+                "no take": go([part("10:01:00", False)]),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["read"] == {"takes": ["2026-11-13 10:00:00,000 on m1", "2026-11-13 10:11:00,000 on m1"], "gaps": ["0:11:00"],
+                           "refused": 2, "caller": "T.run", "lock": "lockX"}, got
+    assert got["refused first"] is None and got["no take"] is None, got
+
+
+def test_p55_the_lock_s_width_is_read_off_the_route_through_its_caller(tmp_path):
+    """P55: the lock's width is the settled clock offset of its lockedTime compare on the routes through the caller
+    (the map's call_readings); none where no such route, the offset needs a parameter, or two routes disagree."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            def site(chain, offset, needs=()):
+                cmp = N(node="compare", subject="Job_Output_Report.lockedTime", items=[],
+                        values=[N(base="naive_utcnow", offset_seconds=offset, needs=list(needs))])
+                tree = N(node="any", subject="", values=[], items=[N(node="all", subject="", values=[], items=[cmp])])
+                return N(owner="j.py::lockX", call_readings=[N(chain=chain, condition_trees=[N(tree=tree)])])
+
+            def width(sites):
+                RR.mapdump.fragment = lambda: N(read_sites=sites)
+                RR._bare = lambda owner: owner
+                w = RR.Rerun._lock_width("j.py::lockX", "a.py::main.T.run")
+                return None if w is None else str(w)
+
+            print(json.dumps({
+                "settled": width([site(["t.py:2506", "a.py:115"], -600.0)]),
+                "other route": width([site(["t.py:2506", "b.py:9"], -600.0)]),
+                "needs": width([site(["t.py:2506", "a.py:115"], -60.0, ["lockX.time_limit"])]),
+                "two": width([site(["t.py:2506", "a.py:115"], -600.0), site(["t.py:2506", "a.py:201"], -300.0)]),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"settled": "0:10:00", "other route": None, "needs": None, "two": None}, got

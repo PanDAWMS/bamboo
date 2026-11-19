@@ -9267,6 +9267,104 @@ class Rerun:
                 f"holds no row from {str(p.first)[:19]} to the run that moved the value ({str(moved)[:19]}): it moved nothing "
                 "(P55)"), call.lineno
 
+    @staticmethod
+    def _lock_width(lock: str, caller: str) -> datetime.timedelta | None:
+        """P55: the width of *lock*'s time term on the way *caller* calls it: of the map's readings of its read sites on
+        the routes of calls into it (``call_readings``) that pass through *caller*, the compares of a lockedTime column
+        against a UTC clock with a settled offset and nothing needed (``lockedTime<:lockedTime``, ``naive_utcnow`` -600 s
+        on the route [TaskBuffer.py:2506, add_main.py:115]), all one offset: its size.  None where no route settles it --
+        the map leaves it needing the lock function's parameter where the call into it is not placed."""
+        crel = caller.partition("::")[0]
+        offsets: set[float] = set()
+        for rs in getattr(mapdump.fragment(), "read_sites", None) or []:
+            if str(rs.owner) != lock and _bare(str(rs.owner)) != _bare(lock):
+                continue
+            for cr in getattr(rs, "call_readings", None) or []:
+                if not any(str(site).rpartition(":")[0] == crel for site in getattr(cr, "chain", None) or []):
+                    continue
+                stack = [getattr(ct, "tree", None) for ct in getattr(cr, "condition_trees", None) or []]
+                while stack:
+                    node = stack.pop()
+                    if node is None:
+                        continue
+                    stack.extend(getattr(node, "items", None) or [])
+                    if getattr(node, "node", "") != "compare" or not str(getattr(node, "subject", "")).endswith(".lockedTime"):
+                        continue
+                    for v in getattr(node, "values", None) or []:
+                        if v.base in UTC_CLOCKS and v.offset_seconds is not None and not getattr(v, "needs", None):
+                            offsets.add(float(v.offset_seconds))
+        if len(offsets) != 1:
+            return None
+        return datetime.timedelta(seconds=abs(offsets.pop()))
+
+    def _lock_timeline(self, q: Blocked) -> T.Said | None:
+        """P55 (out/gm/qk-design.md, the lock timeline's draft, delegated design): where every pass of a late value's
+        mover in the window stopped in a call (:meth:`_stopped_in_call`), the lock a caller on the way into the mover
+        takes first (:func:`agents.lock_before`) is read on the row over the stay: its calls, each a take where it printed
+        a row only a take prints (:func:`agents.take_rows`), else a refusal.  Where some call took it, and every refusal
+        came after a take, the stop says so: the others were kept off while a lock taken before them stood.  Why each
+        later take came when it did (the width the lock's term reads, an unlock) is not read.  NJ-holding-late:
+        lockJobOutputReport took it at 15:35:38, 15:46:24 and 15:56:45, and refused it 12 times between.  None where
+        no such lock, its logs are not to hand or not in the records (the asks kept), no take, or a refusal before the
+        first take."""
+        mq = getattr(self, "_missed_q", None)
+        if mq is None or getattr(q.fn, "node", None) is None:
+            return None
+        found = AG.lock_before(f"{q.fn.rel}::{pathcond.qualified_name(q.fn.node)}")
+        if found is None:
+            return None
+        lock, caller, line = found
+        lrel, _, lqual = lock.partition("::")
+        try:
+            lf = R.function(lrel, lqual.split(".")[-1])
+        except (LookupError, ValueError, SyntaxError):
+            return None
+        takes = AG.take_rows(lf.node, [r.line for r in getattr(lf, "rows", None) or []])
+        prints = R._prints_of(lock, [])
+        files = self.files_of(lock, sorted({f for st in getattr(prints, "statements", None) or [] for f in st.log_files}), [])
+        to_hand = self.logs.names(files)
+        if not takes or not to_hand:
+            return None
+        start, end = f"{mq.since:%Y-%m-%d %H:%M:%S}", f"{mq.moved:%Y-%m-%d %H:%M:%S}"
+        name = lock.rpartition("::")[2].rpartition(".")[2]
+        asking = W.Asking((start, end), None, T.Said("over-the-stay-for-the-lock", {"start": start, "end": end, "lock": name}))
+        runs, missed, _holes = self._ask(self.args.key, to_hand, asking, owners_of([lock]), quiet=True)
+        if missed:
+            self._keep_unanswered(missed)
+            return None
+        calls: list[tuple[str, str, bool]] = []
+        for log in to_hand:
+            for run in runs.get(log, []):
+                if not of_mover(run, lock):
+                    continue
+                for part in passes_of(lf, run, self.mode)[0]:
+                    hits = getattr(R.seen(lf, part, self.mode), "hits", None) or {}
+                    if any(hits.values()):
+                        calls.append((str(part.first), str(run.machine or "").split(".")[0], any(hits.get(t) for t in takes)))
+        calls.sort()
+        took = [c for c in calls if c[2]]
+        if not took or not calls[0][2]:
+            return None
+        gaps = [str(W.when(b[0]) - W.when(a[0])).split(".")[0] for a, b in zip(took, took[1:], strict=False)]
+        facts = {"n": len(q.passes), "func": q.fn.shown, "calls": sorted(set(q.stopped)),
+                 "caller": ".".join(caller.rpartition("::")[2].split(".")[-2:]), "line": line, "lock": name,
+                 "takes": [f"{a[:23]} on {m}" for a, m, _ in took], "gaps": gaps, "refused": len(calls) - len(took)}
+        width = self._lock_width(lock, caller)
+        if width is not None:
+            # each refusal within the width of the take before it, each later take past the width after the one before
+            last: datetime.datetime | None = None
+            fits = True
+            for at, _m, is_take in calls:
+                t = W.when(at)
+                if is_take:
+                    fits = fits and (last is None or t - last >= width)
+                    last = t
+                else:
+                    fits = fits and last is not None and t - last < width
+            if fits:
+                return T.Said("every-pass-stopped-the-lock-width", {**facts, "width": str(width)})
+        return T.Said("every-pass-stopped-the-lock-read", facts)
+
     def _which_way(self, fn: R.Function, rel: str, func: str, found: list, arms: list[Arm]) -> Blocked:
         """Which way each pass of *found* went -- an arm of *arms*, an exit of *fn*, or none of them -- and the one way
         every pass took: S2's reading of a mover's passes, and U2's of a caller's, its calls into the mover the arms."""
@@ -11393,8 +11491,8 @@ class Rerun:
         if q.stopped and all(q.stopped):
             # P55: every pass stopped in a call before what it set reached the row: no guard kept it, and what kept another
             # pass from taking the row between is the next question (the lock timeline, not built yet)
-            self.need(T.Said("every-pass-stopped-in-a-call", {"n": len(q.passes), "func": fn.shown,
-                                                              "calls": sorted(set(q.stopped))}), None)
+            self.need(self._lock_timeline(q) or T.Said("every-pass-stopped-in-a-call", {
+                "n": len(q.passes), "func": fn.shown, "calls": sorted(set(q.stopped))}), None)
         if q.exit_line is None:
             # every pass ran none of the arms: what settles a guard is the path of the exit a pass was shown to leave by,
             # and what the passes printed on the way

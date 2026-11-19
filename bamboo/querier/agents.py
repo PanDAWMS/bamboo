@@ -373,6 +373,101 @@ def lock_of(sel: Selection) -> Lock | None:
     return None
 
 
+def lock_writes(func: ast.AST) -> list[ast.stmt]:
+    """P55 (out/gm/qk-design.md, the lock timeline's draft): the statements of *func* that run a SQL text setting the
+    lock column (``UPDATE ... SET lockedBy=``), read off the string bound to the name the execute's first argument
+    starts with -- lockJobOutputReport's ``self.cur.execute(sqlUL + comment, varMap)``."""
+    texts: dict[str, str] = {}
+    for n in ast.walk(func):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            parts = [c.value for c in ast.walk(n.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+            if parts:
+                texts[n.targets[0].id] = " ".join(parts)
+    out: list[ast.stmt] = []
+    for n in ast.walk(func):
+        if not (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and getattr(n.value.func, "attr", "") == "execute"
+                and n.value.args):
+            continue
+        first = n.value.args[0]
+        name = first.left if isinstance(first, ast.BinOp) else first
+        text = texts.get(name.id, "") if isinstance(name, ast.Name) else ""
+        if re.search(r"\bUPDATE\b", text, re.I) and re.search(r"\bSET\b[^;]*\blockedBy\s*=", text, re.I):
+            out.append(n)
+    return out
+
+
+def lock_before(mover: str, hops: int = 3) -> tuple[str, str, int] | None:
+    """P55 (out/gm/qk-design.md, the lock timeline's draft): the lock function whose result guards a call on the way
+    into *mover* (``file::qualname``): up the map's calls into it (:func:`sources.calls_into`), at most *hops*, a caller
+    whose call into the chain stands under a guard (``pathcond.arm_condition``, early exits too) naming a local bound to
+    a call of a database module's function with a lock write (:func:`lock_writes`).  add_main's AdderThread.run calls
+    AdderGen.run at 150 only past ``if not got_lock: continue``, ``got_lock = taskBuffer.lockJobOutputReport(...)``.
+    ``(the lock function, the caller, the call line)``, or None."""
+    frontier, seen = [mover], {mover}
+    for _ in range(hops):
+        found: list[str] = []
+        for owner in frontier:
+            rel, _, qual = owner.partition("::")
+            for caller, lines in SR.calls_into(rel, qual):
+                if caller in seen:
+                    continue
+                seen.add(caller)
+                found.append(caller)
+                crel, _, cqual = caller.partition("::")
+                try:
+                    fn = R.function(crel, cqual.split(".")[-1], list(lines))
+                except (LookupError, ValueError, SyntaxError):
+                    continue
+                for line in lines:
+                    stmt = R.statement_at(fn.node, line)
+                    if stmt is None:
+                        continue
+                    for guard in pathcond.arm_condition(stmt):
+                        try:
+                            tree = ast.parse(guard, mode="eval").body
+                        except SyntaxError:
+                            continue
+                        for name in sorted({x.id for x in ast.walk(tree) if isinstance(x, ast.Name)}):
+                            for b in pathcond.bindings(fn.node, name):
+                                value = getattr(b, "value", None)
+                                if not isinstance(value, ast.Call):
+                                    continue
+                                callee = str(getattr(value.func, "attr", None) or getattr(value.func, "id", "") or "")
+                                for o in _defs_named(callee):
+                                    if "/db_proxy_mods/" not in o:
+                                        continue
+                                    lrel, _, lqual = o.partition("::")
+                                    try:
+                                        lf = R.function(lrel, lqual.split(".")[-1])
+                                    except (LookupError, ValueError, SyntaxError):
+                                        continue
+                                    if lock_writes(lf.node):
+                                        return o, caller, line
+        frontier = found
+    return None
+
+
+def take_rows(func: ast.AST, rows: list[int]) -> set[int]:
+    """P55: of the print lines *rows* of *func*, those every way to which runs a lock write (:func:`lock_writes`) first:
+    a statement holding the row, or holding a statement that does, sits in the same block as a lock write and after it.
+    A call printing one took the lock; one printing none did not -- lockJobOutputReport's 'successfully locked record
+    by ...' after the UPDATE in its loop, not its 'done' after the loop."""
+    writes = lock_writes(func)
+    out: set[int] = set()
+    for n in ast.walk(func):
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(n, name, None)
+            if not isinstance(block, list):
+                continue
+            for i, s in enumerate(block):
+                if not any(w is s for w in writes):
+                    continue
+                for later in block[i + 1:]:
+                    out.update(line for line in rows if any(getattr(x, "lineno", None) == line and isinstance(x, ast.stmt)
+                                                            for x in ast.walk(later)))
+    return out
+
+
 def passed_over(picks: dict[str, list[Pick]], first: Pick, label: str, since: str) -> list[Pick]:
     """The selections for *label* that began after the row became selectable (*since*) and ended before the first take
     *first* began, on any machine: each could have taken the row and did not, and nothing here reads why (a lock

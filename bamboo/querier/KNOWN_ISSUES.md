@@ -625,6 +625,21 @@ takes -- is the lock timeline's question, not read yet.  NJ-holding-late: the Ad
 *Premise:* a raise from the call would have printed in the run (AdderGen.run's handler logs it with the same mark); a
 call that came back after the window's last record is not told from one that stopped.
 
+*Changed (P55's lock timeline, 2026-11-19, delegated design):* where every pass stopped so, S3 reads the lock a caller
+takes on the way into the mover (`agents.lock_before`: up the map's calls into it, a caller whose call into the chain
+stands under a guard naming a local bound to a call of a database module's function with a lock write,
+`agents.lock_writes`, an UPDATE setting lockedBy) on the row over the stay: its calls, each a take where it printed a
+row every way to which runs the lock write first (`agents.take_rows`), else a refusal.  Where some call took it and
+the first call was a take, the stop names the takes, their spacing and the refusals between (`_lock_timeline`):
+NJ-holding-late's lockJobOutputReport took the row at 15:35:38 (093), 15:46:24 (098) and 15:56:45 (090), 0:10:46 and
+0:10:21 apart, and refused it 13 times.  The width is the settled clock offset of the lock's lockedTime compare on the
+map's readings of the routes through that caller (`_lock_width`, `call_readings`); where it is settled and every
+refusal came within it of the take before, every later take past it after the one before, the stop says the lock a
+pass took kept the others off for its width.  On x14ks it is not settled -- the map's condition value needs
+lockJobOutputReport.time_limit: add_main's `taskBuffer: Any` stops the call (a PanDA annotation), and `lock_interval`
+is a closure read (the map's CLO) -- so the stop says why each later take came when it did is not read.  On the map's
+probe x14ou (both in) the route [TaskBuffer.py:2506, add_main.py:115] settles it at 600 s.  No unlock's runs are read.
+
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
 ### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is followed alone
