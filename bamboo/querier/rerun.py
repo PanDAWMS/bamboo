@@ -987,6 +987,18 @@ def key_froms() -> list:
     return _RUNS[1]
 
 
+def _row_makers(cls: str) -> dict[str, list[int]]:
+    """The functions whose INSERTs make a row of *cls* (the map's ``KeyFrom.new_row`` into one of the class's tables),
+    each with the lines of those INSERTs: insertNewJob's 3200 for a JobSpec (P14)."""
+    fragment = mapdump.fragment()
+    tables = {str(t.name).lower() for t in getattr(fragment, "tables", None) or [] if getattr(t, "rows_of", "") == cls}
+    makers: dict[str, list[int]] = {}
+    for k in key_froms():
+        if getattr(k, "new_row", False) and str(getattr(k, "table", "")).lower().rpartition(".")[2] in tables:
+            makers.setdefault(_bare(k.owner), []).append(int(getattr(k, "new_row_line", 0) or 0))
+    return makers
+
+
 def batched(rel: str, func: str, lines: list[int], subject: str) -> tuple[int, Any, int] | None:
     """``(line, KeyFrom, the loop's line)`` where *func* writes *subject* in a batch at one of *lines*: the map's
     KeyFrom of it says the object assigned there is handed to a call (``KEY_HANDED``), and a loop of the function holds
@@ -2887,6 +2899,20 @@ def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
     return marks_holding(owner, line, lambda k: bool(ident & set(k.columns)), key) if ident else ()
 
 
+def _references_from(cls: str) -> list[tuple[str, str]]:
+    """``(column, identity)`` for each column of *cls* holding another class's identity by a reference the schema
+    declares (:func:`referencing`: JobSpec.jediTaskID, JediTaskSpec.jediTaskID), the classes in the dump's order of
+    names; a reference through more than one step is left out (P14 on H-4's row)."""
+    classes = sorted({str(getattr(t, "rows_of", "") or "") for t in getattr(mapdump.fragment(), "tables", None) or []} - {"", cls})
+    out: list[tuple[str, str]] = []
+    for other in classes:
+        ident = _identity_attrs(other)
+        for column, steps in sorted(referencing(other).items()):
+            if column.startswith(f"{cls}.") and len(steps) == 1 and len(ident) == 1:
+                out.append((column, ident[0]))
+    return out
+
+
 def referencing(cls: str) -> dict[str, list[str]]:
     """E-1 (W8; out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``TableRecord.references``):
     each ``Class.attr`` whose column holds, by the foreign keys the schema declares, a value of *cls*'s identity, with
@@ -4408,15 +4434,17 @@ class Rerun:
     def ask_rows(self, rows: dict, why: str, place: str) -> None:
         """Keep *rows*, what the rows file does not have said as a fetch can answer it -- a collection of a row, the
         rows a call returned, or an SQL question -- for --rows-asks (the harness's rows ask, stage 1), with the *place*
-        that asks it (K36's four: ``loop``, ``call``, ``answers``, ``linked``)."""
+        that asks it (K36's four: ``loop``, ``call``, ``answers``, ``linked``; and ``row``, another object of a class by
+        its identity, P14 on H-4's row: the harness's ask kind ``row``)."""
         self.rows_asks.setdefault(json.dumps(rows, sort_keys=True, default=str),
                                   {"rows": rows, "step": self.hop, "why": why, "place": place})
 
     def rows_code(self) -> str | None:
         """The code of a stop no other rule names: ``rows`` where rows are asked at a place whose answer a step reads.
         Not for the 4th place's alone (``ask_linked``): its statement stays not settled whatever the rows, so a stop
-        beside it is not one for them (KNOWN_ISSUES.md K36)."""
-        return "rows" if any(a["place"] != "linked" for a in self.rows_asks.values()) else None
+        beside it is not one for them (KNOWN_ISSUES.md K36); nor for ``row``'s, which no step stops for (P14 on H-4's
+        row: what it adds is said after the step's own reading)."""
+        return "rows" if any(a["place"] not in ("linked", "row") for a in self.rows_asks.values()) else None
 
     def ask_collection(self, iterable: str, step, env: E.Env) -> None:
         """A row's collection a walk's loop runs over and the rows file does not have (``Walk.elements``): the row by
@@ -8522,12 +8550,7 @@ class Rerun:
         by the row's own key where that finds none.  Its life: its own
         history rows (*states*), each value with its time and machine.  What is said; an ask the records lack kept.
         Why its maker made it then: :meth:`_waited_trigger`, where *link_column* and the stay's *start* are given."""
-        fragment = mapdump.fragment()
-        tables = {str(t.name).lower() for t in getattr(fragment, "tables", None) or [] if getattr(t, "rows_of", "") == cls}
-        makers: dict[str, list[int]] = {}
-        for k in key_froms():
-            if getattr(k, "new_row", False) and str(getattr(k, "table", "")).lower().rpartition(".")[2] in tables:
-                makers.setdefault(_bare(k.owner), []).append(int(getattr(k, "new_row_line", 0) or 0))
+        makers = _row_makers(cls)
         out: list[T.Said] = []
         if makers:
             files = list(dict.fromkeys(f for o, lines in sorted(makers.items()) for f in self.files_of(o, [], lines)))
@@ -9264,6 +9287,7 @@ class Rerun:
         if (other := self._mark_key(q)) is not None:
             self.say(f"the run that moved it is marked by another {cls}'s key ({other}), not the row's: its callers' "
                      "passes are asked by that key (H-4)")
+            self._mark_row_life(cls, other, q)
             q = replace(q, key=other)
         if q.up is None and (ways_in := self._ways_in(q)) is not None:
             q = replace(q, ways_in=ways_in)
@@ -9449,6 +9473,58 @@ class Rerun:
             for said in ways.guards:
                 self.say(f"  {said} (P20)")
         return list(dict.fromkeys(out))
+
+    def _mark_row_life(self, cls: str, other: str, q: Callers) -> None:
+        """P14 on H-4's row (out/gm/qk-design.md, the next candidate: P14 on H-4's row, delegated design; the
+        investigator's u12 NJ-merging-late 3): where the run that moved a late value is marked by another object of the
+        row's class (H-4, :meth:`_mark_key`), the row moved in that object's pass, and the stay waited on it: the
+        unmerged job on its merge job's end.  That object is read as P14's waited row (:meth:`_waited_birth`): its birth
+        by its makers' runs, its life by its history, and why its makers made it then (:meth:`_waited_trigger`).  The two
+        rows are linked by a column of theirs holding another class's identity by a reference the schema declares
+        (:func:`referencing`: JobSpec.jediTaskID -> JediTaskSpec.jediTaskID), the value both hold alike: the makers'
+        runs are asked by it first (insertNewJob's ``<JediTaskID=...``), and their selections are read by that identity
+        (JobGenerator's, keyed by JediTaskSpec.jediTaskID).  Its row and history come from the rows file's
+        ``rows_by_key`` and ``statuslogs[cls]["by_key"]`` (the harness's ask kind ``row``); where they are not there,
+        they are asked (place ``row``, the key the run's mark printed) and nothing more is said."""
+        read = self.__dict__.setdefault("_mark_rows_read", set())
+        if q.before is None or (cls, other) in read:
+            return
+        read.add((cls, other))
+        hist = PT.history_of_class(cls)
+        ident = _identity_attrs(cls)
+        if hist is None or not ident:
+            return
+        attr = ident[0].partition(".")[2]
+        entry = ((self.data.get("rows_by_key") or {}).get(cls) or {}).get(str(other)) or {}
+        if not entry.get("row"):
+            self.ask_rows({"kind": "row", "row": {"entity": cls, "key": {attr: int(other) if other.isdigit() else other}}},
+                          f"the {cls} the moving run's mark names (H-4): its row and history, for its birth and life (P14)",
+                          "row")
+            self.say(f"  the {cls} it moved in ({other}): its row and history are not in the rows file: asked (P14)")
+            return
+        row = {str(k).lower(): v for k, v in entry["row"].items()}
+        made = row.get(hist.created.lower()) if hist.created else None
+        born = W.when(str(made).replace("T", " ")) if made else None
+        start = W.when(q.window[0])
+        if born is None or born <= start:
+            self.say(f"  the {cls} it moved in ({other}) was made "
+                     f"{f'at {born:%Y-%m-%d %H:%M:%S}, ' if born else ''}not inside the stay: its life is not read (P14)")
+            return
+        own = {str(c).lower(): cell.get("value") for c, cell in self._row_of(cls).items() if isinstance(cell, dict)}
+        link, link_column = "", ""
+        # a reference whose column a maker's run mark holds first (insertNewJob's JobSpec.jediTaskID, not workQueue_ID)
+        marked = {c for o in _row_makers(cls) for r in getattr(R._prints_of(o, []), "runs", None) or []
+                  for k in r.key or [] for c in k.columns or []}
+        for column, identity in sorted(_references_from(cls), key=lambda ref: ref[0] not in marked):
+            a = column.partition(".")[2].lower()
+            if row.get(a) is not None and str(own.get(a)) == str(row[a]):
+                link, link_column = str(row[a]), identity
+                break
+        states = HOP.states_of(((self.data.get("statuslogs") or {}).get(cls) or {}).get("by_key", {}).get(str(other)))
+        self.say(f"  the {cls} it moved in ({other}) was made inside the stay: the row waited on it"
+                 + (f", linked by {link_column}" if link_column else "") + " (P14)")
+        for said in self._waited_birth(cls, str(other), born, states, link, link_column, start):
+            self.say(f"  {T.text(said)}")
 
     def _callers_by_service(self, q: Callers, found: list[Caller]) -> list[Caller]:
         """Bundle H, H-3 (P15, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): pandajedi's code runs in

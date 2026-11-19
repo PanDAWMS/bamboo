@@ -810,6 +810,19 @@ whole by the wakers' marks was 32 asks.  NT-scouting-late: 10 asks of the 10 min
 line should name updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099.
 *Premise:* a write the maker took is a waker write within EDGE before the birth; one older than its round is not read.
 
+*Changed (P14 on H-4's row, 2026-11-19, the investigator's u12 NJ-merging-late 3, delegated design):* where H-4 reads
+the run that moved a late value as marked by another object of the row's class, the row moved in that object's pass
+and the stay waited on it: the unmerged job on its merge job's end.  U1 reads that object as the waited row above
+(`Rerun._mark_row_life`): its row and history from the rows file's `rows_by_key[cls][key]` and
+`statuslogs[cls]["by_key"][key]` (the harness's rows ask kind `row`, by the class's identity, the key the run's mark
+printed); where they are not there, it asks them (place `row`, which codes no stop) and says so.  With its row made
+inside the stay, its birth, life and maker's trigger are read by `_waited_birth`, the two rows linked by a column of
+theirs holding another class's identity by a reference the schema declares (`_references_from`, `referencing`:
+JobSpec.jediTaskID -> JediTaskSpec.jediTaskID), both holding the same value; of two such, the one whose column a
+maker's run mark holds (insertNewJob's, not workQueue_ID).  Made before the stay, that is said.  Each object once.
+*Premise:* the reading of `references` needs the map's TableRecord to carry them (codemap a3be2a5): querier-x's own
+codemap drops the field and `referencing` reads none there, so only a tree with the map's models reads this.
+
 *Changed (P19, 2026-11-19, the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv
 2616f94, delegated design):* the carriers are read by function (a function recording the status reaches a writer of the
 term's columns), so 'merging' counts among the values that move the term.  The END now says, column by column, under

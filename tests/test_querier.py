@@ -20524,3 +20524,58 @@ def test_p20_the_ways_a_moving_run_came_in_by_its_printed_parameters_the_hop_up_
     assert got["no ways"] == ["t.py:827"], got
     assert got["mark"] == [True, False], got
     assert got["columns"] == [["JobSpec.jediTaskID"], ["JobSpec.PandaID"]], got
+
+
+def test_p14_on_h4_s_row_the_object_a_moving_run_s_mark_names_is_asked_then_read_as_the_waited_row(tmp_path):
+    """P14 on H-4's row: the object of the row's class the moving run's mark names is asked by its identity (the
+    harness's ask kind ``row``, place ``row``, no stop coded) where the rows file lacks it; with its row made inside the
+    stay it is read as P14's waited row, linked by a declared reference whose column both rows hold alike; made
+    before the stay, it is said and not read; each object once."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            RR.PT.history_of_class = lambda cls: N(created="creationTime", subject="JobSpec.jobStatus")
+            RR._identity_attrs = lambda cls: ["JobSpec.PandaID"]
+            # two references both rows hold alike: the one whose column a maker's run mark holds is taken
+            RR._references_from = lambda cls: [("JobSpec.computingSite", "SiteSpec.siteid"), ("JobSpec.jediTaskID", "JediTaskSpec.jediTaskID")]
+            RR._row_makers = lambda cls: {"j.py::insertNewJob": [3200]}
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(key=[N(columns=["JobSpec.jediTaskID"]), N(columns=[])])])
+
+            def go(data):
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.lines, r.rows_asks, r.hop = [], {}, "U1"
+                r.data = data
+                r._row_of = lambda cls: {"PandaID": {"value": "5"}, "jediTaskID": {"value": "77"}, "computingSite": {"value": "B"}}
+                calls = []
+                r._waited_birth = lambda cls, key, born, states, link, link_column="", start=None: calls.append(
+                    [cls, key, f"{born:%H:%M:%S}", len(states), link, link_column, f"{start:%H:%M:%S}"]) or ["said"]
+                RR.T.text = lambda said: str(said)
+                q = N(before="2026-11-15 05:05:12", window=("2026-11-14 05:05:13", "2026-11-15 05:05:12"))
+                r._mark_row_life("JobSpec", "9", q)
+                r._mark_row_life("JobSpec", "9", q)
+                return {"asks": [a["rows"] for a in r.rows_asks.values()], "places": [a["place"] for a in r.rows_asks.values()],
+                        "code": r.rows_code(), "calls": calls, "said": [line for line in r.lines if "(P14)" in line]}
+
+            row = {"PandaID": 9, "jediTaskID": 77, "computingSite": "B", "creationTime": "2026-11-14T22:10:00"}
+            logs = {"JobSpec": {"by_key": {"9": {"states": [{"status": "defined"}, {"status": "finished"}]}}}}
+            print(json.dumps({
+                "asked": go({}),
+                "read": go({"rows_by_key": {"JobSpec": {"9": {"row": row}}}, "statuslogs": logs}),
+                "before": go({"rows_by_key": {"JobSpec": {"9": {"row": {**row, "creationTime": "2026-11-13T22:10:00"}}}}}),
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["asked"]["asks"] == [{"kind": "row", "row": {"entity": "JobSpec", "key": {"PandaID": 9}}}], got
+    assert got["asked"]["places"] == ["row"] and got["asked"]["code"] is None and got["asked"]["calls"] == [], got
+    assert len(got["asked"]["said"]) == 1, got
+    # linked by the declared reference a maker's mark holds, of the two both rows hold alike; the stay's start handed
+    assert got["read"]["asks"] == [] and got["read"]["calls"] == [
+        ["JobSpec", "9", "22:10:00", 2, "77", "JediTaskSpec.jediTaskID", "05:05:13"]], got
+    assert got["before"]["calls"] == [] and "not inside the stay" in got["before"]["said"][0], got
