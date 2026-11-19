@@ -33,7 +33,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import PrintRow
@@ -1319,7 +1319,27 @@ class Seen:
                        unambiguous={k: v for k, v in self.unambiguous.items() if k not in drop})
 
 
+#: :func:`seen`'s answers by the function's, the run's and the installed map's identity and the mode, each held with
+#: the three objects so no id is reused while the answer is kept.  L2's column timelines ask the same pair millions of
+#: times (NT-throttled-late: 3.7 million calls; 1020 s -> 701 s with this, the output the same, 11-19).
+_SEEN: dict[tuple[int, int, int, str], tuple[Function, Run, Any, Seen]] = {}
+
+
 def seen(fn: Function, run: Run, mode: str) -> Seen:
+    """*run*'s records as *fn*'s rows find them (``Seen``), computed once per function, run, map and mode: a Seen is
+    not changed by its readers (:meth:`Seen.without` makes a new one), and what it reads of the map (the rows reading
+    a record whole, :func:`_whole_first`) is the installed map's."""
+    frag = mapdump.fragment()
+    key = (id(fn), id(run), id(frag), mode)
+    held = _SEEN.get(key)
+    if held is not None and held[0] is fn and held[1] is run and held[2] is frag:
+        return held[3]
+    answer = _seen_of(fn, run, mode)
+    _SEEN[key] = (fn, run, frag, answer)
+    return answer
+
+
+def _seen_of(fn: Function, run: Run, mode: str) -> Seen:
     hits: dict[int, list[tuple[int, int, str]]] = {}
     owner = ""
     for i, record in enumerate(run.records):

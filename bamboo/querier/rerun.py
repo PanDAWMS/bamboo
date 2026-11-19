@@ -3205,6 +3205,28 @@ def _entries_of(writers: list, owner: str) -> list[str]:
     return list(dict.fromkeys(e for w in writers if w.owner == owner for e in getattr(w, "called_from", None) or []))
 
 
+def jedi_routes(mover: str, entries: list[str]) -> list[str]:
+    """H-3's reading turned to the asks (the harness's T check, NT-scouting-stuck, 2026-11-19): pandajedi's code runs
+    in JEDI's processes alone (pandaserver does not import it), so a mover in ``pandajedi/``, or one every route of
+    whose ``called_from`` *entries* passes a hop in ``pandajedi/``, runs in a JEDI process whatever package it is in:
+    the ``pandajedi/`` sites the routes pass (the mover's own file where it is there).  [] where that is not so: no
+    entries, an entry with no hop in ``pandajedi/`` (a route entering in pandaserver may run in either: JEDI imports
+    pandaserver), or one the map cut (``… N more``, no site).  prepareTasksToBeFinished_JEDI, in pandaserver's
+    db_proxy_mods, is entered from pandajedi alone."""
+    rel = _bare(mover).partition("::")[0]
+    if rel.startswith("pandajedi/"):
+        return [rel]
+    if not entries:
+        return []
+    sites: set[str] = set()
+    for entry in entries:
+        jedi = [s for hop in entry.split(" -> ") if (s := _site(hop)) and s.startswith("pandajedi/")]
+        if not jedi:
+            return []
+        sites.add(jedi[0])
+    return sorted(sites)
+
+
 def _following(func: ast.AST, stmt: ast.stmt) -> ast.stmt | None:
     """The statement after *stmt* in the block holding it inside *func*, or None where it is the block's last (P55)."""
     for node in ast.walk(func):
@@ -4495,6 +4517,17 @@ class Rerun:
         self.ends.append((self.hop, what))
         self.say(f"END {what}")
 
+    def _key_runs(self, log: Log, key: str) -> list:
+        """``records.runs_for`` of *log* for *key* with :meth:`_other_of`, built once per log and key (the door keeps
+        one Log per ask, and runs_for made new Run objects at every ask of it: NT-throttled-late's L2 asked rows.seen
+        3.7 million times, 42% with the same runs; 672 s -> 314 s with this, the output the same, 11-19).  A new list
+        each time: a reader may add to it."""
+        memo = self.__dict__.setdefault("_runs_memo", {})
+        at = (id(log), key)
+        if at not in memo:
+            memo[at] = (log, runs_for(log, key, self._other_of(key, log)))
+        return list(memo[at][1])
+
     def _other_of(self, key: str, log: Log) -> Callable[[Record], bool] | None:
         """K67b B (``key_holes``): ``records.runs_for``'s *other* for the question's key in *log* -- a record whose
         message names it only as another column than the question's class's identity makes no run of it; None for any
@@ -4578,7 +4611,7 @@ class Rerun:
                 self.say(f"  {name}: {note}")
             if log.holes:
                 holes[name] = log.holes
-            out[name] = runs_for(log, key, self._other_of(key, log))
+            out[name] = self._key_runs(log, key)
         return out, unanswered, holes
 
     def _keep_unanswered(self, unanswered: list) -> None:
@@ -6381,7 +6414,7 @@ class Rerun:
         if unanswered:
             self._keep_unanswered(unanswered)
             return plain
-        runs = {(r.first, r.machine): r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+        runs = {(r.first, r.machine): r for log in logs.values() for r in self._key_runs(log, key)
                 if any(of_mover(r, o) for o, _ in inserts) and r.last[:19] >= lo[:19] and r.first[:19] <= hi[:19]}
         if not runs:
             return plain
@@ -6503,7 +6536,7 @@ class Rerun:
                                         strings=asking.strings, whole=True)
                 except Unrecorded:
                     continue
-                if runs_for(log, key, self._other_of(key, log)):
+                if self._key_runs(log, key):
                     out.add(name)
         return out
 
@@ -6619,7 +6652,7 @@ class Rerun:
         there = {name: log for name, log in logs.items() if host not in log.without}
         # the host's runs: a log the host is not listed for comes asked of every machine (K13), and another machine's
         # run is not the host's (a run of a file handed in names no machine)
-        inner = [r for log in there.values() for r in runs_for(log, key, self._other_of(key, log))
+        inner = [r for log in there.values() for r in self._key_runs(log, key)
                  if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi
                  and r.machine in (host, "")]
         # a method's run under its own mark holds every call of it (updateTask_JEDI's 21 records over 15 hours, for
@@ -6683,7 +6716,7 @@ class Rerun:
         if unanswered:
             self._keep_unanswered(unanswered)
             return "", None, None, []
-        inner = [r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+        inner = [r for log in logs.values() for r in self._key_runs(log, key)
                  if any(of_mover(r, m) for m, _ in methods) and r.last[:19] >= lo and r.first[:19] <= hi]
         hosts = {r.machine for r in inner if r.machine}
         if len(hosts) == 1 and all(r.machine for r in inner):
@@ -8762,7 +8795,7 @@ class Rerun:
             unanswered: list = []
             for asked_by in dict.fromkeys(v for v in (link, key) if v and v != "None"):
                 logs, unanswered = self._logs_at(asked_by, files, ask, owners_of(sorted(makers)))
-                runs = sorted((r for log in logs.values() for r in runs_for(log, key, self._other_of(key, log))
+                runs = sorted((r for log in logs.values() for r in self._key_runs(log, key)
                                if any(of_mover(r, o) for o in makers) and r.last[:19] >= lo and r.first[:19] <= hi),
                               key=lambda r: r.first) if not unanswered else []
                 if runs:
@@ -9416,7 +9449,7 @@ class Rerun:
         # the callee's mark holds every call of it for the key (record_task_status_change's at 'staged' and at
         # 'defined', 17 minutes apart): each run is cut at its entry rows, and the calls at the row are read
         cfn, when = R.function(crel, cfunc, [], lines), (str(row["time"]), str(row["time"]))
-        inner = [part for log in logs.values() if host not in log.without for r in runs_for(log, key, self._other_of(key, log))
+        inner = [part for log in logs.values() if host not in log.without for r in self._key_runs(log, key)
                  if of_mover(r, callee) and r.machine == host and r.last[:19] >= edge[0] and r.first[:19] <= edge[1]
                  for part in passes_of(cfn, r, self.mode)[0] if at_window(part, when)]
         for p in mine:
@@ -12799,6 +12832,20 @@ class Rerun:
                                           stay=(since, before)), where
         return "heads-uncut", None, where
 
+    def _route_machines(self, q: Missed, listed) -> tuple[list[str], list[str], list[str]]:
+        """The machines of the listing *listed* the mover's passes are asked on by its marks: each the records list its
+        log on, but, where the mover runs in JEDI's processes alone (:func:`jedi_routes`), not one the records name
+        another service's -- NT-scouting-stuck's S1 asked prepareTasksToBeFinished_JEDI's marks of panda-DBProxy.log
+        on the server machines 090-099 too.  A listed machine no record names the service of stays.  Returns the
+        machines kept, those left out and the ``pandajedi/`` sites that left them out."""
+        machines = sorted(listed.machines - listed.without)
+        sites = jedi_routes(q.mover, _entries_of(q.writers, q.mover))
+        if not sites:
+            return machines, [], []
+        services = getattr(listed, "services", None) or {}
+        kept = [m for m in machines if services.get(m, "jedi") == "jedi"]
+        return kept, [m for m in machines if m not in kept], sites
+
     def _row_value_takes(self, q: Missed, fn: R.Function, start: datetime.datetime,
                          read: list[datetime.datetime]) -> list[T.Said]:
         """Bundle F, F-4 (out/gm/qk-design.md, bundle F widened, tmaeno's OK 2026-11-17 15:2x; P25 (iii)): a time
@@ -12852,13 +12899,18 @@ class Rerun:
             owners = owners_of([q.mover])
             missed: list = []
             passes: list = []
+            off: set[str] = set()
+            entered: list[str] = []
             for name in names:
                 try:
                     listed = self.logs.log(name, self.args.key, window, owners=owners)
                 except Unrecorded as e:
                     missed += [(ask, because) for ask, _ in e.asks]
                     continue
-                for machine in sorted(listed.machines - listed.without):
+                kept, left, sites = self._route_machines(q, listed)
+                off.update(f"{name}@{m.split('.')[0]}" for m in left)
+                entered = entered or sites
+                for machine in kept:
                     try:
                         log = self.logs.log(name, self.args.key, window, machine=machine, owners=owners, strings=heads)
                     except Unrecorded as e:
@@ -12883,10 +12935,13 @@ class Rerun:
                         **where, "n": len({(ask.name, ask.machine) for ask, _ in missed})}))
             elif missed:
                 self._keep_unanswered(missed)
-                out.append(T.Said("took-it-by-the-row-value-asked", {**where, "n": len({ask.key for ask, _ in missed}),
-                                                                     "first": window[0], "last": window[1]}))
+                out.append(T.Said("took-it-by-the-row-value-asked", {
+                    **where, "n": len({ask.key for ask, _ in missed}), "first": window[0], "last": window[1],
+                    "on": T.Said("every-jedi-machine" if entered else "every-machine", {})}))
             else:
                 out.append(T.Said("took-it-by-the-row-value-unread", where))
+            if off:
+                out.append(T.Said("not-asked-off-jedi", {"func": bare, "logs": sorted(off), "entered": entered}))
         return out
 
     def _unprinted_take(self, q: Missed, fn: R.Function, p, lines: list[int]) -> T.Said | None:
@@ -13072,6 +13127,8 @@ class Rerun:
         holes: list[str] = []
         others = 0
         passes: list[tuple[datetime.datetime, datetime.datetime, str, bool]] = []
+        off: set[str] = set()
+        entered: list[str] = []
         for name in names:
             try:
                 listed = self.logs.log(name, key, window, owners=owners)
@@ -13079,7 +13136,10 @@ class Rerun:
                 missed += [(ask, because) for ask, _ in e.asks]
                 continue
             holes += [f"{name}: {h}" for h in listed.holes]
-            for machine in sorted(listed.machines - listed.without):
+            kept, left_out, sites = self._route_machines(q, listed)
+            off.update(f"{name}@{m.split('.')[0]}" for m in left_out)
+            entered = entered or sites
+            for machine in kept:
                 try:
                     log = self.logs.log(name, key, window, machine=machine, owners=owners, strings=heads)
                 except Unrecorded as e:
@@ -13106,6 +13166,10 @@ class Rerun:
         self.say(f"  {bare}'s passes read on {read or 'no machine'}{left}: {len(before)} ended before the turn, "
                  f"{len(between)} began between it and the pass that took the row"
                  + (f" (on {at(took)})" if took else ", which is not read"))
+        if off:
+            said = T.Said("not-asked-off-jedi", {"func": bare, "logs": sorted(off), "entered": entered})
+            self.say(f"  {T.text(said)}")
+            premises = [*premises, said]
         if between:
             self.say(f"  a pass on {at(between[0])} after the turn did not take the row: why it did not is not read here")
             return self._turned_then(t)

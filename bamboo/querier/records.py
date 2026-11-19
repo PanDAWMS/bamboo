@@ -76,8 +76,10 @@ _MARKS: list = []
 _HEADS: list = []
 
 
+@lru_cache(maxsize=None)
 def log_name(path: str) -> str:
-    """The log file the map names, which the file at *path* is a copy or a rotation of.
+    """The log file the map names, which the file at *path* is a copy or a rotation of (cached: ``Log.name`` asks it
+    for every record a row is matched against, 73 million times in NT-throttled-late's 17 minutes).
 
     The map says ``panda-adder.log``; production rotates it into ``panda-adder.log.1`` or
     ``panda-adder.log-20261030.gz``, and a copy handed over may carry the key (``panda-adder.log.<PandaID>``).

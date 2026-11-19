@@ -851,7 +851,10 @@ TEMPLATES: dict[str, str] = {
     "took-it-before-heads-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}: its mark's records there from {first} to {last} hold no pass of it cut around the take: which way that pass went is not read",
     # bundle F, F-4: a take the row's value of a time column the mover's own arms alone wrote shows
     "took-it-by-the-row-value": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass on {machine} from {first} to {last}",
-    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on every machine from {first} to {last} ({n} ask(s))",
+    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on {on} from {first} to {last} ({n} ask(s))",
+    "every-machine": "every machine",
+    "every-jedi-machine": "every JEDI machine",
+    "not-asked-off-jedi": "{func}'s passes are not asked of {logs:join=, }, machines the records name another service's: every route into it passes {entered:join=, }, in pandajedi, whose code runs in JEDI's processes alone (H-3)",
     "took-it-by-the-row-value-others": "{func}'s logs on {n} other machine-file(s) around {at} are not in the records and not asked: another pass of it there writing {column} then is not ruled out",
     "took-it-by-the-row-value-unread": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is not read",
     "unprinted-take": "and that pass printed no key at {line}, which {func} prints for a row it selects and keeps: its condition, {condition}, was false for the row then (read: {read:join=, }; open: {open:join=, }); premises: {premises:join=; }",

@@ -1905,6 +1905,16 @@ MT-scouting-stuck now reads 082's pass, which printed no key at 3766 (early aval
 *Not read:* a pandajedi-only function's asks still go to the server machines' DBProxy log where no pass is recorded
 (H-3's rule is read for callers, not for the logs a pass prints to).
 
+*Changed (H-3 read for the asks, 2026-11-19, the harness's T check: NT-scouting-stuck's S1 asked
+prepareTasksToBeFinished_JEDI's marks of panda-DBProxy.log on every machine 081-099):* where every route of the mover's
+`called_from` passes a hop in `pandajedi/` (or the mover is there), it runs in JEDI's processes alone, and F-4 and L4
+ask its marks only on the machines the records name `jedi` (`jedi_routes`, `Rerun._route_machines`); the machines left
+out are said (not-asked-off-jedi), and L4's END holds that as a premise.  A route entering in pandaserver, a cut entry
+(`… N more`) or none keeps every machine; a listed machine no record names the service of stays.  *Not read:* which of
+a proxy mixin's two files a JEDI process writes: the map's model says panda-DBProxy.log under the server and
+panda-JediDBProxy.log under a knight, but holds it as no field, so panda-DBProxy.log is still asked on JEDI's machines
+(the records hold no `_JEDI` method's line in it there).
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row

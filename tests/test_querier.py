@@ -18351,14 +18351,17 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
             # the moving run's own mark is asked (H-1's fix of F-4: the heads fill vo with the row's 'atlas')
             q = N(mover="m.py::prepareTasksToBeFinished_JEDI", subject="JediTaskSpec.status", observed="scouting",
                   since=t("2026-11-14 18:00:00"), moved=t("2026-11-14 21:00:00"),
-                  run=N(token="prepareTasksToBeFinished_JEDI < vo=None label=user >"))
+                  run=N(token="prepareTasksToBeFinished_JEDI < vo=None label=user >"), writers=[])
             start = t("2026-11-14 20:59:59.500")
             at = t("2026-11-14 19:53:41")
             RR.of_mover = lambda run, owner: True
             RR.passes_of = lambda fn, run, mode: (run.passes, "")
             RR.owners_of = lambda ids: {}
 
-            def go(arms=("prepareTasksToBeFinished_JEDI:3744",), when=at, read=(), recorded=True):
+            def go(arms=("prepareTasksToBeFinished_JEDI:3744",), when=at, read=(), recorded=True, routes=None):
+                asked_on = []
+                # the mover's routes (its junctions' called_from): every one through pandajedi, or one not
+                q.writers = [] if routes is None else [N(owner=q.mover, called_from=routes)]
                 r = RR.Rerun.__new__(RR.Rerun)
                 r.args, r.mode, r.unanswered, r.hop = N(key="7"), None, [], "L2"
                 r._timelines = {("JediTaskSpec.assessmentTime", q.subject, q.observed, q.since, q.moved, False):
@@ -18374,16 +18377,30 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
                     def log(self, name, key, window, machine=None, owners=None, strings=None):
                         if machine is not None:
                             assert list(strings) == ["prepareTasksToBeFinished_JEDI < vo=None label=user >"], strings
+                            asked_on.append(machine.split(".")[0])
                         if not recorded and machine is not None:
                             raise Unrec()
-                        return N(machines={"aipanda084.cern.ch"}, without=set(), passes=[p])
+                        return N(machines={"aipanda084.cern.ch", "aipanda090.cern.ch"}, without=set(),
+                                 passes=[p] if machine is None or "084" in machine else [],
+                                 services={"aipanda084.cern.ch": "jedi", "aipanda090.cern.ch": "server"})
                 r.logs = Logs()
                 RR.runs_for = lambda log, func: [N(passes=log.passes)]
                 said = r._row_value_takes(q, N(), start, list(read))
-                return {"said": [T.text(s) for s in said], "kept": len(r.unanswered)}
+                return {"said": [T.text(s) for s in said], "kept": len(r.unanswered), "on": asked_on}
             got = {"read": go(), "asked": go(recorded=False), "another": go(arms=("prepareTasksToBeFinished_JEDI:3744", "getAchievedTasks_JEDI:3283")),
                    "outside": go(when=t("2026-11-14 17:00:00")), "already": go(read=[at]),
-                   "its_second": go(when=t("2026-11-14 20:59:59"))}
+                   "its_second": go(when=t("2026-11-14 20:59:59")),
+                   "jedi": go(recorded=False, routes=["pandajedi/jedidog/WatchDog.py:120 -> m.py:3700",
+                                                      "pandajedi/jediorder/Finisher.py:80"]),
+                   "mixed": go(recorded=False, routes=["pandajedi/jedidog/WatchDog.py:120 -> m.py:3700",
+                                                       "pandaserver/daemons/scripts/x.py:9"])}
+            # jedi_routes: the mover's own file in pandajedi; every entry through pandajedi (any hop); one not, a cut
+            # entry, or none: no sites
+            got["routes"] = [RR.jedi_routes("pandajedi/jedibrokerage/B.py::B.run", []),
+                             RR.jedi_routes("m.py::f", ["pandajedi/a.py:1 -> m.py:2", "p/x.py:3 -> pandajedi/b.py:4 -> m.py:5"]),
+                             RR.jedi_routes("m.py::f", ["pandajedi/a.py:1 -> m.py:2", "p/x.py:3 -> m.py:5"]),
+                             RR.jedi_routes("m.py::f", ["pandajedi/a.py:1 -> m.py:2", "… 3 more"]),
+                             RR.jedi_routes("m.py::f", [])]
             print(json.dumps(got))
             """,
         )
@@ -18393,7 +18410,20 @@ def test_f4_a_row_value_only_the_mover_s_arms_wrote_in_the_stay_is_a_take_asked_
         "prepareTasksToBeFinished_JEDI took it before, at 2026-11-14 19:53:41, writing assessmentTime by "
         "prepareTasksToBeFinished_JEDI:3744 (the row's value): its pass on aipanda084 from 2026-11-14 19:53:40,900 to "
         "2026-11-14 19:53:42,000"], got
-    assert got["asked"]["kept"] == 2 and "asked by its mark on every machine" in got["asked"]["said"][0], got
+    assert got["asked"]["kept"] == 4 and "asked by its mark on every machine from" in got["asked"]["said"][0], got
+    assert got["asked"]["on"] == ["aipanda084", "aipanda090"], got
+    # every route into the mover passes pandajedi: it runs in JEDI's processes alone, and is asked on JEDI's machines
+    # alone, the others said; a route entering in pandaserver keeps every machine
+    assert got["jedi"]["on"] == ["aipanda084"] and got["jedi"]["kept"] == 2, got
+    assert "asked by its mark on every JEDI machine from" in got["jedi"]["said"][0], got
+    assert got["jedi"]["said"][1] == (
+        "prepareTasksToBeFinished_JEDI's passes are not asked of jedi.log@aipanda090, machines the records name another "
+        "service's: every route into it passes pandajedi/jedidog/WatchDog.py:120, pandajedi/jediorder/Finisher.py:80, in "
+        "pandajedi, whose code runs in JEDI's processes alone (H-3)"), got
+    assert got["mixed"]["on"] == ["aipanda084", "aipanda090"] and len(got["mixed"]["said"]) == 1, got
+    # a pass the records hold is read on the JEDI machine as before
+    assert got["read"]["on"] == ["aipanda084", "aipanda090"], got
+    assert got["routes"] == [["pandajedi/jedibrokerage/B.py"], ["pandajedi/a.py:1", "pandajedi/b.py:4"], [], [], []], got
     assert got["another"]["said"] == [] and got["outside"]["said"] == [] and got["already"]["said"] == [], got
     # the row value's second is the moving pass's own (its write fell in [20:59:59, 21:00:00), the pass began 20:59:59.x)
     assert got["its_second"]["said"] == [], got
