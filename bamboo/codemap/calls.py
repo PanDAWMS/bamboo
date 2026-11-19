@@ -3151,7 +3151,8 @@ class Types:
         return found.pop() if len(found) == 1 else None
 
     def _module_bound(self, file: str) -> dict[str, list[ast.expr]]:
-        """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``."""
+        """``{name: [value]}`` for each ``name = value`` / ``name: T = value`` run at module level, the value a name or ``a.b``
+        -- quoted, for a ``TypeAlias``."""
         if file not in self._module_bindings:
             found: dict[str, list[ast.expr]] = {}
             checked: set[int] = set()
@@ -3163,11 +3164,15 @@ class Types:
                     names = [node.target.id]
                 else:
                     continue
-                if isinstance(node.value, (ast.Name, ast.Attribute)):
+                value = node.value
+                if isinstance(node, ast.AnnAssign) and _head_name(node.annotation) == "TypeAlias":
+                    # ``TaskBufferLike: TypeAlias = "TaskBuffer"``: an alias names what it quotes.
+                    value = _unquoted(value)
+                if isinstance(value, (ast.Name, ast.Attribute)):
                     for one in names:
-                        found.setdefault(one, []).append(node.value)
+                        found.setdefault(one, []).append(value)
                     if checking:
-                        checked.add(id(node.value))
+                        checked.add(id(value))
             self._module_bindings[file] = found
             self._checked_values[file] = frozenset(checked)
         return self._module_bindings[file]

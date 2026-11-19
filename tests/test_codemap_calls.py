@@ -2546,6 +2546,35 @@ def f(tb: Buffer, ch: Child, ng: Negated, inh: Inherits):
     assert held is not None and held[1].name == "work" and held[0].endswith("proxy.py")
 
 
+def test_a_type_alias_names_the_class_it_quotes(tmp_path):
+    """``TaskBufferLike: TypeAlias = "TaskBuffer"``, the class imported under ``TYPE_CHECKING``: a parameter declared
+    the alias is a TaskBuffer.  A string bound without ``TypeAlias`` is a string."""
+    roots = _tree(
+        tmp_path,
+        tb=_BUFFER,
+        alias='''\
+from typing import TYPE_CHECKING, TypeAlias
+
+if TYPE_CHECKING:
+    from pkg.tb import JediTaskBuffer
+
+BufferLike: TypeAlias = "JediTaskBuffer"
+NotAnAlias = "JediTaskBuffer"
+''',
+        m='''\
+from pkg.alias import BufferLike, NotAnAlias
+
+def f(tb: BufferLike, other: NotAnAlias):
+    tb.getTask(1)
+    other.getTask(1)
+''',
+    )
+    calls = _calls(roots)
+
+    assert _where(_placed(calls, "m", "f", "tb.getTask")) == [("JediTaskBuffer", "getTask")]
+    assert _placed(calls, "m", "f", "other.getTask").targets == ()
+
+
 def test_a_name_bound_to_two_corpus_classes_names_neither(tmp_path):
     roots = _tree(
         tmp_path,
