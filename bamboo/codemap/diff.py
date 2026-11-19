@@ -314,6 +314,7 @@ BRANCH_FIELDS: tuple[str, ...] = (
     "copied_from",
     "copied_open",
     "condition_atoms",
+    "accumulated",
     "unset_default",
     "amount",
     "handed",

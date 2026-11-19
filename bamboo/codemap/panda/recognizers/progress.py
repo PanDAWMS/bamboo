@@ -37,12 +37,14 @@ cannot be checked against anything.
 from __future__ import annotations
 
 import ast
-from typing import Iterator, NamedTuple, Optional
+import re
+from typing import Callable, Iterator, NamedTuple, Optional
 
 from bamboo.codemap import callfacts, evaluate, pathcond, values
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.calls import def_name, def_named
 from bamboo.codemap.models import (
+    Accumulation,
     Anchor,
     Branch,
     ConditionAtom,
@@ -1243,20 +1245,127 @@ def attach_condition_atoms(
     attributor: SpecAttributor,
     declarations: dict[str, set[str]],
 ) -> int:
-    """Each branch's :attr:`Branch.condition_atoms` (:func:`condition_atoms`), whichever recognizer made it -- an
-    attribute's write, an SQL write, a producer's return, a field's unset default: the function its junction's owner
-    names, and the class enclosing that.  The branches given any atom."""
+    """Each branch's :attr:`Branch.condition_atoms` (:func:`condition_atoms`) and :attr:`Branch.accumulated`
+    (:func:`accumulations`), whichever recognizer made it -- an attribute's write, an SQL write, a producer's return, a
+    field's unset default: the function its junction's owner names, and the class enclosing that.  The branches
+    given any atom."""
     trees = {module.rel_path: module.tree for module in modules}
+    for tree in trees.values():
+        # Path conditions are read up the parent links (:func:`accumulations`); a tree the build has not linked yet is.
+        if tree.body and getattr(tree.body[0], "parent", None) is None:
+            attach_parents(tree)
+    by_owner: dict[str, list[JunctionNode]] = {}
+    for junction in junctions:
+        by_owner.setdefault(junction.owner, []).append(junction)
+    bound_by_owner: dict[str, Callable[[str], Optional[str]]] = {}
     given = 0
     for junction in junctions:
         rel_path, _, name = junction.owner.partition("::")
         tree = trees.get(rel_path)
         func = def_named(tree, name) if tree is not None else None
         owner_class = enclosing_class(func) if func is not None else None
+        bound = None
+        if func is not None:
+            bound = bound_by_owner.get(junction.owner)
+            if bound is None:
+                bound = bound_by_owner[junction.owner] = _bound_subjects(func, by_owner[junction.owner])
         for branch in junction.branches:
-            branch.condition_atoms = condition_atoms(branch.path_condition, func, attributor, owner_class, declarations)
+            branch.condition_atoms = condition_atoms(
+                branch.path_condition, func, attributor, owner_class, declarations, bound
+            )
+            branch.accumulated = accumulations(branch.outcome, func, attributor, owner_class, declarations, bound)
             given += bool(branch.condition_atoms)
     return given
+
+
+def _bound_subjects(
+    func: ast.FunctionDef | ast.AsyncFunctionDef, junctions: list[JunctionNode]
+) -> Callable[[str], Optional[str]]:
+    """The subject a bare local of *func* holds the value this run writes to: a local defined once from an SQL bind
+    -- propagateResultToJEDI's ``fileStatus = varMap[':status']`` --, where the statements filling that bind
+    (``varMap[':status'] = ...``) are the branches of one of *junctions*, the function's own (JediFileSpec.status's
+    at 3993 to 4017).  None for any other local, and where the bind's branches are several junctions'."""
+    held: dict[str, Optional[str]] = {}
+
+    def subject(name: str) -> Optional[str]:
+        if name not in held:
+            held[name] = None
+            value = pathcond.single_definition(func, name)
+            if (
+                isinstance(value, ast.Subscript)
+                and isinstance(value.value, ast.Name)
+                and isinstance(value.slice, ast.Constant)
+                and isinstance(value.slice.value, str)
+            ):
+                container, key = value.value.id, value.slice.value
+                filled = {
+                    one.lineno
+                    for one in walk(func)
+                    if isinstance(one, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == container
+                        and isinstance(target.slice, ast.Constant)
+                        and target.slice.value == key
+                        for target in one.targets
+                    )
+                }
+                subjects = {
+                    junction.subject
+                    for junction in junctions
+                    if any(branch.line in filled or filled & set(branch.other_lines) for branch in junction.branches)
+                }
+                if len(subjects) == 1:
+                    held[name] = subjects.pop()
+        return held[name]
+
+    return subject
+
+
+#: A counter write whose increment is a value the statement takes from a container: ``runtime(nFilesFinished + {})``.
+_COUNTED = re.compile(r"^runtime\((\w+) [+-] \{\}\)$")
+
+
+def accumulations(
+    outcome: str,
+    func: Optional[ast.FunctionDef | ast.AsyncFunctionDef],
+    attributor: Optional[SpecAttributor],
+    owner_class: Optional[str],
+    declarations: dict[str, set[str]],
+    bound: Optional[Callable[[str], Optional[str]]] = None,
+) -> list[Accumulation]:
+    """:attr:`Branch.accumulated` of a branch of *func* whose outcome is *outcome*: where it is a column plus or less
+    a value taken from a container (:data:`_COUNTED`), each statement of *func* adding to or taking from an entry
+    keyed by the column's name -- ``datasetContentsStat[datasetID]['nFilesFinished'] += 1`` --, with its path
+    condition read as a write's branch's is (its tests, then the exits above it) and its atoms.  Not read: an entry
+    rebuilt whole (``C[k]['col'] = C[k]['col'] + 1``)."""
+    counted = _COUNTED.match(outcome)
+    if counted is None or func is None:
+        return []
+    column = counted.group(1).lower()
+    found = []
+    for node in walk(func):
+        if not (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, (ast.Add, ast.Sub))
+            and isinstance(node.target, ast.Subscript)
+            and isinstance(node.target.slice, ast.Constant)
+            and str(node.target.slice.value).lower() == column
+        ):
+            continue
+        tests = pathcond.path_condition(node)
+        entries = tests + [one for one in pathcond.exits_above(node) if one not in tests]
+        found.append(
+            Accumulation(
+                line=node.lineno,
+                op="+" if isinstance(node.op, ast.Add) else "-",
+                amount=ast.unparse(node.value),
+                path_condition=entries,
+                condition_atoms=condition_atoms(entries, func, attributor, owner_class, declarations, bound),
+            )
+        )
+    return sorted(found, key=lambda one: one.line)
 
 
 def condition_atoms(
@@ -1265,12 +1374,15 @@ def condition_atoms(
     attributor: Optional[SpecAttributor],
     owner_class: Optional[str],
     declarations: dict[str, set[str]],
+    bound: Optional[Callable[[str], Optional[str]]] = None,
 ) -> list[ConditionAtom]:
     """:attr:`Branch.condition_atoms` of a branch of *func* whose path condition is *entries*: each comparison of an
     object's attribute with constants, read again from the entry's text, the object placed in its class by
     *attributor* where the class declares the attribute (*declarations*), and named as *func*'s parameter where it is
-    one.  A comparison of anything else -- a call's value, two attributes, a name -- is none, and so is an entry
-    read where *func*'s names are not its own (:func:`evaluate.read_elsewhere`: a callee's test, a later write's)."""
+    one; and each comparison of a bare local *bound* places on the column whose written value it holds
+    (:attr:`ConditionAtom.written`).  A comparison of anything else -- a call's value, two attributes, another name
+    -- is none, and so is an entry read where *func*'s names are not its own (:func:`evaluate.read_elsewhere`: a
+    callee's test, a later write's)."""
     arguments = getattr(func, "args", None)
     parameters = (
         {one.arg for one in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)}
@@ -1292,23 +1404,44 @@ def condition_atoms(
             left, right = node.left, node.comparators[0]
             if op is None:
                 continue
-            if isinstance(left, ast.Attribute) and (constants := _constants(right)) is not None:
-                attribute = left
-            elif isinstance(right, ast.Attribute) and op in _SWAPPED and (constants := _constants(left)) is not None:
-                attribute, op = right, _SWAPPED[op]
-            else:
+            compared: Optional[ast.expr] = None
+            constants: list[str] = []
+            if isinstance(left, (ast.Attribute, ast.Name)) and (held := _constants(right)) is not None:
+                compared, constants = left, held
+            elif (
+                isinstance(right, (ast.Attribute, ast.Name))
+                and op in _SWAPPED
+                and (held := _constants(left)) is not None
+            ):
+                compared, constants, op = right, held, _SWAPPED[op]
+            if isinstance(compared, ast.Name):
+                written = bound(compared.id) if bound is not None and compared.id not in parameters else None
+                if written:
+                    found.append(
+                        ConditionAtom(
+                            entry=index,
+                            text=ast.unparse(node),
+                            subject=written,
+                            op=op,
+                            values=constants,
+                            object=compared.id,
+                            written=True,
+                        )
+                    )
                 continue
-            cls = attributor.class_of(attribute.value, func, owner_class) if attributor is not None else None
+            if not isinstance(compared, ast.Attribute):
+                continue
+            cls = attributor.class_of(compared.value, func, owner_class) if attributor is not None else None
             found.append(
                 ConditionAtom(
                     entry=index,
                     text=ast.unparse(node),
-                    subject=f"{cls}.{attribute.attr}" if cls and attribute.attr in declarations.get(cls, ()) else "",
+                    subject=f"{cls}.{compared.attr}" if cls and compared.attr in declarations.get(cls, ()) else "",
                     op=op,
                     values=constants,
-                    object=ast.unparse(attribute.value),
-                    parameter=attribute.value.id
-                    if isinstance(attribute.value, ast.Name) and attribute.value.id in parameters
+                    object=ast.unparse(compared.value),
+                    parameter=compared.value.id
+                    if isinstance(compared.value, ast.Name) and compared.value.id in parameters
                     else "",
                 )
             )

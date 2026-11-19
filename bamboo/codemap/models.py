@@ -1122,10 +1122,40 @@ class ConditionAtom(BaseModel):
     values: list[str] = Field(
         default_factory=list, description="The constants compared with, as written: ``'finished'``, ``None``."
     )
-    object: str = Field(description="The object whose attribute is compared, as spelled: ``jobSpec``, ``self.job``.")
+    object: str = Field(
+        description=(
+            "The object whose attribute is compared, as spelled: ``jobSpec``, ``self.job``; for a ``written`` atom, "
+            "the local compared: ``fileStatus``."
+        )
+    )
     parameter: str = Field(
         default="",
         description="Where the object is a parameter of the branch's function: its name (a caller hands it).",
+    )
+    written: bool = Field(
+        default=False,
+        description=(
+            "The comparison is of a bare local defined once from an SQL bind -- propagateResultToJEDI's ``fileStatus "
+            "= varMap[':status']`` --, and ``subject`` is the column of the one junction of the function whose "
+            "branches fill that bind: the value this run writes there, not the row's current one."
+        ),
+    )
+
+
+class Accumulation(BaseModel):
+    """One statement adding to the entry of a container a counter write takes its increment from
+    (:attr:`Branch.accumulated`): propagateResultToJEDI's ``datasetContentsStat[datasetID]['nFilesFinished'] += 1``
+    for ``nFilesFinished=nFilesFinished+{}``."""
+
+    line: int = Field(description="The statement's line.")
+    op: str = Field(description="``+`` or ``-``: the statement adds to the entry or takes from it.")
+    amount: str = Field(description="What it adds or takes, as written: ``1``, ``tmpNumEvents``.")
+    path_condition: list[str] = Field(
+        default_factory=list,
+        description="When the statement runs, read as a write's branch's path condition is: its tests and the exits above it.",
+    )
+    condition_atoms: list[ConditionAtom] = Field(
+        default_factory=list, description="The comparisons of *path_condition* with constants (:class:`ConditionAtom`)."
     )
 
 
@@ -1175,6 +1205,15 @@ class Branch(BaseModel):
         description=(
             "Each comparison of an object's attribute with constants in *path_condition*, the object placed in its "
             "class where the map can (:class:`ConditionAtom`); the arms the attribute slice reads."
+        ),
+    )
+    accumulated: list[Accumulation] = Field(
+        default_factory=list,
+        description=(
+            "Where the outcome is a column plus or less a value the statement takes from a container -- "
+            "``runtime(nFilesFinished + {})``, the SQL built from datasetContentsStat's keys --: each statement of the "
+            "function adding to or taking from the container's entry keyed by the column's name, with when it runs "
+            "(:class:`Accumulation`).  The count moves only where one of them ran."
         ),
     )
     row_precondition: list[str] = Field(

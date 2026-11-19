@@ -23620,6 +23620,71 @@ def test_a_branch_names_each_attribute_its_path_condition_compares_with_constant
             assert atom.text in branch.path_condition[atom.entry]
 
 
+_ACCUMULATED = """
+class Proxy:
+    def propagate(self, jobSpec: JobSpec, fileSpec: JediFileSpec):
+        stat = {}
+        varMap = {}
+        if jobSpec.jobStatus == "finished":
+            varMap[":status"] = "finished"  # FINISHED
+        else:
+            varMap[":status"] = "failed"  # FAILED
+        self.cur.execute("UPDATE ATLAS_PANDA.JEDI_Dataset_Contents SET status=:status", varMap)
+        fileStatus = varMap[":status"]
+        stat[fileSpec.fileID] = {"nFilesFinished": 0, "nFilesFailed": 0}
+        if fileSpec.status == "merging":
+            pass
+        elif fileStatus in ["finished", "lost"]:
+            stat[fileSpec.fileID]["nFilesFinished"] += 1  # COUNTED
+        else:
+            stat[fileSpec.fileID]["nFilesFailed"] += 1
+        for key in stat[fileSpec.fileID]:
+            self.cur.execute(f"UPDATE ATLAS_PANDA.JEDI_Datasets SET {key}={key}+{stat[fileSpec.fileID][key]}")
+"""
+
+
+def test_a_counter_write_says_the_statements_adding_to_the_count_it_takes_and_when_they_run():
+    """propagateResultToJEDI's ``nFilesFinished=nFilesFinished+{}`` takes datasetContentsStat's count, which only
+    ``fileStatus in ['finished', 'lost']`` adds to: the branch says that statement, its path condition and atoms --
+    ``fileStatus``, defined once from the UPDATE's bind, placed on the JediFileSpec.status that run writes (the
+    junction whose branches fill ``:status``), so a reader can go on to the job statuses that write it; a merging
+    file is not counted.  A branch of another outcome has none."""
+    rel = "pandaserver/taskbuffer/Proxy.py"
+    modules = [_module(_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ACCUMULATED, rel)]
+
+    def line(marker: str) -> int:
+        (found,) = [n for n, text in enumerate(_ACCUMULATED.splitlines(), 1) if text.rstrip().endswith(f"# {marker}")]
+        return found
+
+    def junction(subject: str, branches: list[Branch]) -> JunctionNode:
+        return JunctionNode(
+            map_id=MAP_ID, derived_from=VERSION, name=f"n:{subject}", subject=subject, owner=f"{rel}::propagate",
+            branches=branches, anchor=Anchor(package="p", file=rel, line_start=3),
+        )
+
+    written = junction(
+        "JediFileSpec.status",
+        [Branch(outcome="finished", line=line("FINISHED")), Branch(outcome="failed", line=line("FAILED"))],
+    )
+    counter = junction("JediDatasetSpec.nFilesFinished", [Branch(outcome="runtime(nFilesFinished + {})", line=22)])
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms(
+        [written, counter], modules, progress.equipped_attributor(modules, declarations), declarations
+    )
+
+    (accumulation,) = counter.branches[0].accumulated
+    assert (accumulation.line, accumulation.op, accumulation.amount) == (line("COUNTED"), "+", "1")
+    assert accumulation.path_condition == [
+        "not (fileSpec.status == 'merging')",
+        "fileStatus in ['finished', 'lost']",
+    ]
+    assert [(a.entry, a.subject, a.op, a.values, a.object, a.written) for a in accumulation.condition_atoms] == [
+        (0, "JediFileSpec.status", "==", ["'merging'"], "fileSpec", False),
+        (1, "JediFileSpec.status", "in", ["'finished'", "'lost'"], "fileStatus", True),
+    ]
+    assert [one.accumulated for one in written.branches] == [[], []]
+
+
 def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_constants():
     """An SQL write's branch and an alias call site's carry their comparisons as an attribute write's do -- a signed
     number a constant too --, the function their junction's owner names read; the callee's own test an alias's
