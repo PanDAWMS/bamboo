@@ -2421,6 +2421,131 @@ def f(tb: Interface):
     assert _placed(calls, "m", "f", "tb.nowhere").unplaced == calls_mod.UNPLACED_FORWARDED
 
 
+_PROXY = '''\
+class BaseModule:
+    def transaction(self):
+        return 1
+
+
+class Proxy(BaseModule):
+    def work(self):
+        return self.transaction() + self.config()
+
+    def config(self):
+        return 2
+'''
+
+_FACADE = '''\
+from typing import TYPE_CHECKING, Any
+
+from pkg import proxy
+
+if TYPE_CHECKING:
+    _API = proxy.Proxy
+else:
+    _API = object
+
+if not TYPE_CHECKING:
+    _Negated = object
+else:
+    _Negated = proxy.Proxy
+
+Plain = proxy.Proxy
+
+
+class Buffer(_API):
+    def transaction(self):
+        return 3
+
+    def config(self):
+        return 4
+
+    if not TYPE_CHECKING:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.pool.get(), name)
+
+
+class Negated(_Negated):
+    pass
+
+
+class Inherits(Plain):
+    def config(self):
+        return 5
+'''
+
+_CHILD = '''\
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pkg.facade import Buffer
+
+    _Proxied: Any = Buffer
+else:
+    _Proxied = object
+
+
+class Child(_Proxied):
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.remote, name)
+'''
+
+
+def test_a_method_found_through_a_base_named_only_for_a_type_checker_runs_on_that_class_s_object(tmp_path):
+    """``class TaskBuffer(_DBProxyAPI)``, the name a DBProxy only under ``TYPE_CHECKING``: Python builds TaskBuffer on
+    ``object``, and a DBProxy method a TaskBuffer forwards runs on a DBProxy -- its ``self.config()`` is the
+    DBProxy's, never TaskBuffer's own ``config``."""
+    roots = _tree(
+        tmp_path,
+        proxy=_PROXY,
+        facade=_FACADE,
+        child=_CHILD,
+        m='''\
+from pkg.child import Child
+from pkg.facade import Buffer, Inherits, Negated
+
+def f(tb: Buffer, ch: Child, ng: Negated, inh: Inherits):
+    tb.work()
+    tb.config()
+    ch.work()
+    ch.config()
+    ch.nowhere()
+    ng.work()
+    inh.work()
+''',
+    )
+    calls = _calls(roots)
+    types = calls.types
+
+    def bound(placed):
+        return [(one.cls.name, one.func.name, [cls.name for _file, cls in one.bound]) for one in placed.targets]
+
+    def named(file, name):
+        found = types.class_named(f"{PACKAGE}/{file}.py", ast.Name(id=name, ctx=ast.Load()))
+        assert found is not None
+        return found
+
+    assert bound(_placed(calls, "m", "f", "tb.work")) == [("Proxy", "work", ["Proxy"])]
+    assert _placed(calls, "m", "f", "tb.work").unplaced == ""
+    assert bound(_placed(calls, "m", "f", "tb.config")) == [("Buffer", "config", ["Buffer"])]
+    # two hops: the child forwards to a Buffer, which forwards what it lacks to a Proxy
+    assert bound(_placed(calls, "m", "f", "ch.work")) == [("Proxy", "work", ["Proxy"])]
+    assert bound(_placed(calls, "m", "f", "ch.config")) == [("Buffer", "config", ["Buffer"])]
+    assert _placed(calls, "m", "f", "ch.nowhere").unplaced == calls_mod.UNPLACED_FORWARDED
+    assert bound(_placed(calls, "m", "f", "ng.work")) == [("Proxy", "work", ["Proxy"])]
+    # a name bound to the class at run time is a base at run time
+    assert bound(_placed(calls, "m", "f", "inh.work")) == [("Proxy", "work", ["Inherits"])]
+
+    # self in the Proxy's method is a Proxy, or a class built on it at run time -- never the Buffer
+    assert _where(_placed(calls, "proxy", "work", "self.transaction")) == [("BaseModule", "transaction")]
+    assert sorted(_where(_placed(calls, "proxy", "work", "self.config"))) == [("Inherits", "config"), ("Proxy", "config")]
+    assert [cls.name for _file, cls in calls.subclasses(*named("proxy", "Proxy"))] == ["Inherits"]
+    assert [cls.name for _file, cls in types.mro(*named("facade", "Buffer"))] == ["Buffer"]
+    assert [cls.name for _file, cls in types.forwarded(*named("child", "Child"))] == ["Buffer"]
+    held = types.method(*named("facade", "Buffer"), "work")
+    assert held is not None and held[1].name == "work" and held[0].endswith("proxy.py")
+
+
 def test_a_name_bound_to_two_corpus_classes_names_neither(tmp_path):
     roots = _tree(
         tmp_path,
