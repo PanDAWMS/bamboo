@@ -1328,6 +1328,76 @@ def _guard_false(fn: R.Function, site: Any, env: E.Env | None, sn: R.Seen) -> bo
     return False
 
 
+def _bound_targets(stmt: ast.AST) -> list[ast.expr]:
+    """The expressions an assignment binds, a tuple's or a list's elements too (``(spec.userName,) = tmp_res``)."""
+    if isinstance(stmt, ast.Assign):
+        tops: list[ast.expr] = list(stmt.targets)
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        tops = [stmt.target]
+    else:
+        return []
+    out: list[ast.expr] = []
+    while tops:
+        t = tops.pop(0)
+        if isinstance(t, (ast.Tuple, ast.List)):
+            tops.extend(t.elts)
+        elif isinstance(t, ast.Starred):
+            tops.append(t.value)
+        else:
+            out.append(t)
+    return out
+
+
+def taken_back(fn: R.Function, line: int, subject: str, back: Any, value: str) -> str:
+    """P41 (the investigator's u4 NR-T userName cases): why the arm at *line* of *fn* did not write *value* of
+    *subject* into its row, by the map's ``Branch.taken_back`` (*back*: ``resets``, ``open``, ``open_prints``); '' where
+    that is not read.  Every way from the arm takes the change back before its object is written or handed on (no
+    ``open``); or every way that does not passes a print (``open_prints``) under a guard false with the arm's target
+    holding *value*, no other binding of the target reaching that print.
+
+    ``_check_task_with_unprocessed_inputs`` sets ``original_task_spec.userName`` to the user's DN at 2272, takes it back
+    with ``resetChangedAttr("userName")`` at 2286, and keeps it only where ``original_task_spec.userName in ["",
+    None]`` holds, where it prints "has an empty DN" at 2277 first: a value that is not empty did not go to the row by
+    it.  A premise, said: a later write of the object takes its changed attributes only (a reset changes what is
+    written as changed; a write of the whole row would take the value)."""
+    resets = sorted(getattr(back, "resets", None) or [])
+    if not resets:
+        return ""
+    premise = "a premise: a later write of its object takes the changed attributes only"
+    if not getattr(back, "open", None):
+        return (f"every way from it takes the change back at {resets} before its object is written or handed on: it did "
+                f"not write the value ({premise})")
+    prints = sorted(getattr(back, "open_prints", None) or [])
+    arm = R.statement_at(fn.node, line)
+    if not prints or arm is None:
+        return ""
+    attribute = subject.rpartition(".")[2]
+    texts = {ast.unparse(t) for t in _bound_targets(arm) if isinstance(t, ast.Attribute) and t.attr == attribute}
+    if len(texts) != 1:
+        return ""
+    target = texts.pop()
+    base = target.rpartition(".")[0]
+    binds = [n for n in R.own_nodes(fn.node) if any(ast.unparse(t) == target for t in _bound_targets(n))]
+    if base.isidentifier():
+        binds += [b.site for b in pathcond.bindings(fn.node, base) if not b.nested]
+    binds = list({id(b): b for b in binds}.values())
+    for p in prints:
+        row = next((rw for rw in fn.rows if rw.line == p), None)
+        if row is None or {id(b) for b in reaching.reaching(row.stmt, binds)} != {id(arm)}:
+            continue
+        env = E.Env()
+        env.put(target, value, f"the value the arm at {line} would have written")
+        for guard in pathcond.arm_condition(row.stmt):
+            try:
+                got = E.evaluate(guard, env.reading(fn.owner, p))
+            except (SyntaxError, ValueError, TypeError):
+                continue
+            if got is not E.UNKNOWN and not got:
+                return (f"every way from it that does not take the change back at {resets} first prints {p}, under "
+                        f"`{guard}`, false where {target} holds the value: it did not write the value ({premise})")
+    return ""
+
+
 def _record_of_row(fn: R.Function, sn: R.Seen, row: R.Row, alike: list, r_i: int) -> bool:
     """P35 (c): whether record *r_i*, which the rows *alike* of *fn* all find, is *row*'s: the last record before it only
     one row finds (``Seen.unambiguous``) is a print from which *row* can run with no print between, and none of the

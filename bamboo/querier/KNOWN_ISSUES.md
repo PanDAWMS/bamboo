@@ -1219,6 +1219,17 @@ row's creation column, and the INSERT's function prints the key in its run (inse
 holds; the birth's run's mark holds it too); when a writer only reads the row into its spec (getTasksToRefine_JEDI and
 the like) is told apart.
 
+*Changed (P41, 2026-11-19, the investigator's u4 NR-T-53653646-userName and NR-T-53655760-userName, delegated design):*
+a writer whose change the map says is taken back (`Branch.taken_back`, read by `which_ran.taken_back`) is dropped
+before the arms are placed, with a word.  Either every way from it takes the change back (`resetChangedAttr`) before
+its object is written or handed on, or every way that keeps the change prints a line (`open_prints`) under a guard
+false with the arm's target holding the value, no other binding of the target reaching that print.
+`_check_task_with_unprocessed_inputs` sets `original_task_spec.userName` to the user's DN at 2272 and takes it back at
+2286; it keeps it only where `original_task_spec.userName in ["", None]`, printing "has an empty DN" at 2277 first.
+A value that is not empty did not go to the row by 2272.  *Premise, said:* a later write of the object takes its changed
+attributes only (a reset changes what is written as changed; a write of the whole row would take the value).
+*Revisit:* when the map says whether the object's later writes are changed-only.
+
 ### K38. H2's scan of the rows names the arms that wrote last or may have, and each walks on where none is the one
 
 Over the statuslog rows a writer's pass can write (K37), newest first, each row's pass is read three ways

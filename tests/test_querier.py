@@ -20990,6 +20990,64 @@ def test_p69_an_uncut_run_holding_an_edge_is_read_as_one_execution_only_with_no_
                              [False], [True]], got
 
 
+def test_p41_a_writer_whose_change_is_taken_back_did_not_write_the_value(tmp_path):
+    """P41: an arm whose every way takes its change back (the map's Branch.taken_back with no ``open``) did not write;
+    one whose ways that keep it print a line under a guard false with the arm's target holding the value did not write
+    that value (``_check_task_with_unprocessed_inputs``' 2272, kept only where the DN is empty, printed at 2277); a value
+    the guard holds for, a print another binding reaches, or no resets, say nothing."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.which_ran as WR
+            from bamboo.codemap import pathcond
+
+            src = ("def check(spec, cur, log):\\n"
+                   "    tmp_res = cur.fetchone()\\n"
+                   "    (spec.userName,) = tmp_res\\n"
+                   "    if spec.userName in ['', None]:\\n"
+                   "        log.error('has an empty DN')\\n"
+                   "        return 1\\n"
+                   "    else:\\n"
+                   "        spec.resetChangedAttr('userName')\\n"
+                   "    return 0\\n"
+                   "def again(spec, cur, log):\\n"
+                   "    (spec.userName,) = cur.fetchone()\\n"
+                   "    spec.userName = cur.other()\\n"
+                   "    if spec.userName in ['', None]:\\n"
+                   "        log.error('has an empty DN')\\n"
+                   "        return 1\\n"
+                   "    spec.resetChangedAttr('userName')\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            def fn_of(node):
+                rows = [N(line=n.lineno, stmt=n) for n in ast.walk(node) if isinstance(n, ast.Expr)
+                        and isinstance(n.value, ast.Call) and ast.unparse(n.value.func) == "log.error"]
+                return N(node=node, owner=f"t.py::{node.name}", rows=rows)
+            check, again = (fn_of(n) for n in module.body)
+            WR.R.statement_at = lambda node, line: next((n for n in ast.walk(node) if isinstance(n, ast.stmt)
+                                                         and n.lineno == line and not isinstance(n, ast.FunctionDef)), None)
+            WR.R.own_nodes = lambda node: list(ast.walk(node))
+            back = N(resets=[8], open=[6], open_prints=[5])
+            got = {
+                "kept only where empty": bool(WR.taken_back(check, 3, "JediTaskSpec.userName", back, "someone")),
+                "the empty value": WR.taken_back(check, 3, "JediTaskSpec.userName", back, ""),
+                "every way back": bool(WR.taken_back(check, 3, "JediTaskSpec.userName", N(resets=[8], open=[], open_prints=[]), "x")),
+                "no resets": WR.taken_back(check, 3, "JediTaskSpec.userName", N(resets=[], open=[], open_prints=[]), "x"),
+                "open, no prints": WR.taken_back(check, 3, "JediTaskSpec.userName", N(resets=[8], open=[6], open_prints=[]), "x"),
+                "bound again": WR.taken_back(again, 11, "JediTaskSpec.userName", N(resets=[16], open=[15], open_prints=[14]), "x"),
+            }
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"kept only where empty": True, "the empty value": "", "every way back": True, "no resets": "",
+                   "open, no prints": "", "bound again": ""}, got
+
+
 def test_p69_only_a_run_under_a_mark_its_method_s_calls_share_is_cut(tmp_path):
     """P69: shared_mark_parts cuts a run the door says is under a mark its method's calls share, and leaves any other
     run whole, however long its records pause; a run its entry row cut into one pass (a copy) stays that pass."""

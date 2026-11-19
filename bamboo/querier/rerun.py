@@ -187,6 +187,7 @@ from bamboo.querier.which_ran import (
     recorded_in_pass,
     spans,
     stable_holes,
+    taken_back,
     write_prints,
 )
 from bamboo.scripts.derive_strategy import _investigate
@@ -6815,6 +6816,22 @@ class Rerun:
         fragment = mapdump.fragment()
         # P43: a value set on an object a birth then persists is a birth too (JobGenerator's gshare at 1301)
         found = AT.arms(fragment, subject, readings, born=lambda owner, b: birth_arm(owner, b, subject))
+        # P41 (the investigator's u4 NR-T userName cases): a writer whose change is taken back before its object is
+        # written (the map's Branch.taken_back) did not write the value
+        kept: list[AT.Arm] = []
+        for a in found:
+            back = ""
+            if a.taken_back is not None:
+                rel, _, qual = a.owner.partition("::")
+                try:
+                    back = taken_back(R.function(rel, qual.rpartition(".")[2], [a.line]), a.line, subject, a.taken_back, value)
+                except (LookupError, ValueError, OSError, SyntaxError):
+                    back = ""
+            if back:
+                self.say(f"  {a.owner.split('::')[-1]}:{a.line}: {back} (P41)")
+            else:
+                kept.append(a)
+        found = kept
         self.need(T.Said("a-writer-of-in-the-map-to", {"subject": subject, "value": value}), found)
         if AT.now_valued(found):
             asking = W.value_now(attr, value)
