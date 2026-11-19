@@ -538,6 +538,7 @@ TEMPLATES: dict[str, str] = {
     "h-count-turned": "{mover} took it {delta} s after {where}'s count at {line} turned: {test} holds at the {name} the take printed ({k}; {printed}) and not at {less}; of the row's {n} {cls} row(s) by {via}, the one that brought it to {k} by getting a status under which {counted}={value!r} is written was {key}, {status} at {at} on {machine}{later}; premises: {premises:join=; }",
     "h-rows-stand-for-the-count": "the rows the count is over are the row's; its {cls} rows by {via} stand for them, one per {cls} row (which of them hold {counted} rows is not read)",
     "h-count-ways-not-read": "the writing arm's other atoms ({atoms:join=; }) are not read: a way through them may write it at another status",
+    "h-moved-by-column": "by the writers' accumulations, row by row, a column moves only under some of those values: {columns:join=; } (the map's Branch.accumulated; the others as recorded)",
     "h-carried-by": "the term's columns ({inner:join=, }) are written by {writers:join=, }, which {carriers:join=, } reach as they record {status} (the map's calls; read by function, not by its arms)",
     "h-rows-stand-for-the-term-s": "the {inner} rows the term counts are the row's; its {cls} rows by {via} stand for them (which of them hold those rows is not read)",
     "h-a-later-write-not-read": "a write of the term's columns later than its row's move (a queued update) is not read: the move came {delta} s after it",

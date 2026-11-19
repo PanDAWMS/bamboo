@@ -810,6 +810,22 @@ whole by the wakers' marks was 32 asks.  NT-scouting-late: 10 asks of the 10 min
 line should name updateUnmergedDatasets:1971's 'ready' at 17:44:56 on aipanda099.
 *Premise:* a write the maker took is a waker write within EDGE before the birth; one older than its round is not read.
 
+*Changed (P19, 2026-11-19, the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv
+2616f94, delegated design):* the carriers are read by function (a function recording the status reaches a writer of the
+term's columns), so 'merging' counts among the values that move the term.  The END now says, column by column, under
+which of those values the writers' accumulations move it (`_carried_values`): an increment of a counter write
+(``Branch.accumulated``), its written atoms (``ConditionAtom.written``: propagateResultToJEDI's fileStatus, the
+JediFileSpec.status it writes) set to each value the same owner's junction of that subject writes under the candidate,
+read with `_entries_possible` (each subject's atoms take one value: a literal they name or one they do not; the linked
+row's own columns fix its atoms, a fine-grained job's jobSubStatus 'fg_done' among them).  A run-time write is the
+candidate where it is the status itself (the output files' ``jobSpec.jobStatus``), else read through both paths
+(``fileSpec.status`` under ``== 'nooutput'``, which the accumulation's ``not in ('nooutput')`` refuses).
+NT-scouting-late: "nFilesFinished by finished, not by cancelled, closed, failed, merging".  *Not read:* the term's
+direction (which columns' increments make it hold: nFilesUsed's ``= 0`` clause too); nFilesFailed, which 'merging' may
+move by an input file whose attempts ran out (the database's values) or an output file (the term's dataset type leaves
+it out once the counted file's type is tied to the dataset's).  The reading of which row reached what when still uses
+every recorded value.
+
 ## Row values at a step's time (`held.py`)
 
 ### K49. A guard over a column the rows file holds is read in it, by the map's ways and the direction of their changes

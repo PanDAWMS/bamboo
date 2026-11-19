@@ -20383,3 +20383,53 @@ def test_p24_a_writers_selection_restricting_another_column_the_row_never_held_r
                            "(eventService in ['5'], the row held None all the stay)"), got
     assert got["five"] == "" and got["unknown"] == "" and got["no held"] == "", got
     assert got["since birth"] == [True, None] and got["run time"] == [False, None], got
+
+
+def test_p19_a_counter_column_moves_only_under_the_values_its_accumulations_take(tmp_path):
+    """P19 (the investigator's u11 NT-scouting-late 3; the map's ACC): propagateResultToJEDI's nFilesFinished counter
+    takes its increment from an accumulation (4174) under the written file status in (finished, lost); the file's
+    status is written 'finished' when the job's status is 'finished' (or a fine-grained job is 'fg_done'), 'ready'
+    otherwise, its output files the job's status itself, and under 'nooutput' its own status -- which the
+    accumulation's 'not in nooutput' refuses.  So only 'finished' moves it, row by row; with no row a fine-grained
+    job may make any status move it."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        import bamboo.querier.rerun as RR
+
+        def atom(subject, op, values, text, written=False):
+            return N(subject=subject, op=op, values=values, text=text, written=written)
+
+        js = atom("JobSpec.jobStatus", "==", ["'finished'"], "jobSpec.jobStatus == 'finished'")
+        fg = atom("JobSpec.jobSubStatus", "==", ["'fg_done'"], "jobSpec.jobSubStatus == 'fg_done'")
+        typ = atom("FileSpec.type", "in", ["'input'"], "fileSpec.type in ['input']")
+        noout = atom("FileSpec.status", "==", ["'nooutput'"], "fileSpec.status == 'nooutput'")
+        cond = "(jobSpec.jobStatus == 'finished' or jobSpec.jobSubStatus == 'fg_done')"
+        P = "j.py::propagate"
+        files = N(subject="JediFileSpec.status", owner=P, branches=[
+            N(outcome="'finished'", path_condition=["fileSpec.type in ['input']", cond], condition_atoms=[typ, js, fg]),
+            N(outcome="'ready'", path_condition=["fileSpec.type in ['input']", f"not {cond}"], condition_atoms=[typ, js, fg]),
+            N(outcome="runtime(jobSpec.jobStatus)", path_condition=["not (fileSpec.type in ['input'])", "not (fileSpec.status == 'nooutput')"],
+              condition_atoms=[typ, noout]),
+            N(outcome="runtime(fileSpec.status)", path_condition=["not (fileSpec.type in ['input'])", "fileSpec.status == 'nooutput'"],
+              condition_atoms=[typ, noout])])
+        acc = N(line=4174, op="+", path_condition=["fileSpec.status not in ['nooutput']", "not (fileStatus == 'ready')", "fileStatus in ['finished', 'lost']"],
+                condition_atoms=[atom("FileSpec.status", "not in", ["'nooutput'"], "fileSpec.status not in ['nooutput']"),
+                                 atom("JediFileSpec.status", "==", ["'ready'"], "fileStatus == 'ready'", True),
+                                 atom("JediFileSpec.status", "in", ["'finished'", "'lost'"], "fileStatus in ['finished', 'lost']", True)])
+        counter = N(subject="JediDatasetSpec.nFilesFinished", owner=P, branches=[N(outcome="runtime(nFilesFinished + {})", accumulated=[acc])])
+        frag = N(junctions=[files, counter])
+        car = N(writers=(P,), values=frozenset({"finished", "merging", "failed"}))
+        got = {
+            "row": sorted(RR.Rerun._carried_values(frag, car, {"JediDatasetSpec.nFilesFinished"}, "JobSpec.jobStatus", {"jobsubstatus": "staged"})[0]),
+            "no row": sorted(RR.Rerun._carried_values(frag, car, {"JediDatasetSpec.nFilesFinished"}, "JobSpec.jobStatus")[0]),
+            "no counter": sorted(RR.Rerun._carried_values(frag, car, {"JediDatasetSpec.nFilesUsed"}, "JobSpec.jobStatus")[0]),
+        }
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["row"] == ["finished"], got
+    # with no row, a fine-grained job ('fg_done') may make its files 'finished' whatever its status
+    assert got["no row"] == ["failed", "finished", "merging"], got
+    # a column no counter with accumulations writes: every value, as recorded
+    assert got["no counter"] == ["failed", "finished", "merging"], got

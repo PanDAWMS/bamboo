@@ -1982,6 +1982,53 @@ def _unprinted_count(tree: ast.AST, bound: dict[str, Any], counted: str | None,
     return zero, way, unknown, top
 
 
+def _entries_possible(entries: list[str], atoms: list, fixed: dict[str, str], row: dict | None = None) -> bool:
+    """Whether a path's *entries* can all hold together (P19): the map's condition *atoms* on a subject compared with
+    literals take each subject's one value -- *fixed* where given, else each literal its atoms name or one they do not
+    (``<other>``) -- so atoms of one column agree (4008's ``fileSpec.status == 'nooutput'`` and an accumulation's
+    ``not in ('nooutput')``); atoms on nothing so placed are tried both ways (``evaluate.truth``).  Entries read
+    elsewhere ([at N], [in f()]) are left out.  *row*: a row of the class *fixed*'s first subject is of, its columns
+    (lower case) fixing atoms on them where not in *fixed* (NULL a value no literal equals).  True where some
+    assignment makes every entry true or leaves it open."""
+    trees = []
+    for e in entries:
+        if E.shared.read_elsewhere(e):
+            continue
+        try:
+            trees.append(ast.parse(E.shared.strip_annotation(e), mode="eval").body)
+        except SyntaxError:
+            continue
+    if not trees:
+        return True
+    placed: dict[str, list[tuple[str, str, set[str]]]] = {}
+    for a in atoms:
+        subj, op = str(getattr(a, "subject", "") or ""), str(getattr(a, "op", ""))
+        if subj and op in ("==", "!=", "in", "not in"):
+            placed.setdefault(subj, []).append((_atom_text(str(a.text)), op, {str(x).strip("'\"") for x in getattr(a, "values", None) or []}))
+    subjects = sorted(placed)
+    row_cls = next(iter(fixed), "").partition(".")[0]
+
+    def own(s: str) -> list[str] | None:
+        cls, _, attr = s.partition(".")
+        if row is None or cls != row_cls or attr.lower() not in row:
+            return None
+        value = row[attr.lower()]
+        return ["<none>" if value is None else str(value)]
+
+    choices = [[fixed[s]] if s in fixed else own(s) or sorted({v for _, _, vs in placed[s] for v in vs}) + ["<other>"]
+               for s in subjects]
+    env = E.shared.Env()
+    for pick in itertools.product(*choices):
+        known: dict[str, bool] = {}
+        for s, value in zip(subjects, pick, strict=True):
+            for text, op, vs in placed[s]:
+                inside = value in vs
+                known[text] = inside if op in ("==", "in") else not inside
+        if all(E.shared.truth(t, known, env) is not False for t in trees):
+            return True
+    return False
+
+
 def _entry_requests(entries: list[str], endpoints: list) -> list[str]:
     """The routes (``v1/harvester/update_workers``) of the map's *endpoints* whose function holds an entry of a
     waker's ways (``file:line``, a route's outer end), one per entry that one holds; an entry no endpoint's function
@@ -8297,6 +8344,7 @@ class Rerun:
                 via = next(e["via"] for e in entries if e.get("class") == cls)
                 key_attr = str(log.get("key", "")).partition(".")[2].lower()
                 made: dict[str, datetime.datetime | None] = {}
+                own_rows: dict[str, dict] = {}
                 for e in entries:
                     if e.get("class") != cls:
                         continue
@@ -8306,13 +8354,24 @@ class Rerun:
                             continue
                         born = low.get(hist.created.lower()) if hist.created else None
                         made[str(low[key_attr])] = W.when(str(born).replace("T", " ")) if born else None
+                        own_rows[str(low[key_attr])] = low
                 history = {k: HOP.states_of(log["by_key"].get(k)) for k in made}
                 reading = HOP.read_rows(history, made, car.values, moved)
                 carriers = [f"{o.split('::')[-1]} ({', '.join(sorted(vs))})" for o, vs in car.carriers]
                 values = sorted(car.values)
+                # P19: column by column, the carriers' values under which the writers' accumulations move it, over the
+                # linked rows (a fine-grained job's 'fg_done' moves nFilesFinished whatever its status); said where fewer
+                by_column = []
+                for col in sorted(term.tested):
+                    col_moving = frozenset().union(*(self._carried_values(fragment, car, {col}, hist.subject, own_rows.get(k))[0]
+                                                     for k in made)) if made else frozenset(car.values)
+                    if col_moving < frozenset(car.values):
+                        by_column.append(f"{col.partition('.')[2]} by {', '.join(sorted(col_moving)) or 'none of them'}, not by "
+                                         f"{', '.join(sorted(frozenset(car.values) - col_moving))}")
                 said_via = f"{via['from']} -> {via['to']}"
                 premises = [T.Said("h-carried-by", {"inner": sorted(term.tested), "writers": [w.split("::")[-1] for w in car.writers],
                                                     "carriers": carriers, "status": hist.subject}),
+                            *([T.Said("h-moved-by-column", {"columns": by_column})] if by_column else []),
                             T.Said("h-rows-stand-for-the-term-s", {"cls": cls, "via": said_via, "inner": ", ".join(inner_cls)})]
                 if before is None:
                     if not reading.open:
@@ -8641,6 +8700,69 @@ class Rerun:
         attrs = {str(j.subject) for j in getattr(fragment, "junctions", None) or []
                  if str(j.subject).partition(".")[0] in classes and str(j.subject).partition(".")[2].lower() == col}
         return next(iter(attrs)) if len(attrs) == 1 else ""
+
+    @staticmethod
+    def _carried_values(fragment, car, tested: set[str], status: str,
+                        row: dict | None = None) -> tuple[frozenset[str], list[str]]:
+        """P19 (the investigator's u11 NT-scouting-late 3, MT-scouting-stuck 1; the map's ACC, codemap-xliv 2616f94): of
+        the values of *status* the carriers record (``car.values``), those under which a writer's accumulation into a
+        *tested* column may move the count -- an increment (op ``+``) of a counter write (``Branch.accumulated``), its
+        written atoms (``ConditionAtom.written``: propagateResultToJEDI's ``fileStatus``, JediFileSpec.status) set to
+        each value the same owner's junction of that subject writes while *status* holds the candidate, its path read
+        with :func:`_entries_possible`.  A value that junction writes at run time is the candidate where it is *status*
+        itself (4006's ``jobSpec.jobStatus``), else left open to the two paths read together (4008's ``fileSpec.status``
+        under ``== 'nooutput'``, which the accumulation's ``not in ('nooutput')`` refuses).  *row*: a linked row's columns (lower case), its
+        own atoms read from it as :meth:`_counted_states` reads them (a fine-grained job's jobSubStatus 'fg_done' makes
+        its files 'finished' whatever its status).  ``(moving, left out)``; every value, none left out, where no counter
+        write carries accumulations.  A merging job's input files are written 'ready' (3998), so
+        'merging' moves no nFilesFinished, which counts 'finished' and 'lost'."""
+        values = frozenset(str(v) for v in car.values)
+        writers = {_bare(str(w)) for w in car.writers}
+        junctions = list(getattr(fragment, "junctions", None) or [])
+        counters = [(j, b) for j in junctions if str(getattr(j, "subject", "")) in tested and _bare(str(getattr(j, "owner", ""))) in writers
+                    for b in getattr(j, "branches", None) or [] if getattr(b, "accumulated", None)]
+        if not counters:
+            return values, []
+        attr = status.partition(".")[2]
+        moving: set[str] = set()
+        for v in sorted(values):
+            for j, b in counters:
+                if v in moving:
+                    break
+                for acc in b.accumulated:
+                    if str(getattr(acc, "op", "")) != "+":
+                        continue
+                    written = [a for a in getattr(acc, "condition_atoms", None) or [] if getattr(a, "written", False)]
+                    if not written:
+                        moving.add(v)
+                        break
+                    subject = str(written[0].subject)
+                    writes = [fb for fj in junctions if str(getattr(fj, "subject", "")) == subject
+                              and _bare(str(getattr(fj, "owner", ""))) == _bare(str(j.owner)) for fb in getattr(fj, "branches", None) or []]
+                    if not writes:
+                        moving.add(v)
+                        break
+                    for fb in writes:
+                        if not _entries_possible(list(getattr(fb, "path_condition", None) or []),
+                                                 list(getattr(fb, "condition_atoms", None) or []), {status: v}, row):
+                            continue
+                        outcome = str(getattr(fb, "outcome", "") or "").strip("'\"")
+                        fixed = {status: v, subject: outcome}
+                        if outcome.startswith(SV.RUN_TIME):
+                            # the candidate itself where it writes the status (4006); else what it writes is left to
+                            # the two paths together (4008's fileSpec.status, 'nooutput' there, which no accumulation takes)
+                            inner = outcome.partition("(")[2].rstrip(")")
+                            fixed = {status: v, subject: v} if inner.rpartition(".")[2] == attr else {status: v}
+                        entries = [*(getattr(fb, "path_condition", None) or []), *(getattr(acc, "path_condition", None) or [])]
+                        atoms = [*(getattr(fb, "condition_atoms", None) or []), *(getattr(acc, "condition_atoms", None) or [])]
+                        if _entries_possible(entries, atoms, fixed, row):
+                            moving.add(v)
+                            break
+                    if v in moving:
+                        break
+        if not moving:
+            return values, []
+        return frozenset(moving), sorted(values - moving)
 
     @staticmethod
     def _counted_states(fragment, car, counted_attr: str, value: str, status: str, row: dict[str, Any]) -> tuple[frozenset[str], list[str]]:
