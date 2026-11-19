@@ -1551,12 +1551,6 @@ def _parameters(func: ast.AST) -> set[str]:
     return {one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
 
 
-def _holds(scope: ast.AST, name: str) -> bool:
-    """Whether *scope* holds *name* for a function it encloses (:func:`pathcond.closure_scope`): a parameter of
-    it, or a write of its own statements."""
-    return name in _parameters(scope) or any(not one.nested for one in pathcond.bindings(scope, name))
-
-
 def _enclosed(name: ast.Name, outer, depth: int) -> Stated:
     """What a name a nested function reads from *outer*, the enclosing function holding it, holds: each write of
     *outer*'s own statements -- the nested function may run after any of them, so none is chosen by where the name
@@ -1582,7 +1576,7 @@ def _named(name: ast.Name, func, at: ast.AST, depth: int, handed) -> Stated:
     sites = [one.site for one in own]
     parameter = func is not None and name.id in _parameters(func)
     if func is not None and not own and not parameter and name.id not in pathcond.declared_names(func)[0]:
-        outer = pathcond.closure_scope(func, name.id, _holds)
+        outer = pathcond.closure_scope(func, name.id, pathcond.holds)
         if outer is not None:
             return _enclosed(name, outer, depth)
     target = pathcond.site_of(at)

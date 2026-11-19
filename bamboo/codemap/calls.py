@@ -3974,6 +3974,14 @@ class Types:
             # the top of ``panda.py``, a module's caller (:class:`CallSite`).
             if isinstance(func, ast.Module):
                 return self._imported_instance(file, name, depth)
+            # A name a nested function reads and does not bind is its
+            # enclosing function's, as Python reads it (pathcond.closure_scope):
+            # record_response, in run_logged_task_command, calls
+            # task_buffer.set_task_command_response on run_logged_task_command's
+            # parameter, declared a TaskBuffer.
+            outer = None if name in pathcond.declared_names(func)[0] else pathcond.closure_scope(func, name, pathcond.holds)
+            if outer is not None:
+                return self._of_name(file, outer, name, depth + 1)
             return self._outside_instance(file, name, depth)
         found = {self.declared(file, func, value, depth + 1, bound) for value in assigned}
         found.update(one for one in others if one is not None)

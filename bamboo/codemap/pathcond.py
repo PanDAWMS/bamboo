@@ -128,6 +128,14 @@ def closure_scope(
     return None
 
 
+def holds(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* holds *name* for a function it encloses (:func:`closure_scope`): a parameter of it, or a
+    binding of its own statements (:func:`bindings`)."""
+    args = getattr(scope, "args", None)
+    parameters = {one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs)} if args is not None else set()
+    return name in parameters or any(not one.nested for one in bindings(scope, name))
+
+
 def targets_of(node: ast.AST) -> list[ast.expr]:
     """What an ``=`` statement writes to, or ``[]`` if *node* is not one.
 
