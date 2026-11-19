@@ -1551,11 +1551,40 @@ def _parameters(func: ast.AST) -> set[str]:
     return {one.arg for one in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
 
 
+def _holds(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* holds *name* for a function it encloses (:func:`pathcond.closure_scope`): a parameter of
+    it, or a write of its own statements."""
+    return name in _parameters(scope) or any(not one.nested for one in pathcond.bindings(scope, name))
+
+
+def _enclosed(name: ast.Name, outer, depth: int) -> Stated:
+    """What a name a nested function reads from *outer*, the enclosing function holding it, holds: each write of
+    *outer*'s own statements -- the nested function may run after any of them, so none is chosen by where the name
+    is read -- and *outer*'s parameter, a base of its own, where it is one; the one amount they all are, else said.
+    ``AdderThread.run``'s ``lock_interval`` is ``add_main.main``'s ``10``."""
+    found: list[Stated] = [Stated(base=f"{outer.name}.{name.id}")] if name.id in _parameters(outer) else []
+    own = [one for one in pathcond.bindings(outer, name.id) if not one.nested]
+    for one in own:
+        if one.kind not in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED) or one.unpacked or one.value is None:
+            return _said(name, f"{name.id} is bound by {one.kind} at {getattr(one.site, 'lineno', 0)}")
+        found.append(stated(one.value, outer, one.site, depth + 1))
+    if len(set(found)) != 1:
+        lines = sorted({getattr(one.site, "lineno", 0) for one in own})
+        lead = f"{outer.name}'s call's value and " if name.id in _parameters(outer) else f"{outer.name}'s "
+        return _said(name, f"{lead}writes at {', '.join(map(str, lines))} reach it")
+    return found[0]
+
+
 def _named(name: ast.Name, func, at: ast.AST, depth: int, handed) -> Stated:
-    """What *name* holds where *at* reads it: the writes reaching it, the call's value among them."""
+    """What *name* holds where *at* reads it: the writes reaching it, the call's value among them; for a name
+    *func* neither writes nor is handed, the enclosing function's that holds it (:func:`_enclosed`)."""
     own = [one for one in pathcond.bindings(func, name.id) if not one.nested] if func is not None else []
     sites = [one.site for one in own]
     parameter = func is not None and name.id in _parameters(func)
+    if func is not None and not own and not parameter and name.id not in pathcond.declared_names(func)[0]:
+        outer = pathcond.closure_scope(func, name.id, _holds)
+        if outer is not None:
+            return _enclosed(name, outer, depth)
     target = pathcond.site_of(at)
     entry = [func.args] if parameter else []
     reached = reaching(target, [*entry, *sites]) if (sites or entry) else []

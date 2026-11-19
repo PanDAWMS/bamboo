@@ -1141,8 +1141,15 @@ def _declared_or_unread(func: ast.AST) -> tuple[frozenset[str], dict[str, str]]:
 def _binds(func: ast.AST, name: str) -> bool:
     """Whether *func*'s own statements bind *name* by any form -- an import, a ``def``, a ``match`` capture too --,
     which makes it *func*'s own by Python's rule, or, declared ``global`` or ``nonlocal``, read by those bindings
-    (:meth:`_Reader._bound`).  A name it binds by none is a module's."""
+    (:meth:`_Reader._bound`).  A name it binds by none is an enclosing function's that holds it
+    (:func:`pathcond.closure_scope`), else a module's."""
     return _bound_here(func, name) or name in _declared_or_unread(func)[1]
+
+
+def _holds(scope: ast.AST, name: str) -> bool:
+    """Whether *scope* holds *name* for a function it encloses (:func:`pathcond.closure_scope`): a parameter of
+    it, or a binding of its own statements by any form (:func:`_binds`)."""
+    return name in _parameters(scope) or _binds(scope, name)
 
 
 def _index(expr: ast.expr) -> Optional[int]:
@@ -1761,6 +1768,13 @@ class _Reader:
             and not _binds(func, expr.id)
             and pathcond.comprehension_clause(func, expr.id, point) is None
         ):
+            outer = (
+                None
+                if expr.id in pathcond.declared_names(func)[0]
+                else pathcond.closure_scope(func, expr.id, _holds)
+            )
+            if outer is not None:
+                return self._closure(expr, file, outer)
             return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
         last = _statement_of(point)
         if any(one.kind == pathcond.BIND_WALRUS and not one.nested for one in pathcond.bindings(func, expr.id)):
@@ -1772,6 +1786,26 @@ class _Reader:
         for site in sites:
             ways = self._site_ways(expr, point, site, file, func, last, selves=selves)
             found += _chosen(ways, file, site) if len(sites) > 1 else ways
+        return found
+
+    def _closure(self, expr: ast.Name, file: str, outer: ast.AST) -> list[_Way]:
+        """The ways of a name *expr*'s function reads from *outer*, the enclosing function holding it
+        (:func:`pathcond.closure_scope`): *outer*'s parameter, read as its own, where it is one, and each binding
+        of *outer*'s own statements -- the nested function may run after any of them, so none is chosen by where the
+        name is read --, each read where it is made, what changes the object in place after it not carried.
+        ``AdderThread.run``'s ``time_limit=lock_interval`` is ``add_main.main``'s ``lock_interval = 10`` at 57.  A
+        binding by a form not read (an import, a ``def``) is a stop ``unread_binding``, as at a function's entry
+        (:meth:`_bound`).  The read's ``self`` bindings are not *outer*'s, so none is carried there."""
+        held = expr.id in _parameters(outer)
+        sites = [one.site for one in pathcond.bindings(outer, expr.id) if not one.nested]
+        several = len(sites) + held > 1
+        found: list[_Way] = [self._parameter(file, outer, expr.id)] if held else []
+        for site in sites:
+            ways = self._site_ways(expr, site, site, file, outer, None)
+            found += _chosen(ways, file, site) if several else ways
+        form = _declared_or_unread(outer)[1].get(expr.id)
+        if form is not None:
+            found.append(_stop("unread_binding", expr.id, what=form, at=f"{file}:{expr.lineno}"))
         return found
 
     def _site_ways(
@@ -1810,15 +1844,23 @@ class _Reader:
         read of a local not a parameter, gives none: that way raises ``UnboundLocalError`` or is never taken (a
         test the binding's own test rules out, a statement before it that cannot raise) -- no value comes by it
         (``return retVal`` in the handler of a ``try`` whose first statement binds ``retVal``).  A name the
-        function declares ``global`` or ``nonlocal`` is the module's by that way, and a binding of the function that
-        reaches the read gives its own value, no other writer being read between (``global_task_buffer =
-        task_buffer`` read on the next statement).  Where the function binds the name by a form not read
-        (:func:`_declared_or_unread`), a stop ``unread_binding``."""
+        function declares ``global`` is the module's by that way, one it declares ``nonlocal`` the enclosing
+        function's that holds it (:meth:`_closure`), and a binding of the function that reaches the read gives its
+        own value, no other writer being read between (``global_task_buffer = task_buffer`` read on the next
+        statement).  Where the function binds the name by a form not read (:func:`_declared_or_unread`), a stop
+        ``unread_binding``."""
         if site is func.args:  # type: ignore[attr-defined]
             if expr.id in _parameters(func):
                 return [self._parameter(file, func, expr.id)]
             declared, unread = _declared_or_unread(func)
             if expr.id in declared:
+                outer = (
+                    pathcond.closure_scope(func, expr.id, _holds)
+                    if expr.id in pathcond.declared_names(func)[1]
+                    else None
+                )
+                if outer is not None:
+                    return self._closure(expr, file, outer)
                 return [_Way(KEY_GLOBAL, name=expr.id, line=expr.lineno)]
             form = unread.get(expr.id)
             if form is not None:
@@ -3683,8 +3725,9 @@ def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
 
 
 def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
-    """The names *test* reads that are *func*'s parameters or locals -- not a module's name or a comprehension's
-    own -- each at its first read; and each object rooted at ``self`` or ``cls`` that a field or method is read off,
+    """The names *test* reads that are *func*'s parameters or locals, or an enclosing function's it reads as a
+    closure (:func:`_enclosed`) -- not a module's name or a comprehension's own -- each at its first read; and each
+    object rooted at ``self`` or ``cls`` that a field or method is read off,
     by its path: ``self`` for ``self.splitRule is None``, ``self.taskSpec`` for ``self.taskSpec.usePrePro()`` -- the
     object a :class:`WriteFrom` of an arm writing ``self.splitRule`` or ``self.taskSpec.splitRule`` writes."""
     inner = {
@@ -3707,9 +3750,15 @@ def _names(test: ast.expr, func: ast.AST) -> dict[str, ast.expr]:
             and node.id not in ("self", "cls")
             and node.id not in inner
         ):
-            if node.id in own or _binds(func, node.id):
+            if node.id in own or _binds(func, node.id) or _enclosed(func, node.id):
                 found.setdefault(node.id, node)
     return found
+
+
+def _enclosed(func: ast.AST, name: str) -> bool:
+    """Whether *func* reads *name* as a closure: it neither binds nor declares it ``global``, and an enclosing
+    function holds it (:func:`pathcond.closure_scope`)."""
+    return name not in pathcond.declared_names(func)[0] and pathcond.closure_scope(func, name, _holds) is not None
 
 
 def _self_values(test: ast.expr) -> list[str]:

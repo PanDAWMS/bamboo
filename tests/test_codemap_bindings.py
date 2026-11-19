@@ -178,3 +178,74 @@ def test_the_build_takes_a_target_apart_the_same_way(form):
     )  # ``single_definition`` counts a nested function's writes, as it always has
     if isinstance(statement, ast.Assign):
         assert ("x" in sqlwrite._assigned_names(statement)) == by_syntax
+
+
+#: Nested scopes, each reading names from outside it -- an enclosing function's local and parameter, a name only a
+#: class's body binds, a name an enclosing function declares ``global``, one a middle function declares
+#: ``nonlocal``, a module's name.
+CLOSURES = textwrap.dedent(
+    """\
+    limit = 1
+
+    def outer(handed):
+        local = 2
+        global limit
+        limit = 3
+        shared = 4
+
+        class Holder:
+            in_class = 5
+
+            def method(self):
+                return local + handed + in_class + limit + shared + module_only
+
+        def middle():
+            nonlocal shared
+            shared = 6
+
+            def inner():
+                return local + shared + handed + module_only
+
+            return inner
+
+        return Holder, middle
+    """
+)
+
+
+def test_a_name_a_nested_function_reads_is_looked_up_where_python_looks_it_up():
+    """:func:`pathcond.closure_scope` names, for each name a nested function reads and does not bind, the function
+    Python's symbol table says holds it -- a class's body passed over, a ``global`` going to the module, a
+    ``nonlocal`` passed through to the function holding the name -- and ``None`` where Python reads the module's."""
+    import symtable
+
+    tree = ast.parse(CLOSURES)
+    pathcond.attach_parents(tree)
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+
+    def holds(scope: ast.AST, name: str) -> bool:
+        arguments = {one.arg for one in scope.args.args}
+        return name in arguments or any(not one.nested for one in pathcond.bindings(scope, name))
+
+    table = symtable.symtable(CLOSURES, "closures", "exec")
+    tables = {}
+    stack = [table]
+    while stack:
+        one = stack.pop()
+        tables[one.get_name()] = one
+        stack.extend(one.get_children())
+    checked = 0
+    for name in ("method", "inner"):
+        scope = tables[name]
+        for symbol in scope.get_symbols():
+            if symbol.is_assigned() or symbol.is_parameter() or symbol.get_name() == "self":
+                continue
+            found = pathcond.closure_scope(functions[name], symbol.get_name(), holds)
+            if symbol.is_free():
+                expected = "outer"
+            else:
+                assert symbol.is_global()
+                expected = None
+            assert (found.name if found is not None else None) == expected, (name, symbol.get_name())
+            checked += 1
+    assert checked == 10

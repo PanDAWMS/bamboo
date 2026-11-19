@@ -96,3 +96,41 @@ def test_the_clock_less_a_duration_of_one_value_not_settled_is_the_clock_and_sec
         assert (said[name].base, said[name].scale) == ("", None)
         assert said[name].said
 
+
+
+_CLOSURE = '''
+import datetime
+
+def main(argv, interval_arg):
+    lock_interval = 10
+    twice = 1
+    twice = 2
+
+    class AdderThread:
+        def run(self):
+            varMap = {}
+            varMap[":closure"] = naive_utcnow() - datetime.timedelta(minutes=lock_interval)
+            varMap[":outer_parameter"] = naive_utcnow() - datetime.timedelta(minutes=interval_arg)
+            varMap[":outer_twice"] = twice
+            varMap[":module"] = MODULE_LIMIT
+'''
+
+
+def test_a_name_a_nested_function_reads_from_its_enclosing_function_is_that_function_s():
+    """``add_main.main``'s ``AdderThread.run`` hands ``time_limit=lock_interval``, ``main``'s ``10``: a name the
+    method neither writes nor is handed is the enclosing function's that holds it, by Python's rule, the class's
+    body passed over.  Its parameter is its own base; two writes are said; a name no function holds stays said."""
+    tree = ast.parse(_CLOSURE)
+    pathcond.attach_parents(tree)
+    (run,) = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run"]
+    said = {
+        node.targets[0].slice.value: values.stated(node.value, run, node)
+        for node in ast.walk(run)
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Subscript)
+    }
+    assert (said[":closure"].base, said[":closure"].offset) == ("naive_utcnow", -600.0)
+    one = said[":outer_parameter"]
+    assert (one.base, one.offset, one.needs) == ("naive_utcnow", None, ("main.interval_arg",))
+    assert said[":outer_twice"].said.startswith("twice@")
+    assert "main's writes at 6, 7 reach it" in said[":outer_twice"].said
+    assert said[":module"].said.startswith("MODULE_LIMIT@")
