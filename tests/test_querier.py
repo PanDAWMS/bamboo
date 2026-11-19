@@ -20579,3 +20579,57 @@ def test_p14_on_h4_s_row_the_object_a_moving_run_s_mark_names_is_asked_then_read
     assert got["read"]["asks"] == [] and got["read"]["calls"] == [
         ["JobSpec", "9", "22:10:00", 2, "77", "JediTaskSpec.jediTaskID", "05:05:13"]], got
     assert got["before"]["calls"] == [] and "not inside the stay" in got["before"]["said"][0], got
+
+
+def test_p55_a_pass_whose_run_ends_before_the_print_after_a_call_stopped_in_that_call_and_moved_nothing(tmp_path):
+    """P55's first piece: a pass whose run holds no record after a row whose next statement makes a call, the statement
+    after that printing a row the run would show, stopped in the call; where the statuslog holds no row from its start to
+    the run that moved the value, it moved nothing.  A record after the row, a row printed after the call, no call
+    next, or a statuslog row in between: not said.  S3 stops on passes that all stopped."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap import pathcond
+
+            src = ("def f(self):\\n"
+                   "    log('start')\\n"
+                   "    log('updating DB')\\n"
+                   "    r = self.tb.updateJobs([1])\\n"
+                   "    log(f'retU: {r}')\\n"
+                   "    return r\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            fn = N(node=node, rows=[N(line=2), N(line=3), N(line=5)], rel="a.py", shown="a.py::f")
+
+            def go(hits, n=2, states=(), moved="2026-11-13 15:56:45,700"):
+                RR.R.seen = lambda fn, p, mode: N(hits={k: [(i, 9, "")] for k, i in hits.items()}, would_show=lambda row: True)
+                r = RR.Rerun.__new__(RR.Rerun)
+                r.mode = None
+                r.result = {"moved_by": {"run": {"first": moved}}}
+                r.data = {"statuslog": {"states": [{"time": t} for t in states]}}
+                p = N(records=list(range(n)), first="2026-11-13 15:46:24,641", last="2026-11-13 15:46:38,283")
+                got = r._stopped_in_call(fn, p)
+                return [got[1], "updateJobs" in got[0]] if got else None
+
+            print(json.dumps({
+                "stopped": go({2: 0, 3: 1}, states=["2026-11-13 15:57:07"]),
+                "record after": go({2: 0, 3: 1}, n=3),
+                "came back": go({2: 0, 3: 1, 5: 2}, n=3),
+                "no call next": go({2: 0}, n=1),
+                "a move between": go({2: 0, 3: 1}, states=["2026-11-13 15:50:00"]),
+                "no moving run": go({2: 0, 3: 1}, moved=""),
+                "following": [RR._following(node, node.body[2]).lineno, RR._following(node, node.body[4])],
+            }))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["stopped"] == [4, True], got
+    assert got["record after"] is None and got["came back"] is None and got["no call next"] is None, got
+    assert got["a move between"] is None and got["no moving run"] is None, got
+    assert got["following"] == [5, None], got

@@ -2355,6 +2355,8 @@ class Blocked:
     left_by: tuple[int, ...] = ()
     took: tuple[int | None, ...] = ()
     unhanded: tuple[str, ...] = ()
+    #: P55: each pass's call it stopped in (``file:line``, :meth:`Rerun._stopped_in_call`), "" for one that did not
+    stopped: tuple[str, ...] = ()
 
 
 @dataclass
@@ -3174,6 +3176,17 @@ def prints_key(owner: str, lines, columns: set[str]) -> bool:
 def _entries_of(writers: list, owner: str) -> list[str]:
     """The ``called_from`` entries of *owner*'s junctions among *writers*, each once."""
     return list(dict.fromkeys(e for w in writers if w.owner == owner for e in getattr(w, "called_from", None) or []))
+
+
+def _following(func: ast.AST, stmt: ast.stmt) -> ast.stmt | None:
+    """The statement after *stmt* in the block holding it inside *func*, or None where it is the block's last (P55)."""
+    for node in ast.walk(func):
+        for name in ("body", "orelse", "finalbody"):
+            block = getattr(node, name, None)
+            if isinstance(block, list) and any(s is stmt for s in block):
+                i = next(k for k, s in enumerate(block) if s is stmt)
+                return block[i + 1] if i + 1 < len(block) else None
+    return None
 
 
 def _site(hop: str) -> str | None:
@@ -9217,6 +9230,43 @@ class Rerun:
                 return p, f"{', '.join(names)} recorded it inside the pass, {func} calling {cfunc}; its prints do not place the call"
         return None
 
+    def _stopped_in_call(self, fn: R.Function, p) -> tuple[str, int] | None:
+        """P55's first piece (out/gm/qk-design.md, the lock timeline's draft, delegated design): a pass whose run holds
+        no record after a row of the function whose next statement makes a call, the statement after that printing a
+        row the run would show, did not come back from the call, nor did a raise from it print in the run: it stopped
+        there, or its process did, and ran nothing after the call.  What it set before the call reaches the row only
+        through it, and where the statuslog holds no row from the pass's start to the run that moved the value (L1's),
+        it moved nothing.  NJ-holding-late's Adder pass on aipanda098: 'updating DB' (adder_gen 471), then updateJobs
+        at 472, and never 'retU' (479).  The text said and the call's line, or None where any of this does not hold."""
+        if not getattr(p, "records", None) or getattr(fn, "node", None) is None:
+            return None
+        sn = R.seen(fn, p, self.mode)
+        hit = [(max(i for i, _, _ in hs), line) for line, hs in (getattr(sn, "hits", None) or {}).items() if hs]
+        if not hit:
+            return None
+        last_i, last_line = max(hit)
+        stmt = R.statement_at(fn.node, last_line)
+        call = _following(fn.node, stmt) if last_i == len(p.records) - 1 and stmt is not None else None
+        if call is None or not any(isinstance(x, ast.Call) for x in ast.walk(call)):
+            return None
+        after = _following(fn.node, call)
+        rows = {r.line: r for r in getattr(fn, "rows", None) or []}
+        if call.lineno in rows or after is None or after.lineno not in rows or not sn.would_show(rows[after.lineno]):
+            # a print is a call too: the call is one of no row's
+            return None
+        moved = ((self.result.get("moved_by") or {}).get("run") or {}).get("first") \
+            if isinstance(getattr(self, "result", None), dict) else None
+        if not moved or W.when(str(p.first)[:19]) >= W.when(str(moved)[:19]):
+            return None
+        states = ((getattr(self, "data", None) or {}).get("statuslog") or {}).get("states") or []
+        if any(W.when(str(p.first)[:19]) <= W.when(str(s["time"])[:19]) < W.when(str(moved)[:19]) for s in states):
+            return None
+        name = ast.unparse(next(x for x in ast.walk(call) if isinstance(x, ast.Call)).func)
+        return (f"stopped in the call at {call.lineno} ({name}): its last record is row {last_line}, and row {after.lineno}, "
+                f"which the statement after the call prints, is not in its run, nor any record after {p.last}; the statuslog "
+                f"holds no row from {str(p.first)[:19]} to the run that moved the value ({str(moved)[:19]}): it moved nothing "
+                "(P55)"), call.lineno
+
     def _which_way(self, fn: R.Function, rel: str, func: str, found: list, arms: list[Arm]) -> Blocked:
         """Which way each pass of *found* went -- an arm of *arms*, an exit of *fn*, or none of them -- and the one way
         every pass took: S2's reading of a mover's passes, and U2's of a caller's, its calls into the mover the arms."""
@@ -9228,8 +9278,10 @@ class Rerun:
         envs = []
         left_by: set[int] = set()  # the exits a pass that ran no arm may have left by (S-1, S-2a)
         unhanded: list[str] = []  # D-4: a pass every arm of which was a call handing no element of the key's turn
+        stopped: list[str] = []  # P55: the call each pass stopped in, "" for one that did not
         arm_lines = {a.line for a in arms}
         for n, p in enumerate(found, 1):
+            stopped.append("")
             env = self.base_env(at=p.first)
             stable_holes([R.seen(fn, p, self.mode)], env, class_of(fn), local_to=fn.owner)
             self.say(f"-- pass {n}: {p.first} .. {p.last}, {len(p.records)} record(s); printed {self._printed(env)}")
@@ -9258,6 +9310,11 @@ class Rerun:
                 left_by.update(left if shown is None else [shown])
                 chosen.append(None)
                 took.append(shown)
+            elif (stuck := self._stopped_in_call(fn, p)) is not None:
+                self.say(f"  pass {n} {stuck[0]}")
+                stopped[-1] = f"{fn.rel}:{stuck[1]}"
+                chosen.append(None)
+                took.append(None)
             else:
                 chosen.append(self.pick(T.Said("which-way-pass-went", {"n": n}), j))
                 took.append(None)
@@ -9273,7 +9330,8 @@ class Rerun:
                  else f"every pass ({len(found)}) of {func} took none of its candidates" if not left_by
                  else f"every pass ({len(found)}) of {func} ran none of its arms")
         return Blocked(fn, exit_line, found, envs, arms, tuple(sorted(left_by)),
-                       tuple(took) if exit_line is None and any(x is not None for x in took) else (), tuple(unhanded))
+                       tuple(took) if exit_line is None and any(x is not None for x in took) else (), tuple(unhanded),
+                       tuple(stopped) if any(stopped) else ())
 
     # ------------------------------------------------------------ Callers: what called the mover on the row
     def callers(self, q: Callers):
@@ -11332,6 +11390,11 @@ class Rerun:
             # what held on the way to the exit, the early exits above it too; one read at another line is not solved here
             return [g for g in pathcond.arm_condition(R.statement_at(fn.node, line)) if not E.read_elsewhere(g)]
 
+        if q.stopped and all(q.stopped):
+            # P55: every pass stopped in a call before what it set reached the row: no guard kept it, and what kept another
+            # pass from taking the row between is the next question (the lock timeline, not built yet)
+            self.need(T.Said("every-pass-stopped-in-a-call", {"n": len(q.passes), "func": fn.shown,
+                                                              "calls": sorted(set(q.stopped))}), None)
         if q.exit_line is None:
             # every pass ran none of the arms: what settles a guard is the path of the exit a pass was shown to leave by,
             # and what the passes printed on the way

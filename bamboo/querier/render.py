@@ -447,6 +447,7 @@ TEMPLATES: dict[str, str] = {
     "why-each-pass-took-its-way": "why each pass took its way, which {caller}'s own log ({files:join=, }) would say",
     "a-caller-s-run-printing-the-key": "a run of {caller} (calling at {lines}) printing the key: no mark of it holds the key and no row of it prints a key column (KNOWN_ISSUES.md K55)",
     "over-the-movers-window": "from {start} to {end}, {how}",
+    "every-pass-stopped-in-a-call": "every pass ({n}) of {func} in the window stopped in a call before the value it set reached the row ({calls:join=, }): what kept another pass from taking the row between -- a lock its caller takes, its selection -- is not read here (P55)",
     "caller-called-mover-not-found": "{mover}'s pass on the row inside {caller}'s call at {line}: every pass of {caller} on the row called there, and no pass of {mover} holding the key was found; its run inside the call is not read (KNOWN_ISSUES.md K55)",
     "one-call-statement-at": "one statement calling at {site}, or two with the same guards ({n} found)",
     "caller-marks-hold-the-key": "its marks {marks:rjoin=, } hold the key on every line",

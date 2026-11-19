@@ -613,6 +613,18 @@ source that is the value, so a part the read does not reach is a note and the re
 read whole is a value made of the literal (a constant-through way, never None), and a step into it takes the parts
 beside it, not the literal.  On a dump without containers (x13zns, x13znd) the stop stays.
 
+*Changed (P55's first piece, 2026-11-19, the investigator's u12 NJ-holding-late 2, delegated design):* S2 reads a pass
+whose run holds no record after a row of the mover whose next statement makes a call (no print), the statement after
+that printing a row the run would show, as stopped in that call: it did not come back from the call, and a raise from
+it printed nothing in the run (`Rerun._stopped_in_call`, `_following`).  Where the statuslog holds no row from the
+pass's start to the run that moved the value (L1's), what it set before the call did not reach the row: it moved
+nothing, and S2 goes on as for a pass that took none of its candidates.  S3 stops on passes that all stopped
+(`Blocked.stopped`): no guard kept them, and what kept another pass from taking the row between -- a lock its caller
+takes -- is the lock timeline's question, not read yet.  NJ-holding-late: the Adder's pass on aipanda098 printed
+'updating DB' (adder_gen 471), called updateJobs at 472, and never printed 'retU' (479).
+*Premise:* a raise from the call would have printed in the run (AdderGen.run's handler logs it with the same mark); a
+call that came back after the window's last record is not told from one that stopped.
+
 ## L2 -- the movers of a late value (`Rerun.missed`, `Rerun._movers_in_window`)
 
 ### K15. A writer that takes a row by its key is ruled out only by judgement 3, and one that ran is followed alone
