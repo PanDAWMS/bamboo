@@ -35,6 +35,15 @@ fetched).  The general form would be parts: the map's tables and conditions of t
 time, per row kind, from its status history and the tables it moves through; the conditions evaluated
 on those rows.  Reading 2 is that with job rows and no condition but the key.
 
+*Changed (2026-11-19, the harness's switch from db_read to task/get_job_rows, upstream 31f1a14a, delegated design):*
+the endpoint's counts and job rows name no table, and a job the same in two tables is one row.  Such a row is placed
+by its jobStatus, as the rows file's source says (`tables_by_status`, `placed_in`: a final job in jobsArchived4 or the
+archive, any other in jobsDefined4 or jobsActive4).  Reading 2's assumption is then that word, not read at the counts'
+moment, and the output says so.  A call that reads only one of the two tables a job not yet final may be in stops
+(`at_one_moment`'s fourth part, "the counts to place every job").  The endpoint's counts are its first page's moment
+and its rows every page's, as of the last: rows naming no table are needed read at or after the counts' moment, not at
+it, and the rows-to-counts check that follows stays.  Rows a db_read file names tables for are read as before.
+
 ### K2. S5's premise is not checked
 
 The premise: the count a pass printed is the number of rows the statement returned by the key.  A

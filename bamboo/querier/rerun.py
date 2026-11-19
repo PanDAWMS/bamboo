@@ -198,6 +198,25 @@ BAMBOO = Path(R.BAMBOO_TREE)
 FINAL_STATES = ("finished", "failed", "cancelled", "closed")
 #: the tables that assumption is about: a job sits in one of them until it reaches FINAL_STATES -- PanDA's too
 ACTIVE_TABLES = ("jobsDefined4", "jobsActive4")
+#: where a final job is: the archive tables
+ARCHIVE_TABLES = ("jobsArchived4", "jobsArchived")
+
+
+def tables_by_status(status: str | None) -> tuple[str, ...]:
+    """Where a job whose row names no table is, by its jobStatus, as the rows file's source says (task/get_job_rows
+    names no table; the harness's fieldtest, tmaeno's word): a final job in jobsArchived4 or the archive, any other in
+    jobsDefined4 or jobsActive4."""
+    return ARCHIVE_TABLES if status in FINAL_STATES else ACTIVE_TABLES
+
+
+def placed_in(row: dict, read: set[str]) -> bool | None:
+    """Whether the job *row* (a job row's ``tbl``, a count's ``table``) is in the tables *read* (lower case): by its
+    table where it names one, else by every table :func:`tables_by_status` places it in; None where they are partly in."""
+    table = row.get("tbl") or row.get("table")
+    if table:
+        return table.lower() in read
+    inside = [t.lower() in read for t in tables_by_status(row.get("jobstatus") or row.get("jobStatus"))]
+    return all(inside) if all(inside) or not any(inside) else None
 
 
 def handed_to(func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call) -> dict[str, ast.expr]:
@@ -322,18 +341,25 @@ def stop_reading(detail: str) -> tuple[list[str], list[str]]:
     return (said[1].split(", ") if said else []), (unread[1].split(", ") if unread else [])
 
 
-def at_one_moment(counts: list[dict], tables: list[str]) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+def at_one_moment(counts: list[dict], tables: list[str]) -> tuple[dict[str, int], dict[str, int], dict[str, int], dict[str, int]]:
     """The rows file's counts (``table``, ``jobStatus``, ``n``, all of one moment) against reading 2's assumption in
-    S5: what *tables* hold, the jobs among them in FINAL_STATES, and the jobs not yet final outside them -- each as
-    ``table/jobStatus`` -> n.  The assumption holds at that moment when the last two are empty."""
+    S5: what *tables* hold, the jobs among them in FINAL_STATES, the jobs not yet final outside them, and the jobs
+    no table places in or out of them -- each as ``table/jobStatus`` -> n.  The assumption holds at that moment when
+    the middle two are empty.  A count naming no table (task/get_job_rows) is placed by its jobStatus
+    (:func:`tables_by_status`, ``a|b/jobStatus``): there the assumption is the source's word, not a reading."""
     read = {t.lower() for t in tables}
-    held, final_in, open_out = {}, {}, {}
+    held: dict[str, int] = {}
+    final_in: dict[str, int] = {}
+    open_out: dict[str, int] = {}
+    unplaced: dict[str, int] = {}
     for r in counts:
-        inside, final = r["table"].lower() in read, r["jobStatus"] in FINAL_STATES
-        for into, kept in ((held, inside), (final_in, inside and final), (open_out, not inside and not final)):
+        label = f"{r.get('table') or '|'.join(tables_by_status(r['jobStatus']))}/{r['jobStatus']}"
+        inside, final = placed_in(r, read), r["jobStatus"] in FINAL_STATES
+        for into, kept in ((held, inside), (final_in, inside and final), (open_out, inside is False and not final),
+                           (unplaced, inside is None)):
             if kept:
-                into[f"{r['table']}/{r['jobStatus']}"] = into.get(f"{r['table']}/{r['jobStatus']}", 0) + r["n"]
-    return held, final_in, open_out
+                into[label] = into.get(label, 0) + r["n"]
+    return held, final_in, open_out, unplaced
 
 
 def through_calls(rel: str, spans: list[tuple[int, int]], writers: list, subject: str, observed: str) -> tuple[list[str], list[str]]:
@@ -11908,7 +11934,7 @@ class Rerun:
         finals = {pid: min((r["t_final"] for r in jobs if str(r["pandaid"]) == pid and r.get("t_final")), default=None) for pid in ids}
         # reading 1 and 2 are of the tables this call reads (proxy_reading), not of every table the statement can
         read = {t.lower() for t in at_call}
-        held, final_in, open_out = at_one_moment(counts, at_call)
+        held, final_in, open_out, unplaced = at_one_moment(counts, at_call)
 
         def state_at(pid: str, when: str) -> str | None:
             before = [h for h in history.get(pid, []) if h["time_extended"] < when]
@@ -11942,6 +11968,12 @@ class Rerun:
         # its assumption, checked where both sides are of one moment: the counts, by table and jobStatus
         self.say(f"at one moment ({moment}): {at_call} hold {sum(held.values())} row(s){f' {held}' if held else ''}; "
                  f"final among them: {final_in or 'none'}; not yet final outside them: {open_out or 'none'}")
+        if any(not r.get("table") for r in counts):
+            # task/get_job_rows names no table: each job is placed by its jobStatus, as its source says
+            self.say(f"the counts name no table: each job is placed by its jobStatus, as the rows' source says (final in "
+                     f"{list(ARCHIVE_TABLES)}, any other in {list(ACTIVE_TABLES)}) -- reading 2's assumption is that "
+                     "word here, not read at this moment")
+        self.need(T.Said("the-counts-place-every-job", {"at_call": at_call, "unplaced": unplaced}), not unplaced)
         self.need(T.Said("reading-s-assumption-at-that-moment-no", {"at_call": at_call}),
                   not final_in and not open_out)
         last_pass, _, active, states = active_by_pass[-1]
@@ -11965,11 +11997,20 @@ class Rerun:
             tables_at = self.need(T.Said("the-time-the-counts-were-read-their"),
                                   self.data["counts"].get("as_of"))
             rows_at = self.data["job_rows"].get("as_of")
-            self.need(T.Said("the-job-rows-read-at-the-counts", {"tables_at": tables_at, "rows_at": rows_at}), rows_at == tables_at)
+            if any(r.get("tbl") for r in jobs):
+                self.need(T.Said("the-job-rows-read-at-the-counts", {"tables_at": tables_at, "rows_at": rows_at}),
+                          rows_at == tables_at)
+            else:
+                # task/get_job_rows: the counts are its first page's moment, the rows every page's, as of the last
+                self.need(T.Said("the-job-rows-read-from-the-counts", {"tables_at": tables_at, "rows_at": rows_at}),
+                          rows_at is not None and rows_at >= tables_at)
+                if rows_at != tables_at:
+                    self.say(f"the job rows were read from {tables_at} to {rows_at}, in pages: a job may have moved "
+                             "between them; they are set against the counts below")
             self.need(T.Said("the-tables-read-after-the-last-pass", {"after": after, "tables_at": tables_at}), tables_at > after)
             n_held = sum(held.values())
             self.need(T.Said("a-job-in-at-the-value-not", {"at_call": at_call, "tables_at": tables_at, "as_of": as_of}), n_held)
-            open_rows = sorted((str(r["pandaid"]), r["jobstatus"]) for r in jobs if (r.get("tbl") or "").lower() in read)
+            open_rows = sorted((str(r["pandaid"]), r["jobstatus"]) for r in jobs if placed_in(r, read))
             self.need(T.Said("the-job-rows-to-hold-the-row", {"n_held": n_held, "at_call": at_call, "n_open_rows": len(open_rows)}),
                       len(open_rows) == n_held)
             named = [f"{pid} {status}" for pid, status in open_rows]

@@ -2461,16 +2461,28 @@ def test_the_tables_at_one_moment_check_where_reading_2_puts_a_job(tmp_path):
             fails = [{"table": "JOBSACTIVE4", "jobStatus": "running", "n": 1},
                      {"table": "jobsActive4", "jobStatus": "finished", "n": 1},
                      {"table": "jobsArchived4", "jobStatus": "running", "n": 3}]
-            print(json.dumps([at_one_moment(holds, tables), at_one_moment(fails, tables), at_one_moment([], tables)]))
+            # task/get_job_rows names no table: a job is placed by its jobStatus, as the rows' source says
+            untabled = [{"jobStatus": "running", "n": 2}, {"jobStatus": "finished", "n": 5}]
+            from bamboo.querier.rerun import placed_in
+            rows = [placed_in({"jobstatus": "running"}, {"jobsdefined4", "jobsactive4"}),
+                    placed_in({"jobstatus": "running"}, {"jobsactive4"}),
+                    placed_in({"jobstatus": "finished"}, {"jobsactive4"}),
+                    placed_in({"tbl": "jobsActive4", "jobstatus": "finished"}, {"jobsactive4"})]
+            print(json.dumps([at_one_moment(holds, tables), at_one_moment(fails, tables), at_one_moment([], tables),
+                              at_one_moment(untabled, tables), at_one_moment(untabled, ["jobsActive4"]), rows]))
             """,
         )
     )
-    holds, fails, empty = json.loads(out.splitlines()[-1])
-    assert holds == [{"jobsActive4/running": 2}, {}, {}]
+    holds, fails, empty, untabled, part, rows = json.loads(out.splitlines()[-1])
+    assert holds == [{"jobsActive4/running": 2}, {}, {}, {}]
     # a final job inside the call's tables, and one not yet final outside them, each break the assumption
     assert fails == [{"JOBSACTIVE4/running": 1, "jobsActive4/finished": 1}, {"jobsActive4/finished": 1},
-                     {"jobsArchived4/running": 3}]
-    assert empty == [{}, {}, {}]
+                     {"jobsArchived4/running": 3}, {}]
+    assert empty == [{}, {}, {}, {}]
+    assert untabled == [{"jobsDefined4|jobsActive4/running": 2}, {}, {}, {}]
+    # a call reading one of the two tables a job not yet final may be in: that job is not placed
+    assert part == [{}, {}, {}, {"jobsDefined4|jobsActive4/running": 2}]
+    assert rows == [True, None, False, True]
 
 
 def test_a_mover_reaches_a_writer_by_the_calls_the_map_placed_into_it(tmp_path):
