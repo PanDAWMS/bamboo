@@ -2387,6 +2387,23 @@ class Callers:
     #: second), and what S2 read of its passes
     after: str | None = None
     left: T.Said | None = None
+    #: P20: the ways the run that moved the row came in by, as its printed parameters choose them
+    #: (:meth:`Rerun._ways_in`), which the hop up from a caller absent keeps to
+    ways_in: WaysIn | None = None
+
+
+@dataclass(frozen=True)
+class WaysIn:
+    """P20 (out/gm/qk-design.md, the section on P20's rest): the ways a mover's moving run came in by, chosen by the parameters it
+    printed.  *kept*: the ways not ruled out, each route the outermost call first (a way through a binding a guard
+    holds, lengthened by the ways of the guard's parameter that do not make it false); *off*: the ways ruled out, each
+    with the parameter and the literal it hands; *printed*: the parameters with what the run printed for them;
+    *guards*: what each guard read says, as said."""
+
+    kept: tuple[SR.Way, ...]
+    off: tuple[tuple[SR.Way, str, str], ...]
+    printed: tuple[tuple[str, str], ...]
+    guards: tuple[str, ...] = ()
 
 
 @dataclass
@@ -3115,11 +3132,17 @@ def _names_column(col: str) -> Callable[[Any], bool]:
 def prints_key(owner: str, lines, columns: set[str]) -> bool:
     """Whether a row of *owner*'s prints a hole the map says holds one of *columns*, the row's key, in its message or
     its mark: a run of it is found there by the key alone, though a line of it without the key is not (as K45's mover
-    whose mark holds none).  AtlasAnalWatchDog.doForPreStaging's "action=release_... jediTaskID=..."."""
+    whose mark holds none).  AtlasAnalWatchDog.doForPreStaging's "action=release_... jediTaskID=..."  The mark is also
+    read as the map's runs of the function hold it (P20): AdderGen's ``LogWrapper(_logger, str(self.job_id))``, a mark
+    '{}' whose hole holds JobSpec.PandaID, puts the key alone before each line -- no text around it to ask by
+    (:func:`marks_holding`), but the key is on every line of the run."""
     found = R._prints_of(owner, lines)
-    return found is not None and any(
-        columns & set(h.columns or [])
-        for st in found.statements for r in st.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])])
+    if found is None:
+        return False
+    if any(columns & set(k.columns or []) for r in getattr(found, "runs", None) or [] for k in r.key or []):
+        return True
+    return any(columns & set(h.columns or [])
+               for st in found.statements for r in st.rows or [] for h in [*(r.holes or []), *(r.prefix_holes or [])])
 
 
 def _entries_of(writers: list, owner: str) -> list[str]:
@@ -3597,6 +3620,66 @@ def across_sends(entries: list[str]) -> dict[str, str]:
                 for n in lines:
                     out.setdefault(f"{crel}:{n} -> {send} -> {entry}", send)
     return out
+
+
+def _literal_way(w: SR.Way) -> bool:
+    """Whether the way *w* hands a literal as written (G-5's reading): a constant with no steps taken off it, no part of
+    one, a value the map names."""
+    return w.end == SR.CONSTANT and not w.steps and w.why not in SR.NO_LITERAL and bool(w.value)
+
+
+def guarded_ways(w: SR.Way) -> tuple[list[SR.Way], list[tuple[SR.Way, str, str]], str] | None:
+    """P20 (out/gm/qk-design.md, the section on P20's rest): a way *w* ending at a binding of a value no literal is (TaskBuffer.py:656's
+    ``async_params = {...}``) in the function its outermost call is in, read by the guards that binding stands under
+    (``pathcond.arm_condition``): a guard naming a parameter of that function is read with each literal a way of that
+    parameter hands (:func:`sources.param_ways`), the guard's other atoms unknown (``evaluate.truth``); a literal making
+    it false does not reach the binding.  ``(kept, off, said)``: *w* lengthened outward by each way of the parameter
+    that is not ruled out, those ruled out (each with the parameter and the literal), and what the guard says -- for the
+    first guard and parameter that rule one out; None where none does, or the binding is not read."""
+    if not w.route or not w.end_at:
+        return None
+    rel, _, ln = w.route[0].rpartition(":")
+    erel, _, eln = w.end_at.rpartition(":")
+    if erel != rel or not ln.isdigit() or not eln.isdigit():
+        return None
+    node = R.def_holding(rel, int(ln))
+    if node is None or not node.lineno <= int(eln) <= (node.end_lineno or node.lineno):
+        return None
+    stmt = R.statement_at(node, int(eln))
+    if stmt is None:
+        return None
+    args = node.args
+    params = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)} - {"self", "cls"}
+    owner = R.owner_of(rel, node)
+    for guard in pathcond.arm_condition(stmt):
+        try:
+            tree = ast.parse(guard, mode="eval").body
+        except SyntaxError:
+            continue
+        for name in sorted({x.id for x in ast.walk(tree) if isinstance(x, ast.Name)} & params):
+            kept: list[SR.Way] = []
+            off: list[tuple[SR.Way, str, str]] = []
+            for u in SR.param_ways(owner, name):
+                longer = replace(w, route=u.route + w.route)
+                if _literal_way(u):
+                    try:
+                        value = ast.literal_eval(u.value)
+                    except (ValueError, SyntaxError):
+                        value = E.shared.UNKNOWN
+                    if value is not E.shared.UNKNOWN:
+                        env = E.shared.Env()
+                        env.put(name, value, "a literal a way of it hands")
+                        if E.shared.truth(tree, {}, env) is False:
+                            off.append((longer, name, u.value))
+                            continue
+                kept.append(longer)
+            if off:
+                handed = sorted({u.route[0] for u in kept if u.route})
+                said = (f"{w.end_at} binds it only where {guard!r} holds, which {name} {', '.join(sorted({v for _, _, v in off}))} "
+                        f"makes false: of the calls into {owner.split('::')[-1]}, only {', '.join(handed) or 'none'} hand(s) "
+                        f"{name} a value it may hold with")
+                return kept, off, said
+    return None
 
 
 def _f3(state: dict | None) -> str:
@@ -7982,9 +8065,11 @@ class Rerun:
 
     def _key_columns(self, subject: str, key: str) -> set[str]:
         """The columns of *subject*'s class whose value in the rows file is *key* -- the row's key, as ``held.split``
-        reads it -- spelled ``Class.attribute`` as the map's names are."""
+        reads it -- spelled ``Class.attribute`` as the map's names are.  A key no column of the row holds is another
+        object's of the class (H-4's, the merge job's PandaID a mark held): the class's identity columns (P20)."""
         cls = subject.partition(".")[0]
-        return {f"{cls}.{c}" for c, cell in self._row_of(cls).items() if isinstance(cell, dict) and str(cell.get("value")) == key}
+        own = {f"{cls}.{c}" for c, cell in self._row_of(cls).items() if isinstance(cell, dict) and str(cell.get("value")) == key}
+        return own or set(_identity_attrs(cls))
 
     def _searched_whole(self, to_hand: list[str], asking: W.Asking, searched: W.Asking, missed: list, holes: dict,
                         rest: W.Asking | None) -> dict:
@@ -9180,6 +9265,8 @@ class Rerun:
             self.say(f"the run that moved it is marked by another {cls}'s key ({other}), not the row's: its callers' "
                      "passes are asked by that key (H-4)")
             q = replace(q, key=other)
+        if q.up is None and (ways_in := self._ways_in(q)) is not None:
+            q = replace(q, ways_in=ways_in)
         found = callers_of(q.entries, cls, q.key, self._key_columns(q.subject, q.key))
         self.need(T.Said("a-caller-the-map-lists", {"func": func}), found, "K55")
         found = self._callers_by_printed(q, found)
@@ -9275,6 +9362,93 @@ class Rerun:
                 if set(getattr(k, "columns", None) or []) & own and str(v).strip() and str(v).strip() != q.key:
                     others.add(str(v).strip())
         return others.pop() if len(others) == 1 else None
+
+    def _ways_in(self, q: Callers) -> WaysIn | None:
+        """P20 (out/gm/qk-design.md, the section on P20's rest): the ways the mover's moving run of a late value came in by, as the
+        parameters it printed choose them -- G-5's reading (:meth:`_callers_by_printed`) over the whole way, not its
+        first call alone.  Of each printed parameter's ways (:func:`sources.param_ways`), one handing a literal other
+        than the value printed is not the run's; one ending at a binding no literal is, under a guard on a parameter
+        of the function binding it, is lengthened by that parameter's ways and loses those whose literal makes the guard
+        false (:func:`guarded_ways`).  NJ-merging-late's updateUnmergedJobs printed ``async_params`` as a dict at 1177:
+        the ways handing None (TaskBuffer.py:827 and 1131 through archiveJob's default, among others) are not its, and
+        TaskBuffer.py:656 makes the dict only where ``async_dataset_update`` holds, which adder_gen.py:472 alone hands
+        True.  A way around a cycle stays.  None where nothing is ruled out, or not the moving run of a late value."""
+        q2 = getattr(self, "_missed_q", None)
+        if q2 is None or q2.mover != q.mover or q2.run is None:
+            return None
+        printed = self._printed_parameters(q.mover, q2.run)
+        if not printed:
+            return None
+        bare = _bare(q.mover)
+        kept: list[SR.Way] = []
+        off: list[tuple[SR.Way, str, str]] = []
+        guards: list[str] = []
+        for p, value in sorted(printed.items()):
+            for w in SR.param_ways(bare, p):
+                if _literal_way(w):
+                    if SR.same_value(w.value, value):
+                        kept.append(w)
+                    else:
+                        off.append((w, p, w.value))
+                    continue
+                got = guarded_ways(w) if w.end == SR.CONSTANT else None
+                if got is None:
+                    kept.append(w)
+                    continue
+                more, out, said = got
+                kept += more
+                off += out
+                if said not in guards:
+                    guards.append(said)
+        if not off:
+            return None
+        return WaysIn(tuple(kept), tuple(off), tuple(sorted(printed.items())), tuple(guards))
+
+    def _outer_on_ways(self, up: Callers, sites: set[str], outer: list[str]) -> list[str]:
+        """P20: of the calls *outer* into a caller absent (at its call *sites*), those on a way the run that moved the
+        row came in by (*up*'s ``ways_in``): a call no kept way goes through, where a way ruled out does, goes; one no
+        way names stays.  A call on a kept way into a function that prints nothing (TaskBuffer.updateJobs, :func:`
+        prints_nothing`) is read with the call on that way into it (``adder_gen.py:472 -> TaskBuffer.py:663``): its
+        runs are in no log, and the caller U1 asks is the one past it.  What goes, and why, is said."""
+        ways = up.ways_in
+        if ways is None:
+            return outer
+        on: dict[tuple[str, str], set[str]] = {}
+        for w in ways.kept:
+            for i in range(1, len(w.route)):
+                a, b = _site(w.route[i - 1]), _site(w.route[i])
+                if a and b and b in sites:
+                    on.setdefault((a, b), set())
+                    if i >= 2 and (o := _site(w.route[i - 2])):
+                        on[(a, b)].add(o)
+        named = {(_site(w.route[i - 1]), _site(w.route[i])) for w, _, _ in ways.off for i in range(1, len(w.route))
+                 if _site(w.route[i]) in sites}
+        out: list[str] = []
+        gone: list[str] = []
+        for e in outer:
+            a = _site(e)
+            hits = [k for k in on if k[0] == a]
+            if not hits:
+                if any(k[0] == a for k in named):
+                    gone.append(e)
+                else:
+                    out.append(e)
+                continue
+            further = sorted({o for k in hits for o in on[k]})
+            rel, _, ln = (a or "").rpartition(":")
+            node = R.def_holding(rel, int(ln)) if ln.isdigit() else None
+            if further and node is not None and prints_nothing(R.owner_of(rel, node), [int(ln)]):
+                out += [f"{o} -> {e}" for o in further]
+            else:
+                out.append(e)
+        if gone:
+            # the values printed are not said (a print may hold a name); the literals the ways hand are the code's
+            handed = sorted({f"{p} {v}" for _, p, v in ways.off})
+            self.say(f"  not on a way the run that moved it came in by: {gone} (by what it printed for "
+                     f"{', '.join(p for p, _ in ways.printed)}, the ways handing {', '.join(handed)} are not its) (P20)")
+            for said in ways.guards:
+                self.say(f"  {said} (P20)")
+        return list(dict.fromkeys(out))
 
     def _callers_by_service(self, q: Callers, found: list[Caller]) -> list[Caller]:
         """Bundle H, H-3 (P15, out/gm/qk-design.md, bundle H, tmaeno's OK 2026-11-17 17:1x): pandajedi's code runs in
@@ -9779,6 +9953,8 @@ class Rerun:
         self.say(f"{func} did not run on the row from {start} to {end}: {'; '.join(T.text(p['why']) for p in premises.values())}")
         sites = {f"{c.owner.partition('::')[0]}:{line}" for line in c.lines}
         outer = [e.split(" -> ")[0] for e in up.entries if " -> " in e and _site(e.split(" -> ")[1]) in sites]
+        if c.hop == 1 and up.up is None and outer:
+            outer = self._outer_on_ways(up, sites, outer)
         if c.hop == 1 and up.up is None and outer:
             self.say(f"up to {func}'s callers: {outer}")
             return Callers(c.owner, up.arms, up.subject, up.key, up.window, up.kind, outer, up.before, up=c.owner,

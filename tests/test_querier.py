@@ -20433,3 +20433,94 @@ def test_p19_a_counter_column_moves_only_under_the_values_its_accumulations_take
     assert got["no row"] == ["failed", "finished", "merging"], got
     # a column no counter with accumulations writes: every value, as recorded
     assert got["no counter"] == ["failed", "finished", "merging"], got
+
+
+def test_p20_the_ways_a_moving_run_came_in_by_its_printed_parameters_the_hop_up_kept_to_them_and_a_bare_key_mark(tmp_path):
+    """P20 (out/gm/qk-design.md, the section on P20's rest).  The ways the moving run came in by, by the parameters it printed: a way
+    handing another literal goes; a way ending at a binding no literal is, under a guard on a parameter of the function
+    binding it, is lengthened by that parameter's ways, less those whose literal makes the guard false; a cycle stays.
+    The hop up from an absent caller keeps to those ways and goes through a caller printing nothing to the call into it.
+    prints_key reads the map's run marks (a mark '{}' holding the key), and _key_columns gives the class's identity
+    columns for a key no column of the row holds."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import ast, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.codemap import pathcond
+
+            got = {}
+            src = ("def updateJobs(self, jobs, async_dataset_update=False):\\n"
+                   "    for job in jobs:\\n"
+                   "        if async_dataset_update and job.jediTaskID not in [None, 'NULL']:\\n"
+                   "            async_params = {'exec_order': 0}\\n"
+                   "        else:\\n"
+                   "            async_params = None\\n"
+                   "        archive(job, async_params=async_params)\\n")
+            module = ast.parse(src)
+            pathcond.attach_parents(module)
+            node = module.body[0]
+            RR.R.def_holding = lambda rel, line: node if rel == "t.py" else None
+            RR.R.owner_of = lambda rel, n: f"{rel}::{n.name}"
+            RR._bare = lambda owner: owner
+            W, C = RR.SR.Way, RR.SR.CONSTANT
+
+            def ways(owner, p):
+                if p == "async_params":
+                    return [W(C, "", RR.SR.THROUGH, ("t.py:7", "j.py:1782"), end_at="t.py:4"),
+                            W(C, "None", "constant", ("t.py:7", "j.py:1782"), end_at="t.py:6"),
+                            W(C, "None", "constant", ("t.py:827", "j.py:1782")),
+                            W(C, "None", "constant", ("t.py:1131", "j.py:1782")),
+                            W(RR.SR.STOP, "", "cycle", ("j.py:1253", "j.py:1782"))]
+                if p == "async_dataset_update":
+                    return [W(C, "True", "constant", ("a.py:472",)), W(C, "False", "constant", ("s.py:192",))]
+                return []
+            RR.SR.param_ways = ways
+            kept, off, said = RR.guarded_ways(ways("j.py::upd", "async_params")[0])
+            got["guarded"] = [[list(w.route) for w in kept], [[list(w.route), p, v] for w, p, v in off], "a.py:472" in said]
+            # not a binding in the outermost call's function: not read
+            got["unread"] = RR.guarded_ways(W(C, "", RR.SR.THROUGH, ("t.py:7",), end_at="u.py:4"))
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines = []
+            r._missed_q = N(mover="j.py::upd", run=N())
+            r._printed_parameters = lambda mover, run: {"async_params": "{'exec_order': 8}"}
+            wi = r._ways_in(N(mover="j.py::upd"))
+            got["kept"] = sorted(list(w.route) for w in wi.kept)
+            got["off"] = sorted([w.route[0], p, v] for w, p, v in wi.off)
+            # a run that printed the None way's value: nothing ruled out but the dict's guard, which stays
+            r._printed_parameters = lambda mover, run: {"async_params": "None"}
+            got["none printed"] = sorted(w.route[0] for w, _, _ in r._ways_in(N(mover="j.py::upd")).off)
+            # another mover's run, or no printed parameter: nothing
+            r._printed_parameters = lambda mover, run: {}
+            got["no print"] = r._ways_in(N(mover="j.py::upd"))
+            RR.prints_nothing = lambda owner, lines: owner == "t.py::updateJobs"
+            got["outer"] = r._outer_on_ways(N(ways_in=wi), {"j.py:1782"}, ["t.py:7", "t.py:827", "t.py:1131", "j.py:1253", "x.py:9"])
+            got["said"] = [line for line in r.lines if "(P20)" in line]
+            got["no ways"] = r._outer_on_ways(N(ways_in=None), {"j.py:1782"}, ["t.py:827"])
+            # prints_key: a run mark whose hole holds the key column
+            RR.R._prints_of = lambda owner, lines: N(runs=[N(key=[N(columns=["JobSpec.PandaID"])])], statements=[])
+            got["mark"] = [RR.prints_key("a.py::f", [1], {"JobSpec.PandaID"}), RR.prints_key("a.py::f", [1], {"JobSpec.jediTaskID"})]
+            # _key_columns: the row's column holding the key, else the class's identity
+            r._row_of = lambda cls: {"jediTaskID": {"value": "5"}}
+            RR._identity_attrs = lambda cls: ["JobSpec.PandaID"]
+            got["columns"] = [sorted(r._key_columns("JobSpec.jobStatus", "5")), sorted(r._key_columns("JobSpec.jobStatus", "9"))]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["guarded"] == [[["a.py:472", "t.py:7", "j.py:1782"]], [[["s.py:192", "t.py:7", "j.py:1782"], "async_dataset_update", "False"]], True], got
+    assert got["unread"] is None, got
+    assert got["kept"] == [["a.py:472", "t.py:7", "j.py:1782"], ["j.py:1253", "j.py:1782"]], got
+    assert got["off"] == [["s.py:192", "async_dataset_update", "False"], ["t.py:1131", "async_params", "None"],
+                          ["t.py:7", "async_params", "None"], ["t.py:827", "async_params", "None"]], got
+    assert got["none printed"] == ["s.py:192"] and got["no print"] is None, got
+    # the calls handing None go; the call into a function printing nothing is read with the call into it; a cycle and a
+    # call no way names stay
+    assert got["outer"] == ["a.py:472 -> t.py:7", "j.py:1253", "x.py:9"], got
+    assert len(got["said"]) == 2 and "t.py:827" in got["said"][0] and "async_dataset_update" in got["said"][1], got
+    assert got["no ways"] == ["t.py:827"], got
+    assert got["mark"] == [True, False], got
+    assert got["columns"] == [["JobSpec.jediTaskID"], ["JobSpec.PandaID"]], got

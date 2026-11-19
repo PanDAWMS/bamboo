@@ -1832,6 +1832,23 @@ of them too) are none of the call (`_calls_printing_key`): copyArchive's 707 're
 no column for their holes (a list appended from a select's rows: stops `element`, `row_item`), so NJ-defined-late's
 call is said at [740, 780, 811, 843, 1179], not the rebrokerage's 1179 alone -- the map's part.
 
+*Changed (P20, the investigator's u11 NJ-merging-late 2, 2026-11-19, delegated design):* the ways the moving run of a
+late value came in by are read by the parameters it printed over the whole way, not its first call alone
+(`Rerun._ways_in`): a way handing another literal is not its (G-5's reading); a way ending at a binding no literal is
+(a dict), in the function of the way's outermost call, under a guard naming a parameter of that function, is
+lengthened by that parameter's ways, less those whose literal makes the guard false (`guarded_ways`, the guard's other
+atoms unknown); a way around a cycle stays.  The hop up from an absent hop-1 caller keeps to those ways
+(`_outer_on_ways`): a call only ways ruled out go through goes, said; a call on a kept way into a function printing
+nothing is read with the call on that way into it.  NJ-merging-late's updateUnmergedJobs printed async_params as a
+dict at 1177: of archiveJob's callers, killJobs (1131) and archiveJobs (827) hand None; TaskBuffer.py:656 makes the
+dict only where async_dataset_update holds, which adder_gen.py:472 alone hands True, so the hop goes through
+TaskBuffer.updateJobs to AdderGen.process_job_report, asked by the merge job's key (its log, panda-adder.log, is not in
+the records).  `prints_key` reads the map's run marks too: the Adder's mark is '{}' holding JobSpec.PandaID, the key
+alone before every line.  `_key_columns` gives the class's identity columns for a key no column of the row holds (H-4's
+merge job key), where it gave none.  *Not read:* whether a caller off the moving run's ways could have moved the row
+earlier (U2 reads the moving run's caller's earlier passes, as G-5); the cycle's way (updateUnmergedJobs:1253 calling
+archiveJob on another merge job's unmerged job) stays a branch.
+
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
 A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's
