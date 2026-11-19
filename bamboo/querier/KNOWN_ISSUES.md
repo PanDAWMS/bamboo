@@ -942,6 +942,16 @@ updateJobs and archiveJob from storeJobs' 540, after its INSERT at 455/510) -- r
 Those later writes persist the value the row was born with, no other arm writing the column; hops the map leaves open
 (too deep) are not read.
 
+*Changed (P24, 2026-11-19, the investigator's u11 MJ-assigned-late 4, delegated design):* M3(a)-1 leaves a writer of
+the time column out where its statement takes the rows of a selection restricting another column of the row to values
+the row did not hold all the stay (`stay_value._other_off`, by `held`): getCoJumboJobsToBeFinished's 1489 writes
+prodDBUpdateTime by the PandaIDs its 1455 selects at eventService 5, and MJ-assigned-late's job held NULL, so the
+row's prodDBUpdateTime 13:20:49 was lockJobsForActivator:941's.  The value all the stay is what `_held` knows, else
+`_held_since_birth`: a column `after` holds that no arm but a birth can write (every other arm writes a literal of
+another value: eventService's 6, 2 and 4) held that value from the birth.  An arm writing a value at run time, or the
+row's own, leaves it not known.  A column read on the way to another's reading is not known (`_held_off`), so no
+reading waits on itself.
+
 ### K79. A write a print reached is read as run where the statuslog shows its statement's status, and as none of the row's where its key's selection takes other states
 
 A timeline (Q1) reads a write of a lock or time column as `reached` where a print shows the pass reached it but not its

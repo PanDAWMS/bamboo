@@ -12405,6 +12405,42 @@ class Rerun:
             return True, found[1]
         return False, None
 
+    def _held_off(self, other: str, reading: str, q: Missed) -> tuple[bool, object]:
+        """P24 (the investigator's u11 MJ-assigned-late 4): *other*, a column of the row a writer's selecting statement
+        restricts, as the row held it all the stay, for M3(a)-1 reading *reading* (``stay_value._term_off``): what
+        :meth:`_held` knows, else :meth:`_held_since_birth`.  A column read on the way in (one reading another) is not
+        known, so no reading waits on itself."""
+        busy: set[str] = self.__dict__.setdefault("_held_off_busy", set())
+        if other in busy or other == reading:
+            return False, None
+        busy.add(reading)
+        try:
+            known, value = self._held(other, q)
+            return (known, value) if known else self._held_since_birth(other, q)
+        finally:
+            busy.discard(reading)
+
+    def _held_since_birth(self, subject: str, q: Missed) -> tuple[bool, object]:
+        """``(known, value)``: *subject*, a column the rows file read of the asked row after the move, held that value
+        from the row's birth where no arm but a birth (P43's ``birth_arm``) can write it -- every other arm writes a
+        literal of another value (JobSpec.eventService: the job's NULL, which set_fine_grained's 6, setEventServiceMerge's
+        2 and makeJumboJobs' 4 are not).  Not known where an arm writes a value known at run time only, or the value."""
+        cls, _, attr = subject.partition(".")
+        after = self._read()[1]
+        if q.at_end or cls != q.subject.partition(".")[0] or attr not in after or mapdump.fragment() is None:
+            return False, None
+        value = after[attr]
+        arms = [(j.owner, b) for j in asyncio.run(self._writers_of(subject)) for b in j.branches]
+        if not arms:
+            return False, None
+        for owner, b in arms:
+            if birth_arm(owner, b, subject):
+                continue
+            outcome = str(getattr(b, "outcome", "") or "")
+            if outcome.startswith(SV.RUN_TIME) or outcome == "" or outcome.strip("'\"") == str(value):
+                return False, None
+        return True, value
+
     def _before(self, subject: str, q: Missed, nulls: bool = False) -> tuple[SV.Before, str] | None:
         """M3(a)-1 (``stay_value``): what the map says of *subject*, a column of the asked row the rows file holds only
         after the move (late's ``after``), all the stay at the observed value, with the time of the statuslog row
@@ -12440,7 +12476,7 @@ class Rerun:
                           lambda owner, b: born(b, birth_marks(owner, subject)), nulls=nulls, existed=existed,
                           status_born=lambda owner, b: born(b, birth_marks(owner, q.subject)),
                           offset_of=lambda b: o.total_seconds() if (o := _written_offset(b)) is not None else None,
-                          together=self._together_lines)
+                          together=self._together_lines, held=lambda other: self._held_off(other, subject, q))
         if found is None:
             cache[key] = None
             return None

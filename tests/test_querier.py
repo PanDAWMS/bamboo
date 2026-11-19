@@ -20337,3 +20337,49 @@ def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_b
                                    "for the key from 2026-11-14 17:35:57 to 2026-11-14 17:45:57"], got
     # the INSERT's site reached from no selection's function: nothing said
     assert got["no maker reach"] == [], got
+
+
+def test_p24_a_writers_selection_restricting_another_column_the_row_never_held_rules_it_out(tmp_path):
+    """P24 (the investigator's u11 MJ-assigned-late 4): getCoJumboJobsToBeFinished's 1489 writes prodDBUpdateTime by
+    the PandaIDs its 1455 selects at eventService 5; the job held NULL all the stay (no arm but a birth writes NULL:
+    the others write 6, 2, 4), so it took none of the job's rows and is ruled out of the timeline.  A held value inside
+    the restriction, or one not known, rules nothing out; a column whose other arms write a value at run time, or the
+    row's own value, is not known."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import stay_value as SV
+        from bamboo.querier import rerun
+
+        kf = N(owner="j.py::getCoJumbo", statement=1489, term="PandaID=:PandaID",
+               sources=[N(kind=SV.KEY_ROWS, site_owner="j.py::getCoJumbo", site_line=1455)], routes_open=True)
+        rs = N(restricts=["JobSpec.eventService=5"])
+        read_at = lambda owner, line: rs
+        held = {"JobSpec.eventService": (True, None)}
+        got = {"null": SV._term_off(kf, "JobSpec.jobStatus", "assigned", read_at, lambda c: held.get(c, (False, None))),
+               "five": SV._term_off(kf, "JobSpec.jobStatus", "assigned", read_at, lambda c: (True, "5")),
+               "unknown": SV._term_off(kf, "JobSpec.jobStatus", "assigned", read_at, lambda c: (False, None)),
+               "no held": SV._term_off(kf, "JobSpec.jobStatus", "assigned", read_at)}
+
+        r = object.__new__(rerun.Rerun)
+        q = N(at_end=False, subject="JobSpec.jobStatus")
+        r._read = lambda: ({}, {"eventService": None, "cloud": "WORLD"})
+        rerun.mapdump.fragment = lambda: N()
+        branches = {"JobSpec.eventService": [("g.py::doGenerate", N(outcome="'5'", born=True)), ("s.py::fine", N(outcome="6", born=False)),
+                                             ("m.py::merge", N(outcome="'2'", born=False))],
+                    "JobSpec.cloud": [("g.py::doGenerate", N(outcome="'WORLD'", born=True)), ("t.py::set", N(outcome="runtime(cloud)", born=False))]}
+
+        async def writers_of(subject):
+            return [N(owner=o, branches=[b]) for o, b in branches[subject]]
+
+        r._writers_of = writers_of
+        rerun.birth_arm = lambda owner, b, subject: b.born
+        got["since birth"] = list(r._held_since_birth("JobSpec.eventService", q))
+        got["run time"] = list(r._held_since_birth("JobSpec.cloud", q))
+        print(json.dumps(got))
+    """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["null"] == ("its statement at 1489 takes the rows of getCoJumbo@1455 "
+                           "(eventService in ['5'], the row held None all the stay)"), got
+    assert got["five"] == "" and got["unknown"] == "" and got["no held"] == "", got
+    assert got["since birth"] == [True, None] and got["run time"] == [False, None], got

@@ -146,7 +146,8 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
            born: Callable[[str, object], bool], nulls: bool = False, existed: bool = False,
            status_born: Callable[[str, object], bool] | None = None,
            offset_of: Callable[[object], float | None] = _now_only,
-           together: Callable[[str, int, int], bool] | None = None) -> Before | None:
+           together: Callable[[str, int, int], bool] | None = None,
+           held: Callable[[str], tuple[bool, object]] | None = None) -> Before | None:
     """*column* (``Class.attr``) of a row while *subject* held *value*: see the module; None for a column no arm
     writes the time it runs.  *status_junctions* and *column_junctions* are the map's writers of the two; *key_froms*
     the dump's KeyFroms (each statement's row-naming terms, the subjects it writes by line, its table, its sources),
@@ -162,7 +163,9 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
     that makes the row (*status_born*, owner and branch) did not begin it: left out (``births``) --
     getTasksToRefine_JEDI's 1190 INSERT of a task at 'registered' for NT-registered-late, whose stay
     reactivatePendingTasks_JEDI's ``SET status=oldStatus`` began.  *offset_of*: the seconds past the clock an arm writes
-    (rerun.s ``_written_offset``), None for no clock; the default reads the clock itself only."""
+    (rerun.s ``_written_offset``), None for no clock; the default reads the clock itself only.  *held*: ``(known,
+    value)`` of another column of the row all the stay, for a statement whose rows are restricted on it
+    (:func:`_term_off`: getCoJumboJobsToBeFinished's 1455 takes eventService 5, the job held NULL)."""
     if not nulls and not time_column(column_junctions):
         return None
     attr = subject.partition(".")[2]
@@ -241,7 +244,7 @@ def before(status_junctions: list, column_junctions: list, subject: str, value: 
                 out.append((name, f"its statement at {moves[0]} writes {attr} too, to {moves[1]}"))
             elif asked is not None and value not in asked:
                 out.append((name, f"its row precondition asks {attr} in {sorted(asked)}"))
-            elif statements and all(offs := [_statement_off(terms, subject, value, read_at)
+            elif statements and all(offs := [_statement_off(terms, subject, value, read_at, held)
                                              for terms in _by_statement(statements).values()]):
                 out.append((name, "; ".join(sorted(set(offs)))))
             elif statements and all(kf.table for kf in statements) and not {kf.table.lower() for kf in statements} & row_tables:
@@ -296,19 +299,39 @@ def _by_statement(key_froms: list) -> dict[tuple[str, int], list]:
     return out
 
 
-def _statement_off(terms: list, subject: str, value: str, read_at: Callable[[str, int], object | None]) -> str:
+def _statement_off(terms: list, subject: str, value: str, read_at: Callable[[str, int], object | None],
+                   held: Callable[[str], tuple[bool, object]] | None = None) -> str:
     """Why a statement, by its terms' KeyFroms, takes no row holding *value*: one of its terms takes none
     (``_term_off``); "" where none of them says so."""
-    return next((said for kf in terms if (said := _term_off(kf, subject, value, read_at))), "")
+    return next((said for kf in terms if (said := _term_off(kf, subject, value, read_at, held))), "")
 
 
-def _term_off(kf, subject: str, value: str, read_at: Callable[[str, int], object | None]) -> str:
+def _other_off(statement, subject: str, held: Callable[[str], tuple[bool, object]]) -> str:
+    """A restriction of *statement* on another column of *subject*'s class that the row's value all the stay
+    (*held*) fails: ``"eventService in ['5'], the row held None"``; "" where none (a NULL fails every equality)."""
+    cls = subject.partition(".")[0]
+    by: dict[str, set[str]] = {}
+    for p in getattr(statement, "restricts", None) or []:
+        col, _, v = p.partition("=")
+        if col != subject and col.partition(".")[0] == cls:
+            by.setdefault(col, set()).add(v)
+    for col, values in sorted(by.items()):
+        known, v = held(col)
+        if known and (v is None or str(v) not in values):
+            return f"{col.partition('.')[2]} in {sorted(values)}, the row held {v!r} all the stay"
+    return ""
+
+
+def _term_off(kf, subject: str, value: str, read_at: Callable[[str, int], object | None],
+              held: Callable[[str], tuple[bool, object]] | None = None) -> str:
     """Why a statement's row-naming term (its KeyFrom) takes no row holding *value*: a term on *subject*'s column
     filled only by literals of other values (updateJobStatus' 297 asks jobStatus 'waiting'), or a term every source of
     which is a selecting statement's rows restricting *subject* to other values (lockJobsForFinisher's 906 by the
     PandaIDs its 900 selects at transferring) -- rows of another function's statement only where the map places every
     route into the statement (``routes_open`` false).  A source of any other kind (a parameter an API fills: killJob's
-    pandaID) leaves the term open: ""."""
+    pandaID) leaves the term open: "".  A selecting statement restricting another column of the row to values the row
+    did not hold all the stay (*held*) takes none of its rows either: getCoJumboJobsToBeFinished's 1455 takes
+    eventService 5, and the job held NULL from its birth (P24)."""
     attr = subject.partition(".")[2]
     sources = getattr(kf, "sources", None) or []
     if not sources:
@@ -326,7 +349,11 @@ def _term_off(kf, subject: str, value: str, read_at: Callable[[str, int], object
             return ""
         rs = read_at(owner, s.site_line)
         values = restricted_values(rs, subject) if rs is not None else None
-        if values is None or value in values:
+        if values is not None and value not in values:
+            said.append(f"{owner.rpartition('::')[2]}@{s.site_line} ({attr} in {sorted(values)})")
+            continue
+        other = _other_off(rs, subject, held) if rs is not None and held is not None else ""
+        if not other:
             return ""
-        said.append(f"{owner.rpartition('::')[2]}@{s.site_line} ({attr} in {sorted(values)})")
+        said.append(f"{owner.rpartition('::')[2]}@{s.site_line} ({other})")
     return f"its statement at {kf.statement} takes the rows of {', '.join(said)}"
