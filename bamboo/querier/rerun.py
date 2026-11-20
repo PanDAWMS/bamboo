@@ -149,7 +149,7 @@ from bamboo.querier import timeline as TL
 from bamboo.querier import value_diff as V
 from bamboo.querier import value_reach as VR
 from bamboo.querier import windows as W
-from bamboo.querier.recorded import EDGE, RecordedLogs
+from bamboo.querier.recorded import EDGE, RecordedLogs, references_to
 from bamboo.querier.records import (
     CORPUS,
     FileLogs,
@@ -2230,6 +2230,74 @@ def _store_unread(subject: str, owner: str, line: int, fn: Any, via: Any) -> T.S
     return T.Said("failure-caught-not-read", {"fn": fn.shown, "line": handler.lineno}) if handler is not None else ""
 
 
+def _clock_premise(chosen: Any) -> T.Said | str:
+    """P71: the other positive arms writing the clock H2 chose *chosen* over (``Verdict.clock_others``), as the END's
+    premises: one whose run holds the observed second was last only where its write fell within it; one whose run does
+    not, not at all.  Nothing where H2 chose otherwise."""
+    facts = getattr(chosen, "clock_others", None) or []
+    if not facts:
+        return ""
+    return T.Said("clock-writers", {"others": [
+        T.Said("clock-writer-in" if inside else "clock-writer-off",
+               {"name": name, "first": first, "last": last, "second": second})
+        for name, first, last, second, inside in facts]})
+
+
+def _counted_over_linked(subject: str, owner: str, line: int, observed: str, data: dict) -> T.Said | str:
+    """P58 (the investigator's NR-J-7425097753-nInputDataFiles 3; the map's ``Branch.accumulated``, codemap-xlv
+    f6b45d8): where the arm at *owner*:*line* sets *subject* to a start the statements after it add to per element of a
+    loop (``Accumulation``: its ``per``, its ``condition_atoms`` on one class), the count over the rows file's rows of
+    that class linked to the row, the atoms read on each: correct_lfn's ``tmp_job.nInputDataFiles = 0`` at 1343, ``+= 1``
+    at 1350 for each ``tmp_file in tmp_job.Files`` with ``tmp_file.type == 'input'``: the job's three FileSpec rows
+    (log, output, input) count 1.  Said with whether it is the observed value, the loop read as those rows and the rest
+    of the condition not read; nothing where the map holds no such count (a dump before it), the atoms span classes or
+    use another test than == and !=, or the rows file links no such rows."""
+    file, _, qual = owner.partition("::")
+    name = qual.rpartition(".")[2]
+    cls = subject.partition(".")[0]
+    for j in getattr(mapdump.fragment(), "junctions", None) or []:
+        if j.subject != subject or j.owner.partition("::")[0] != file or j.owner.rpartition("::")[2].rpartition(".")[2] != name:
+            continue
+        for b in j.branches:
+            for acc in getattr(b, "accumulated", None) or []:
+                atoms = list(getattr(acc, "condition_atoms", None) or [])
+                if line not in (b.line, acc.line) or not atoms:
+                    continue
+                classes = {a.subject.partition(".")[0] for a in atoms}
+                if len(classes) != 1 or any(a.op not in ("==", "!=") for a in atoms):
+                    continue
+                (each,) = classes
+                links = [x for x in data.get("linked") or [] if x.get("class") == each
+                         and str((x.get("via") or {}).get("from", "")).partition(".")[0] == cls]
+                if not links:
+                    continue
+                try:
+                    base, amount = int(ast.literal_eval(b.outcome)), int(ast.literal_eval(acc.amount))
+                except (ValueError, SyntaxError, TypeError):
+                    continue
+
+                def value(row: dict, column: str) -> str:
+                    v = row.get(column)
+                    return str(v.get("value") if isinstance(v, dict) else v)
+
+                def holds(row: dict, a: Any) -> bool:
+                    wanted = {str(ast.literal_eval(v)) for v in a.values}
+                    return bool((value(row, a.subject.partition(".")[2]) in wanted) == (a.op == "=="))
+
+                rows = [r for x in links for r in x.get("rows") or []]
+                n = sum(all(holds(r, a) for a in atoms) for r in rows)
+                total = base + n * amount if acc.op == "+" else base - n * amount
+                via = links[0].get("via") or {}
+                return T.Said("counted-over-linked", {
+                    "cls": each, "via": f"{via.get('from', '')} = {via.get('to', '')}", "n": n, "m": len(rows),
+                    "atoms": [a.text for a in atoms], "per": list(getattr(acc, "per", None) or []), "base": base,
+                    "op": acc.op, "amount": amount, "total": total,
+                    "match": T.Said("the-observed-value" if str(total) == observed.strip().strip("'\"") else "not-the-observed-value",
+                                    {"observed": observed}),
+                    "rest": list(acc.path_condition or [])})
+    return ""
+
+
 def tree_stamp(path: Path) -> str:
     """``git describe --dirty`` of *path*, or what it is when it is not a git tree (a pinned copy)."""
     done = subprocess.run(["git", "-C", str(path), "describe", "--dirty", "--always"], capture_output=True, text=True)
@@ -2943,32 +3011,9 @@ def _references_from(cls: str) -> list[tuple[str, str]]:
 
 
 def referencing(cls: str) -> dict[str, list[str]]:
-    """E-1 (W8; out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``TableRecord.references``):
-    each ``Class.attr`` whose column holds, by the foreign keys the schema declares, a value of *cls*'s identity, with
-    the ``table.column -> table.column`` steps it goes through -- ``JediDatasetSpec.jediTaskID`` holds a
-    ``JediTaskSpec.jediTaskID`` (jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid); a composite key is followed a
-    column at a time.  Empty where the dump declares none."""
-    ident = set(_identity_attrs(cls))
-    edges: dict[str, list[tuple[str, str]]] = {}
-    for t in getattr(mapdump.fragment(), "tables", None) or []:
-        for ref in getattr(t, "references", None) or []:
-            for i, attr in enumerate(ref.attrs or []):
-                if attr and i < len(ref.table_attrs or []) and ref.table_attrs[i]:
-                    edges.setdefault(attr, []).append(
-                        (ref.table_attrs[i], f"{t.name}.{ref.columns[i]} -> {ref.table}.{ref.table_columns[i]}"))
-    out: dict[str, list[str]] = {}
-    for start in edges:
-        stack: list[tuple[str, list[str]]] = [(start, [])]
-        seen = {start}
-        while stack:
-            attr, way = stack.pop()
-            for to, step in edges.get(attr, []):
-                if to in ident:
-                    out.setdefault(start, [*way, step])
-                elif to not in seen:
-                    seen.add(to)
-                    stack.append((to, [*way, step]))
-    return out
+    """E-1 (W8; out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42): :func:`recorded.references_to`, which
+    the record door reads too (K60)."""
+    return references_to(cls)
 
 
 def ref_marks(owner: str, line: int, cls: str, key: str) -> tuple[tuple[str, ...], list[str]]:
@@ -3745,14 +3790,36 @@ def _bursts(stamps: list[str], gap: datetime.timedelta) -> list[tuple[str, str]]
     return out
 
 
-def _callees_by_line(owner: str, depth: int = 6) -> dict[str, tuple[set[int], int]]:
+def _callees_by_line(owner: str, depth: int = 6,
+                     toward: tuple[str, set[int]] | None = None) -> dict[str, tuple[set[int], int]]:
     """The functions *owner* (``file::Class.function``) reaches by the map's closure within *depth* calls
     (:func:`map_reach.by_call`: each call followed for the classes it holds for, into those it runs as), each with the
     lines of *owner*'s own calls it is reached through and the fewest calls it takes: AtlasProdTaskBrokerThread.runImpl
     reaches updateTask_JEDI through 236 and 443, and through post_process_for_error's calls at 285, 300, ...; and
-    PostProcessor.start's ``thr.start()`` reaches PostProcessorThread's runImpl, no other agent's."""
+    PostProcessor.start's ``thr.start()`` reaches PostProcessorThread's runImpl, no other agent's.
+
+    P73 (the harness's T check, the 115 held asks): *toward*, a mover and the lines *owner* calls it from, leaves out
+    the calls at those lines to another target of the name of one reaching the mover: one dispatch's other classes.
+    WorkerThread.run's ``self.runImpl()`` at 193 is a call to each of ten agents' runImpl; a TaskRefiner thread's run
+    runs TaskRefinerThread's alone, and JobGenerator's brokers and setuppers are no callees of it."""
     out: dict[str, tuple[set[int], int]] = {}
-    for call, reached in MR.by_call(owner, depth):
+    calls = MR.by_call(owner, depth)
+    skip: set[int] = set()
+    if toward is not None:
+        mover, at = toward
+
+        def name(target: str) -> str:
+            return target.rpartition("::")[2].rpartition(".")[2]
+
+        def reaches(call: Any, reached: dict[str, int]) -> bool:
+            return _bare(call.to) == mover or any(_bare(o) == mover for o in reached)
+
+        into = [(call, reached) for call, reached in calls if set(call.lines or [call.line]) & at]
+        names = {name(call.to) for call, reached in into if reaches(call, reached)}
+        skip = {id(call) for call, reached in into if name(call.to) in names and not reaches(call, reached)}
+    for call, reached in calls:
+        if id(call) in skip:
+            continue
         lines = set(call.lines or [call.line])
         for o, n in reached.items():
             had, fewest = out.get(o, (set(), n))
@@ -4435,6 +4502,8 @@ class Rerun:
             # K67b B: a record naming the key only as another column makes no mark of the key's run
             cls = args.subject.partition(".")[0]
             self.logs.other = lambda key, log, r: key == args.key and KH.other_column(r, log, key, cls)
+            # a mark holding another class's identity is one the calls share, for the question's key (K60)
+            self.logs.key_class = (args.key, cls)
         self.lines: list[str] = []
         self.hop = ""
         self.touched: list[tuple[R.Function, object]] = []  # (function, run) this investigation read
@@ -5079,9 +5148,13 @@ class Rerun:
                     "subject": q.subject, "observed": q.observed, "fn": site_fn.shown, "line": chosen.line, "via": via})
                 # what it leaves unread of the value reaching the row (KNOWN_ISSUES.md K41)
                 store = _store_unread(q.subject, chosen.candidate.owner, chosen.line, site_fn, w.via)
+                # P58: a count the map reads per a loop's elements, over the rows file's linked rows
+                counted = _counted_over_linked(q.subject, chosen.candidate.owner, chosen.line, str(q.observed), self.data)
+                # P71: the other positives writing the clock that H2 chose this one over, as premises
+                clock = _clock_premise(chosen)
                 if shown:
                     self.end(T.Said("shown-in-its-run", {"said": said, "how": how, "at": at, "question_describe": question.said(),
-                                                         "store": store}))
+                                                         "store": store, "counted": counted, "clock": clock}))
                     return None
                 holes = [T.Said("log-on", {"log": log, "machines": list(dict.fromkeys(h.partition(": ")[0] for h in hs))})
                          for log, hs in w.unsearched.items()]
@@ -5089,6 +5162,7 @@ class Rerun:
                     "said": said, "how": how, "at": at,
                     "by_elimination": (T.Said("the-only-writer-left") if a.only_way else T.Said("by-elimination") if not branch else ""),
                     "holes": T.Said("not-searched-there", {"holes": holes}) if holes else "", "store": store,
+                    "counted": counted, "clock": clock,
                 }))
                 return None
             unread = [T.Said("guard-read-false" if got is False else "guard-not-read-held" if g in held else "guard-not-read",
@@ -10093,7 +10167,7 @@ class Rerun:
             except (LookupError, ValueError, SyntaxError):
                 out.append(func)
                 continue
-            reached = _callees_by_line(f"{rel}::{pathcond.qualified_name(fn.node)}")
+            reached = _callees_by_line(f"{rel}::{pathcond.qualified_name(fn.node)}", toward=(_bare(up.mover), set(o.lines)))
             if any(_bare(x) == _bare(callee) for x in reached):
                 out.append(func)
         return out
@@ -10156,9 +10230,9 @@ class Rerun:
         except (LookupError, ValueError, SyntaxError):
             return False
         qual = f"{rel}::{pathcond.qualified_name(fn.node)}"
-        reached = _callees_by_line(qual)
-        columns = self._key_columns(up.subject, up.key)
         mover = _bare(up.mover)
+        reached = _callees_by_line(qual, toward=(mover, set(c.lines)))
+        columns = self._key_columns(up.subject, up.key)
         # each callee that prints the key: the lines of the caller's calls reaching it, the map's name, its logs
         printing: dict[str, tuple[set[int], str, set[str]]] = {}
         # E-1 (W8): a callee whose runs are marked by a column that references the key's class's identity, with that
@@ -14955,7 +15029,12 @@ class Rerun:
         the map names a column of it (``RunKey.columns``) the rows file's row holds -- ``reactivatePendingTasks_JEDI <
         vo=atlas label=managed limit=`` -- so an ask by it returns the passes that may have selected the row, with every
         value of the parameters after; and the columns so read, with their values.  The agent's loop chooses them each
-        selection, and they are read as the row's, as M3(a)-cap reads its keys (:meth:`_label_of`): a premise."""
+        selection, and they are read as the row's, as M3(a)-cap reads its keys (:meth:`_label_of`): a premise.
+        P72 (the harness's T check, NT-scouting-stuck): a hole that is the function's parameter as its calls hand it
+        (``RunKey.parameter``) holds what they hand, of which the row's column is one value only; it is filled from the
+        row only where the records show that value in it, else by the literal every way of the parameter hands
+        (:meth:`_handed_literal`), else the head stops there.  prepareTasksToBeFinished_JEDI's vo is handed None by
+        PostProcessor: filled with the task's 'atlas', the asks of a case whose records hold no mark of it found none."""
         out = set()
         used: dict[str, str] = {}
         found = R._prints_of(owner, lines)
@@ -14978,12 +15057,35 @@ class Rerun:
                             break
                         text += next(iter(seen)) + after
                         continue
+                    # P72: a parameter as handed, which no record shows: the literal its ways hand, or no further
+                    parameter = getattr(hole, "parameter", None)
+                    if not seen and isinstance(parameter, str) and parameter:
+                        literal = self._handed_literal(owner, parameter)
+                        if literal is None:
+                            break
+                        text += literal + after
+                        continue
                     if held is None:
                         break
                     used[held[0]] = held[1]
                     text += held[1] + after
                 out.add(text)
         return tuple(sorted(out)), used
+
+    def _handed_literal(self, owner: str, parameter: str) -> str | None:
+        """P72: the value every way of *owner*'s *parameter* (``RunKey.parameter``, ``function.name``) hands, as a mark
+        prints it, where each is a literal as written (:func:`_literal_way`) and they agree (the map's ParameterFrom,
+        :func:`sources.param_ways`); None otherwise -- a way the map does not end at a literal, or two literals."""
+        ways = SR.param_ways(_bare(owner), parameter.rpartition(".")[2])
+        if not ways or not all(_literal_way(w) for w in ways):
+            return None
+        values = set()
+        for w in ways:
+            try:
+                values.add(str(ast.literal_eval(str(w.value))))
+            except (ValueError, SyntaxError):
+                values.add(str(w.value))
+        return next(iter(values)) if len(values) == 1 else None
 
     def _recorded_hole_values(self, owner: str, lines: list[int], text: str, after: str) -> set[str]:
         """B: the values the records the walk holds show in the hole after *text* of *owner*'s marks, up to *after* --

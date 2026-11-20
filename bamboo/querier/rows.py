@@ -996,10 +996,13 @@ def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]
     ``f"{PandaID} skip since {scope}:{lfn} is missing with rule"`` was read by no function's row here, so
     :func:`whole_writers` named none for ActivatorThr's 863, which finds the record inside it (I-5, MJ-assigned-late)."""
     by_text = writers[2]
-    if record.text not in by_text:
-        by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
-    line = f"{record.token} {record.text}"
-    found = [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    # the record's text once: it is a property, and the rows' patterns are thousands (NJ-starting-late: 650 million
+    # reads of it under cProfile, 104 thousand texts)
+    text = record.text
+    if text not in by_text:
+        by_text[text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(text)]
+    line = f"{record.token} {text}"
+    found = [(o, r) for o, p, logs, r in by_text[text] if (logs is None or log in logs) and (p is None or p.match(line))]
     found += [(o, r) for regex, o, _, logs, r in writers[5].get(record.token, ())
               if (logs is None or log in logs) and regex.match(line) and (o, r) not in found]
     if record.token:

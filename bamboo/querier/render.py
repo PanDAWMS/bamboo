@@ -157,7 +157,15 @@ TEMPLATES: dict[str, str] = {
     "a-run-that-shows-ran": "a run that shows {fn_name}:{chosen_line} ran ({why})",
     "left-by-elimination-no-pass": "left by elimination, no pass of it at the window",
     "no-pass-at-the-window": "no pass of it at the window; {left}",
-    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}",
+    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}{counted}{clock}",
+    "clock-writers": "; chosen over the other positive arms, each writing the clock: {others:join=; }",
+    "clock-writer-in": "{name} was last only where its write fell within {second} (its run {first} .. {last})",
+    "clock-writer-off": "{name}'s run ({first} .. {last}) holds no write at {second}",
+    "counted-over-linked": ("; the rows file's {cls} rows linked by {via} count it: {n} of {m} with {atoms:join= and } "
+                            "({per:join=, } read as those rows), {base} {op} {n} x {amount} = {total}, {match}; its "
+                            "condition as the map writes it, {rest:join=; }, read in those atoms alone"),
+    "the-observed-value": "the observed value",
+    "not-the-observed-value": "not the observed value {observed!r}",
     "by-elimination": "by elimination: ",
     "not-searched-there": "; not searched there: {holes:join=; }",
     "its-conditions": " (its conditions: {unread:join=, })",
@@ -637,7 +645,7 @@ TEMPLATES: dict[str, str] = {
     "reading-to-give-every-count-the-passes": "reading 2 to give every count the passes printed",
     "s-print-at-among-its-rows": "{func}'s print at {printed_line} among its rows",
     "said": "{what} = {found}",
-    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}{store}",
+    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}{store}{counted}{clock}",
     # what an attribute's END leaves unread of its value reaching the row (KNOWN_ISSUES.md K41)
     "row-written-later-not-read": "; its row is written by a later statement or call, which is not read (KNOWN_ISSUES.md K41)",
     "failure-caught-not-read": "; its statement's failure is caught in {fn} (except at {line}) and the call returns: that it "

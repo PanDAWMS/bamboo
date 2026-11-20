@@ -510,6 +510,9 @@ class RecordedLogs:
         #: ``other(key, log, record)``: the record's message holds *key* only as another column (K67b B,
         #: ``key_holes.other_column``), so its mark is no mark of the key's run; set by the asker for its question's key
         self.other: Callable[[str, str, Record], bool] | None = None
+        #: ``(key, class)``: the question's key and the class whose row it is, set by the asker; a mark holding another
+        #: class's identity is one the calls share for that key (:func:`_calls_share`)
+        self.key_class: tuple[str, str] | None = None
 
     def names(self, wanted: list[str]) -> list[str]:
         return list(dict.fromkeys(wanted))
@@ -660,7 +663,8 @@ class RecordedLogs:
         why = "the records of the key's runs whose mark does not hold the key"
         # a mark the calls share, by the map, only within 2 EDGE of the key's records under it on its machine, the
         # windows of one machine joined where they overlap (KNOWN_ISSUES.md K60)
-        share = set() if whole else _calls_share(name, marks)
+        cls = self.key_class[1] if self.key_class is not None and self.key_class[0] == key else None
+        share = set() if whole else _calls_share(name, marks, cls)
         own_marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in share})}
         asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners, keyed_heads, key))), window, m), why)
                 for m, t in sorted(own_marks.items())]
@@ -807,12 +811,49 @@ _SHARES: list = []
 _TIME = r"\d{4}-\d\d-\d\d[/ T]\d\d:\d\d:\d\d(?:\.\d+)?"
 
 
-def _calls_share(log: str, marks: dict[str, set[str]]) -> set[tuple[str, str]]:
+def references_to(cls: str) -> dict[str, list[str]]:
+    """E-1 (W8; out/gm/qk-design.md's bundle E, tmaeno's OK 2026-11-17 13:42; the map's ``TableRecord.references``):
+    each ``Class.attr`` whose column holds, by the foreign keys the schema declares, a value of *cls*'s identity, with
+    the ``table.column -> table.column`` steps it goes through -- ``JediDatasetSpec.jediTaskID`` holds a
+    ``JediTaskSpec.jediTaskID`` (jedi_datasets.jeditaskid -> jedi_tasks.jeditaskid); a composite key is followed a
+    column at a time.  Empty where the dump declares none."""
+    fragment = mapdump.fragment()
+    ident = set(next((t.identity_attrs for t in getattr(fragment, "tables", None) or []
+                      if t.spec_class == cls and t.identity_attrs), []))
+    edges: dict[str, list[tuple[str, str]]] = {}
+    for t in getattr(fragment, "tables", None) or []:
+        for ref in getattr(t, "references", None) or []:
+            for i, attr in enumerate(ref.attrs or []):
+                if attr and i < len(ref.table_attrs or []) and ref.table_attrs[i]:
+                    edges.setdefault(attr, []).append(
+                        (ref.table_attrs[i], f"{t.name}.{ref.columns[i]} -> {ref.table}.{ref.table_columns[i]}"))
+    out: dict[str, list[str]] = {}
+    for start in edges:
+        stack: list[tuple[str, list[str]]] = [(start, [])]
+        seen = {start}
+        while stack:
+            attr, way = stack.pop()
+            for to, step in edges.get(attr, []):
+                if to in ident:
+                    out.setdefault(start, [*way, step])
+                elif to not in seen:
+                    seen.add(to)
+                    stack.append((to, [*way, step]))
+    return out
+
+
+def _calls_share(log: str, marks: dict[str, set[str]], cls: str | None = None) -> set[tuple[str, str]]:
     """The ``(machine, mark)`` among *marks* that every map mark of a run printing into *log* reading it says the calls
     share: none of the mark's holes holds a column that is a table's identity, and it is no time stamp
     (:func:`_share_index`).  A JEDI worker's ``process <host_pid-thread>``, ``getTasksToExecCommand_JEDI < vo=None
     label=None >``, AtlasAnalWatchDog's ``#ATM #KV doForPreStaging label=user``; not ``< PandaID=... >`` nor a
-    stamp.  None with no map installed, or for a mark no map mark reads."""
+    stamp.  None with no map installed, or for a mark no map mark reads.
+
+    With the class *cls* whose row the asked key is, only a hole holding the identity of that class or of one whose rows
+    reference it (:func:`references_to`: a task's datasets and jobs) makes a mark the calls' own: one holding another
+    class's names whoever makes the calls, not the row they are on -- updateWorkers ``< harvesterID=... pid=... >`` is
+    every call of one harvester through one server process, and asking it whole for a job's PandaID read hours of
+    other jobs' calls (the harness's T3 check, MJ-transferring-late's 5.5 h stay)."""
     fragment = mapdump.fragment()
     if fragment is None:
         return set()
@@ -820,20 +861,26 @@ def _calls_share(log: str, marks: dict[str, set[str]]) -> set[tuple[str, str]]:
         _SHARES[:] = [fragment, _share_index(fragment)]
     index = _SHARES[1].get(log, [])
     out = set()
+    own = None
+    if cls is not None:
+        mine = {cls} | {a.partition(".")[0] for a in references_to(cls)}
+        own = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or [] if a.partition(".")[0] in mine}
     for machine, tokens in marks.items():
         for token in tokens:
-            hits = [shared for rx, shared in index if rx.fullmatch(token.strip())]
+            hits = [not time and not (held & own if own is not None else held)
+                    for rx, time, held in index if rx.fullmatch(token.strip())]
             if hits and all(hits):
                 out.add((machine, token))
     return out
 
 
-def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool]]]:
+def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool, frozenset[str]]]]:
     """For every log, each map mark of a run printing into it (``records.runs_into``) as a pattern of the token a line
     carries -- ``method < tag >`` for create_tagged_logger and make_logger, ``<stamp>`` for a MsgWrapper's stamp, the
-    mark itself for the others, a hole any text -- and whether the calls share it."""
+    mark itself for the others, a hole any text -- whether it is a time stamp, and the identity columns its holes
+    hold."""
     ident = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or []}
-    out: dict[str, list[tuple[re.Pattern[str], bool]]] = {}
+    out: dict[str, list[tuple[re.Pattern[str], bool, frozenset[str]]]] = {}
     for log, runs in runs_into(fragment).items():
         for run in runs:
             time = any(RUN_KEY_TIME in k.columns for k in run.key)
@@ -847,7 +894,7 @@ def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool]]]:
                 rx = "<" + body + ">"
             else:
                 rx = body
-            out.setdefault(log, []).append((re.compile(rx), not time and not any(ident & set(k.columns) for k in run.key)))
+            out.setdefault(log, []).append((re.compile(rx), time, frozenset(ident & {c for k in run.key for c in k.columns})))
     return out
 
 
