@@ -76,6 +76,7 @@ from bamboo.codemap.panda.recognizers import (
     boundary,
     emit,
     errorcode,
+    factories,
     flush,
     logfile,
     loopcut,
@@ -925,6 +926,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # their logger again in JEDI's processes.
         if self._calls is not None:
             fragment.log_file_services = logfile.file_services(self._modules, self._calls.types, self._declared_files)
+            # Which plugin each factory hands out for a vo and a label, and which processes the master starts, as
+            # the instance's record configures them -- empty without one.
+            fragment.plugin_factories, fragment.plugin_choices = factories.plugin_factories(self._calls)
+            fragment.process_items = factories.process_items(self._calls, self._modules)
 
         lap("dispatch and log files")
         # After the log files, because the file an emit lands in is resolved
