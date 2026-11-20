@@ -1979,6 +1979,14 @@ updateTaskStatusByContFeeder_JEDI went unasked.  A dump without the table change
 a JEDI-only function's proxy logs, x14 against x15, which differ by the table alone): no END or STOP moves; 17 asks go
 (NT-scouting-stuck 9, MT-aborting-late 7, MT-ready-late 1); NT-pending-late's END names 9 machines asked, not 18.
 
+*Changed (2026-11-20, the investigator's P46 and P56, the delegated design):* H2's window for a value the statuslog's
+rows hold beside the status (`windows.value_held`) says the rows after the stretch's first hold it too ("not changed at
+them": NR-J-7423807701-cloud, 'WORLD' at pending, defined and activated).  L2 leaves out, as "writes only it", a mover
+with no arm writing another value whose every write of the subject the map reads writes the observed value
+(`_writes_only`): restartTasksForContentsUpdate_JEDI (1857, 1864, 1917) for a task late in 'defined',
+getTasksToBeFinished_JEDI and throttleTask_JEDI likewise; it was "undecided" as if it wrote through its calls (K14).
+Measured on the investigator's 48 cases: those four lines move; no END, STOP or ask.
+
 *Changed (2026-11-20, P70, out/gm/qk-design.md, the P70 walk continued on 2026-11-20 00:32, the delegated design):* a late value's mover that L2
 follows (it ran, it did not move the value) is read by S2 from just after the take before the last, where one of its
 own selections of the row has a condition every build requires, read on terms comparing columns with the clock

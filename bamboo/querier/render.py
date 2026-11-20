@@ -344,7 +344,8 @@ TEMPLATES: dict[str, str] = {
     "rows-carry-no": "the statuslog rows carry no {column}",
     "last-row-holds-another": "the last statuslog row ({status!r} at {time}) holds {column}={value!r}: written after it, and no row closes the window",
     "first-row-no-creation": "the first statuslog row ({status!r} at {time}) holds {column}={value!r} and the row's creation time is not known",
-    "value-held": "{column}={value!r} {since} to the statuslog's {status!r} at {time}, on every machine (no row says which run wrote it)",
+    "value-held": "{column}={value!r} {since} to the statuslog's {status!r} at {time}{kept}, on every machine (no row says which run wrote it)",
+    "held-at-the-rows-after": " (and at its {n} row(s) after it, to {status!r} at {time}: not changed at them)",
     "after-the-row-holding": "after the statuslog's {status!r} at {time} ({column}={value!r})",
     "from-the-creation": "from the row's creation at {created}",
     "value-not-a-time": "{column}={value!r}, which its writers set to the time they run, is not a time",
@@ -844,6 +845,8 @@ TEMPLATES: dict[str, str] = {
     "premise-why": "{premise}: {why}",
     # the harness's rnd14 costs: a writer marking no run by the key, over a window holding the row's move
     "shared-logs-not-asked-bare": "  {func}: {logs:join=, } not asked by the key alone from {start} to {end} (the records do not answer it): its marks hold no key, and the window holds the row's move at {move}, where every call of the key's object and of the rows tied to it prints the key there (the logs most functions print into); not searched there",
+    # P56: a writer of the observed value alone
+    "writes-only-the-value": "every write of {subject} the map reads in it writes {observed!r} (at {lines:join=, }): it moves no row off {observed!r}",
     # P70: a mover read from its last take on
     "the-last-take": "{where:join=, } surely held for the row in {n} span(s) from {first} to {end} before the one it was moved on in, and surely failed between them, on the writes the records show{premises}; the value stayed {observed!r} till {moved}: its passes are read from just after the take before the last ({prev}), the last at {end}",
     "the-last-take-premises": ", where {premises:join= and }",

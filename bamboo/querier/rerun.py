@@ -4542,6 +4542,21 @@ def _spans_words(spans: list, whole: tuple) -> T.Said:
         T.Said("from-to", {"a": a, "b": b}) for a, b in spans]})
 
 
+def _writes_only(writers: list, owner: str, subject: str, observed: str) -> list[int]:
+    """The lines of *owner*'s writes of *subject* the map reads (its junction's branches), where there is one and every
+    one writes *observed* as a literal; ``[]`` otherwise -- a write of a value known only at run time, or of another."""
+    lines: list[int] = []
+    for j in writers:
+        if j.owner != owner or getattr(j, "subject", subject) != subject:
+            continue
+        for b in getattr(j, "branches", None) or []:
+            outcome = b.outcome if isinstance(b.outcome, str) else None
+            if outcome is None or outcome.strip("'\"") != observed:
+                return []
+            lines.append(b.line)
+    return sorted(set(lines))
+
+
 def _union(spans: list) -> list:
     """The spans merged where they meet."""
     out: list = []
@@ -12764,6 +12779,12 @@ class Rerun:
                 verdict = "not reached"
                 said = [T.Said("not-reached-from-the-value-s-reads", {"observed": q.observed, "reads": list(q.reach.reads)})]
                 reasons.append({"code": "M2", "record": said[0]})
+            elif not armed and owner not in guarded and (only := _writes_only(q.writers, owner, q.subject, q.observed)):
+                # P56: every write of the subject the map reads in it writes the observed value: no mover off it
+                # (restartTasksForContentsUpdate_JEDI sets a task 'defined' or leaves it; its datasets apart)
+                verdict = "writes only it"
+                said = [T.Said("writes-only-the-value", {"subject": q.subject, "observed": q.observed, "lines": only})]
+                reasons.append({"code": "writes-only", "record": said[0]})
             elif not armed and owner not in guarded:
                 if paths and all(kinds.get((st.owner, st.line)) == "refused" for st in paths):
                     verdict = "refused"
@@ -12786,7 +12807,7 @@ class Rerun:
                 gap = T.Said("map-could-not-read-all", {"gaps": gaps})
                 said.append(gap)
                 reasons.append({"code": "map-gap", "record": gap})
-            if verdict not in ("moved it", "write refuses", "refused", "not reached"):
+            if verdict not in ("moved it", "write refuses", "refused", "not reached", "writes only it"):
                 # what keeps each statement from a verdict: a value the rows file does not hold, a run-time key
                 for st in paths:
                     where = f"{st.owner.split('::')[-1]}@{st.line}"
@@ -12808,7 +12829,8 @@ class Rerun:
                             "verdict": verdict.replace(" ", "-"), "reasons": reasons, "premises": premises,
                             **({"gaps": gaps} if gaps else {})})
         self.result["movers"] = entries
-        left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "not reached", "did not run")]
+        left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "not reached", "did not run",
+                                               "writes only it")]
         self.say(f"not ruled out: {len(left)} mover(s)")
         return out
 

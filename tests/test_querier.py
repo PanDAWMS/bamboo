@@ -624,6 +624,9 @@ def test_h2_bounds_a_value_the_history_holds_by_the_rows_holding_it(tmp_path):
     assert again[0] == ["2026-10-16 02:32:24", "2026-10-16 02:32:46"]
     # a stretch from the first row: from the row's creation, never after the first row
     assert first[0] == ["2026-10-16 02:32:04", "2026-10-16 02:32:18"] and "from the row's creation" in first[2]
+    # P46: the rows after the stretch's first hold it too, said; none after the last row
+    assert "(and at its 2 row(s) after it, to 'assigned' at 2026-10-16 02:32:46: not changed at them)" in first[2], first
+    assert "(and at its 1 row(s) after it, to 'assigned' at 2026-10-16 02:32:46" in later[2] and "row(s) after it" not in again[2]
     assert early_clock[0] == ["2026-10-16 02:32:18", "2026-10-16 02:32:18"]
     assert no_creation[0] is None and "creation time is not known" in no_creation[2]
     # no row closes the window; no row carries the column under its own name
@@ -1245,6 +1248,31 @@ def test_a_writer_marking_no_run_by_the_key_is_not_asked_bare_on_the_shared_logs
     # the asks the records do not answer: the shared log's is not made, and the log is not searched there
     assert got["shared"] == ["db.log"] and got["over a move"] == ["x.log"] and got["holes"] == ["db.log"], got
     assert got["said"] == 1 and got["by marks"] == 2 and got["no move"] == 2 and got["answered"] == 0, got
+
+
+def test_p56_a_writer_of_the_observed_value_alone_moves_no_row_off_it(tmp_path):
+    """restartTasksForContentsUpdate_JEDI writes JediTaskSpec.status only as 'defined' (1857, 1864, 1917): for a task
+    late in 'defined' it is no mover off it, whatever its datasets."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            def j(owner, *outcomes):
+                return N(owner=owner, subject="JediTaskSpec.status",
+                         branches=[N(line=10 + i, outcome=o) for i, o in enumerate(outcomes)])
+
+            writers = [j("t.py::restart", "defined", "'defined'", "defined"), j("t.py::other", "defined", "ready"),
+                       j("t.py::clock", "runtime(x)"), j("t.py::none")]
+            print(json.dumps([RR._writes_only(writers, o, "JediTaskSpec.status", "defined")
+                              for o in ("t.py::restart", "t.py::other", "t.py::clock", "t.py::none", "t.py::absent")]))
+            """,
+        )
+    )
+    assert json.loads(out.splitlines()[-1]) == [[10, 11, 12], [], [], [], []]
 
 
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
