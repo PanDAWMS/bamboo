@@ -2008,6 +2008,14 @@ Asking such a writer by its rows' own texts around the key was measured and left
 holding no key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39
 asks of up to 209 strings).
 
+*Changed (speed, 2026-11-20, the map's and tmaeno's reading of the investigator's speed report):* judgement's P
+(`printed.prove`, inside which_ran.judge) walked each pass of a mover's runs for each arm, and a running job's
+heartbeats print the same lines call after call: NJ-starting-late's updateJobStatus, 72 passes on 9 machines, its
+arms 230, 233 and 236 each walked 72 times (~460 s of the case's 596, every answer the same "kept").  P's answer is
+now shared between passes whose records say the same -- each record's mark and text with its following lines, in
+order, under one mark of one log on one machine, not its time -- for the arm and the judge's other verdicts: P reads
+nothing else of a pass.  The 47: outputs identical, NJ-starting-late 588 s -> 176 s.
+
 *Changed (A2's asks, 2026-11-20, found with P20's rest):* A2's reading of the wakers' writes (`Rerun._waker_writes`)
 asked their logs naming no runs it reads, so the door asked every mark near the key's records whole: NJ-merging-late's
 merge job over DBProxy asked 22 asks of 500 marks of other calls (archiveJob, propagateResultToJEDI, getJobs ...),

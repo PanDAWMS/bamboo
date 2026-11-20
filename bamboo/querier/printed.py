@@ -932,9 +932,25 @@ def binding_ifs(top: ast.If, target: str) -> list[ast.If]:
     return [s for s in reversed(block[: block.index(top)]) if isinstance(s, ast.If) and any(affects(t, {target}) for t in deep_binds(s))]
 
 
+#: P's answers by what they read (:func:`prove`): the arm, the judge's other verdicts, and the pass's records as text
+_PROVEN: dict[tuple, Proof] = {}
+
+
 def prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt, reaching: Reaching | None = None) -> Proof:
     """P for the arm *stmt* of *fn* against one run (the records *sn* read); *reaching*, the judge's other verdicts
-    (d), where it has them."""
+    (d), where it has them.  A pass whose records say the same as another's -- each record's mark and text with its
+    following lines, in order, under one mark of one log on one machine; not its time -- gets that pass's answer: P reads nothing else of it
+    (its printed rows' values, the rows' order, a traceback's frames, what the log's ask held), and a running job's
+    heartbeats print the same lines call after call (NJ-starting-late's updateJobStatus: 72 passes judged, 216 walks
+    of its 230, 233 and 236 arms, ~460 s of the case's 596; the map's and tmaeno's reading, 2026-11-20)."""
+    key = (fn.rel, fn.owner, stmt.lineno, reaching, sn.mode, sn.run.log.name, sn.run.machine, sn.run.token,
+           tuple((r.token, r.text) for r in sn.run.records))
+    if key not in _PROVEN:
+        _PROVEN[key] = _prove(fn, sn, stmt, reaching)
+    return _PROVEN[key]
+
+
+def _prove(fn: R.Function, sn: R.Seen, stmt: ast.stmt, reaching: Reaching | None = None) -> Proof:
     func = fn.node
     levels = chain_of_arm(func, stmt)
     if not levels:

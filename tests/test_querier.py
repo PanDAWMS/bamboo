@@ -18239,6 +18239,36 @@ def test_p74_what_called_the_caller_is_read_by_the_linked_value_on_the_moving_pa
         "AtlasAnalWatchDog.doForWaitingJobs) are asked by the linked value (1 ask(s))"), got
 
 
+def test_p_is_read_once_for_passes_whose_records_say_the_same(tmp_path):
+    """printed.prove shares its answer between passes whose records say the same (marks and texts in order, one mark of
+    one log on one machine), whatever their times: a running job's heartbeats (NJ-starting-late's updateJobStatus,
+    72 passes).  A text, a machine, the arm or the judge's other verdicts differing reads it again."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import printed as PR
+
+        calls = []
+        PR._prove = lambda fn, sn, stmt, reaching=None: calls.append(stmt.lineno) or PR.Proof("none", reason=str(len(calls)))
+        fn = N(rel="p/j.py", owner="p/j.py::D.updateJobStatus")
+        rec = lambda stamp, text: N(stamp=stamp, token="updateJobStatus < PandaID=9 >", text=text)
+        def sn(machine, *texts, stamp="2026-11-13 16:55:29,106"):
+            return N(mode="outside", run=N(log=N(name="panda-DBProxy.log"), machine=machine, token="updateJobStatus < PandaID=9 >",
+                                          records=[rec(stamp, t) for t in texts]))
+        beat = ("attemptNr=1 status=starting", "attemptNr=1 nUp=1 old=starting new=starting")
+        got = [PR.prove(fn, sn("m90", *beat), N(lineno=230)).reason,
+               PR.prove(fn, sn("m90", *beat, stamp="2026-11-14 09:37:04,000"), N(lineno=230)).reason,
+               PR.prove(fn, sn("m90", "attemptNr=1 status=running", "attemptNr=1 nUp=1 old=starting new=running"), N(lineno=230)).reason,
+               PR.prove(fn, sn("m92", *beat), N(lineno=230)).reason,
+               PR.prove(fn, sn("m90", *beat), N(lineno=233)).reason,
+               PR.prove(fn, sn("m90", *beat), N(lineno=230), PR.Reaching("x", frozenset({1}))).reason]
+        print(json.dumps({"reasons": got, "calls": calls}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    # the second heartbeat, at another time, shares the first's answer; each other differing pass is read
+    assert got == {"reasons": ["1", "1", "2", "3", "4", "5"], "calls": [230, 230, 230, 233, 230]}, got
+
+
 def test_a2_asks_a_wakers_logs_for_its_own_runs_alone(tmp_path):
     """A2's waker asks (rerun._waker_writes) name the waker's own method as the runs read (owners): the door asks no
     other method's mark whole near the key's records (NJ-merging-late's merge job asked 101 other jobs' archiveJob and
