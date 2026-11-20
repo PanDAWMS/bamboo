@@ -156,9 +156,19 @@ COLUMN_IS_A_HOLE = "the WHERE names its column through an interpolation"
 #: column nor a value: the condition itself is not in the text.
 CONDITION_IS_A_HOLE = "the WHERE takes whole conditions through an interpolation"
 
+#: ``FROM ({}) tmp_union`` -- ``get_task_job_rows`` unions the job tables in a
+#: nested function -- or ``FROM {} WHERE vuid=:vuid``, a table a name holds:
+#: the statement reads rows, and the text does not say whose.  Its read tables
+#: are not all its tables (:attr:`ReadingStop.reads_known`).
+FROM_IS_A_HOLE = "the FROM takes its tables through an interpolation"
+
 #: Where the binds go, as opposed to where the schema does.  ``{}.JEDI_Tasks``
 #: is a hole too and is not a gap: the reading blanks the schema on purpose.
 _HOLE = re.compile(r"\{\d*\}")
+
+#: A ``FROM`` or ``JOIN`` whose table, or derived table, is a hole -- read once
+#: the schemas' holes are gone.
+_FROM_HOLE = re.compile(r"\b(?:FROM|JOIN)\s*(?:\(\s*\{\d*\}\s*\)|\{\d*\}(?=[\s,)]|$))", re.IGNORECASE)
 
 
 def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
@@ -205,6 +215,13 @@ def _hole_stops(sql: str, line: int) -> tuple[Stop, ...]:
             reason = BINDS_ARE_A_HOLE
         found.add(Stop(line, text, reason))
     return tuple(sorted(found))
+
+
+def _from_stops(sql: str, line: int) -> tuple[Stop, ...]:
+    """One :class:`Stop` per ``FROM`` or ``JOIN`` taking its table, or a derived table, as a hole
+    (:data:`FROM_IS_A_HOLE`): the schema's hole, ``{}.JEDI_Tasks``, is not one."""
+    text = _SCHEMA_HOLE.sub("", sql)
+    return tuple(sorted({Stop(line, match.group(0), FROM_IS_A_HOLE) for match in _FROM_HOLE.finditer(text)}))
 
 
 def _balanced(term: str) -> str:
@@ -3864,7 +3881,8 @@ def _executions_read(
             run = _fragments_out(one, func)
             read_as = reading_text(run.text, run.holes)
             # What a stop names is what the code wrote: a repeated part as its passes.
-            unresolved = _fragment_stops(one, func) + _hole_stops(sqltext.unmarked(read_as), line)
+            unmarked = sqltext.unmarked(read_as)
+            unresolved = _fragment_stops(one, func) + _hole_stops(unmarked, line) + _from_stops(unmarked, line)
             found.append(
                 Execution(
                     sql=run.text,

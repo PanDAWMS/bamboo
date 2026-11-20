@@ -377,6 +377,8 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
     too, and a plain ``UPDATE`` reads no table, so they are not about rows.
     """
     read_tables = sorted({table for verb, table in _table_verbs(run.reading) if verb == "read"})
+    # A table taken through an interpolation is not among them, whatever else the text names.
+    known = not any(stop.reason == sql.FROM_IS_A_HOLE for stop in run.unresolved)
     return [
         ReadingStop(
             reason=stop.reason,
@@ -386,6 +388,7 @@ def _run_stops(run: sql.Execution, rel_path: str, owner: str) -> list[ReadingSto
             line=stop.line,
             statement=run.call.lineno,
             reads=read_tables,
+            reads_known=known,
         )
         for stop in (*run.unresolved, *run.unread_columns)
     ]
@@ -7208,6 +7211,69 @@ def returned_under(
     reading.ruled = ruled
     crossings, _handed = _walk(reading, func, site, returning=frozenset({owner}))
     return _spelled_paths(frozenset(crossings.returned.get(owner, set())))
+
+
+#: Why a statement's select list is not walked item by item to an answer (:func:`returned_columns`).
+COLUMNS_UNREAD = "no select list is read"
+COLUMNS_HOLE = "the select list takes columns through an interpolation"
+COLUMNS_STAR = "the select list is *"
+#: Asked of a read whose rows reach the answer, no item does alone: none is placed where the rows arrive --
+#: ``getClobObj`` hands the rows back as the second of a pair, and :func:`_item_in` reads a fetch's alone.
+COLUMNS_UNPLACED = "no select item is placed where the rows arrive"
+
+
+def returned_columns(
+    calls: Calls,
+    owners: set[str],
+    record: "ReachGraph",
+    func: ast.FunctionDef | ast.AsyncFunctionDef,
+    site: ReadSiteNode,
+    owner: str,
+    ruled: dict[int, frozenset[int]],
+    attributor: SpecAttributor,
+) -> tuple[list[str], bool, str]:
+    """Which of *site*'s select items reach *owner*'s answer, each walked alone from the statement -- the walk
+    :func:`_item_landings` makes to the keys, here to the answer, taking no return of *ruled* (:func:`returned_under`):
+    the subjects of the columns among them, whether every item does, and why the list could not be walked item by item
+    (:data:`COLUMNS_UNREAD`, :data:`COLUMNS_HOLE`, :data:`COLUMNS_STAR`, :data:`COLUMNS_UNPLACED`; ``""`` where it
+    could).  Asked of a read whose rows reach the answer.  A column of no one
+    table read is said by its name.  ``task/get_status``'s ``getTaskStatus`` returns its one column; a spec's
+    ``columnNames()`` is a hole, and which of them reach is not read here."""
+    lists = _select_lists(func, site)
+    if not lists:
+        return [], False, COLUMNS_UNREAD
+    reading = _Reading(calls, owners, record, True)
+    reading.ruled = ruled
+    walked = {sqltext.ITEM_COLUMN, sqltext.ITEM_EXPRESSION}
+    reached: set[int] = set()
+    for number in _positions(lists):
+        if not any(number < len(items) and items[number].kind in walked for items in lists):
+            continue
+        crossings, _handed = _walk(reading, func, site, number, returning=frozenset({owner}))
+        if crossings.returned.get(owner):
+            reached.add(number)
+    tables = {table.lower() for table in site.tables}
+    only = next(iter(tables)) if len(tables) == 1 else ""
+    subjects = sorted(
+        {
+            _column_subject(attributor, item.table or only, item.column) if item.table or only else item.column
+            for items in lists
+            for number, item in enumerate(items)
+            if number in reached and item.kind == sqltext.ITEM_COLUMN
+        }
+    )
+    kinds = {item.kind for items in lists for item in items}
+    why = (
+        COLUMNS_HOLE
+        if kinds & {sqltext.ITEM_HOLE, sqltext.ITEM_AFTER_HOLE}
+        else COLUMNS_STAR
+        if sqltext.ITEM_STAR in kinds
+        else ""
+    )
+    if not why and not reached:
+        why = COLUMNS_UNPLACED
+    whole = not why and all(number in reached for items in lists for number in range(len(items)))
+    return subjects, whole, why
 
 
 def _crossing_selects(site: ReadSiteNode, ways: dict[str, set[tuple[str, ...]]]) -> dict[str, list[str]]:

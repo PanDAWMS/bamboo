@@ -11325,6 +11325,124 @@ def test_an_answer_takes_no_return_the_endpoint_s_constants_rule_out(tmp_path):
     assert [(read.site, read.returned) for read in endpoint.reads] == [(node.name, ["['data']"])]
 
 
+_PEEK = (
+    "class TaskModule:\n"
+    "    def peek(self, task_id):\n"
+    "        varMap = {':jediTaskID': task_id}\n"
+    "        sql = f'SELECT jediTaskID,status,oldStatus FROM {schema}.JEDI_Tasks WHERE jediTaskID=:jediTaskID '\n"
+    "        self.cur.execute(sql + comment, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return res\n\n"
+    "    def count_rows(self, inner):\n"
+    "        sql = f'SELECT COUNT(*) FROM ({inner}) t'\n"
+    "        self.cur.execute(sql, {})\n"
+    "        return self.cur.fetchone()[0]\n\n"
+    "    def params(self, task_id):\n"
+    "        sql = f'SELECT taskParams FROM {schema}.JEDI_TaskParams WHERE jediTaskID=:jediTaskID '\n"
+    "        _ok, rows = self.getClobObj(sql, {':jediTaskID': task_id})\n"
+    "        return rows[0][0]\n\n"
+    "    def getClobObj(self, sql, varMap):\n"
+    "        self.cur.execute(sql, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return True, res\n"
+)
+
+
+def test_an_answer_says_which_columns_of_a_read_reach_it_and_a_statement_with_its_from_a_hole_is_an_open_hole(
+    tmp_path,
+):
+    """Each select item walked alone to an endpoint's answer (``sqlwrite.returned_columns``): ``status`` returns the
+    row's second column; ``row`` returns the rows whole, every column -- said by the table here, whose class this
+    corpus does not say; ``params`` returns ``getClobObj``'s rows, no item of which is placed alone.  A statement whose
+    ``FROM`` takes its tables through an interpolation reads rows no read says (``sql.FROM_IS_A_HOLE``, its reads
+    not known): an ``open`` hole of each endpoint whose closure holds it -- ``count``'s."""
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import endpoints, objects, plugin
+
+    server = (
+        "from pandaserver.api.v1 import task_api as task_api_v1\n\n\n"
+        "def module_mapping(version, api_module):\n"
+        "    mapping = {'v1': {'task': {'module': task_api_v1, 'allowed_methods': []}}}\n"
+        "    return mapping[version][api_module]\n"
+    )
+    api = (
+        "from pandaserver.x import TaskModule\n\n"
+        "task_module: TaskModule = None\n\n\n"
+        "def status(req, task_id):\n"
+        "    return {'data': task_module.peek(task_id)[0][1]}\n\n\n"
+        "def row(req, task_id):\n"
+        "    return {'data': task_module.peek(task_id)}\n\n\n"
+        "def count(req, inner):\n"
+        "    return {'data': task_module.count_rows(inner)}\n\n\n"
+        "def params(req, task_id):\n"
+        "    return {'data': task_module.params(task_id)}\n"
+    )
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PEEK,
+        "pandaserver/server/panda.py": server,
+        "pandaserver/api/v1/task_api.py": api,
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    api_file = "pandaserver/api/v1/task_api.py"
+    asked = frozenset(f"{api_file}::{name}" for name in ("status", "row", "count", "params"))
+    returned: dict = {}
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        graph = reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves(calls))
+        record = reach.ReachGraph(graph)
+        sqlwrite.attach_crossings(nodes, modules, [], calls, record, returned=returned, returning=asked)
+        stops = [
+            stop
+            for func, _cls in pathcond.functions_with_owner(modules[1].tree)
+            for stop in sqlwrite.statement_stops(func, "pandaserver/x.py")
+        ]
+        fragment = MapFragment(
+            map_id=MAP_ID, derived_from=VERSION, read_sites=nodes, reach_graph=graph, reading_stops=stops
+        )
+        objects.attach(fragment, modules, calls)
+        endpoints.attach(fragment, modules, calls, returned, attributor)
+
+    (unread,) = [stop for stop in stops if stop.reason == sql.FROM_IS_A_HOLE]
+    assert (unread.owner, unread.statement, unread.detail, unread.reads_known) == (
+        "pandaserver/x.py::count_rows",
+        11,
+        "FROM ({})",
+        False,
+    )
+    by_route = {one.route: one for one in fragment.endpoints}
+    (status,) = by_route["task/status"].reads
+    assert (status.returned_columns, status.returned_all, status.returned_columns_open) == (
+        ["jedi_tasks.status"],
+        False,
+        "",
+    )
+    (whole,) = by_route["task/row"].reads
+    assert (whole.returned_columns, whole.returned_all) == (
+        ["jedi_tasks.jeditaskid", "jedi_tasks.oldstatus", "jedi_tasks.status"],
+        True,
+    )
+    (clob,) = by_route["task/params"].reads
+    # getClobObj hands the rows back as the second of a pair: they reach the answer, no item is placed alone.
+    assert clob.returned and (clob.returned_columns, clob.returned_columns_open) == ([], sqlwrite.COLUMNS_UNPLACED)
+    counting = by_route["task/count"]
+    assert "pandaserver/x.py::TaskModule.count_rows:11" in counting.holes
+    assert [
+        (hole.at, hole.callee, hole.why, hole.bound)
+        for hole in counting.hole_bounds
+        if hole.why == sql.FROM_IS_A_HOLE
+    ] == [("pandaserver/x.py::TaskModule.count_rows:11", "FROM ({})", sql.FROM_IS_A_HOLE, "open")]
+    assert all(sql.FROM_IS_A_HOLE not in by_route[route].holes for route in ("task/status", "task/row"))
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [

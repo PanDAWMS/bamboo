@@ -1031,7 +1031,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             made = aftermade.attach(fragment, self._modules, self._calls, record)
             logger.info("PandaCodeMapPlugin: %d branch(es) read for a row made before them", made)
             # The statements each API endpoint's calls reach, on the reach record and the read terms.
-            read = endpoints.attach(fragment, self._modules, self._calls, returned)
+            read = endpoints.attach(fragment, self._modules, self._calls, returned, attributor)
             logger.info(
                 "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
             )

@@ -5141,6 +5141,27 @@ class EndpointRead(BaseModel):
             "*returned* says."
         ),
     )
+    returned_columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where *returned* is not empty: the columns of the rows that reach the answer, as subjects "
+            "(``JediTaskSpec.status``; ``table.column`` where the table has no spec class), each select item walked "
+            "alone from the statement to the answer as *returned*'s walk goes (:func:`bamboo.codemap.panda."
+            "recognizers.sqlwrite.returned_columns`).  ``task/get_status`` returns ``JediTaskSpec.status``."
+        ),
+    )
+    returned_all: bool = Field(
+        default=False,
+        description="Whether every item of the statement's select list reaches the answer: the rows go whole.",
+    )
+    returned_columns_open: str = Field(
+        default="",
+        description=(
+            "Why the select list was not walked item by item, so *returned_columns* is not all there is: none is "
+            "read, it takes columns through an interpolation (a spec's ``columnNames()``), it is ``*``, or no item is "
+            "placed where the rows arrive (``getClobObj``'s pair).  Empty where every item was walked."
+        ),
+    )
 
 
 class EndpointWrite(BaseModel):

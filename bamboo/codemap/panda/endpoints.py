@@ -69,6 +69,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import objects, sql, sqltext
 
 if TYPE_CHECKING:
+    from bamboo.codemap.panda.attribution import SpecAttributor
     from bamboo.codemap.panda.recognizers import sqlwrite
 
 logger = logging.getLogger(__name__)
@@ -186,13 +187,18 @@ def attach(
     modules: list[SourceModule],
     calls: C.Calls,
     returned: Optional[dict[str, sqlwrite.Returned]] = None,
+    attributor: Optional["SpecAttributor"] = None,
 ) -> int:
     """Set *fragment*'s :attr:`MapFragment.endpoints` and :attr:`MapFragment.handlers`; returns how many statements
     the endpoints read, counted per endpoint.
 
     With *returned* -- :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_crossings`' walks asked for every
     endpoint's answer -- each read says where its rows are in what the endpoint returns, and the holes on the way in
-    the endpoint's closure (:attr:`EndpointRead.returned`, :attr:`EndpointRead.returned_open`)."""
+    the endpoint's closure (:attr:`EndpointRead.returned`, :attr:`EndpointRead.returned_open`); with *attributor* too,
+    which of its columns they are (:attr:`EndpointRead.returned_columns`).
+
+    A statement of the closure whose ``FROM`` takes its tables through an interpolation reads rows no read says: it
+    is an ``open`` hole of the endpoint (:attr:`Endpoint.holes`) -- ``get_task_job_rows``' union of the job tables."""
     record = reach.ReachGraph(fragment.reach_graph)
     sites: dict[str, list[ReadSiteNode]] = {}
     for site in fragment.read_sites:
@@ -225,6 +231,23 @@ def attach(
             return walks.returned_under(calls, owners, record, func, site, owner, ruled)
 
         read.rewalk = rewalk
+        if attributor is not None:
+            held = attributor
+
+            def columns(
+                site: ReadSiteNode, owner: str, ruled: dict[int, frozenset[int]]
+            ) -> Optional[tuple[list[str], bool, str]]:
+                func = walks._site_function(trees, site)
+                if func is None:
+                    return None
+                return walks.returned_columns(calls, owners, record, func, site, owner, ruled, held)
+
+            read.columns = columns
+    for stop in fragment.reading_stops:
+        # By the reach record's function holding the statement, as the read sites are.
+        holder = record.function_at(stop.file, stop.statement) if stop.reason == sql.FROM_IS_A_HOLE else None
+        if holder is not None:
+            read.unread.setdefault(holder, []).append((stop.statement, stop.detail))
     fragment.endpoints = [
         one
         for version, route, owner in routes(modules)
@@ -264,6 +287,13 @@ class _Reader:
                 [ReadSiteNode, str, dict[int, frozenset[int]]], Optional[list[str]]
             ]
         ] = None
+        #: Which select items of a read reach the answer, each walked alone (:func:`sqlwrite.returned_columns`).
+        self.columns: Optional[
+            Callable[[ReadSiteNode, str, dict[int, frozenset[int]]], Optional[tuple[list[str], bool, str]]]
+        ] = None
+        #: Each function's statements whose ``FROM`` takes its tables through an interpolation
+        #: (:data:`sql.FROM_IS_A_HOLE`), by the reach record's owner: ``(line, the FROM as read)``.
+        self.unread: dict[str, list[tuple[int, str]]] = {}
 
     def _bounded(
         self,
@@ -332,6 +362,7 @@ class _Reader:
                 # the read's own function, a caller on the way or a callee they are handed to.
                 again = self.rewalk(site, owner, ruled)
                 paths = paths if again is None else again
+            columns = self.columns(site, owner, ruled) if paths and self.columns is not None else None
             reads.append(
                 EndpointRead(
                     site=site.name,
@@ -357,9 +388,16 @@ class _Reader:
                     )
                     if answer is not None
                     else [],
+                    returned_columns=columns[0] if columns is not None else [],
+                    returned_all=columns[1] if columns is not None else False,
+                    returned_columns_open=columns[2] if columns is not None else "",
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))
+        # The closure's statements read with their FROM a hole: rows no read above says.
+        unread = [
+            (function, line, detail) for function in functions for line, detail in self.unread.get(function, ())
+        ]
         into = _into(record, came, shut)
         return Endpoint(
             route=route,
@@ -367,7 +405,12 @@ class _Reader:
             function=owner,
             closure=len(functions),
             holes=list(
-                dict.fromkeys(f"{function}:{line}" for function, line, _callee in holes)
+                dict.fromkeys(
+                    [
+                        *(f"{function}:{line}" for function, line, _callee in holes),
+                        *(f"{function}:{line}" for function, line, _detail in unread),
+                    ]
+                )
             ),
             shut=sorted(
                 {
@@ -386,9 +429,15 @@ class _Reader:
             ],
             changes=[one for function in functions for one in code.changes(function)],
             hole_bounds=[
-                self._bounded(function, hole, held_in[key], into)
-                for key, hole in holes.items()
-                for function in [key[0]]
+                *(
+                    self._bounded(function, hole, held_in[key], into)
+                    for key, hole in holes.items()
+                    for function in [key[0]]
+                ),
+                *(
+                    EndpointHole(at=f"{function}:{line}", callee=detail, why=sql.FROM_IS_A_HOLE, bound=HOLE_OPEN)
+                    for function, line, detail in unread
+                ),
             ],
         )
 
