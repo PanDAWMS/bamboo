@@ -21103,7 +21103,10 @@ def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_b
         for name, found in {"wrote": ([(datetime.datetime(2026, 11, 14, 17, 40), p, "pandaserver/d.py::D.updateUnmergedDatasets", 1971, ["ready"]),
                                        (datetime.datetime(2026, 11, 14, 17, 44, 56), p, "pandaserver/d.py::D.updateUnmergedDatasets", 1971, ["ready"])], [], None),
                             "asked": ([], [(N(key="k1"), ""), (N(key="k2"), "")], None),
-                            "none": ([], [], None)}.items():
+                            "none": ([], [], None),
+                            # W15 (the investigator's u16): a write the day's records hold before the span asked is not one
+                            "before the span": ([(datetime.datetime(2026, 11, 13, 23, 7, 42), p, "pandaserver/d.py::D.updateUnmergedDatasets",
+                                                  1971, ["ready"])], [], None)}.items():
             r._waker_writes, r.unanswered, calls[:] = writes_of(found), [], []
             said = r._waited_trigger("JobSpec", [maker], "5", "JediTaskSpec.jediTaskID", start, born)
             got[name] = {"said": [T.text(x) for x in said], "calls": list(calls), "kept": len(r.unanswered)}
@@ -21121,6 +21124,7 @@ def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_b
     assert got["asked"]["kept"] == 2 and "are asked (2 ask(s))" in got["asked"]["said"][0], got
     assert got["none"]["said"] == ["its maker's selection _get_tasks_datasets_with_unprocessed_inputs@1872: no waker of it wrote "
                                    "for the key from 2026-11-14 17:35:57 to 2026-11-14 17:45:57"], got
+    assert got["before the span"]["said"] == got["none"]["said"], got
     # the INSERT's site reached from no selection's function: nothing said
     assert got["no maker reach"] == [], got
 

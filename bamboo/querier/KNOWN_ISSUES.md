@@ -2008,6 +2008,13 @@ Asking such a writer by its rows' own texts around the key was measured and left
 holding no key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39
 asks of up to 209 strings).
 
+*Changed (W15, the investigator's u16, 2026-11-20):* the maker's selection's reading (`Rerun._waited_trigger`, P14's
+"the last such write for the key in the 10 minutes before the JobSpec was made") took any write its wakers' runs
+showed before the birth, and the records hold a waker's asked lines of the whole day: NJ-merging-late named
+updateUnmergedDatasets' 'ready' 18 hours before the merge job was made.  Only the writes in the span asked (the birth
+less EDGE, or the stay's start) are read now, as A2 reads its stay; none there says none.  The 18 hours between (the
+JobGenerator's brokerage failing to place the merge jobs) are P76, not read.
+
 *Changed (speed, 2026-11-20, the map's and tmaeno's reading of the investigator's speed report):* judgement's P
 (`printed.prove`, inside which_ran.judge) walked each pass of a mover's runs for each arm, and a running job's
 heartbeats print the same lines call after call: NJ-starting-late's updateJobStatus, 72 passes on 9 machines, its

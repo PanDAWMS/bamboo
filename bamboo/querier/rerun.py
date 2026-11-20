@@ -9405,7 +9405,9 @@ class Rerun:
             return [T.Said("waited-trigger-asked", {"where": where, "n": len({a.key for a, _ in missed}), "since": since, "until": until})]
         if unread is not None:
             return [T.Said("waited-trigger-unread", {"where": where, "why": unread})]
-        before = sorted((w for w in writes if w[0] <= born), key=lambda w: w[0])
+        # the records hold a waker's lines of the whole day asked: only the writes in the span asked are its (W15, the
+        # investigator's u16: NJ-merging-late named a 'ready' 18 hours before the merge job was made)
+        before = sorted((w for w in writes if W.when(since) <= w[0] <= born), key=lambda w: w[0])
         if not before:
             return [T.Said("waited-trigger-none", {"where": where, "since": since, "until": until})]
         at, p, owner, line, shown = before[-1]
