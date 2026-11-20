@@ -880,10 +880,24 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         printed_writes = sqlwrite.attach_write_arms(fragment.write_prints, fragment.key_froms)
         logger.info("PandaCodeMapPlugin: %d write statement(s) print their text and bind map", printed_writes)
         # Each message a run sends and the function another run takes it with: beside reach, not in it.
-        fragment.message_edges = messages.edges(self._modules, self._calls, values)
+        sent = messages.sends(self._modules, self._calls)
+        fragment.message_edges = messages.edges(self._modules, self._calls, values, sent)
         # And which column each payload key names rows by in the receiver's run, read from the key and parameter
         # records.
         messages.attach_received_as(fragment.message_edges, fragment.key_froms, fragment.parameter_froms)
+        # Every receiver and each type it takes, with the sends of it; a type nothing in PanDA sends came from
+        # outside, through a boundary of its own.
+        fragment.message_receivers, message_boundaries = messages.receivers(
+            self._modules, self._calls, self.map_id, self._version, {messages.TYPE_KEY: sent}
+        )
+        fragment.boundaries.extend(message_boundaries)
+        logger.info(
+            "PandaCodeMapPlugin: %d send(s), %d message edge(s), %d receiver type(s), %d message boundary/boundaries",
+            len(sent),
+            len(fragment.message_edges),
+            len(fragment.message_receivers),
+            len(message_boundaries),
+        )
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(

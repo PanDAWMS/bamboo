@@ -425,6 +425,10 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: a message one run sends and the function another run takes it with -- "
         "see MessageEdge; a dump's section compare reads them"
     ),
+    "message_receivers": (
+        "records beside the nodes, not nodes: each type a message receiver takes and the sends of it -- see "
+        "MessageReceiver; a dump's section compare reads them"
+    ),
     "exit_keeps": (
         "records beside the nodes, not nodes: the arms and prints each exit of a function keeps a run from -- see "
         "ExitKeeps; a dump's section compare reads them"

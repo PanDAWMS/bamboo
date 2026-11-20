@@ -23581,6 +23581,226 @@ class Proxy:
 '''
 
 
+#: Messages built four ways: a type handed in with the keywords merged (``make_message``), a type written in place, a
+#: type handed in with a dict merged; and a sender handing the type on.
+_MESSAGE_UTILS = '''
+import json
+
+
+def make_message(msg_type, **kwargs):
+    msg_dict: dict = {"msg_type": msg_type}
+    msg_dict.update(kwargs)
+    return json.dumps(msg_dict)
+
+
+def push_status(task_id, status):
+    msg = {"msg_type": "task_status", "taskid": task_id, "status": status}
+    return json.dumps(msg)
+
+
+def send_message(msg_type, data_dict=None):
+    msg_dict = {}
+    if data_dict:
+        msg_dict.update(data_dict)
+    msg_dict.update({"msg_type": msg_type, "timestamp": 0})
+    return json.dumps(msg_dict)
+
+
+def send_workflow(workflow_id):
+    return send_message("workflow", data_dict={"workflow_id": workflow_id})
+'''
+
+_MESSAGE_SENDS = '''
+from pkg.utils import make_message
+
+
+def send_job(task_id, job_id):
+    return make_message("get_job", taskid=task_id, jobid=job_id)
+
+
+def send_command(command, task_id):
+    return make_message(f"{command}_task", taskid=task_id)
+'''
+
+#: A send whose type is the configuration's.
+_MESSAGE_CONFIGURED = '''
+from pkg.utils import make_message
+
+
+class Relay:
+    def __init__(self, params):
+        self.component = params["component"]
+
+    def relay(self, task_id):
+        return make_message(self.component, taskid=task_id)
+'''
+
+_MESSAGE_PLUGINS = '''
+import json
+
+import yaml
+from pandacommon.pandamsgbkr.msg_processor import SimpleMsgProcPluginBase
+
+
+class Base(SimpleMsgProcPluginBase):
+    def process(self, msg_obj):
+        """Process the message."""
+        pass
+
+
+class Status(Base):
+    def process(self, msg_obj, decoded_data=None):
+        if decoded_data is None:
+            msg_dict = json.loads(msg_obj.data)
+        else:
+            msg_dict = decoded_data
+        msg_type = msg_dict["msg_type"]
+        if msg_type == "task_status":
+            self.on_task(msg_dict)
+        elif msg_type in ("workflow", "kill_task"):
+            self.on_other(msg_type)
+        if msg_type == "task_status" and msg_dict["relation"] in ["input"]:
+            pass
+
+    def on_task(self, msg_dict):
+        return msg_dict["taskid"]
+
+    def on_other(self, kind):
+        return kind
+
+
+class Steps(Base):
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        if msg_dict["msg_type"] not in ("wfstep", "wfdata"):
+            return None
+        return msg_dict["step_id"]
+
+
+class Callback(Base):
+    def process(self, msg_obj):
+        message_dict = yaml.safe_load(msg_obj.data)
+        event_type = message_dict["event_type"]
+        if self.enabled and event_type in ["datasetlock_ok"]:
+            self.on_lock(event_type, message_dict)
+
+    def on_lock(self, event_type, message_dict):
+        return message_dict["payload"]
+
+
+class Forward(Base):
+    def process(self, msg_obj):
+        return msg_obj.data
+'''
+
+
+def test_a_message_s_sends_are_read_however_its_type_is_spelled(tmp_path):
+    """``make_message`` puts its type in a dict and merges its ``**kwargs`` in: ``send_job``'s call sends
+    ``get_job`` with ``taskid`` and ``jobid``, ``send_command``'s an f-string, a pattern.  ``push_status`` writes its
+    type in place, a send of its own with the dict's other keys.  ``send_message`` merges a dict parameter: the
+    literal ``send_workflow`` hands it is the payload.  ``Relay`` hands a type its configuration holds: an open send.
+    The senders' own hand-ons send nothing.  The edges are unchanged by these: no receiver takes only one type."""
+    files = {
+        "pkg/utils.py": _MESSAGE_UTILS,
+        "pkg/sends.py": _MESSAGE_SENDS,
+        "pkg/relay.py": _MESSAGE_CONFIGURED,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    sent = messages.sends(modules, calls)
+
+    assert [
+        (one.place, one.literal, one.pattern.pattern if one.pattern else None, one.open, sorted(one.payload))
+        for one in sent
+    ] == [
+        (f"pkg/relay.py::relay:{_at('make_message(self.component', _MESSAGE_CONFIGURED)}", None, None, True, ["taskid"]),
+        (f"pkg/sends.py::send_job:{_at('get_job', _MESSAGE_SENDS)}", "get_job", None, False, ["jobid", "taskid"]),
+        (f"pkg/sends.py::send_command:{_at('_task', _MESSAGE_SENDS)}", None, ".+_task", False, ["taskid"]),
+        (f"pkg/utils.py::push_status:{_at('task_status', _MESSAGE_UTILS)}", "task_status", None, False, ["status", "taskid"]),
+        (f"pkg/utils.py::send_workflow:{_at('return send_message(', _MESSAGE_UTILS)}", "workflow", None, False, ["workflow_id"]),
+    ]
+    assert [one.carries("kill_task") for one in sent] == [False, False, True, False, False]
+    assert messages.edges(modules, calls, None, sent) == []
+
+
+def test_every_receiver_says_the_types_it_takes_their_sends_and_a_boundary_where_none_could_be_sent(tmp_path):
+    """Each override of the message processors' ``process`` is a receiver.  ``Status`` tells ``msg_type``
+    ``task_status`` -- handed to ``on_task`` -- from ``workflow`` and ``kill_task``; its test of ``relation`` chooses
+    within a type and is no type.  ``Steps`` takes ``wfstep`` and ``wfdata`` only.  ``Callback`` reads no
+    ``msg_type`` and tells ``event_type`` ``datasetlock_ok``, in an ``and``.  ``Forward`` tests nothing: one row, no
+    key.  The base's own passes and receives nothing.  Each type's sends are joined -- ``kill_task`` to the
+    f-string's -- and ``Relay``'s open send to every ``msg_type`` row; no send puts an ``event_type``, so the
+    callback's type crosses a boundary of its own.  Without the open send, a ``msg_type`` nothing sends does too."""
+    files = {
+        "pkg/utils.py": _MESSAGE_UTILS,
+        "pkg/sends.py": _MESSAGE_SENDS,
+        "pkg/relay.py": _MESSAGE_CONFIGURED,
+        "pkg/plugins.py": _MESSAGE_PLUGINS,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    rows, boundaries = messages.receivers(modules, calls, MAP_ID, VERSION)
+
+    relay = f"pkg/relay.py::relay:{_at('make_message(self.component', _MESSAGE_CONFIGURED)}"
+    callback = "pkg/plugins.py::Callback.process"
+    assert [(one.receiver, one.key, one.msg_type, one.handled_by, one.senders, one.senders_open, one.boundary) for one in rows] == [
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "kill_task",
+            [],
+            [f"pkg/sends.py::send_command:{_at('_task', _MESSAGE_SENDS)}"],
+            [relay],
+            "",
+        ),
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "task_status",
+            ["pkg/plugins.py::on_task"],
+            [f"pkg/utils.py::push_status:{_at('task_status', _MESSAGE_UTILS)}"],
+            [relay],
+            "",
+        ),
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "workflow",
+            [],
+            [f"pkg/utils.py::send_workflow:{_at('return send_message(', _MESSAGE_UTILS)}"],
+            [relay],
+            "",
+        ),
+        ("pkg/plugins.py::Steps.process", "msg_type", "wfdata", [], [], [relay], ""),
+        ("pkg/plugins.py::Steps.process", "msg_type", "wfstep", [], [], [relay], ""),
+        (
+            callback,
+            "event_type",
+            "datasetlock_ok",
+            ["pkg/plugins.py::on_lock"],
+            [],
+            [],
+            BoundaryNode.make_name(MAP_ID, "", callback),
+        ),
+        ("pkg/plugins.py::Forward.process", "", "", [], [], [], ""),
+    ]
+    assert [
+        (one.interface, one.system, one.kind, one.transport, one.direction, one.carried_values) for one in boundaries
+    ] == [(callback, "", "transports_causation", "message", "inbound", ["event_type"])]
+
+    del files["pkg/relay.py"]
+    closed_modules, closed_calls, _record = _keyed_corpus(tmp_path / "closed", files)
+    rows, boundaries = messages.receivers(closed_modules, closed_calls, MAP_ID, VERSION)
+    steps = "pkg/plugins.py::Steps.process"
+    assert [(one.msg_type, one.boundary) for one in rows if one.receiver == steps] == [
+        ("wfdata", BoundaryNode.make_name(MAP_ID, "", steps)),
+        ("wfstep", BoundaryNode.make_name(MAP_ID, "", steps)),
+    ]
+    assert [one.interface for one in boundaries] == [steps, callback]
+    assert boundaries[0].carried_values == ["msg_type", "step_id"]
+
+
+
 def test_a_branch_names_each_attribute_its_path_condition_compares_with_constants_by_class():
     """propagateResultToJEDI writes an input file ``finished`` under ``jobSpec.jobStatus == 'finished'``, ``jobSpec``
     its parameter: each comparison of an object's attribute with constants in a branch's path condition is said as
