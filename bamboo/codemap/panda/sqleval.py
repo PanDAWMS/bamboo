@@ -85,7 +85,7 @@ import ast
 import itertools
 import re
 import string
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -229,6 +229,9 @@ class Str:
     """
 
     __slots__ = ("s", "runs", "_r")
+    s: str
+    runs: tuple
+    _r: Optional[str]
 
     def __new__(cls, s: str, runs: tuple):
         key = ("S", s, runs)
@@ -285,7 +288,8 @@ def _dim_id(dim: Dim) -> int:
 def dims(value) -> frozenset:
     t = type(value)
     if t is Choice or t is Cat or t is Lst or t is Tup or t is Dct:
-        return value.dims
+        held: frozenset = value.dims
+        return held
     return _NODIMS
 
 
@@ -337,6 +341,8 @@ class Cat:
     Interned (see :class:`Str`)."""
 
     __slots__ = ("parts", "dims")
+    parts: tuple
+    dims: frozenset
 
     def __new__(cls, parts: tuple):
         key = ("K", parts)
@@ -354,6 +360,9 @@ class Cat:
 
 class Lst:
     __slots__ = ("items", "dims", "_h")
+    items: tuple
+    dims: frozenset
+    _h: Optional[int]
 
     def __init__(self, items: tuple):
         self.items = items
@@ -375,6 +384,9 @@ class Lst:
 
 class Tup:
     __slots__ = ("items", "dims", "_h")
+    items: tuple
+    dims: frozenset
+    _h: Optional[int]
 
     def __init__(self, items: tuple):
         self.items = items
@@ -402,6 +414,10 @@ class Dct:
     on one is not decided, and ``len`` is the number of the others at least."""
 
     __slots__ = ("items", "maybe", "dims", "_h")
+    items: tuple
+    maybe: frozenset
+    dims: frozenset
+    _h: Optional[int]
 
     def __init__(self, items: tuple, maybe: frozenset = _NODIMS):
         self.items = items
@@ -878,9 +894,11 @@ def truth(value) -> Optional[bool]:
 def sequence(value) -> Optional[tuple]:
     t = type(value)
     if t is Lst or t is Tup:
-        return value.items
+        items: tuple = value.items
+        return items
     if t is Dct:
-        return value.keys()
+        keys: tuple = value.keys()
+        return keys
     return None
 
 
@@ -1001,7 +1019,7 @@ def _names(node: ast.AST) -> set[str]:
 
 def _own_nodes(func: ast.AST):
     """Every node of *func*'s own body: nested functions, classes and lambdas are not entered."""
-    stack = list(func.body)
+    stack: list[ast.AST] = list(cast("ast.FunctionDef | ast.AsyncFunctionDef | ast.Module", func).body)
     while stack:
         node = stack.pop()
         yield node
@@ -1520,9 +1538,9 @@ def _modelled_call(call: ast.Call) -> bool:
 
 def _pattern_names(pattern) -> list[str]:
     return [
-        node.name
+        name
         for node in walk(pattern)
-        if getattr(node, "name", None) and isinstance(node.name, str)
+        if isinstance(name := getattr(node, "name", None), str) and name
     ]
 
 
@@ -1565,7 +1583,7 @@ def statement_map(func: ast.AST) -> dict[int, ast.AST]:
                 if not isinstance(child, ast.stmt):
                     stack.append(child)
 
-    todo = list(func.body)
+    todo = list(cast("ast.FunctionDef | ast.AsyncFunctionDef | ast.Module", func).body)
     own(func, [n for n in ast.iter_child_nodes(func) if not isinstance(n, ast.stmt)])
     while todo:
         stmt = todo.pop()
@@ -1608,8 +1626,8 @@ class Env:
     def __init__(self, vars: dict, facts: dict):
         self.vars = vars
         self.facts = facts
-        self._key = None
-        self._skel = None
+        self._key: Optional[tuple[frozenset, frozenset]] = None
+        self._skel: Optional[tuple[frozenset, frozenset]] = None
 
     def key(self):
         if self._key is None:
@@ -1715,7 +1733,7 @@ def join_value(values: list, dim_for: Callable):
     return UNK
 
 
-def _alike(envs, keep: frozenset) -> set:
+def _alike(envs, keep: set | frozenset) -> set:
     """The names outside *keep* every one of *envs* holds, each with one value on all of them."""
     envs = list(envs)
     first = envs[0].vars
@@ -1798,7 +1816,8 @@ def _unify(a, b, mapping: dict, taken: dict) -> bool:
                 for (ka, x), (kb, y) in zip(a.items, b.items, strict=False)
             )
         )
-    return a == b
+    same: bool = a == b
+    return same
 
 
 def _aligned(base: "Env", env: "Env", names) -> "Env":
@@ -1919,7 +1938,7 @@ class Ref:
         ] = {}  # mode "uses": name -> {value it held at a use or an exit}
         self._for_text = False  # evaluating what a text is built from: only there is a call followed (d)
         self._epoch = 0  # bumped at each pass of a loop: a call run again on one path gets fresh choices
-        self._handed: dict = {}  # (call, arguments, epoch) -> the callee's values, its choices renamed for that call
+        self._handed: dict[tuple, list] = {}  # (call, arguments, epoch) -> the callee's values, its choices renamed for that call
         self.stats = {
             "merges": 0,
             "forks": 0,
@@ -1947,8 +1966,9 @@ class Ref:
             uses = _uses(func, self.built_names)
             self._targets = {id(n) for n in uses}
             self._last_target = func.end_lineno or 0
-            seeds = list(uses) + [
-                ast.Name(id=name, ctx=ast.Load()) for name in sorted(self.built_names)
+            seeds = [
+                *uses,
+                *[ast.Name(id=name, ctx=ast.Load()) for name in sorted(self.built_names)],
             ]
         else:
             self.runners = [
@@ -1959,7 +1979,7 @@ class Ref:
             self._targets = {id(call) for call in self.runners}
             self._last_target = max((call.lineno for call in self.runners), default=0)
             seeds = [call.args[0] for call in self.runners]
-        self._loop_names: dict = {}
+        self._loop_names: dict[int | tuple, frozenset] = {}
         self._contains: dict[int, bool] = {}
         self._loads: dict = {}
         self._loops_with_target = 0
@@ -2253,9 +2273,9 @@ class Ref:
                     )
                 if reads is not None and add(reads):
                     changed = True
-            for writes, runs, test in bodies:
+            for writes, runs, test_reads in bodies:
                 if (runs or hits(writes, self.text_names, self._text_keyed)) and add(
-                    test
+                    test_reads
                 ):
                     changed = True
         return whole, keyed
@@ -2488,8 +2508,8 @@ class Ref:
                 dim = Dim(len(group), getattr(self, "_at_line", 0))
                 if key is not None:
                     made[key] = dim
-            for name, values in differing:
-                vars[name] = factor(dim, list(values))
+            for name, taken in differing:
+                vars[name] = factor(dim, list(taken))
         self.stats["merges"] += 1
         return Env(vars, group[0].facts)
 
@@ -2528,7 +2548,7 @@ class Ref:
         """The tracked names a statement reads to decide which way it goes (its test, its loop's sequence, a condition
         inside its expressions): a choice there splits the path first."""
         key = ("ctl", id(stmt))
-        held = self._loads.get(key)
+        held: Optional[frozenset] = self._loads.get(key)
         if held is not None:
             return held
         found: set[str] = set()
@@ -2775,7 +2795,7 @@ class Ref:
 
     # ---------------------------------------------------------- statements
 
-    def tracks(self, stmt: ast.stmt) -> bool:
+    def tracks(self, stmt: ast.Assign | ast.AnnAssign | ast.AugAssign) -> bool:
         targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
         for target in targets:
             for node in walk(target):
@@ -2783,7 +2803,7 @@ class Ref:
                     return True
         return False
 
-    def builds_text(self, stmt: ast.stmt) -> bool:
+    def builds_text(self, stmt: ast.Assign | ast.AnnAssign | ast.AugAssign) -> bool:
         """Whether an assignment binds a name a text is built from (where a call's return is worth reading)."""
         key = ("text", id(stmt))
         held = self._loads.get(key)
@@ -2890,8 +2910,8 @@ class Ref:
                     statement = ast.copy_location(
                         ast.JoinedStr(values=expression.values[:last]), expression
                     )
-                    self._stmt[id(statement)] = self._stmt.get(id(expression))
-                    held = (statement, expression.values[last].value)
+                    self._stmt[id(statement)] = cast(ast.AST, self._stmt.get(id(expression)))
+                    held = (statement, cast(ast.FormattedValue, expression.values[last]).value)
             self._stated[id(call)] = held
         return held
 
@@ -2914,7 +2934,8 @@ class Ref:
                     found |= _names(n.target)
             found |= {"?" + test for test in self.tests(node)}
             self._loads[key] = frozenset(found)
-        return self._loads[key]
+        loads: frozenset = self._loads[key]
+        return loads
 
     def tests(self, node: ast.AST) -> frozenset:
         key = ("tests", id(node))
@@ -2928,7 +2949,8 @@ class Ref:
                             if fact in self.repeated:
                                 found.add(fact)
             self._loads[key] = frozenset(found)
-        return self._loads[key]
+        loads: frozenset = self._loads[key]
+        return loads
 
     def kills(self, stmt: ast.stmt) -> frozenset:
         """The facts on attributes *stmt* forgets as it starts (:func:`_header`): a call handed an object or attribute a
@@ -3025,12 +3047,12 @@ class Ref:
             not self._loops_with_target
             and self.mode != "uses"  # it reads the names where the function ends, too
             and stmts
-            and stmts[-1].end_lineno >= self._last_target
+            and cast(int, stmts[-1].end_lineno) >= self._last_target
         ):
             holding = [i for i, stmt in enumerate(stmts) if self.contains_target(stmt)]
             if holding:
                 stmts = stmts[: holding[-1] + 1]
-        suffix = [frozenset()] * (len(stmts) + 1)
+        suffix: list[frozenset] = [frozenset()] * (len(stmts) + 1)
         for i in range(len(stmts) - 1, -1, -1):
             suffix[i] = suffix[i + 1] | self.loads(stmts[i])
         broken: list[Env] = []
@@ -3560,7 +3582,7 @@ class Ref:
             env = self.forget(env, name)
         return env
 
-    def loop_for(self, stmt: ast.For, envs: list[Env], after: frozenset):
+    def loop_for(self, stmt: ast.For | ast.AsyncFor, envs: list[Env], after: frozenset):
         self.record(stmt.iter, envs)
         finished: list[Env] = []
         broken: list[Env] = []
@@ -3762,7 +3784,7 @@ class Ref:
                     isinstance(func, ast.Attribute)
                     and func.attr in _STR_METHODS | _CONTAINER_METHODS
                 )
-                or (direct and func.attr in _MUTATORS)
+                or (direct and cast(ast.Attribute, func).attr in _MUTATORS)
                 or (
                     isinstance(func, ast.Attribute)
                     and func.attr == "sub"
@@ -3898,42 +3920,45 @@ class Ref:
     def _ev(self, node: ast.expr, env: Env) -> list:
         t = type(node)
         if t is ast.Constant:
-            value = node.value
+            value = cast(ast.Constant, node).value
             if isinstance(value, str):
                 return [lit(value, self.stmt_of(node))]
             return [value if isinstance(value, _SCALARS) else UNK]
         if t is ast.Name:
-            return [env.vars.get(node.id, UNK)]
+            return [env.vars.get(cast(ast.Name, node).id, UNK)]
         if t is ast.JoinedStr:
             parts = []
-            for piece in node.values:
+            for piece in cast(ast.JoinedStr, node).values:
                 if isinstance(piece, ast.Constant):
-                    parts.append([lit(piece.value, self.stmt_of(piece))])
+                    parts.append([lit(cast(str, piece.value), self.stmt_of(piece))])
                 else:
-                    parts.append(self.formatted(piece, env))
+                    parts.append(self.formatted(cast(ast.FormattedValue, piece), env))
             return _distinct(make_cat(chosen) for chosen in _product(parts))
         if t is ast.BinOp:
-            pairs = _product([self.ev(node.left, env), self.ev(node.right, env)])
-            return _distinct(self.binop(node, left, right) for left, right in pairs)
+            binop = cast(ast.BinOp, node)
+            pairs = _product([self.ev(binop.left, env), self.ev(binop.right, env)])
+            return _distinct(self.binop(binop, left, right) for left, right in pairs)
         if t is ast.BoolOp:
-            return self.boolop(node, env)
+            return self.boolop(cast(ast.BoolOp, node), env)
         if t is ast.UnaryOp:
+            unary = cast(ast.UnaryOp, node)
             return _distinct(
-                self.lift(lambda v: _unary(node.op, v), [value])
-                for value in self.ev(node.operand, env)
+                self.lift(lambda v: _unary(unary.op, v), [value])
+                for value in self.ev(unary.operand, env)
             )
         if t is ast.Compare:
-            return self.compare(node, env)
+            return self.compare(cast(ast.Compare, node), env)
         if t is ast.IfExp:
-            result = self.decide(node.test, env)
+            ifexp = cast(ast.IfExp, node)
+            result = self.decide(ifexp.test, env)
             if result is True:
-                return self.ev(node.body, env)
+                return self.ev(ifexp.body, env)
             if result is False:
-                return self.ev(node.orelse, env)
-            return _distinct(self.ev(node.body, env) + self.ev(node.orelse, env))
+                return self.ev(ifexp.orelse, env)
+            return _distinct(self.ev(ifexp.body, env) + self.ev(ifexp.orelse, env))
         if t is ast.List or t is ast.Tuple:
-            pieces = []
-            for element in node.elts:
+            pieces: list = []
+            for element in cast("ast.List | ast.Tuple", node).elts:
                 if isinstance(element, ast.Starred):
                     pieces.append(
                         [("*", value) for value in self.ev(element.value, env)]
@@ -3941,7 +3966,7 @@ class Ref:
                 else:
                     pieces.append([("", value) for value in self.ev(element, env)])
             kind_of = Lst if t is ast.List else Tup
-            out = []
+            out: list = []
             for chosen in _product(pieces):
                 items: list = []
                 ok = True
@@ -3957,14 +3982,16 @@ class Ref:
                 out.append(kind_of(tuple(items)) if ok else UNK)
             return _distinct(out)
         if t is ast.Dict:
-            if any(key is None for key in node.keys):
+            mapping = cast(ast.Dict, node)
+            if any(key is None for key in mapping.keys):
                 return [UNK]
             pieces = [
                 _product([self.ev(k, env), self.ev(v, env)])
-                for k, v in zip(node.keys, node.values, strict=False)
+                for k, v in zip(cast("list[ast.expr]", mapping.keys), mapping.values, strict=False)
             ]
             out = []
             for chosen in _product(pieces):
+                d: Dct | _Unknown
                 d = Dct(())
                 for k, v in chosen:
                     key = key_of(k)
@@ -3975,16 +4002,16 @@ class Ref:
                 out.append(d)
             return _distinct(out)
         if t is ast.Subscript:
-            return self.subscript(node, env)
+            return self.subscript(cast(ast.Subscript, node), env)
         if t is ast.Call:
-            return self.call(node, env)
+            return self.call(cast(ast.Call, node), env)
         if t is ast.ListComp or t is ast.GeneratorExp:
             return self.comprehension(node, env)
         return [UNK]
 
     def formatted(self, piece: ast.FormattedValue, env: Env) -> list:
         if piece.format_spec is None:
-            specs = [""]
+            specs: list[Optional[str]] = [""]
         else:
             specs = [
                 v.s
@@ -4370,11 +4397,11 @@ class Ref:
         return str_join(sep, joined)
 
     def format_call(self, template, node: ast.Call, env: Env) -> list:
-        positional_choices = []
+        positional_choices: list[tuple[str, list, ast.expr]] = []
         spread_unknown = False
         for arg in node.args:
             if isinstance(arg, ast.Starred):
-                choices = []
+                choices: list[tuple] = []
                 for value in self.ev(arg.value, env):
                     items = sequence(value)
                     if items is None:
@@ -4525,7 +4552,7 @@ class Ref:
             if spec and "{" in spec:
                 parts.append(self.hole(node))
                 continue
-            head = re.match(r"[^.\[]*", field).group(0)
+            head = cast("re.Match[str]", re.match(r"[^.\[]*", field)).group(0)  # it matches every text
             rest = field[len(head) :]
             if head == "" and numbered_only:
                 return None
@@ -4562,7 +4589,7 @@ class Ref:
         t = type(receiver)
         if t is Str or t is str:
             text = receiver if t is Str else lit(receiver, self.stmt_of(node))
-            plain_args = []
+            plain_args: list = []
             for arg in args:
                 if type(arg) is Str:
                     if HOLE in arg.s:
@@ -4911,7 +4938,7 @@ class Ref:
         generator = node.generators[0]
         if generator.is_async:
             return [UNK]
-        out = []
+        out: list = []
         for value in self.ev(generator.iter, env):
             items = sequence(value)
             if items is None or len(items) > MAX_UNROLL:
@@ -4951,9 +4978,10 @@ class Ref:
             if items is None or len(items) != len(target.elts):
                 return None
             for element, item in zip(target.elts, items, strict=False):
-                env = self._bind_free(env, element, item)
-                if env is None:
+                rebound = self._bind_free(env, element, item)
+                if rebound is None:
                     return None
+                env = rebound
             return env
         return None
 
@@ -5156,7 +5184,7 @@ def _mutated(container, method: str, args: tuple):
                 return Opn(
                     len(container.items)
                     if args[0] is UNK
-                    else max(len(container.items), args[0].least)
+                    else max(len(container.items), cast(Opn, args[0]).least)
                 )
             return UNK
         if method == "setdefault" and len(args) == 2:
@@ -5187,7 +5215,7 @@ def _empty_text(value) -> bool:
     return (t is Str and value.s == "") or (t is str and value == "")
 
 
-def _holds_a_letter(value, memo: dict) -> bool:
+def _holds_a_letter(value, memo: dict[int, bool]) -> bool:
     """Whether every text *value* can be holds a written character (a hole can be ``""``)."""
     held = memo.get(id(value))
     if held is not None:
@@ -5487,7 +5515,7 @@ def _rendered_parts(parts: tuple, index: int, done: Str):
         yield from _rendered_parts(parts, index + 1, str_concat(done, one))
 
 
-def _common_end(texts) -> str:
+def _common_end(texts: tuple[str, ...]) -> str:
     """What every text in *texts* (rendered) ends with after its last hole, from a space or a comma on: the
     separator a cut after the loop drops (``ret[:-1]``, ``sql[:-4]`` of ``AND ``), not the tail of an item the hole
     holds the rest of (``+1,`` of ``{k}={k}+1,`` is ``,``)."""
@@ -5541,7 +5569,7 @@ def repeated_part(loop, name: str, added: list) -> Callable:
         return lambda before: Lst(before.items + (UNK,))
     end = "" if capped else _common_end(templates)
     inner = tuple(_holes_of(pieces, text) for text in templates)
-    part = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed, inner=inner))
+    part: object = hole_str(HoleAt(loop, name, REPEATED, templates, end, listed, inner=inner))
     if end:
         part = make_cat([part, _ending(pieces, end, loop)])
     if listed:
@@ -5672,7 +5700,7 @@ def joined_by(value, sep: str):
 # ================================================================ expansion
 
 
-def _free(value, memo: dict, cap: int) -> set:
+def _free(value, memo: dict[int, tuple[object, set]], cap: int) -> set:
     """Every text *value* renders to if each occurrence of a dimension chose on its own (``None`` for no text): a
     superset of :func:`full_texts`, cheap because it is a set per node, not an assignment per path."""
     held = memo.get(id(value))
@@ -6049,7 +6077,7 @@ class Reading:
         self.defaults_used: set[str] = set()
         self.stats: dict = {}
         self.mode = "function"
-        self._texts = None
+        self._texts: Optional[tuple[dict, dict, set]] = None
         lines = (
             [line]
             if line is not None
@@ -6102,8 +6130,10 @@ class Reading:
             self.reached |= one.reached
             self.defaults_used |= one.defaults_used
 
-    def _expand_all(self):
-        texts, no_text, capped = {}, {}, set()
+    def _expand_all(self) -> tuple[dict, dict, set]:
+        texts: dict = {}
+        no_text: dict = {}
+        capped: set = set()
         for line, held in self.values.items():
             got, none, cut = full_texts(list(held))
             texts[line] = got
@@ -6112,24 +6142,19 @@ class Reading:
             if cut:
                 capped.add(line)
         self._texts = (texts, no_text, capped)
+        return self._texts
 
     @property
     def texts(self) -> dict:
-        if self._texts is None:
-            self._expand_all()
-        return self._texts[0]
+        return (self._texts or self._expand_all())[0]
 
     @property
     def no_text(self) -> dict:
-        if self._texts is None:
-            self._expand_all()
-        return self._texts[1]
+        return (self._texts or self._expand_all())[1]
 
     @property
     def full_capped(self) -> set:
-        if self._texts is None:
-            self._expand_all()
-        return self._texts[2]
+        return (self._texts or self._expand_all())[2]
 
     def cover(self, line: int, cap: int = COVER_CAP) -> tuple[list[Rendered], bool]:
         return cover(list(self.values.get(line, {})), cap)

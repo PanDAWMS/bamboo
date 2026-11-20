@@ -2933,7 +2933,7 @@ class Types:
                     found.append(file)
         return found
 
-    def enclosing_function(self, file: str, node: ast.AST) -> Optional[ast.AST]:
+    def enclosing_function(self, file: str, node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
         """The function a name *node* does not bind is read from next, or ``None`` at module scope.
 
         Python's scoping: a class body is no scope for the functions in it, so

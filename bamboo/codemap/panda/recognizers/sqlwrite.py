@@ -62,6 +62,8 @@ from typing import (
     Iterator,
     NamedTuple,
     Optional,
+    TypeGuard,
+    cast,
 )
 
 from bamboo.codemap import callfacts, objects, pathcond, values
@@ -466,7 +468,7 @@ def _row_key_source(
 
     The values only: who handed them is read after the reach record, by the carry (:func:`attach_key_sources`).
     """
-    values = []
+    values: list[tuple] = []
     if run.varmap is not None:
         for _column, bind in sorted(statement.keys.items()):
             values.extend(
@@ -527,7 +529,7 @@ def _key_froms(
         )
         if run.varmap is None and not found:
             continue
-        binds = record._binds[2]
+        binds = cast(tuple, record._binds)[2]
         binds.extend(found)
         record.unread = "" if binds else KEY_NO_BIND
 
@@ -656,7 +658,9 @@ class _Writing:
 
     @classmethod
     def of(cls, runs: list[sql.Execution]) -> "_Writing":
-        returning, deletes, updated = set(), {}, set()
+        returning: set = set()
+        deletes: dict = {}
+        updated: set = set()
         for run in runs:
             lines = {call.lineno for call in run.run_at}
             text = run.sql or ""
@@ -687,7 +691,8 @@ class _Writing:
                 call.lineno < at.lineno and surviving_writes([site_of(call)], site_of(at), as_run=True)
                 for at in run.run_at
             ):
-                return call.lineno
+                line: int = call.lineno
+                return line
         return None
 
     def upserts(self, run: sql.Execution, table: str) -> bool:
@@ -700,7 +705,7 @@ def _returned(text: str) -> set[str]:
     return {column.strip().lower() for column in m.group(1).split(",")} if (m := _RETURNING.search(text)) else set()
 
 
-def _converting(value: ast.AST) -> bool:
+def _converting(value: ast.AST) -> TypeGuard[ast.Call]:
     """Whether *value* makes one value of another without making it new -- ``int(row[0])`` is still the row's
     (:data:`callfacts.CONVERTING`)."""
     return (
@@ -739,7 +744,11 @@ def _bind_value(
     if not _plain(value):
         return ("computed", line, None)
     root = _root(value)
-    return ("plain", line, attributor.class_of(root, func, owner) if root is not None else None)
+    return (
+        "plain",
+        line,
+        attributor.class_of(root, cast("ast.FunctionDef | ast.AsyncFunctionDef", func), owner) if root is not None else None,
+    )
 
 
 def _sequenced_attributes(modules: list[SourceModule]) -> dict[str, frozenset[str]]:
@@ -823,7 +832,7 @@ def _objects_of(run: sql.Execution, func: ast.AST) -> list[tuple[ast.expr, ast.C
         # ``var_maps = []`` before its new seeds' maps renews the list its UPDATE of the old seeds ran with.
         live: set[int] = set()
         for call in run.run_at if appends else ():
-            live |= sql._live_at(func, run.varmap, appends, call)
+            live |= sql._live_at(cast("ast.FunctionDef | ast.AsyncFunctionDef", func), run.varmap, appends, call)
         for node in appends:
             if id(node) not in live:
                 continue
@@ -872,12 +881,12 @@ def _insert_from(
             record._object = (obj, obj_class, mades or [], frozenset())
         key_froms.append(record)
     else:
-        record._insert.binds.extend(insert.binds)
+        cast(_Insert, record._insert).binds.extend(insert.binds)
     _ran_by(record, func, run)
     for subject, lines in written.items():
         record.writes[subject] = sorted({*record.writes.get(subject, ()), *lines})
-    record._binds[2].extend(binds)
-    if insert.value in ("bind", "object") and not record._binds[2]:
+    cast(tuple, record._binds)[2].extend(binds)
+    if insert.value in ("bind", "object") and not cast(tuple, record._binds)[2]:
         record.unread = KEY_NO_BIND if run.varmap is not None or obj else KEY_NO_MAP
     else:
         record.unread = ""
@@ -905,7 +914,7 @@ def _insert_froms(
     identity = sorted(sqltext.table_identity(table))
     returned = _returned(run.sql or "")
     spelled = {column.lower(): (column, supplied) for column, supplied in statement.columns.items()}
-    common = {
+    common: dict[str, Any] = {
         "table_class": table_class,
         "rewritten": writing.rewritten(table, identity, run),
         "returning_lines": writing.returning_lines,
@@ -1088,7 +1097,7 @@ def _unspelled_froms(
     spelled_obj = ast.unparse(obj) if obj is not None else ""
     returned = _returned(run.sql or "")
     upsert = bool(table) and writing.upserts(run, table)
-    common = {
+    common: dict[str, Any] = {
         "table_class": table_class,
         "rewritten": writing.rewritten(table, identity, run) if table else None,
         "returning_lines": writing.returning_lines,
@@ -1119,13 +1128,13 @@ def _unspelled_froms(
             # replaced by ``fileIDPool[...]`` before its valuesMap(), and insertFilesForDataset_JEDI's fileID is a
             # sequence's, read through the name it was assigned from, not the field.
             reached = _reaching(func, obj, attribute, mades)
-            assigned = reached.nodes
+            assigned = cast("list[ast.Assign | ast.AugAssign]", reached.nodes)  # each an assignment with its value
             values = [_bind_value(node.value, node.lineno, func, owner_class, attributor) for node in assigned]
-            binds = [sql.Bind(node.value, site_of(node.value)) for node in assigned]
+            binds = [sql.Bind(node.value, cast(ast.stmt, site_of(node.value))) for node in assigned]
             if not assigned:
                 field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
                 field.parent = getattr(obj, "parent", None)  # type: ignore[attr-defined]
-                values, binds = [("plain", run.call.lineno, obj_class)], [sql.Bind(field, site_of(run.call))]
+                values, binds = [("plain", run.call.lineno, obj_class)], [sql.Bind(field, cast(ast.stmt, site_of(run.call)))]
             record = put(term, _Insert(value="object", binds=values, **common), binds)
             through = {hole for holes in reached.perhaps.values() for hole in holes}
             record.through_holes = sorted({*record.through_holes, *through})
@@ -1353,9 +1362,9 @@ def _mark_object(
         record.object = spelled_obj
         record._object = (spelled_obj, obj_class, _maps_of(found), frozenset())
         attribute = attributes.get(bind.lstrip(":").lower())
-        if not record._binds[2] and attribute is not None:
+        if not cast(tuple, record._binds)[2] and attribute is not None:
             field = ast.copy_location(ast.Attribute(value=obj, attr=attribute, ctx=ast.Load()), obj)
-            record._binds[2].append(sql.Bind(field, site_of(run.call)))
+            cast(tuple, record._binds)[2].append(sql.Bind(field, cast(ast.stmt, site_of(run.call))))
             record.unread = ""
 
 
@@ -1464,7 +1473,7 @@ def extract(
                 inserting = _INSERT_INTO.match(run.sql or "") is not None
                 if key_froms is not None and (made_of or inserting):
                     writing = writing or _Writing.of(list(sql.executions(func)))
-                if writing is not None and inserting and not any(s.kind == "insert" for s in statements):
+                if key_froms is not None and writing is not None and inserting and not any(s.kind == "insert" for s in statements):
                     _unspelled_froms(
                         keyed, key_froms, func, _owner, run, made_of, module.rel_path, attributor, writing, sequenced
                     )
@@ -1638,7 +1647,7 @@ def extract(
                                     else False
                                 )
                                 _set_froms(wrote, set_froms, func, one, statement, module.rel_path, new_row)
-                            if inserts:
+                            if inserts and writing is not None:
                                 _insert_froms(
                                     keyed, key_froms, func, _owner, one, statement, module.rel_path, lines,
                                     attributor, writing,
@@ -1712,7 +1721,7 @@ def _deciding_fragment(
     column: str,
     supplied: sqltext.ColumnValue,
     kind: str,
-) -> Optional[ast.stmt]:
+) -> Optional[ast.stmt | ast.Call]:
     """Return the statement fragment that put ``<column>=<value>`` into the SQL.
 
     For a value written inline there is no bind assignment to anchor at, and
@@ -1757,9 +1766,9 @@ class _Outcome(NamedTuple):
 
     outcome: str
     tier: int
-    node: ast.stmt
+    node: ast.stmt | ast.Call
     extra: list[str]
-    decided_at: ast.stmt
+    decided_at: ast.stmt | ast.Call
     #: Every text a run-time value can be -- see ``Branch.value_frames``.
     frames: tuple[str, ...] = ()
     #: The lengths the code cuts the value to -- see ``Branch.value_cuts``.
@@ -1816,7 +1825,7 @@ def _outcomes(
         scan = sql.scan_binds(func, run.varmap, supplied.text, run.window, at=run)
         # A later bind of the key the run still holds replaces this one where it runs.
         replaced = sql.bind_replacements(func, run, supplied.text, scan.binds)
-        found = []
+        found: list[_Outcome] = []
         for bind in scan.binds:
             value, site = bind.value, bind.site
             later = entries(replaced.get(id(site), ()), arm_condition(site))
@@ -1992,7 +2001,7 @@ def _record(
     attribute: str,
     outcomes: list[_Outcome],
     row_precondition: list[str],
-    setters: dict[str, object],
+    setters: dict[str, progress._Setter],
     beside=None,
     whens: Optional[list[Optional[list[str]]]] = None,
     row_precondition_spelled: Optional[list[str]] = None,
@@ -2054,9 +2063,10 @@ def _record(
         # And over every statement's: one text of a statement writes only the
         # outcomes its own branch binds (``sql.bound_values``), so the first
         # statement read is not every arm.
-        junction.anchor.line_start = min(junction.anchor.line_start, *(found.node.lineno for found in outcomes))
-        junction.anchor.line_end = max(
-            junction.anchor.line_end or junction.anchor.line_start,
+        anchor = cast(Anchor, junction.anchor)  # a junction is made with its anchor
+        anchor.line_start = min(anchor.line_start, *(found.node.lineno for found in outcomes))
+        anchor.line_end = max(
+            anchor.line_end or anchor.line_start,
             *(found.node.end_lineno or found.node.lineno for found in outcomes),
         )
 
@@ -2136,7 +2146,7 @@ class _Written(NamedTuple):
 
 
 def _every_written(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.AST, held: dict[int, Optional[list[_Written]]]
+    func: ast.FunctionDef | ast.AsyncFunctionDef, call: ast.Call, held: dict[int, Optional[list[_Written]]]
 ) -> Optional[list[_Written]]:
     """Every statement *call* runs (:func:`sql.every_rendering`), ``None`` past the cap, held in *held* by call.
 
@@ -2194,7 +2204,7 @@ def _guard_conditions(
             if not ways or any(one is None for one in said):
                 break
             for one in said:
-                tests.extend(one)
+                tests.extend(cast("list[str]", one))
         else:
             found[column] = list(dict.fromkeys(tests))
     return found
@@ -2257,9 +2267,10 @@ def _none_without(
 ) -> bool:
     """Whether no statement *other*'s call runs writes the value without *guard* (spelled *spelled*) and can pass
     its tests -- see :func:`_settle_conditional_guards`."""
-    written = _every_written(other.func, other.call, held)
+    call = cast(ast.Call, other.call)  # a carrier whose guards are settled has its call
+    written = _every_written(other.func, call, held)
     if written is None:
-        return not same and pathcond.exclusive(guard.when, path_condition(other.call))
+        return not same and pathcond.exclusive(guard.when, path_condition(call))
     for one in written:
         if other.column.lower() not in one.columns or spelled in one.guards:
             continue
@@ -2472,7 +2483,7 @@ def _run_builds(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     as well, and reading them again was most of the read side's time.
     """
     key = (sql.reading_context(), run.variable, run.head, run.sql, id(run.call), run.pieces, run.holes)
-    held = getattr(func, "_run_builds_held", None)
+    held: Optional[tuple[object, dict[tuple, Optional[list[_Build]]]]] = getattr(func, "_run_builds_held", None)
     if held is None or held[0] != key[0][0]:
         held = (key[0][0], {})
         func._run_builds_held = held  # type: ignore[union-attr]
@@ -2510,7 +2521,7 @@ def _evaluated_leaves(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Exe
                 hops[-1] = hops[-1]._replace(call=node)
             elif node is not hops[-1].at:
                 hops.append(_Hop(enclosing_function(node) or func, node))
-        leaves.append(_Leaf(start, end, _statement_of(nodes[0]), tuple(hops)))
+        leaves.append(_Leaf(start, end, cast(ast.stmt, _statement_of(nodes[0])), tuple(hops)))
     return leaves
 
 
@@ -2665,10 +2676,10 @@ def _guard_read(name: str, hop: int, hops: tuple[_Hop, ...], file_of) -> GuardRe
         # The call into *func*: the nearest hop above whose function is another.
         while at > 0 and hops[at - 1].func is func:
             at -= 1
-        if at == 0 or hops[at - 1].call is None:
+        call = hops[at - 1].call if at else None
+        if call is None:
             read.via.append(f"{func.name}.{current}: no call into it on the way")
             return read
-        call = hops[at - 1].call
         handed = next((one.value for one in call.keywords if one.arg == current), None)
         if handed is None:
             names = _parameters(func)
@@ -2940,8 +2951,8 @@ def _folded(
     common = set.intersection(*(set(one) for one in entries))
     folded = [(entry, trees[entry]) for entry in sorted(common)]
     remainders: list[tuple[str, ...]] = []
-    for one in entries:
-        shape = tuple(entry for entry in one if entry not in common)
+    for listed in entries:
+        shape = tuple(entry for entry in listed if entry not in common)
         if shape not in remainders:
             remainders.append(shape)
     # ``A or (A and B)`` is ``A``: a way that asks all another asks and more
@@ -2955,7 +2966,10 @@ def _folded(
         if tree_of is not None:
             tree = ConditionNode(
                 node="any",
-                items=[ConditionNode(node="all", items=[trees[entry] for entry in shape]) for shape in remainders],
+                items=[
+                    ConditionNode(node="all", items=[cast(ConditionNode, trees[entry]) for entry in shape])
+                    for shape in remainders
+                ],
             )
         folded.append(
             (" OR ".join(f"({' AND '.join(shape)})" if len(shape) > 1 else shape[0] for shape in remainders), tree)
@@ -3032,7 +3046,7 @@ def _changed_between(func: ast.AST, names: set[str], low: int, high: int) -> boo
         line = getattr(node, "lineno", 0)
         if not low < line < high or enclosing_function(node) is not func:
             continue
-        targets: list[ast.AST] = []
+        targets: list[ast.expr] = []
         if isinstance(node, ast.Assign):
             targets = node.targets
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor)):
@@ -3068,8 +3082,8 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     executed = _message_parts(run.call.args[0])
     if any(kind != "expr" for kind, _value in executed):
         return []
-    spelled = [ast.unparse(value) for _kind, value in executed]
-    execute = _statement_of(run.call)
+    spelled = [ast.unparse(cast(ast.AST, value)) for _kind, value in executed]
+    execute = cast(ast.stmt, _statement_of(run.call))
     whole = len(spelled)
     shorter = whole - 1 if whole > 1 and _comment_name(func, executed[-1], execute) else None
     found: list[PrintedBy] = []
@@ -3087,7 +3101,7 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
             isinstance(parts[-1][1], ast.Name) and parts[-1][1].id == run.varmap
         ):
             continue
-        said = [ast.unparse(value) if kind == "expr" else None for kind, value in parts[:-1]]
+        said = [ast.unparse(cast(ast.AST, value)) if kind == "expr" else None for kind, value in parts[:-1]]
         for length, text in ((whole, "whole"), (shorter, "without comment")):
             if not length:
                 continue
@@ -3105,9 +3119,9 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
                 if kind != "text":
                     break
                 lead = str(value) + lead
-            printed = _statement_of(node)
+            printed = cast(ast.stmt, _statement_of(node))
             low, high = sorted((printed.lineno, execute.lineno))
-            names = {one.id for _kind, value in executed for one in walk(value) if isinstance(one, ast.Name)}
+            names = {one.id for _kind, value in executed for one in walk(cast(ast.AST, value)) if isinstance(one, ast.Name)}
             if _changed_between(func, names | {run.varmap}, low, high):
                 break
             found.append(
@@ -3123,11 +3137,13 @@ def _printed_by(func: ast.FunctionDef | ast.AsyncFunctionDef, run: sql.Execution
     return sorted(found, key=lambda one: one.line)
 
 
-def _loop_said(loop: ast.AST, func: ast.AST, file: str) -> str:
+def _loop_said(loop: ast.For | ast.AsyncFor, func: ast.AST, file: str) -> str:
     """``file:line for x in xs (xs = f()@line)``: a loop, and what it walks where that is a name."""
     said = f"{file}:{loop.lineno} for {ast.unparse(loop.target)} in {ast.unparse(loop.iter)}"
     if isinstance(loop.iter, ast.Name):
-        written = [f"{ast.unparse(one)}@{site_of(one).lineno}" for one in reaching_definitions(func, loop.iter.id, loop)]
+        written = [
+            f"{ast.unparse(one)}@{cast(ast.stmt, site_of(one)).lineno}" for one in reaching_definitions(func, loop.iter.id, loop)
+        ]
         if written:
             said += f" ({loop.iter.id} = {', '.join(written)})"
     return said
@@ -3304,7 +3320,7 @@ def _restricted_pairs(restricted: dict[str, set[str]]) -> set[tuple[str, str]]:
 READ_SLICE_NAME = "sql-read"
 
 
-def read_coverage(modules: list[SourceModule]) -> list[CoverageStat]:
+def read_coverage(modules: list[SourceModule]) -> tuple[list[CoverageStat], list[Unexplained]]:
     """How many of the corpus's queries the read side actually reads.
 
     The denominator that did not exist.  ``sql-write`` has one, so a write the
@@ -3787,7 +3803,7 @@ def read_side(
     # The route of calls the read side is reading a function as, while it
     # reads one (``place_routes``): its chain, and what it hands the
     # function's parameters.
-    routing: dict[str, object] = {"chain": None, "into": frozenset(), "func": None, "handed": None}
+    routing: dict[str, Any] = {"chain": None, "into": frozenset(), "func": None, "handed": None}
     # What every run of a statement so far passes over, by (owner, line) --
     # kept for runs that file nothing too, since a run that refuses nothing
     # is the run that returns the row.
@@ -4357,10 +4373,10 @@ def read_side(
             kept = statements.get((owner, line))
             if kept is not None:
                 added, read_trees = terms_added(func, file, line, variants, kept)
-                held = {one.entry for one in kept.condition_trees}
+                entries_held = {one.entry for one in kept.condition_trees}
                 statements[(owner, line)] = kept._replace(
                     added_under=added,
-                    condition_trees=(*kept.condition_trees, *(one for one in read_trees if one.entry not in held)),
+                    condition_trees=(*kept.condition_trees, *(one for one in read_trees if one.entry not in entries_held)),
                 )
 
     def terms_added(
@@ -4433,7 +4449,9 @@ def read_side(
             """``(pair, binds, words)``: what *term* asks for in a run passing *along*, and what in the text carries it."""
             subject = _term_subject(attributor, term)
             field = "excludes" if term.excluding else "selects"
-            found = [((field, f"{subject}={value}"), (), (term.column, f"'{value}'")) for value in term.literals]
+            found: list[tuple[tuple[str, str], tuple[str, ...], tuple[str, ...]]] = [
+                ((field, f"{subject}={value}"), (), (term.column, f"'{value}'")) for value in term.literals
+            ]
             unsaid = term.undecided
             for key in term.binds:
                 values_of = values(run, key, along)
@@ -4566,7 +4584,7 @@ def read_side(
                                 continue
                             if _squeezed(value.value) != _squeezed(text):
                                 continue
-                            leaf = _Leaf(0, 0, site_of(value), (_Hop(func, run.call),))
+                            leaf = _Leaf(0, 0, cast(ast.stmt, site_of(value)), (_Hop(func, run.call),))
                             place = _place(leaf, term, file_of)
                             if place.tests:
                                 found.setdefault((place.fragment, place.term), place)
@@ -4613,7 +4631,7 @@ def read_side(
             else:
                 added.append(AddedTerm(field=field, term=term, unplaced="the fragment appending it was not found"))
         read_trees = tuple(
-            ConditionReading(entry=spelled[key], tree=trees[key])
+            ConditionReading(entry=spelled[key], tree=cast(ConditionNode, trees[key]))
             for key in missing
             if key[0] == "conditions" and trees.get(key) is not None
         )
@@ -5011,6 +5029,8 @@ ANY_FIELD = _ANY_FIELD
 #: The step for a dict's keys: where a dict literal puts its keys.
 KEY_STEP = _KEY
 _Paths = frozenset[tuple[str, ...]]
+#: A part's paths from its whole's.
+_Take = Callable[[_Paths], _Paths]
 #: The value itself holds the rows.
 _WHOLE: _Paths = frozenset({()})
 _NOTHING: _Paths = frozenset()
@@ -5023,7 +5043,7 @@ _READ_AGAIN = callfacts.READ_AGAIN
 _COMPUTING_MODULES = callfacts.COMPUTING_MODULES
 
 
-def _unread_call(call: ast.Call, name: str, function: Optional[callfacts.Function]) -> bool:
+def _unread_call(call: ast.Call, name: Optional[str], function: Optional[callfacts.Function]) -> bool:
     """Whether *call*, which no reading places, makes a value the map cannot read (U1's 4): another system's answer, a
     function of the corpus or a library -- not a builtin (*function*) or a module computing a number, a value read
     again out of a text, a text made by a str method."""
@@ -5142,7 +5162,7 @@ def _name_kinds(func: ast.AST) -> dict[str, str]:
             name: (said.get(name, set()) | {_operand(value, kinds) for value in made.get(name, [])}) - {None}
             for name in set(said) | set(made)
         }
-        settled = {name: next(iter(kind)) for name, kind in found.items() if len(kind) == 1}
+        settled = {name: cast(str, next(iter(kind))) for name, kind in found.items() if len(kind) == 1}
         if settled == kinds:
             break
         kinds = settled
@@ -5186,7 +5206,7 @@ def _same_step(head: str, step: str) -> bool:
 
 def _under(step: str, paths: Iterable[tuple[str, ...]]) -> _Paths:
     """What the part *step* of a value holds, the value holding *paths*: the whole value holds every part."""
-    found = set()
+    found: set[tuple[str, ...]] = set()
     for path in paths:
         path = _bare(path)
         if not path:
@@ -5665,9 +5685,11 @@ class _PathCarry:
         elif isinstance(target, (ast.Tuple, ast.List)):
             for index, element in enumerate(target.elts):
                 if isinstance(element, ast.Starred):
-                    self._target(element.value, node, source, lambda p, t=take: _below((_ALL,), _under(_ALL, t(p))), adds)
+                    self._target(
+                        element.value, node, source, cast(_Take, lambda p, t=take: _below((_ALL,), _under(_ALL, t(p)))), adds
+                    )
                 else:
-                    self._target(element, node, source, lambda p, t=take, s=f"[{index}]": _under(s, t(p)), adds)
+                    self._target(element, node, source, cast(_Take, lambda p, t=take, s=f"[{index}]": _under(s, t(p))), adds)
         elif isinstance(target, (ast.Attribute, ast.Subscript)):
             found = _access_path(target)
             if found is not None:
@@ -6043,24 +6065,24 @@ class _PathCarry:
                 return held(args[0], at) if args else _NOTHING
             receiver = held(call.func.value, at)
             placed = self.reading.place(self, call) if receiver else None
-            gives = callfacts.taken(name)
-            if not receiver and gives is not None and gives.key is not None and self.handed_any(call, at):
+            give = callfacts.taken(cast(str, name))  # an attribute's call: a name
+            if not receiver and give is not None and give.key is not None and self.handed_any(call, at):
                 # ``d.get(k)``, ``k`` holding them: the key chooses the value; a default handed beside it may be it.
                 placed = self.reading.place(self, call)
                 if not (placed is not None and placed.targets):
-                    beside = args[gives.default : gives.default + 1] if gives.default is not None else []
-                    return frozenset(path for one in beside for path in held(one, at))
-            if receiver and gives is not None and not (placed is not None and placed.targets):
+                    defaults = args[give.default : give.default + 1] if give.default is not None else []
+                    return frozenset(path for one in defaults for path in held(one, at))
+            if receiver and give is not None and not (placed is not None and placed.targets):
                 # A builtin container's method no reading places, by what it hands back (callfacts.Give).
-                if gives.part == callfacts.VALUES:
+                if give.part == callfacts.VALUES:
                     return _below((_ALL,), _under(_ALL, receiver))
-                if gives.part == callfacts.KEYS:
+                if give.part == callfacts.KEYS:
                     return _below((_ALL,), _under(_KEY, receiver))
-                if gives.part == callfacts.ITEMS:
+                if give.part == callfacts.ITEMS:
                     return _below((_ALL, "[0]"), _under(_KEY, receiver)) | _below((_ALL, "[1]"), _under(_ALL, receiver))
-                if gives.part == callfacts.ITEM:
+                if give.part == callfacts.ITEM:
                     return _below(("[0]",), _under(_KEY, receiver)) | _below(("[1]",), _under(_ALL, receiver))
-                if gives.part == callfacts.AT:
+                if give.part == callfacts.AT:
                     return _under(_ALL, receiver)
                 return receiver  # a copy
         if not self.handed_any(call, at):
@@ -6083,9 +6105,9 @@ class _PathCarry:
         if args and name in _CHUNKING | _SLICING | _CHAINING:
             # An iterator helper no reading places: the first argument's elements, or every one's -- not the
             # count beside them, which the rule below would read as the whole value.
-            taken = args if name in _CHAINING else args[:1]
-            elements = frozenset(path for one in taken for path in _elements(self._as_list(one, at)))
-            return _below((_ALL, _ALL) if name in _CHUNKING else (_ALL,), elements)
+            chained = args if name in _CHAINING else args[:1]
+            chained_paths = frozenset(path for one in chained for path in _elements(self._as_list(one, at)))
+            return _below((_ALL, _ALL) if name in _CHUNKING else (_ALL,), chained_paths)
         # A call no reading places -- a builtin, a str method, a hole -- computes a value from what it is handed, and
         # it holds none of the rows (U1): a count, a sum, a value read again (``json.loads`` of a column), another
         # system's answer (a hole handed them is said where it is handed them: ``crosses_open``).  What carries them
@@ -6208,7 +6230,7 @@ class _Reading:
         self._placed: dict[tuple, Optional[Placed]] = {}
         self._meanings: dict[tuple, callfacts.Meaning] = {}
         #: Keyed by node ids, each holding the node, so that no id is reused while the build runs.
-        self._writes: dict[int, tuple[ast.AST, list[_Write]]] = {}
+        self._writes: dict[tuple[int, bool], tuple[ast.AST, list[_Write]]] = {}
         self._dicts: dict[int, tuple[ast.AST, frozenset[str]]] = {}
         self._names: dict[int, tuple[ast.AST, dict[str, str]]] = {}
         self._surviving: dict[tuple, set[int]] = {}
@@ -6426,8 +6448,8 @@ class _Reading:
             if receiver is not None and made_on is not None:
                 handed[receiver] = made_on
             for parameter, paths in summary.kept.items():
-                value = handed.get(parameter)
-                where = _access_path(value) if value is not None else None
+                handed_value = handed.get(parameter)
+                where = _access_path(handed_value) if handed_value is not None else None
                 if where is not None:
                     found[where] = found.get(where, _NOTHING) | paths
         return found
@@ -6465,8 +6487,8 @@ class _Reading:
             parent = getattr(node, "parent", None)
             if (
                 isinstance(parent, ast.Attribute)
-                and isinstance(getattr(parent, "parent", None), ast.Call)
-                and parent.parent.func is parent
+                and isinstance(called := getattr(parent, "parent", None), ast.Call)
+                and called.func is parent
             ):
                 continue  # a method's receiver: read above, at its call
             if isinstance(parent, (ast.Attribute, ast.Subscript)) and parent.value is node:
@@ -6484,8 +6506,8 @@ class _Reading:
                     return self._method_reads(carry, parent)
                 return self._argument_reads(carry, parent, child)
             if isinstance(parent, ast.Attribute) and parent.value is child:
-                if isinstance(getattr(parent, "parent", None), ast.Call) and parent.parent.func is parent:
-                    return self._method_reads(carry, parent.parent)
+                if isinstance(called := getattr(parent, "parent", None), ast.Call) and called.func is parent:
+                    return self._method_reads(carry, called)
                 return False  # a field the path does not hold (held() read it as such)
             if isinstance(parent, ast.Subscript):
                 if parent.slice is child:
@@ -7265,7 +7287,7 @@ class _Filled:
             if given[:1] == ["self"]
             else []
         )
-        self._carries: dict[str, _PathCarry] = {}
+        self._carries: dict[str, Optional[_PathCarry]] = {}
         self._items: dict[str, tuple[tuple[sqltext.SelectItem, ...], ...]] = {}
 
     def _carry(self, name: str, seeds: dict[str, _Paths]) -> _PathCarry:
@@ -7416,7 +7438,7 @@ class _Filled:
         if key not in self._carries:
             seeds = _rows_written(self.func, site.anchor.line_start, site.region[1])
             self._carries[key] = _PathCarry(self.reading, self.file, self.func, (), start=seeds, item=item)
-        return self._carries[key]
+        return cast(_PathCarry, self._carries[key])  # an item's carry is always made
 
     def column(self, site: ReadSiteNode, value: ast.AST, at: ast.AST) -> tuple[str, str, str]:
         """``(table.column, its subject, "")`` of the select item of *site*'s rows *value* is where *at* runs, or
@@ -7429,7 +7451,7 @@ class _Filled:
         """*column* (``table.column``) as a subject where its table's spec class has it, else ``""``."""
         if not column or self.attributor is None:
             return ""
-        return _spec_attr(self.attributor, *column.split(".", 1), self.class_of)
+        return _spec_attr(self.attributor, *cast("tuple[str, str]", column.split(".", 1)), self.class_of)
 
     def never_at(self, site: ReadSiteNode, places: list[ast.AST]) -> list[str]:
         """The values *site* selects (its *selects*) for which no node of *places* runs: a test on the way to each
@@ -7626,8 +7648,8 @@ def _read_key_froms(sites: Iterable[ReadSiteNode], trees: dict[str, ast.AST]) ->
                 ]
                 if run.varmap is None and not bound:
                     continue
-                record._binds[2].extend(bound)
-                record.unread = "" if record._binds[2] else KEY_NO_BIND
+                cast(tuple, record._binds)[2].extend(bound)
+                record.unread = "" if cast(tuple, record._binds)[2] else KEY_NO_BIND
             for table, column, bind, mapping in _read_keyed(func, run):
                 spelled = f"{column}={bind}"
                 record = found.get((site.owner, line, table, spelled))
@@ -8423,7 +8445,7 @@ def _landed_sources(
         site = sites.get(name)
         if site is None:
             continue
-        lists = _select_lists(found[0].origin, site)
+        lists = _select_lists(cast(ast.AST, found[0].origin), site)
         for landing in found:
             for key_from in by_call.get(id(landing.call), ()):
                 hit = [key.lstrip(":") for key in re.findall(r":\w+", key_from.term) if key.lstrip(":") in landing.held]
@@ -8444,7 +8466,7 @@ def _landed_sources(
                     bound[0].value if bound else None,
                     site,
                     lambda column: (
-                        _spec_attr(attributor, *column.split(".", 1), class_of)
+                        _spec_attr(attributor, *cast("tuple[str, str]", column.split(".", 1)), class_of)
                         if column and attributor is not None
                         else ""
                     ),
@@ -8698,12 +8720,12 @@ def attach_key_sources(
         new_row, why, line = _new_row(together, sites, table_class or (lambda _table: None))
         for key_from in together:
             key_from.new_row, key_from.new_row_by, key_from.new_row_line = new_row, why, line
-    for source in row_keys:
-        if source._filled is None:
+    for row_key in row_keys:
+        if row_key._filled is None:
             continue
-        func, file, values = source._filled
+        func, file, values = row_key._filled
         reader = of(func, file)
-        source.handed_by = next(
+        row_key.handed_by = next(
             (names[0] for value, at, steps in values if (names := reader.handed(value, at, steps))), ""
         )
         read += 1
@@ -9062,12 +9084,12 @@ def attach_routes(key_froms: Iterable[KeyFrom], calls: Optional[Calls]) -> None:
                 [(list(route.chain), _route_constants(calls, target, route.sites, tested)) for route in routes],
                 bool(stops),
             )
-        _func, routes, opened = found
-        record.routes = len(routes)
+        _func, constants_by_route, opened = found
+        record.routes = len(constants_by_route)
         record.routes_open = opened
         record.out_on = [
             chain
-            for chain, constants in routes
+            for chain, constants in constants_by_route
             if constants and places and all(pathcond.ruled_out_by(place, func, constants) for place in places)
         ]
 
@@ -9556,7 +9578,7 @@ def _key_values(
     key_from: KeyFrom, sites: dict[str, ReadSiteNode], table_class: Callable[[str], Optional[str]]
 ) -> list[tuple[str, str, Optional[int]]]:
     """What one key column of an ``INSERT`` is given: ``(new | carried | handed | other | unread, why, line)`` each."""
-    insert: _Insert = key_from._insert
+    insert = cast(_Insert, key_from._insert)
     statement = key_from.statement
     settled = {
         "returning": NEW_ROW_RETURNING,
@@ -9612,7 +9634,7 @@ def _new_row(
     one is carried from a row of the table's class read here; else new, its key carried from something not of the
     table's class -- a scalar handed in, a parent's row.  A table no class maps is a class of its own."""
     first = key_froms[0]
-    insert: _Insert = first._insert
+    insert = cast(_Insert, first._insert)
     if insert.value == "none":
         return None, NEW_ROW_NO_KEY, first.statement
     if insert.rewritten is not None:
@@ -9622,10 +9644,10 @@ def _new_row(
     if new:
         why = min(new, key=lambda value: (_NEW_ROW_ORDER.index(value[1]), value[2] or 0))
         return True, why[1], why[2]
-    for kind, why in (("upsert", NEW_ROW_UPSERT), ("unread", NEW_ROW_UNREAD), ("handed", NEW_ROW_HANDED)):
+    for kind, reason in (("upsert", NEW_ROW_UPSERT), ("unread", NEW_ROW_UNREAD), ("handed", NEW_ROW_HANDED)):
         found = [value for value in values if value[0] == kind]
         if found:
-            return None, why, found[0][2]
+            return None, reason, found[0][2]
     other = [value for value in values if value[0] == "other"]
     if not other:
         return False, NEW_ROW_MOVED, values[0][2] if values else first.statement

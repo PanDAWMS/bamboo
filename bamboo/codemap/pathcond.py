@@ -230,9 +230,7 @@ def _assigned(
         _assigned(one, held, node, found)
 
 
-def single_definition(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> Optional[ast.expr]:
+def single_definition(func: ast.AST, name: str) -> Optional[ast.expr]:
     """Return the expression assigned to *name*, when exactly one assigns it.
 
     A condition written as a bare local name says nothing on its own: ``if not
@@ -483,9 +481,7 @@ def _index(scope: ast.AST) -> _Index:
     return held
 
 
-def assigned_expressions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> dict[str, list[ast.expr]]:
+def assigned_expressions(func: ast.AST) -> dict[str, list[ast.expr]]:
     """Every expression bound to each local name in *func*, ``+=`` included.
 
     The unrestricted sibling of :func:`single_definition`, for the readers that
@@ -508,9 +504,7 @@ def assigned_expressions(
     return {name: list(values) for name, values in _index(func).assigned().items()}
 
 
-def attribute_expressions(
-    scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, field: str
-) -> list[ast.expr]:
+def attribute_expressions(scope: ast.AST, field: str) -> list[ast.expr]:
     """Every expression bound to ``self.<field>`` inside *scope*.
 
     The ``ast.Attribute`` sibling of :func:`assigned_expressions`, and a
@@ -1635,9 +1629,7 @@ def _within(node: ast.AST, container: ast.AST) -> bool:
     return node is container or any(ancestor is container for ancestor in ancestors(node))
 
 
-def reaching_definitions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, target: ast.AST
-) -> list[ast.expr]:
+def reaching_definitions(func: ast.AST, name: str, target: ast.AST) -> list[ast.expr]:
     """The expressions bound to *name* that can still be what *target* reads.
 
     :func:`assigned_expressions` answers "everything this name ever holds",

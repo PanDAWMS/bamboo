@@ -59,7 +59,7 @@ import string
 import sys
 from collections import Counter, deque
 from pathlib import Path
-from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence
+from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import astwalk, callfacts, pathcond
 from bamboo.codemap import calls as calls_mod
@@ -293,6 +293,10 @@ def _node_at(func: ast.AST, place: tuple) -> Optional[ast.AST]:
     return next((node for node in astwalk.walk(func) if _place(node) == place), None)
 
 
+#: A step the walk takes after its queue: what it hands back is not read.
+_Later = Callable[[], object]
+
+
 class _Frame(NamedTuple):
     file: str
     owner: str
@@ -317,7 +321,8 @@ def _located(tree: ast.Module, owner: str, line: Optional[int]) -> Optional[ast.
 
 def _holds(func: ast.AST, line: Optional[int]) -> bool:
     """Whether *line* is in *func*, or no line is asked."""
-    return line is None or func.lineno <= line <= (func.end_lineno or func.lineno)
+    defined = cast(ast.stmt, func)  # a frame held in the walk's frames is a function's
+    return line is None or defined.lineno <= line <= (defined.end_lineno or defined.lineno)
 
 
 def _text(node: ast.AST) -> str:
@@ -679,7 +684,7 @@ def _hole_prints(part: ast.FormattedValue) -> str:
     if isinstance(spec, ast.JoinedStr) and all(
         isinstance(value, ast.Constant) for value in spec.values
     ):
-        written = "".join(str(value.value) for value in spec.values)
+        written = "".join(str(cast(ast.Constant, value).value) for value in spec.values)
         if written and written[-1] in _NUMBER_SPEC:
             return "number"
     if part.conversion == ord("r"):
@@ -1123,7 +1128,7 @@ def _blocks_of(statement: ast.stmt) -> list[tuple[str, list[ast.stmt]]]:
 
 def _of_interest(
     statement: ast.stmt,
-    printed: dict[int, list[tuple[ast.expr, ast.expr]]],
+    printed: dict[int, list[tuple[ast.expr, "_Message"]]],
     armed: dict[int, ast.stmt],
 ) -> bool:
     """Whether anything under *statement* is a line printed or an arm written.
@@ -1446,8 +1451,9 @@ def _fold(expression: Optional[ast.expr], env: dict[str, list], depth: int = 0) 
             if isinstance(part, ast.Constant):
                 out.append(str(part.value))
                 continue
-            inner = _fold(part.value, env, depth + 1) if part.format_spec is None else None
-            out.extend(inner if inner is not None else [_Unknown(_text(part.value), _hole_prints(part) or "token")])
+            hole = cast(ast.FormattedValue, part)
+            inner = _fold(hole.value, env, depth + 1) if hole.format_spec is None else None
+            out.extend(inner if inner is not None else [_Unknown(_text(hole.value), _hole_prints(hole) or "token")])
         return out
     if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.Add):
         left = _fold(expression.left, env, depth + 1)
@@ -1569,7 +1575,7 @@ def _wrapper_prefix(
     ``MsgWrapper`` with no token, or either with ``None``, a time stamp taken when the logger is made, which no
     pattern here spells.  A mark that does not fold is a hole.
     """
-    mark = callfacts.LOGGER_MAKERS[_called_name(built)].mark
+    mark = cast(callfacts.Mark, callfacts.LOGGER_MAKERS[_called_name(built)].mark)
     if len(built.args) > mark.position:
         given = built.args[mark.position]
     elif any(keyword.arg == mark.keyword for keyword in built.keywords):
@@ -1598,11 +1604,10 @@ def _made_logger_prefix(
     if method is None or _is_none(method, nones):
         if caller is None:
             return None, PREFIX_NOT_FOLDED.replace("{prefix}", "the calling function's name")
-        named: Optional[list] = [caller]
+        named: list = [caller]
     else:
-        named = _fold(method, env)
-        if named is None:
-            named = [_Unknown(_text(method), "token")]
+        folded = _fold(method, env)
+        named = folded if folded is not None else [_Unknown(_text(method), "token")]
     if token is None or _is_none(token, nones):
         return [*named, " :"], ""
     held = _fold(token, env)
@@ -2425,15 +2430,15 @@ def _module_bindings(tree: ast.Module, name: str) -> list[ast.expr]:
     found: list[ast.expr] = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
-            targets = node.targets
+            targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
+            targets, value = [node.target], node.value
         else:
             continue
         for target in targets:
             elements = target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]
             if any(isinstance(e, ast.Name) and e.id == name for e in elements):
-                found.append(node.value)
+                found.append(value)
     return found
 
 
@@ -2456,7 +2461,9 @@ def _caught_as(func: ast.AST, name: str) -> list[ast.ExceptHandler]:
     ]
 
 
-def _nested_scope(func: ast.AST, site: ast.AST) -> Optional[ast.AST]:
+def _nested_scope(
+    func: ast.AST, site: ast.AST
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef]:
     """The inner ``def`` or ``class`` between *site* and *func*, if any.
 
     ``pathcond.assigned_expressions`` walks the whole subtree, so a name
@@ -2596,7 +2603,7 @@ class _Walk:
         self.queue: deque[tuple[_Frame, str, int, Optional[ast.AST]]] = deque()
         #: What waits until the function's own answer is done: going into a
         #: call, and the names asked in the functions reached that way.
-        self.beyond: deque[Callable[[], None]] = deque()
+        self.beyond: deque[_Later] = deque()
         #: Whether what is being recorded now is spent from the crossing's
         #: allowance -- see ``Budget.crossed_steps``.
         self.crossing = False
@@ -2618,7 +2625,7 @@ class _Walk:
         self._made: dict[tuple[str, int, str], Optional[set[tuple[str, int, int]]]] = {}
         #: ``_message_sites`` per (function, spelling): a function with a
         #: hundred logging calls asks for the same local a hundred times.
-        self._sites: dict[tuple[int, str], tuple] = {}
+        self._sites: dict[tuple[int, str], tuple[list[ast.expr], list[ast.expr], list[ast.AST]]] = {}
         self._asked: dict[tuple[str, str], str] = {}
         self._prefixes: dict[tuple[str, int], list[tuple[str, str, list[SkeletonHole], str]]] = {}
         #: The walk back from a logging call to the calls making its logger (:meth:`_makers`), made on first use.
@@ -2691,9 +2698,10 @@ class _Walk:
             # A question spells the function by its file, so it is found
             # before its key is known (:meth:`_spelled`).
             parsed = self.module(file)
-            located = _located(parsed[1], owner, line) if parsed is not None else None
-            if located is not None:
-                owner = self._spelled(file, parsed[1], located)
+            if parsed is not None:
+                located = _located(parsed[1], owner, line)
+                if located is not None:
+                    owner = self._spelled(file, parsed[1], located)
         key = (file, owner)
         if key in self.frames:
             held = self.frames[key]
@@ -2704,7 +2712,8 @@ class _Walk:
             # each of its threads, and the line asked about is not in the
             # ``run`` the walk entered first.  Spelled with the class, as
             # ``_callee_frame`` spells a call's.
-            func = containing_function(self.parsed[file][1], line, owner) if file in self.parsed else None
+            # Not held: a line was asked.
+            func = containing_function(self.parsed[file][1], cast(int, line), owner) if file in self.parsed else None
             if func is None or "." in owner.rsplit("::", 1)[-1]:
                 return held
             return self.frame(file, _with_class(file, self.parsed[file][1], func), line=line, handovers=handovers)
@@ -2832,7 +2841,7 @@ class _Walk:
             if (where, func.lineno) in read:
                 continue
             read.add((where, func.lineno))
-            readings = [None]
+            readings: list[Optional[dict[str, object]]] = [None]
             if at:
                 owned = self.types.method_class(where, func)
                 target = calls_mod.Target(where, func, owned[1] if owned else None)
@@ -3193,8 +3202,11 @@ class _Walk:
             role = self._role
             if (frame.file, frame.owner) in self.entered:
                 self.beyond.append(
-                    lambda held=frame, one=name, deep=depth, where=at, part=role: self._explain_as(
-                        part, held, one, deep, where
+                    cast(
+                        _Later,
+                        lambda held=frame, one=name, deep=depth, where=at, part=role: self._explain_as(
+                            part, held, one, deep, where
+                        ),
                     )
                 )
             else:
@@ -3356,10 +3368,10 @@ class _Walk:
                 return [[_hole(expr)]], []
             return [], [REFUSED_RETURNED]
         if isinstance(expr, ast.IfExp):
-            ways: list[list[ast.expr]] = []
+            either: list[list[ast.expr]] = []
             for branch in (expr.body, expr.orelse):
-                ways.extend(self._operand(frame, branch, at, depth, seen))
-            return ways, []
+                either.extend(self._operand(frame, branch, at, depth, seen))
+            return either, []
         if isinstance(expr, (ast.Name, ast.Attribute, ast.Subscript)):
             return self._bound_message(frame, expr, at, depth, seen)
         return [[_hole(expr)]], []
@@ -3439,7 +3451,7 @@ class _Walk:
         )
         if outside and not any(_dominates(pathcond.site_of(value), at) for value in plain):
             refused.append(outside)
-        tail = [_appended(expr)] if appended else []
+        tail: list[ast.expr] = [_appended(expr)] if appended else []
         # Each binding's text with what ``+=`` adds after it on each way to the call; a binding whose ways are not
         # told is printed as before, its text then a hole, and the ``+=`` parts then each a row of their own.
         alone = not plain
@@ -3502,7 +3514,7 @@ class _Walk:
             why = next(why for pieces, why in marks if pieces is None)
             said = [("", why.replace("{logger}", _text(receiver)), [], "")]
         else:
-            distinct = {_spelled(pieces): pieces for pieces, _why in marks}
+            distinct = {_spelled(pieces): pieces for pieces, _why in cast("list[tuple[list, str]]", marks)}
             said = sorted(
                 (
                     (
@@ -3586,7 +3598,9 @@ class _Walk:
         if stopped:
             return hole
         marks = [self._mark_of(one, depth + 1) for one in makers]
-        if any(pieces is None for pieces, _why in marks) or len({_spelled(pieces) for pieces, _why in marks}) > 1:
+        if any(pieces is None for pieces, _why in marks) or len(
+            {_spelled(pieces) for pieces, _why in cast("list[tuple[list, str]]", marks)}
+        ) > 1:
             return hole
         inner = marks[0][0] if marks else []
         return [*inner, " "] if inner else []
@@ -3632,11 +3646,11 @@ class _Walk:
             return None, unfollowed
         (target,) = placed.targets
         bound = calls_mod.bind(built, target, placed.on_class)
-        callee_env = {
+        bound_env = {
             name: (_fold(value, env) if value is not None else None)
             for name, value in bound.items()
         }
-        callee_env = {name: value for name, value in callee_env.items() if value is not None}
+        callee_env = {name: value for name, value in bound_env.items() if value is not None}
         loggers: dict[str, tuple[Optional[list], str]] = {}
         for statement in target.func.body:  # type: ignore[attr-defined]
             targets = pathcond.targets_of(statement)
@@ -3659,9 +3673,9 @@ class _Walk:
             elif isinstance(statement, ast.If):
                 # Whatever a branch assigns, ``+=`` too, is not known to have run.
                 for node in astwalk.walk(statement):
-                    for held in [node.target] if isinstance(node, ast.AugAssign) else pathcond.targets_of(node):
-                        if isinstance(held, ast.Name):
-                            callee_env[held.id] = [_Unknown(held.id)]
+                    for written in [node.target] if isinstance(node, ast.AugAssign) else pathcond.targets_of(node):
+                        if isinstance(written, ast.Name):
+                            callee_env[written.id] = [_Unknown(written.id)]
             elif isinstance(statement, ast.Return):
                 returned = statement.value
                 if isinstance(returned, ast.Name):
@@ -4179,7 +4193,7 @@ class _Walk:
                 if not again:
                     self._unbound(frame, name, depth, only_below=True)
                 return
-        if again:
+        if done is not None:
             bindings = [node for node in bindings if _walked_key(node) not in done]
             loops = [node for node in loops if _walked_key(node) not in done]
             caught = [node for node in caught if _walked_key(node) not in done]
@@ -4334,9 +4348,7 @@ class _Walk:
         map": the entry is asked for as itself, after the name has been.
         """
         for keyed in _keyed_reads(expression):
-            self.beyond.append(
-                lambda one=keyed: self.want(frame, [one], depth, at)
-            )
+            self.beyond.append(cast(_Later, lambda one=keyed: self.want(frame, [one], depth, at)))
 
     def _keyed(self, frame: _Frame, name: str, depth: int, at: Optional[ast.AST]) -> None:
         """Explain ``x['k']``: what this function puts there, or what the call ``x`` came from returns there."""
@@ -4366,7 +4378,7 @@ class _Walk:
         # the entry is what that call returns under the key.
         for value in pathcond.assigned_expressions(frame.func).get(base, []):
             if isinstance(value, ast.Call):
-                self.beyond.append(lambda call=value: self._enter(frame, None, call, (key,), depth))
+                self.beyond.append(cast(_Later, lambda call=value: self._enter(frame, None, call, (key,), depth)))
             elif isinstance(value, ast.Dict):
                 for held, item in zip(value.keys, value.values, strict=True):
                     if isinstance(held, ast.Constant) and held.value == key:
@@ -4374,7 +4386,10 @@ class _Walk:
         for assign, slot in _tuple_bindings(frame.func, base):
             if slot is not None and isinstance(assign.value, ast.Call):
                 self.beyond.append(
-                    lambda call=assign.value, where=slot: self._enter(frame, None, call, (where, key), depth)
+                    cast(
+                        _Later,
+                        lambda call=assign.value, where=slot: self._enter(frame, None, call, (where, key), depth),
+                    )
                 )
 
     def _enter_tests(self, frame: _Frame, site: ast.AST, depth: int, above: bool = True) -> None:
@@ -4400,9 +4415,7 @@ class _Walk:
                 if isinstance(node, ast.Call) and not (
                     isinstance(node.func, ast.Name) and node.func.id in _BUILTINS
                 ):
-                    self.beyond.append(
-                        lambda call=node: self._enter(frame, None, call, None, depth)
-                    )
+                    self.beyond.append(cast(_Later, lambda call=node: self._enter(frame, None, call, None, depth)))
 
     def _block_prints(self, frame: _Frame, statement: ast.AST) -> list[str]:
         """Patterns of the lines printed on the way to *statement*, nearest first.
@@ -4420,11 +4433,11 @@ class _Walk:
                 continue
             # Written out the way the skeleton writes it, holes filled from
             # the locals that fill them.
-            for one in self._expanded(frame, message.expr, argument):
+            for written in self._expanded(frame, message.expr, argument):
                 pattern = (
-                    line_pattern(one)
-                    if isinstance(one, ast.JoinedStr)
-                    else _constant_pattern(one)
+                    line_pattern(written)
+                    if isinstance(written, ast.JoinedStr)
+                    else _constant_pattern(written)
                 )
                 if pattern:
                     rendered.setdefault(id(enclosing), []).append(pattern)
@@ -4570,7 +4583,7 @@ class _Walk:
         frame: _Frame,
         step: Optional[TraceStep],
         expression: ast.expr,
-        slot: Optional[int],
+        slot: Optional[int | tuple],
         depth: int,
     ) -> None:
         """Go into the call a value was bound from, and explain what it returns.
@@ -4642,10 +4655,10 @@ class _Walk:
             for returned in calls_mod.returns(callee.func):
                 value, pending = returned, list(path)
                 while pending:
-                    taken = _projected(value, pending[0])
-                    if taken is value:
+                    projected = _projected(value, pending[0])
+                    if projected is value:
                         break
-                    value, pending = taken, pending[1:]
+                    value, pending = projected, pending[1:]
                 statement = pathcond.site_of(returned) if hasattr(returned, "parent") else callee.func
                 terminal, detail = self.terminal_of(callee, value)
                 text = _text(value)
@@ -4704,7 +4717,7 @@ class _Walk:
             for narrowed in self.watched.get((callee.file, callee.owner), ()):
                 self._came_later(narrowed, frame, call)
         self.entered.add((callee.file, callee.owner))
-        self._moved(frame, callee, Move(MOVE_DOWN, callee.file, callee.owner, callee.func.lineno, _place(call)))
+        self._moved(frame, callee, Move(MOVE_DOWN, callee.file, callee.owner, cast(ast.stmt, callee.func).lineno, _place(call)))
 
     def _entered_open(self, callee: _Frame, reason: str) -> None:
         """Say on each return step of *callee* that some call that entered it was placed open.
@@ -4727,7 +4740,7 @@ class _Walk:
         owner = f"{target.file}::{target.func.name}"  # type: ignore[attr-defined]
         held = self.frames.get((target.file, owner))
         line = target.func.lineno  # type: ignore[attr-defined]
-        if held is not None and held.func.lineno != line:
+        if held is not None and cast(ast.stmt, held.func).lineno != line:
             # Two functions of one file with one name: a method of each of two
             # classes.  Spelled with the class so the second is not the first.
             owner = f"{target.file}::{target.cls.name if target.cls else 'module'}.{target.func.name}"  # type: ignore[attr-defined]
@@ -4990,7 +5003,7 @@ class _Walk:
                 spent = (site.file, owner) not in self.frames and len(self.frames) >= self._functions_limit()
                 caller = self.frame(site.file, owner, line=site.func.lineno)  # type: ignore[attr-defined]
             call = _same_node(caller.func, site.call) if caller is not None else None
-            if not isinstance(call, ast.Call):
+            if caller is None or not isinstance(call, ast.Call):
                 why = (
                     "the walk's functions budget ran out" if caller is None and spent
                     else "its function is not read" if caller is None
@@ -5181,7 +5194,8 @@ class _Walk:
         made = self._object_made(frame)
         if made is None:
             return sites, [], None
-        kept, left = [], []
+        kept: list = []
+        left: list = []
         for site in sites:
             receiver = self.calls.made_on(site.file, site.func, site.call)
             if receiver is None or (isinstance(receiver, ast.Name) and receiver.id == "self"):
@@ -5296,7 +5310,7 @@ class _Walk:
             elif not bound and not isinstance(func, ast.Module):
                 tree = self.types.tree(file)
                 bound = _plain_bindings(tree, expression.id) if tree is not None else None
-                if not bound:
+                if tree is None or not bound:
                     return None
                 values = [(tree, value) for value in bound]
         else:
@@ -5304,18 +5318,18 @@ class _Walk:
         if not values:
             return None
         found: set[tuple[str, int, int]] = set()
-        for holder, value in values:
+        for scope, value in values:
             if value is None:
-                # The parameter itself, as each caller of *holder* hands it.
+                # The parameter itself, as each caller of *scope* hands it.
                 if hops <= 0:
                     return None
-                owned = self.types.method_class(file, holder)
-                called = calls_mod.Target(file, holder, owned[1] if owned else None)
+                owned = self.types.method_class(file, scope)
+                called = calls_mod.Target(file, scope, owned[1] if owned else None)
                 sites = self.calls.callers(called)
                 if not sites or len(sites) > _BUILT_CALLERS:
                     return None
                 for site in sites:
-                    argument = self.calls.handed(site, called).get(expression.id)
+                    argument = self.calls.handed(site, called).get(cast(ast.Name, expression).id)
                     if argument is None:
                         return None
                     more = self._constructions(site.file, site.func, argument, hops - 1, seen)
@@ -5324,16 +5338,16 @@ class _Walk:
                     found |= more
             elif isinstance(value, ast.Call):
                 if self.types.class_named(file, value.func) is None and (
-                    isinstance(holder, ast.Module)
+                    isinstance(scope, ast.Module)
                     or not any(
                         getattr(one.func, "name", "") == "__init__"
-                        for one in self.calls.callees(file, holder, value).targets
+                        for one in self.calls.callees(file, scope, value).targets
                     )
                 ):
                     return None
                 found.add((file, value.lineno, value.col_offset))
             elif isinstance(value, ast.Name):
-                more = self._constructions(file, holder, value, hops, seen)
+                more = self._constructions(file, scope, value, hops, seen)
                 if more is None:
                     return None
                 found |= more
@@ -5377,7 +5391,7 @@ class _Walk:
             )
         )
 
-    def _loop(self, frame: _Frame, name: str, loop: ast.AST, depth: int) -> None:
+    def _loop(self, frame: _Frame, name: str, loop: ast.For | ast.AsyncFor, depth: int) -> None:
         over = _text(loop.iter)
         reads = _reads(loop.iter)
         step = TraceStep(
@@ -5421,7 +5435,7 @@ class _Walk:
                 owner=frame.owner,
                 file=frame.file,
                 line=handler.lineno,
-                value=f"raised under {_text(handler.type)}",
+                value=f"raised under {_text(cast(ast.expr, handler.type))}",
                 unseen=_unseen(handler),
                 terminal=terminal,
                 detail=detail,
@@ -5429,7 +5443,7 @@ class _Walk:
             )
         )
 
-    def _sibling(self, frame: _Frame, method: ast.AST) -> Optional[_Frame]:
+    def _sibling(self, frame: _Frame, method: ast.FunctionDef | ast.AsyncFunctionDef) -> Optional[_Frame]:
         """A frame for another method of the same class.
 
         Its own frame, not the caller's, because the guards the walk reports
@@ -5511,7 +5525,7 @@ class _Walk:
                     answered = True
                 if other is not None and method.name != "__init__":
                     self.beyond.append(
-                        lambda held=other, step=said: self._mutated_at(held, field, depth + 1, step)
+                        cast(_Later, lambda held=other, step=said: self._mutated_at(held, field, depth + 1, step))
                     )
         # Bases declared in other files are read beyond the function's own
         # answer: ``AdderAtlasPlugin``'s ``self.result`` is assigned in
@@ -5523,8 +5537,11 @@ class _Walk:
                 if not pathcond.attribute_expressions(method, field):
                     continue
                 self.beyond.append(
-                    lambda place=where, one=method: self._inherited_field(
-                        frame, place, one, name, field, depth
+                    cast(
+                        _Later,
+                        lambda place=where, one=method: self._inherited_field(
+                            frame, place, one, name, field, depth
+                        ),
                     )
                 )
                 answered = True
@@ -5593,7 +5610,7 @@ class _Walk:
         self.beyond.append(lambda: left.follow(extra))
 
     def _inherited_field(
-        self, frame: _Frame, file: str, method: ast.AST, name: str, field: str, depth: int
+        self, frame: _Frame, file: str, method: ast.FunctionDef | ast.AsyncFunctionDef, name: str, field: str, depth: int
     ) -> None:
         """``self.<field>`` as a base class in another file assigns it, asked by *frame* as a sibling in the file is."""
         other = self.frame(file, f"{file}::{getattr(method, 'name', '')}", line=method.lineno)
@@ -6137,7 +6154,7 @@ def walk_from_print(
             for argument in calls
         ):
             arguments = [statement.value]
-    if not arguments:
+    if not arguments or statement is None:
         return Walked([], "no logging call prints what is on this line")
     for argument in arguments:
         reads = _reads(argument)

@@ -358,7 +358,7 @@ def _one_hop(argument: ast.expr, assignments: dict[str, list[ast.expr]]) -> list
 
 
 def _reaching(
-    name: str, write: ast.stmt, func: ast.FunctionDef | ast.AsyncFunctionDef
+    name: str, write: ast.stmt | ast.Call, func: ast.FunctionDef | ast.AsyncFunctionDef
 ) -> list[ast.expr]:
     """The definitions of *name* that reach *write*.
 
@@ -423,7 +423,7 @@ def _block_containing(node: ast.AST) -> list[ast.stmt]:
 
 
 def recorded_signature(
-    node: ast.stmt,
+    node: ast.stmt | ast.Call,
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     setters: dict[str, _Setter],
     attribute: Optional[str] = None,
