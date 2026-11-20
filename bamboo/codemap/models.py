@@ -6816,7 +6816,7 @@ class FollowUp(BaseModel):
     # What ``attach_mover_gaps`` judges with, gathered while the map is open and
     # left out of what is printed or saved: it is the map's, not the answer's.
     mover_sites: dict[str, list["ReadSiteNode"]] = Field(default_factory=dict, exclude=True)
-    mover_files: dict[str, tuple[str, str]] = Field(default_factory=dict, exclude=True)
+    mover_files: dict[str, tuple[str, Optional[str]]] = Field(default_factory=dict, exclude=True)
     table_kinds: dict[str, Optional[str]] = Field(default_factory=dict, exclude=True)
     spec_class: str = Field(default="", exclude=True)
 

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Callable, Iterator, NamedTuple, Optional
+from typing import Callable, Iterator, NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts, evaluate, pathcond, values
 from bamboo.codemap.astwalk import walk
@@ -197,7 +197,7 @@ def _attribute_writes(
             continue
         for target, value in assigned_targets(node):
             if isinstance(target, ast.Attribute) and value is not None:
-                yield target, value, node
+                yield target, value, cast(ast.stmt, node)  # only a statement assigns
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +248,8 @@ def spec_setters(
                 continue
             written: dict[str, set[str]] = {}
             for node in walk(func):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue  # targets_of reads no other node
                 targets = targets_of(node)
                 if len(targets) != 1:
                     continue
@@ -259,8 +261,9 @@ def spec_setters(
                     and target.attr in declarations[owner]
                 ):
                     continue
+                assigned = cast(ast.expr, node.value)  # an assignment targets_of reads has a value
                 flowing = {
-                    name.id for name in walk(node.value) if isinstance(name, ast.Name)
+                    name.id for name in walk(assigned) if isinstance(name, ast.Name)
                 } & set(parameters)
                 if flowing:
                     written.setdefault(target.attr, set()).update(flowing)
@@ -333,9 +336,10 @@ def _recorded_in(
         if isinstance(node, ast.Call):
             yield _recorded_argument(node, setters)
         elif (
-            len(targets_of(node)) == 1
-            and isinstance(targets_of(node)[0], ast.Attribute)
-            and targets_of(node)[0].attr != settling
+            isinstance(node, (ast.Assign, ast.AnnAssign))  # targets_of reads no other node
+            and len(targets_of(node)) == 1
+            and isinstance(first := targets_of(node)[0], ast.Attribute)
+            and first.attr != settling
             and isinstance(node.value, (ast.Constant, ast.JoinedStr, ast.BinOp))
         ):
             yield node.value
@@ -373,7 +377,7 @@ def _reaching(
     """
     definitions = sorted(
         (
-            node
+            cast("ast.Assign | ast.AnnAssign | ast.AugAssign", node)  # what targets_of or the test below reads
             for node in walk(func)
             if any(isinstance(t, ast.Name) and t.id == name for t in targets_of(node))
             or (
@@ -384,7 +388,7 @@ def _reaching(
         ),
         key=lambda node: node.lineno,
     )
-    current: list[ast.stmt] = []
+    current: list[ast.Assign | ast.AnnAssign | ast.AugAssign] = []
     for definition in definitions:
         if definition.lineno > write.lineno:
             break
@@ -404,7 +408,7 @@ def _reaching(
         current = [
             held for held in current if exclusive(path_condition(held), conditions)
         ] + [definition]
-    return [definition.value for definition in current]
+    return [cast(ast.expr, definition.value) for definition in current]  # an assignment targets_of reads has a value
 
 
 def _block_containing(node: ast.AST) -> list[ast.stmt]:
@@ -901,7 +905,7 @@ def spec_declarations(modules: list[SourceModule]) -> list[tuple[str, str, set[s
                 value = getattr(stmt, "value", None)
                 if isinstance(value, (ast.Tuple, ast.List)) and not value.elts:
                     continue
-                found.append((cls.name, module.rel_path, _declared_names(stmt.value)))
+                found.append((cls.name, module.rel_path, _declared_names(cast(ast.expr, value))))
     return found
 
 

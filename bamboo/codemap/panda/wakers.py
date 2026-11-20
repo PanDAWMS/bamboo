@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterator, NamedTuple, Optional, cast
 
 from bamboo.codemap import pathcond
 from bamboo.codemap.models import (
@@ -197,7 +197,7 @@ def _wakers(
                 branch.tier == 2
                 and not branch_excludes(branch, value, cuts.get(subject))
             ):
-                key = (text, subject, value, owner, branch.line)
+                key = (text, subject, value, owner, cast(int, branch.line))  # a write's branch has its line
                 found[key] = found.get(key, False) or stated
     out = []
     for (text, subject, value, owner, line), stated in found.items():
@@ -218,17 +218,17 @@ def _wakers(
         )
     if inserts is not None:
         # One per write and line, however many reach records hold the write: their routes and statements together.
-        held: dict[
+        merged: dict[
             tuple[str, str, str, str, int, bool], tuple[set[tuple[str, ...]], set[str]]
         ] = {}
         for text, subject, value in asked:
             for owner, line, stated, routes, by in inserts.of(subject, value):
-                ways, names = held.setdefault(
+                ways, names = merged.setdefault(
                     (text, subject, value, owner, line, stated), (set(), set())
                 )
                 ways.update(tuple(route) for route in routes)
                 names.update(by)
-        for (text, subject, value, owner, line, stated), (ways, names) in held.items():
+        for (text, subject, value, owner, line, stated), (ways, names) in merged.items():
             pairs = asked[(text, subject, value)]
             by = sorted(names)
             out.append(

@@ -452,7 +452,7 @@ async def _submit(query: GrepQuery) -> str:
         "tail_bytes": query.tail_bytes,
     }
     payload = await asyncio.to_thread(_call, "post", _SUBMIT_ENDPOINT, data)
-    request_id = (payload or {}).get("request_id")
+    request_id: Optional[str] = (payload or {}).get("request_id")
     if not request_id:
         raise RuntimeError(f"no request_id returned for {query.key()}")
     return request_id
@@ -831,12 +831,12 @@ def observed_task_status(evidence: Evidence) -> dict[str, list[tuple[str, str, s
                 (stamp.group(1), status.group(1), result.query.log_filename)
             )
     histories: dict[str, list[tuple[str, str, str]]] = {}
-    for task, rows in seen.items():
+    for task_id, rows in seen.items():
         ordered: list[tuple[str, str, str]] = []
         for row in sorted(rows):
             if not ordered or ordered[-1][1] != row[1]:
                 ordered.append(row)
-        histories[task] = ordered
+        histories[task_id] = ordered
     return histories
 
 
@@ -895,7 +895,7 @@ class Survivors(NamedTuple):
     """How many candidates were left after one step, as production counted them."""
 
     log_file: str
-    count: int
+    survived: int
     label: str
 
 
@@ -1002,7 +1002,7 @@ def observed_survivors(
                 rows.append(
                     Survivors(
                         log_file=result.query.log_filename,
-                        count=int(found.group("count")),
+                        survived=int(found.group("count")),
                         label=found.group("label").strip(),
                     )
                 )
@@ -1066,7 +1066,7 @@ def _levels_in(lines: list[str]) -> Counter:
     return counts
 
 
-def level_histogram(evidence: Evidence, **where) -> Counter:
+def level_histogram(evidence: Evidence, **where) -> Counter[str]:
     """Count log lines by level in the sample, filtered by service or file.
 
     Read from each result's stored tally rather than recounted from its lines,

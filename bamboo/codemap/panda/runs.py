@@ -157,7 +157,7 @@ import re
 import string
 from collections import defaultdict, deque
 from functools import partial
-from typing import Callable, Iterator, NamedTuple, Optional, Union
+from typing import Callable, Iterator, NamedTuple, Optional, Union, cast
 
 from bamboo.codemap import callfacts, objects, pathcond, reach, values
 from bamboo.codemap import calls as C
@@ -764,7 +764,8 @@ class _Reader:
             if key not in named and maker.returning is not None:
                 key = (
                     self.names.of(maker.returning.caller) or "",
-                    _binding_line(maker.returning.at),
+                    # a call followed into its function has its site: at is None only where no function is (logfile)
+                    _binding_line(cast(ast.AST, maker.returning.at)),
                 )
             if key in named and key not in own:
                 found.add((named[key], key[1]))

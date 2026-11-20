@@ -105,6 +105,8 @@ def _binding(module, func_line: int, use_line: int, name: str) -> Optional[int]:
         return None
     best = None
     for node in ast.walk(holder[0]):
+        if not isinstance(node, ast.stmt):
+            continue  # only statements bind below
         targets = []
         if isinstance(node, ast.Assign):
             targets = node.targets

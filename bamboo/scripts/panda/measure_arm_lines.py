@@ -186,8 +186,8 @@ async def _run(
     map_id: str,
     source_root: Optional[Path],
     out: Optional[Path],
-    evidence: Optional[Path] = None,
-    dump: Optional[Path] = None,
+    evidence: Optional[Path],
+    dump: Path,
 ) -> None:
     from bamboo.codemap.store import load_dump
 

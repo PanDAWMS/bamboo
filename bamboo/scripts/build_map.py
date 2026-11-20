@@ -258,9 +258,9 @@ def _report(
             # Not a failure to fix: a write at module scope has no enclosing
             # function, so there is nothing to hand a reader.  Said out loud
             # because a silent zero is how "not read" hides inside "no key".
-            where = Counter(n.owner for n in unreadable)
+            by_owner = Counter(n.owner for n in unreadable)
             click.echo(f"  no enclosing function ({len(unreadable)}):")
-            for owner, count in where.most_common(top):
+            for owner, count in by_owner.most_common(top):
                 click.echo(f"    {count:>3}  {owner}")
 
     if fragment.diagnostics:
@@ -317,28 +317,28 @@ def _report(
                 + ", ".join(f"{verb}={count}" for verb, count in verbs.most_common())
                 + "  -- verbs by the far side's method names"
             )
-        shared = [b for b in fragment.boundaries if b.transport == "shared_table"]
-        if shared:
+        shared_tables = [b for b in fragment.boundaries if b.transport == "shared_table"]
+        if shared_tables:
             # Listed rather than counted: a shared table is investigated by
             # querying it, so the columns and the verbs are the investigation.
             # "DELETE, INSERT" on a command table is a finding on its own.
-            click.echo(f"  through a shared table ({len(shared)}):")
-            for channel in shared:
+            click.echo(f"  through a shared table ({len(shared_tables)}):")
+            for table_boundary in shared_tables:
                 click.echo(
-                    f"    {channel.interface}  [{', '.join(channel.operations)}]"
-                    f"  in {len(channel.carried_values)} / out {len(channel.handed_over)}"
+                    f"    {table_boundary.interface}  [{', '.join(table_boundary.operations)}]"
+                    f"  in {len(table_boundary.carried_values)} / out {len(table_boundary.handed_over)}"
                 )
 
-        thin = gates.unobservable_boundaries(fragment)
-        if thin:
+        unlogged = gates.unobservable_boundaries(fragment)
+        if unlogged:
             # What crossed a boundary and was never logged cannot be recovered
             # afterwards, so the limit is worth knowing before an incident
             # turns on it rather than during one.
-            click.echo(f"  logging under half of what they receive ({len(thin)}):")
-            for interface, observed, carried in thin[:top]:
+            click.echo(f"  logging under half of what they receive ({len(unlogged)}):")
+            for interface, observed, carried in unlogged[:top]:
                 click.echo(f"    {observed:>3}/{carried:<3}  {interface}")
-            if len(thin) > top:
-                click.echo(f"    … {len(thin) - top} more")
+            if len(unlogged) > top:
+                click.echo(f"    … {len(unlogged) - top} more")
 
     click.echo("\ngates:")
     all_passed = True
@@ -615,7 +615,7 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     # nothing resolved by name reaches it; before this an arm in a worker could
     # be named and what handed it its input could not.
     uplinks = getattr(plugin, "worker_uplinks", {})
-    if not uplinks and getattr(plugin, "worker_classes", 0):
+    if not uplinks and bool(getattr(plugin, "worker_classes", 0)):
         # The loud half of the same fact.  With no door resolved the whole
         # uplink is off and the map goes back to naming an arm without naming
         # what handed it its input -- which reads, from the report alone,
@@ -627,11 +627,11 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
     if uplinks:
         owners = {j.owner for j in fragment.junctions}
         landed = {key for key in uplinks if "::".join(key) in owners}
-        sites = {
+        dispatch_sites = {
             (entry, via) for entries in uplinks.values() for entry, via, _b, _s in entries
         }
         click.echo(
-            f"  worker uplinks: {len(sites)} dispatch site(s), reaching "
+            f"  worker uplinks: {len(dispatch_sites)} dispatch site(s), reaching "
             f"{len(uplinks)} worker method(s) of which {len(landed)} own a junction"
         )
 
@@ -645,10 +645,10 @@ def _report_triggers(fragment: MapFragment, plugin: object, top: int) -> None:
             for j in fanned
             for d in j.dispatch
         }
-        silent = sum(1 for _d, _c, said in sets if not said)
+        unannounced = sum(1 for _d, _c, said in sets if not said)
         click.echo(
             f"  run-time dispatch: {len(sets)} fan-out(s) over {len(fanned)} junction(s)"
-            + (f", {silent} of them printing no class name" if silent else "")
+            + (f", {unannounced} of them printing no class name" if unannounced else "")
         )
         for default, candidates, said in sorted(sets):
             click.echo(
@@ -910,7 +910,7 @@ def main(
         if len(unreadable) > top:
             click.echo(f"  … {len(unreadable) - top} more")
 
-    uncovered = getattr(plugin, "uncovered_tables", set())
+    uncovered: set[str] = getattr(plugin, "uncovered_tables", set())
     if uncovered:
         # Not a gap in extraction: these are written by the code and hold no
         # spec, so nothing about them can become a subject.  Named because
@@ -1008,10 +1008,10 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
         # this list existed a truncated ``WHERE`` was indistinguishable from
         # no ``WHERE`` -- ``getJobs``, the whole of the pilot's job request,
         # was stored as a ``SELECT`` that filters on nothing.
-        where = Counter(r.owner for r in stops)
+        stopped_in = Counter(r.owner for r in stops)
         click.echo(
             f"\nwhere the reading stopped: {len(stops)} in "
-            f"{len(where)} function(s)"
+            f"{len(stopped_in)} function(s)"
         )
         # The scope, said where the number is: a count read as "where the map
         # stops" is taken for all of it, and it is the SQL reader's alone.
@@ -1040,10 +1040,10 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
                 f" of at all, in {len({r.owner for r in skipped})} function(s);"
                 " the rest stopped inside a statement that was read"
             )
-        for owner, count in where.most_common(top):
+        for owner, count in stopped_in.most_common(top):
             click.echo(f"  {count:>4}  {owner}")
-        if len(where) > top:
-            click.echo(f"    … {len(where) - top} more function(s)")
+        if len(stopped_in) > top:
+            click.echo(f"    … {len(stopped_in) - top} more function(s)")
 
     _report_call_stops(fragment, top)
     watch = getattr(plugin, "read_watch", None)
@@ -1083,7 +1083,7 @@ def _report_unexplained(fragment, plugin, top: int) -> None:
     # candidate is, so a reason vocabulary for one does not transfer, and
     # claiming these were classified would be the more expensive mistake.
     told = {label for label, rows in reported if rows}
-    rest = Counter()
+    rest: Counter[str] = Counter()
     for row in fragment.coverage:
         if row.slice_name not in told and row.candidates > row.explained:
             rest[row.slice_name] += row.candidates - row.explained

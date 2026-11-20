@@ -269,13 +269,13 @@ def _attach(
             must[key] = [] if reaching(arm, entry) else None
         # One flow per print, asked of every arm in the function: reaching
         # keeps the flow on the scope for the set of writes it was asked with.
-        for line, statement in statements[id(func)].items():
-            if statement is None:
+        for line, printing in statements[id(func)].items():
+            if printing is None:
                 continue
             for key, arm in arms.items():
-                held = must[key]
-                if held is not None and not reaching(arm, entry, [statement]):
-                    held.append(line)
+                missed = must[key]
+                if missed is not None and not reaching(arm, entry, [printing]):
+                    missed.append(line)
     found = 0
     # Each junction's own arms, for what may run between an object's construction and an arm of it (made_before).
     own_arms: dict[int, list[ast.stmt]] = {}

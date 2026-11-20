@@ -307,7 +307,7 @@ def _with_class(file: str, tree: ast.Module, func: ast.AST) -> str:
     return f"{file}::{cls.name if cls is not None else 'module'}.{getattr(func, 'name', '')}"
 
 
-def _located(tree: ast.Module, owner: str, line: Optional[int]) -> Optional[ast.AST]:
+def _located(tree: ast.Module, owner: str, line: Optional[int]) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
     """The function of *tree* *owner* names: the one holding *line*, or with no line the first of its name."""
     if line is not None:
         return containing_function(tree, line, owner)
@@ -2949,7 +2949,7 @@ class _Walk:
         if key in self._classes:
             return self._classes[key]
         tree = held[1]
-        func = containing_function(tree, step.line, step.owner) if step.line else None
+        func: Optional[ast.AST] = containing_function(tree, step.line, step.owner) if step.line else None
         if func is None:
             frames = {
                 id(one.func): one.func

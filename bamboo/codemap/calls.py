@@ -38,7 +38,7 @@ import re
 import weakref
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence
+from typing import Callable, Iterable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
@@ -855,7 +855,7 @@ def said(call: ast.Call, target: Target, on_class: bool = False) -> set[str]:
 
 def receiver_parameter(target: Target) -> Optional[str]:
     """``self`` or ``cls`` -- the parameter a method call fills with the object it is made on."""
-    args = target.func.args  # type: ignore[attr-defined]
+    args = cast("ast.FunctionDef | ast.AsyncFunctionDef", target.func).args
     positional = [*args.posonlyargs, *args.args]
     if target.cls is None or _is_static(target.func) or not positional:
         return None
@@ -881,7 +881,7 @@ class Calls:
         self._handing_callables: set[tuple[str, int, str]] = set()
         #: :meth:`forwarding` by class, the locals :meth:`_wrapped` reads, and
         #: what :meth:`_wrappings` finds across the corpus.
-        self._forwarders: dict[tuple[str, int], dict[str, tuple[str, str]]] = {}
+        self._forwarders: dict[tuple[str, int], dict[str, tuple[str, str, str]]] = {}
         self._wraps: dict[tuple[int, str], Optional[tuple[list[tuple[tuple[str, ast.ClassDef], ast.Call]], list[ast.Call]]]] = {}
         self._wrapping_names: Optional[set[str]] = None
         self._wrapping_classes: Optional[set[str]] = None
@@ -1066,9 +1066,9 @@ class Calls:
         if module is not None:
             return self._module_member(module, called.attr)
         # ``JobBrokerBase.__init__(self, ...)``: a method read off its class.
-        named = self.types.class_named(file, receiver)
-        if named is not None:
-            placed = self._method_of(named, called.attr)._replace(on_class=True)
+        owner_class = self.types.class_named(file, receiver)
+        if owner_class is not None:
+            placed = self._method_of(owner_class, called.attr)._replace(on_class=True)
             return placed._replace(targets=tuple(one._replace(bound=self._handed_self(file, func, call, bound)) for one in placed.targets))
         # ``timed_method.run(job_id, ...)``: the function it was built with, called with them.
         forwarded = self._handed_on(file, func, call)
@@ -1088,9 +1088,9 @@ class Calls:
         # Nothing declares it -- or it is declared ``Any`` -- so read what it
         # was built from.  Every class it can be is a target; where some way
         # of building it cannot be read, that is said beside them.
-        classes, opened = self.types.candidates(file, func, receiver)
-        builtin = {name for where, name in classes if where == BUILTIN}
-        if builtin and len(builtin) == len(classes) and not opened:
+        candidates, opened = self.types.candidates(file, func, receiver)
+        builtin = {name for where, name in candidates if where == BUILTIN}
+        if builtin and len(builtin) == len(candidates) and not opened:
             # ``tmp_list = []`` ... ``tmp_list.append(x)``: a builtin type's
             # method, as on a literal above -- and no call to a corpus
             # function of that name (:meth:`Calls.missed`).
@@ -1099,9 +1099,9 @@ class Calls:
         # it was told apart: the call may land on either.
         opened = opened or bool(builtin)
         built = [
-            (where, cls)
-            for where, name in sorted(classes)
-            if where != BUILTIN and (cls := self.types.class_def(where, name)) is not None
+            (where, built_class)
+            for where, name in sorted(candidates)
+            if where != BUILTIN and (built_class := self.types.class_def(where, name)) is not None
         ]
         placed = self._method_of_any(built, called.attr, opened)
         if placed.targets or placed.unplaced in _FORWARDING:
@@ -2521,7 +2521,9 @@ def _may_build_from(node: ast.expr) -> bool:
             isinstance(parent, ast.Call)
             and child is not parent.func
             and (function := callfacts.builtin_function_at(parent)) is not None
-            and callfacts.builds_nothing(function, parent, child.value if isinstance(child, ast.keyword) else child)
+            and callfacts.builds_nothing(
+                function, parent, child.value if isinstance(child, ast.keyword) else cast(ast.expr, child)
+            )
         ):
             return False
         if isinstance(parent, ast.ExceptHandler):
@@ -2870,7 +2872,9 @@ class Types:
     def assigned(self, func: ast.AST) -> dict[str, list[ast.expr]]:
         """``pathcond.assigned_expressions``, once per function."""
         if id(func) not in self._assigned:
-            self._assigned[id(func)] = pathcond.assigned_expressions(func)
+            self._assigned[id(func)] = pathcond.assigned_expressions(
+                cast("ast.FunctionDef | ast.AsyncFunctionDef", func)
+            )
         return self._assigned[id(func)]
 
     def bound(self, func: ast.AST) -> dict[str, list[ast.expr]]:
@@ -3745,15 +3749,15 @@ class Types:
                 ):
                     return self._field_read(where, node.annotation)
             for method in pathcond.methods_of(holder):
-                for node in walk(method):
+                for inner in walk(method):
                     if (
-                        isinstance(node, ast.AnnAssign)
-                        and isinstance(node.target, ast.Attribute)
-                        and isinstance(node.target.value, ast.Name)
-                        and node.target.value.id == "self"
-                        and node.target.attr == field
+                        isinstance(inner, ast.AnnAssign)
+                        and isinstance(inner.target, ast.Attribute)
+                        and isinstance(inner.target.value, ast.Name)
+                        and inner.target.value.id == "self"
+                        and inner.target.attr == field
                     ):
-                        return self._field_read(where, node.annotation)
+                        return self._field_read(where, inner.annotation)
         if depth >= self.DEPTH:
             return None
         found: set[Classes] = set()
@@ -3867,15 +3871,15 @@ class Types:
                 if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == field:
                     return where, node.annotation
             for method in pathcond.methods_of(cls):
-                for node in walk(method):
+                for inner in walk(method):
                     if (
-                        isinstance(node, ast.AnnAssign)
-                        and isinstance(node.target, ast.Attribute)
-                        and isinstance(node.target.value, ast.Name)
-                        and node.target.value.id == "self"
-                        and node.target.attr == field
+                        isinstance(inner, ast.AnnAssign)
+                        and isinstance(inner.target, ast.Attribute)
+                        and isinstance(inner.target.value, ast.Name)
+                        and inner.target.value.id == "self"
+                        and inner.target.attr == field
                     ):
-                        return where, node.annotation
+                        return where, inner.annotation
         return None
 
     def _function_named(self, file: str, name: str) -> Optional[tuple[str, ast.AST]]:
@@ -4171,7 +4175,8 @@ class Types:
             one.kind != pathcond.BIND_ASSIGN or one.unpacked or not isinstance(one.value, ast.Call) for one in sites
         ):
             return None
-        found = [self._returned(file, func, one.value, depth) for one in sites]
+        # every site assigns a call (above)
+        found = [self._returned(file, func, cast(ast.expr, one.value), depth) for one in sites]
         held = [one for one in found if one is not None]
         if len(held) != len(found) or len({ast.unparse(annotation) for _where, annotation in held}) != 1:
             return None
@@ -4257,7 +4262,8 @@ class Types:
                 function = self._function_named(file, called.id)
                 if function is not None:
                     where, definition = function
-                    return self.annotated_all(where, definition.returns)
+                    returns = cast("ast.FunctionDef | ast.AsyncFunctionDef", definition).returns  # a function's
+                    return self.annotated_all(where, returns)
                 return None
             if isinstance(called, ast.Attribute):
                 receiver = called.value
@@ -4425,15 +4431,15 @@ class Types:
                     # read here.
                     opened = True
                     continue
-                cls = self.class_def(where, name)
-                if cls is None:
+                owner_cls = self.class_def(where, name)
+                if owner_cls is None:
                     continue
-                typed = self.of_field(where, cls, expression.attr, depth + 1)
+                typed = self.of_field(where, owner_cls, expression.attr, depth + 1)
                 if typed is not None and instances:
                     found.update((one, held.name) for one, held in typed)
                     continue
-                for place, holder in self.lineage(where, cls):
-                    for method in pathcond.methods_of(holder):
+                for place, ancestor in self.lineage(where, owner_cls):
+                    for method in pathcond.methods_of(ancestor):
                         for value in pathcond.attribute_expressions(method, expression.attr):
                             if isinstance(value, ast.Constant) and value.value is None:
                                 continue
@@ -4543,7 +4549,8 @@ class Types:
             holder = self.method_class(file, func)
             if holder is None:
                 return None
-            return self.method(holder[0], holder[1], called.attr)
+            method: Optional[tuple[str, ast.AST]] = self.method(holder[0], holder[1], called.attr)
+            return method
         if isinstance(called, ast.Name):
             return None if self._local(func, called.id) else self._function_named(file, called.id)
         if isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name):

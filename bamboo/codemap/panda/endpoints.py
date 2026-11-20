@@ -22,7 +22,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import TYPE_CHECKING, Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterator, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
@@ -51,6 +51,7 @@ from bamboo.codemap.models import (
     THROUGH_CONVERTED,
     THROUGH_DECODED,
     THROUGH_UNKNOWN,
+    Anchor,
     Endpoint,
     EndpointChange,
     EndpointFill,
@@ -302,10 +303,12 @@ class _Reader:
         shut, constants = _shut(record, code, came)
         ruled = _ruled_returns(code, came, constants)
         if shut:
-            came = record.closure(
-                [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
-            )
-        holes = {}
+
+            def cut(node: Node, call: ReachCall, shut: frozenset[tuple[Node, int]] = shut) -> bool:
+                return (node, id(call)) in shut
+
+            came = record.closure([owner], cut=cut)
+        holes: dict[tuple[str, int, str], ReachHole] = {}
         held_in: dict[tuple[str, int, str], list[Node]] = {}
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
@@ -547,8 +550,8 @@ class _Code:
             found = self._changes[owner] = []
             file, func = self.funcs.get(owner, ("", None))
             for node in C.own_nodes(func) if func is not None else []:
-                if not isinstance(node, ast.Call):
-                    continue
+                if func is None or not isinstance(node, ast.Call):
+                    continue  # no node comes without a function
                 got = callfacts.change(self.types, file, func, node)
                 if got is not None:
                     kind, system, callee = got
@@ -732,7 +735,7 @@ class _Fills:
             try:
                 placed = self.code.calls.callees(file, func, value).targets
             except Exception:  # noqa: BLE001 -- the reach record has the hole
-                placed = []
+                placed = ()
             if placed:
                 return [EndpointFill(why=FILL_RESULT, at=at)]
             return [EndpointFill(why=FILL_VALUE, at=at)]
@@ -998,7 +1001,7 @@ def _constants(
     func = code.funcs[node[0]][1]
     found: dict[str, tuple[type, object]] = {}
     for name in sorted(_parameters(func) - {"self", "cls"}):
-        values = []
+        values: list[Optional[tuple[type, object]]] = []
         for caller, call in edges:
             runs = code.bound(caller[0], call, node[0]) if call.how == "call" else []
             if not runs:
@@ -1458,10 +1461,9 @@ def _handlers_in(
         and not table.generators[0].ifs
     ):
         loop = table.generators[0]
+        named = cast(ast.Name, loop.target).id  # a name, tested above
         for one in _texts(module.tree, loop.iter):
-            _handler(
-                module, imported, table.key, table.value, {loop.target.id: one}, found
-            )  # type: ignore[union-attr]
+            _handler(module, imported, table.key, table.value, {named: one}, found)
     else:
         logger.warning("endpoints: %s's %s is not read", file, HANDLERS)
 
@@ -1499,7 +1501,7 @@ def _bound_value(tree: ast.Module, name: str) -> Optional[ast.expr]:
             else []
         )
         if any(isinstance(one, ast.Name) and one.id == name for one in targets):
-            value = node.value  # type: ignore[union-attr]
+            value = cast("ast.Assign | ast.AnnAssign", node).value  # only these have targets above
     return value
 
 
@@ -1587,7 +1589,7 @@ MAX_STEPS = 12
 
 
 def _line(site: ReadSiteNode) -> int:
-    return site.anchor.line_start  # type: ignore[union-attr] -- only sites with an anchor are placed
+    return cast(Anchor, site.anchor).line_start  # only sites with an anchor are placed
 
 
 def _split(path: str) -> tuple[str, str]:

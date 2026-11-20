@@ -35,7 +35,7 @@ from __future__ import annotations
 import ast
 from collections import Counter
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, cast
 
 from bamboo.codemap.astwalk import walk
 from bamboo.codemap.models import Anchor, CoverageStat, SourceModule, ValueEnumNode
@@ -118,7 +118,7 @@ def _leading_comment(lines: list[str], lineno: int) -> Optional[str]:
     return " ".join(reversed(collected)) or None
 
 
-def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.stmt]]:
+def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.Assign | ast.AnnAssign]]:
     """Yield ``(name, node)`` for module-level constant assignments.
 
     ``ST_ready: Final[int] = 0`` is the same declaration as ``ST_ready = 0``;
@@ -126,6 +126,8 @@ def _iter_module_constants(tree: ast.Module) -> Iterable[tuple[str, ast.stmt]]:
     one.
     """
     for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other statement
         for target in targets_of(node):
             if isinstance(target, ast.Name) and _is_enum_name(target.id):
                 yield target.id, node
@@ -216,7 +218,7 @@ def extract(
         lines = module.source.splitlines()
         candidates = 0
         explained = 0
-        entries: list[tuple[str, ast.stmt]] = []
+        entries: list[tuple[str, ast.Assign | ast.AnnAssign]] = []
         for name, node in _iter_module_constants(tree):
             value_node = node.value
             is_scalar = (
@@ -248,7 +250,7 @@ def extract(
         prefix_counts = Counter(p for name, _ in entries if (p := _name_prefix(name)))
         grouped_prefixes = {p for p, n in prefix_counts.items() if n >= 2}
         for name, node in entries:
-            value_node = node.value
+            value_node = cast(ast.Constant, node.value)  # an entry's value is a scalar literal (above)
             explained += 1
             # The namespace is the index key and may end with the enumeration's
             # prefix; the display name stays module-scoped so it does not read

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import ast
 from collections import defaultdict
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Sequence
 
 from bamboo.codemap import calls as C
 from bamboo.codemap import pathcond
@@ -236,7 +236,8 @@ def _in_body(node: ast.AST, loop: ast.AST) -> bool:
     """Whether *loop*'s body holds *node*, by the lines the record keeps (:class:`LoopLines`)."""
     body = loop.body  # type: ignore[attr-defined]
     end = getattr(body[-1], "end_lineno", None) or body[-1].lineno
-    return body[0].lineno <= getattr(node, "lineno", 0) <= end
+    inside: bool = body[0].lineno <= getattr(node, "lineno", 0) <= end
+    return inside
 
 
 class _Flows:
@@ -294,7 +295,7 @@ def _renewed(
     func: ast.AST,
     row: ReachNode,
     at: dict[int, ast.AST],
-    loops: list[ast.AST],
+    loops: Sequence[ast.AST],
     met_round: list[tuple[int, int]],
 ) -> list[Renewed]:
     """For each loop holding a pair that meets only on a later pass, the names it binds to another object between.
@@ -503,9 +504,9 @@ def _cleared_by(
         for key in {id(one) for one in free} - {id(one) for one in kept}:
             if lines[key] != line:
                 gone[lines[key]].append(line)
-    free = {id(one) for one in reaching_exit(func, sites, (), sites)}
-    kept = {id(one) for one in reaching_exit(func, sites, killers, sites)}
-    for key in free - kept:
+    free_at_exit = {id(one) for one in reaching_exit(func, sites, (), sites)}
+    kept_at_exit = {id(one) for one in reaching_exit(func, sites, killers, sites)}
+    for key in free_at_exit - kept_at_exit:
         gone[lines[key]].append(EXIT_LINE)
     return [
         ClearedLines(path=path, columns=columns, line=line, lines=sorted(set(others)))

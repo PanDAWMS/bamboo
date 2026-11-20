@@ -64,7 +64,7 @@ _FUNNEL = re.compile(r"candidates passed(?:\s+for)?\s+(.+?)\s*$")
 _SUMMARY = "add_summary_message"
 
 
-def _rendered(node: ast.AST) -> Optional[str]:
+def _rendered(node: Optional[ast.AST]) -> Optional[str]:
     """Render a string literal, marking interpolations as ``{}``."""
     if isinstance(node, ast.JoinedStr):
         return "".join(
@@ -78,7 +78,7 @@ def _rendered(node: ast.AST) -> Optional[str]:
     return None
 
 
-def _strings(tree: ast.AST) -> Iterator[tuple[ast.AST, str]]:
+def _strings(tree: ast.AST) -> Iterator[tuple[ast.JoinedStr | ast.Constant, str]]:
     """Yield each string literal once, not once per f-string piece."""
     for node in walk(tree):
         if isinstance(node, ast.JoinedStr):

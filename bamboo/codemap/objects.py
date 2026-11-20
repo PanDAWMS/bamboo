@@ -62,7 +62,7 @@ import re
 from bisect import bisect_left
 from collections import defaultdict
 from functools import lru_cache, partial
-from typing import Callable, Iterator, NamedTuple, Optional, Sequence
+from typing import AbstractSet, Callable, Iterator, NamedTuple, Optional, Sequence
 
 from bamboo.codemap.models import (
     BIND_ALIAS,
@@ -275,10 +275,10 @@ def follow(
         held_in[at] |= held
         if spent:
             cut = cut or HELD_SPENT
-        for one in row.assigns:
-            if _holds(held, one.path):
-                for attr in one.attrs:
-                    assigned[attr][Site(at, one.line, one.how)] = None
+        for assign in row.assigns:
+            if _holds(held, assign.path):
+                for attr in assign.attrs:
+                    assigned[attr][Site(at, assign.line, assign.how)] = None
         for binding in row.bindings:
             if binding.how != BIND_RESULT:
                 continue
@@ -465,7 +465,7 @@ def _held(row: ReachNode, start: set[str]) -> tuple[set[str], bool]:
 def _held_steps(
     row: ReachNode,
     start: set[str],
-    returned: set[str] = frozenset(),
+    returned: AbstractSet[str] = frozenset(),
     capped: Optional[dict[Site, None]] = None,
 ) -> tuple[dict[str, Optional[tuple[str, int, str]]], bool]:
     """Every path of *row*'s function that holds what *start* holds, each with the step it was first reached by.
@@ -1439,8 +1439,8 @@ class _Lines:
         tables: dict[tuple[str, tuple[str, ...]], dict[int, set[int]]] = defaultdict(
             dict
         )
-        for one in row.cleared:
-            tables[(one.path, tuple(one.columns))][one.line] = set(one.lines)
+        for cleared in row.cleared:
+            tables[(cleared.path, tuple(cleared.columns))][cleared.line] = set(cleared.lines)
         self.cleared = [
             (path, set(columns), table) for (path, columns), table in tables.items()
         ]

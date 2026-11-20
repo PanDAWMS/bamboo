@@ -895,9 +895,10 @@ def _together(found: list[Method]) -> Optional[Method]:
         method.gives.part if method.gives is not None else None for method in found
     }
     gives = None
-    if len(parts) == 1 and None not in parts:
+    only = next(iter(parts)) if len(parts) == 1 else None
+    if only is not None:
         gives = Give(
-            parts.pop(),
+            only,
             next(
                 (m.gives.key for m in found if m.gives and m.gives.key is not None),
                 None,
@@ -1617,15 +1618,15 @@ def meaning(
         method = _of_types(frozenset({literal}), name)
         return Meaning(BUILTIN, method) if method is not None else _UNKNOWN
     try:
-        classes, opened = types.candidates(file, func, receiver)
+        candidates, opened = types.candidates(file, func, receiver)
     except Exception:  # noqa: BLE001
-        classes, opened = frozenset(), True
+        candidates, opened = frozenset(), True
     if (
-        classes
+        candidates
         and not opened
-        and all(where == BUILTIN_CLASS for where, _name in classes)
+        and all(where == BUILTIN_CLASS for where, _name in candidates)
     ):
-        kinds = frozenset(one for _where, one in classes)
+        kinds = frozenset(one for _where, one in candidates)
         if kinds <= SCALARS:
             return Meaning(BUILTIN, Method())
         method = _of_types(kinds, name)
