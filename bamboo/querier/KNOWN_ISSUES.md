@@ -2136,6 +2136,22 @@ merge job key), where it gave none.  *Not read:* whether a caller off the moving
 earlier (U2 reads the moving run's caller's earlier passes, as G-5); the cycle's way (updateUnmergedJobs:1253 calling
 archiveJob on another merge job's unmerged job) stays a branch.
 
+*Changed (P20's rest, the investigator's u15 NJ-merging-late 4, 2026-11-20, delegated design; rebuilt on the S step's
+ways):* where U2 reads that a caller ran on the row in the stay only in the pass that moved it on, and the name its runs
+hold the key in -- its run's mark's key hole (`RunKey.expression`: AdderGen's `str(self.job_id)`) -- comes in, by the S
+step's ways (`caller_key_ways`: `sources.field_ways`, then `sources.param_ways` from the constructor's parameter), only
+from the rows of selections the map's `wakers` insert, or from an API's request (`agents.rows_handing`), A2's reading is
+made for the caller (`Rerun._caller_waker_turn`, `_waker_reading`): its wakers' writes for the key its runs were asked
+by (H-4's, the merge job's), from the object's birth where P14 read it inside the stay, to the move.  AdderGen's job_id
+comes from listJobOutputReport@2401's rows through the Adder's lists (add_main.py's `add` and `pop`, the map's
+`held_elements`), and from pilot_api.update_job's request at 711.  The END names the last write before the move:
+NJ-merging-late's process_job_report ran on the merge job after insertJobOutputReport (or updateEventRanges,
+updateWorkers) wrote its Job_Output_Report row, and that pass archived the merge job and moved the unmerged jobs.
+*Premise:* the API's request is another way in, not read.  A way ending anywhere else (a constant, a field not
+followed, a call) reads nothing.  The first build read the selections from the map's `crosses_to`, which does not say a
+selection's rows are the only way in: NT-toincexec-late took getConfigValue@355's rows as handing TaskCommando a task
+(withdrawn before commit).
+
 ### K56. An arm with no guard of its own is read at the call that ran it, by what the call handed its run's mark
 
 A status's arm its run shows ran (H2's positive, K54) with no guard of its own ran because a call of its function's

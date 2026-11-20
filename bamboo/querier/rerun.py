@@ -3001,6 +3001,36 @@ def _identity_attrs(cls: str) -> list[str]:
     return SR.identity_attrs(cls)
 
 
+def caller_key_ways(owner: str, ident: set[str], lines: Iterable[int] = ()) -> tuple[str, list]:
+    """P20's rest: the name *owner*'s runs hold their key in -- a hole of a run's mark the map says holds one of
+    *ident* (``RunKey.columns``), its expression (AdderGen's ``str(self.job_id)``) -- and the S step's ways of it: a
+    field of the class (:func:`sources.field_ways`), each way stopping at a parameter its constructor is handed read on up
+    the callers (:func:`sources.param_ways`), or the function's own parameter.  ``("", [])`` where no mark holds the key
+    in one name, or where the def is not told by *lines* (one of several of the name)."""
+    try:
+        found = R._prints_of(owner, tuple(lines))
+    except (LookupError, ValueError, SyntaxError):
+        return "", []
+    names = {k.expression for run in getattr(found, "runs", None) or [] for k in run.key or []
+             if set(getattr(k, "columns", None) or ()) & ident and k.expression}
+    held = {m[1] for e in names if (m := re.search(r"\bself\.(\w+)\b", e))} or {
+        m[0] for e in names if (m := re.fullmatch(r"\w+", e.strip()))}
+    if len(held) != 1:
+        return "", []
+    name = held.pop()
+    # the class from the map's name of the def (``rel::Class.method``): a reading's owner may carry the bare name
+    rel, _, qual = (getattr(found, "owner", "") or owner).partition("::")
+    if any(re.search(r"\bself\.", e) for e in names):
+        cls = f"{rel}::{qual.rpartition('.')[0]}" if "." in qual else ""
+        if not cls:
+            return "", []
+        ways = []
+        for w in SR.field_ways(cls, name):
+            ways += SR.param_ways(w.of, w.value) if w.end == SR.STOP and w.why == "parameter" and w.of else [w]
+        return f"self.{name}", ways
+    return name, SR.param_ways(owner, name)
+
+
 def key_marks(owner: str, line: int, cls: str, key: str) -> tuple[str, ...]:
     """What *owner*'s lines carry where its run's mark holds *cls*'s key *key*: for a run the map records for the
     function (``FunctionPrintsNode``'s ``runs``) whose mark's key holds the class's identity (``_identity_attrs``),
@@ -8984,11 +9014,23 @@ class Rerun:
             readers, wakers, via = crossed
             found = (readers, wakers)
         readers, wakers = found
+        return self._waker_reading(func, q.key, since, until, q.before, readers, wakers, via)
+
+    def _waker_reading(self, func: str, key: str, since: str, until: str, before: str | None, readers: list,
+                       wakers: list, via: list[str], caller: tuple[str, str] | None = None,
+                       handed: tuple[str, list[str]] = ("", [])) -> bool:
+        """A2's reading of the rows *readers* select, which *wakers* insert, for *key* from *since* to *until*
+        (:meth:`_waker_turn`): *before*, a late value's move; *via*, the callers the rows reach where the key is handed
+        in (P45).  *caller*: P20's rest (:meth:`_caller_waker_turn`), the class and key of the object a caller's moving
+        pass ran on (H-4's) -- the END says the caller ran on it after the write, and that its one pass on it in the stay
+        is the one that moved the row, which U2 read, in place of A2's premise of a mover's first pass; *handed*: the
+        name the caller's key is in and the API ways it may come in by besides, a premise."""
+        fragment = mapdump.fragment()
         reader, column = readers[0]
         said_column: T.Said | str = (T.Said("handed-on-by", {"callers": [c.split("::")[-1] for c in via]}) if via else column)
         where = f"{reader.owner.split('::')[-1]}@{reader.anchor.line_start}"
         values = {w.value for w in wakers}
-        writes, missed, unread = self._waker_writes(wakers, q.key, since, until, where, values)
+        writes, missed, unread = self._waker_writes(wakers, key, since, until, where, values)
         # every waker's logs asked before the branch stops: one record round answers them all
         self._stop_unanswered(missed)
         if unread is not None:
@@ -8997,7 +9039,7 @@ class Rerun:
         start, end = W.when(since), W.when(until)
         # the move to the microsecond where its statuslog row has it, as BP' reads the edges
         moved = next((W.when(s.get("time_extended") or str(s["time"])) for s in self.data.get("statuslog", {}).get("states", [])
-                      if q.before is not None and str(s["time"])[:19] == q.before[:19] and s["status"] != self.args.observed), end)
+                      if before is not None and str(s["time"])[:19] == before[:19] and s["status"] != self.args.observed), end)
         stay = sorted((w for w in writes if start <= w[0] <= max(end, moved)), key=lambda w: w[0])
         outside = [T.Said("an-outside-writer-of-the-table", {"system": b.system, "table": b.interface})
                    for b in getattr(fragment, "boundaries", None) or []
@@ -9007,11 +9049,11 @@ class Rerun:
         told = T.Said("written-outside-too", {"writers": outside}) if outside else T.Said("written-here-alone")
         unshown = list(self.__dict__.get("_waker_unshown") or [])
         if not stay:
-            if q.before is None and not outside and unshown:
+            if before is None and not outside and unshown:
                 # C: a waker whose write no row could show may have written in the window
                 self.say(f"no write of the wakers the runs show is in the window, but {unshown} print no row a run would "
                          "show their write by: that none was written is not shown (A2s, C)")
-            if q.before is None and not outside and not unshown:
+            if before is None and not outside and not unshown:
                 # A2s (out/gm/qk-design.md "A2s", delegated design; tmaeno's fact through the harness, 2026-11-18: DEFT
                 # writes no command into PRODSYS_COMM, the map's DFC): a stuck value whose mover takes the row only by
                 # the rows its wakers write, none of which was written for the key in the window, every waker's log
@@ -9024,15 +9066,15 @@ class Rerun:
                 return True
             # the harness's T check (MJ-merging-stuck): wakers whose write no row could show are none of "searched whole"
             hidden = T.Said("wakers-unshown-clause", {"writes": unshown}) if unshown else ""
-            if q.before is None:
+            if before is None:
                 self.need(T.Said("a-waker-s-write-in-the-window", {
                     "mover": func, "reader": where, "wakers": wakers_said, "since": since, "until": until, "outside": told,
                     "unshown": hidden}), None, "K55")
             self.need(T.Said("a-waker-s-write-in-the-stay", {
-                "mover": func, "reader": where, "wakers": wakers_said, "since": since, "before": q.before,
+                "mover": func, "reader": where, "wakers": wakers_said, "since": since, "before": before,
                 "outside": told, "unshown": hidden}), None, "K55")
         at, p, owner, line, printed = stay[-1]
-        if q.before is None:
+        if before is None:
             self.say(f"{owner.split('::')[-1]}:{line} wrote a row {where} selects for the key at {at:%Y-%m-%d %H:%M:%S} "
                      f"and the value has not moved on by {until}: why {func} did not take it is not read here (A2)")
             return False
@@ -9048,6 +9090,18 @@ class Rerun:
                 if len(printed) == 1 else T.Said("a-row-for-it"))
         earlier = (T.Said("earlier-writes-in-the-stay", {"n": len(stay) - 1, "at": [f"{w[0]:%Y-%m-%d %H:%M:%S}" for w in stay[:-1]]})
                    if len(stay) > 1 else T.Said("no-earlier-write-in-the-stay", {"since": since}))
+        if caller is not None:
+            cls, other = caller
+            self.end(T.Said("caller-ran-on-a-row-its-wakers-wrote", {
+                "caller": func, "cls": cls, "key": other, "after": f"{(moved - at).total_seconds():.0f}",
+                "waker": owner.split("::")[-1].rpartition(".")[2], "line": line, "what": what,
+                "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0], "through": through, "reader": where,
+                "earlier": earlier,
+                "premises": [*outside, *([T.Said("waker-writes-unshown", {"writes": unshown})] if unshown else []),
+                             T.Said("the-caller-s-key-from-the-rows", {
+                                 "caller": func, "name": handed[0], "reader": where,
+                                 "outside": T.Said("and-an-api-s-request", {"ways": handed[1]}) if handed[1] else ""})]}))
+            return True
         self.end(T.Said("ran-on-a-row-its-wakers-wrote", {
             "mover": func, "after": f"{(moved - at).total_seconds():.0f}", "waker": owner.split("::")[-1].rpartition(".")[2],
             "line": line, "what": what, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
@@ -10383,6 +10437,9 @@ class Rerun:
         made = row.get(hist.created.lower()) if hist.created else None
         born = W.when(str(made).replace("T", " ")) if made else None
         start = W.when(q.window[0])
+        if born is not None and born > start:
+            # P20's rest: the object's key holds nothing before its birth (_caller_waker_turn's window)
+            self.__dict__.setdefault("_mark_born", {})[(cls, other)] = born
         if born is None or born <= start:
             self.say(f"  the {cls} it moved in ({other}) was made "
                      f"{f'at {born:%Y-%m-%d %H:%M:%S}, ' if born else ''}not inside the stay: its life is not read (P14)")
@@ -11042,6 +11099,8 @@ class Rerun:
                            after=up.after, left=up.left)
         if moving and up.before is not None and self._agent_cycles(c, up, moving, absent=True):
             return None
+        if moving and self._caller_waker_turn(c, up):
+            return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
                                                                  "hop": c.hop}), None, "K55")
 
@@ -11097,6 +11156,38 @@ class Rerun:
             "others": [s for s in short if s != upper.rpartition("::")[2] and s not in unread] or ["none"],
             "callers": sorted(x.rpartition("::")[2] for x in MR.callers(upper)),
             "unread": f"; no log of {', '.join(unread)} to hand: not ruled out" if unread else ""})
+
+    def _caller_waker_turn(self, c: Caller, up: Callers) -> bool:
+        """P20's rest (out/gm/qk-design.md, the section on rebuilding P20's rest, delegated design; the investigator's u15
+        NJ-merging-late 4): U2 read that the caller *c* ran on the row in the stay only in the pass that moved it on (a
+        late value), its runs asked by the key of the object they ran on -- the row's, or H-4's, the merge job an
+        unmerged job waits on.  Where the name its run's mark holds that key in (``RunKey.expression``: AdderGen's
+        ``self.job_id``) comes in, by the S step's ways (:func:`caller_key_ways`), only from the rows of selections the
+        map's ``wakers`` insert, or from an API's request (:func:`agents.rows_handing`) -- listJobOutputReport@2405's
+        rows through the Adder's lists, and pilot_api.update_job's request -- it ran on the object when a waker
+        inserted such a row for the key: A2's reading (:meth:`_waker_reading`) for the caller, over the stay, from the
+        object's birth where H-4's row was made inside it (P14, :meth:`_mark_row_life`), the API's way named as a
+        premise.  False where no such way is read."""
+        if not self.logs.needs_window or up.before is None:
+            return False
+        fragment = mapdump.fragment()
+        cls = up.subject.partition(".")[0]
+        name, ways = caller_key_ways(c.owner, set(_identity_attrs(cls)), c.lines)
+        found = AG.rows_handing(getattr(fragment, "read_sites", None) or [], ways) if ways else None
+        if found is None:
+            return False
+        readers, wakers, outside = found
+        func = c.owner.split("::")[-1]
+        since = up.window[0]
+        born = (self.__dict__.get("_mark_born") or {}).get((cls, up.key))
+        if born is not None and W.when(since) < born:
+            since = f"{born:%Y-%m-%d %H:%M:%S}"
+        where = ", ".join(sorted(f"{r.owner.split('::')[-1]}@{r.anchor.line_start}" for r, _ in readers))
+        self.say(f"{func}'s {name} comes from the rows {where} select(s), by the map's ways of it"
+                 f"{'; and from ' + ', '.join(outside) + ' (an API caller' + chr(39) + 's request)' if outside else ''}: "
+                 f"its wakers' writes for {up.key} are read from {since} to {up.before} (P20)")
+        return self._waker_reading(func, up.key, since, up.before, up.before, readers, wakers, [], caller=(cls, up.key),
+                                   handed=(name, outside))
 
     def _calls_printing_key(self, c: Caller, keys: set[str]) -> list[int]:
         """P9: the call lines of *c* every way to which prints a hole the map names a column of *keys* by (a list of

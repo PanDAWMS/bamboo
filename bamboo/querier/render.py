@@ -560,6 +560,10 @@ TEMPLATES: dict[str, str] = {
     "through-no-one-entry": "",
     "no-earlier-write-in-the-stay": "no waker wrote one for its key earlier in the stay (from {since}; their logs searched whole on every machine)",
     "earlier-writes-in-the-stay": "its wakers wrote {n} more for its key earlier in the stay ({at:join=, }), each refused or of another value (not read)",
+    # P20's rest: a caller's moving pass on the object a selection's rows hand it (rerun._caller_waker_turn)
+    "caller-ran-on-a-row-its-wakers-wrote": "{caller} moved it on {after} s after {waker}:{line} wrote {what} at {at} on {machine}{through}, for the {cls} its moving pass ran on ({key}): {caller} is handed a {cls} by the rows {reader} selects, and ran on this one in the stay only in that pass (U2); {earlier}; premises: {premises:join=; }",
+    "the-caller-s-key-from-the-rows": "{caller}'s {name} comes from the rows {reader} selects by the map's ways of it{outside}",
+    "and-an-api-s-request": ", and from {ways:join=, } (an API caller's request, not read)",
     "its-first-pass-after-the-write": "{mover}'s first pass after the write took it (its passes print no key: not read)",
     "h-ran-after-other-rows-moved-on": "{mover} moved it on {delta} s after {where}'s {polarity} term on {inner} began to hold at {at}: the last of the row's {n} {cls} row(s) by {via} to reach one of {values:join=, } was {key}, {value} at {at} on {machine}; the stay from {since} waited on them{later} -- next: {next}; premises: {premises:join=; }",
     "h-made-later": " ({n} {cls} row(s) made after the move not read)",

@@ -18239,6 +18239,91 @@ def test_p74_what_called_the_caller_is_read_by_the_linked_value_on_the_moving_pa
         "AtlasAnalWatchDog.doForWaitingJobs) are asked by the linked value (1 ask(s))"), got
 
 
+def test_p20_a_caller_whose_key_comes_from_a_selections_rows_is_read_by_their_wakers(tmp_path):
+    """P20's rest (agents.rows_handing, rerun.caller_key_ways, rerun._caller_waker_turn): process_job_report's runs hold
+    the merge job's key in self.job_id, which the S step's ways bring from the rows listJobOutputReport@2401 selects
+    (through the Adder's lists) and from pilot_api.update_job's request; A2's reading is made for the caller by that
+    object's key, from its birth where P14 read it inside the stay, the API's way named.  A way ending anywhere else
+    (a constant, a field), no inserting waker, no way, or no move (stuck), reads nothing."""
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import agents as AG
+        from bamboo.querier import rerun
+
+        caller = "p/adder_gen.py::AdderGen.process_job_report"
+        site = "panda:p/job_standalone_module.py::listJobOutputReport@2401"
+        ins = N(kind="born", owner="p/job_standalone_module.py::insertJobOutputReport", line=2106, value="", subject="Job_Output_Report")
+        report = N(name=site, owner="p/job_standalone_module.py::listJobOutputReport", anchor=N(line_start=2401),
+                   tables=["Job_Output_Report"], keys=[], wakers=[ins])
+        quiet = N(name="panda:p/x.py::peek@9", owner="p/x.py::peek", anchor=N(line_start=9), tables=["t"], keys=[], wakers=[])
+        rows = lambda at: N(end="database", why="rows", site=at, route=("p/add_main.py:88",))
+        api = N(end="stop", why="missed,no_caller", site="", route=("p/pilot_api.py:720", "p/pilot_api.py:711"))
+        const = N(end="constant", why="", site="", route=("p/x.py:5",))
+        got = {}
+        found = AG.rows_handing([report, quiet], [rows(site), rows(site), api])
+        got["handed"] = [[r.anchor.line_start for r, _ in found[0]], [w.line for w in found[1]], found[2]]
+        got["a constant too"] = AG.rows_handing([report], [rows(site), const])
+        got["no waker"] = AG.rows_handing([quiet], [rows(quiet.name)])
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "U2", [], "outside"
+        r.logs = N(needs_window=True)
+        rerun.mapdump.fragment = lambda: N(read_sites=[report, quiet])
+        rerun._identity_attrs = lambda cls: ["JobSpec.PandaID"]
+        ways = {"ways": [rows(site), api]}
+        rerun.caller_key_ways = lambda owner, ident, lines=(): ("self.job_id", ways["ways"]) if ways["ways"] else ("", [])
+        calls = []
+        r._waker_reading = lambda *a, **k: calls.append([a[0], a[1], a[2], a[3], a[4], [x.anchor.line_start for x, _ in a[5]],
+                                                         k.get("caller"), k.get("handed")]) or True
+        c = N(owner=caller, lines=[472])
+        up = N(subject="JobSpec.jobStatus", key="9", window=("2026-11-14 05:05:13", "2026-11-15 05:05:12"),
+               before="2026-11-15 05:05:12")
+        r.__dict__["_mark_born"] = {("JobSpec", "9"): datetime.datetime(2026, 11, 15, 3, 28, 25, 945000)}
+        got["born"] = [r._caller_waker_turn(c, up), list(calls)]
+        calls[:] = []
+        r.__dict__["_mark_born"] = {}
+        got["stay"] = [r._caller_waker_turn(c, up), list(calls)]
+        calls[:] = []
+        got["stuck"] = [r._caller_waker_turn(c, N(**{**vars(up), "before": None})), list(calls)]
+        ways["ways"] = [rows(site), const]
+        got["another way"] = [r._caller_waker_turn(c, up), list(calls)]
+        ways["ways"] = []
+        got["no way"] = [r._caller_waker_turn(c, up), list(calls)]
+
+        # the END for the caller: the last write before the move, the object it ran on, U2's one pass, the API's way
+        del r._waker_reading
+        ins.routes = [["p/job_standalone_module.py::insertJobOutputReport", "p/api.py::updateJob"]]
+        rerun.mapdump.fragment = lambda: N(boundaries=[], endpoints=[])
+        p = N(machine="aipanda090.cern.ch")
+        r._waker_writes = lambda *a, **k: ([(datetime.datetime(2026, 11, 15, 5, 4, 57, 184000), p, ins.owner, 2106, [])], [], None)
+        r._stop_unanswered = lambda missed: None
+        r.data = {"statuslog": {"states": [{"status": "merging", "time": "2026-11-14 05:05:13"},
+                                           {"status": "finished", "time": "2026-11-15 05:05:12", "time_extended": "2026-11-15 05:05:12.903"}]}}
+        r.args, r.rests, r.ends = N(observed="merging"), [], []
+        from bamboo.querier import render as T
+        r._waker_reading("process_job_report", "9", "2026-11-15 03:28:25", "2026-11-15 05:05:12", "2026-11-15 05:05:12",
+                         [(report, "")], [ins], [], caller=("JobSpec", "9"), handed=("self.job_id", ["p/pilot_api.py:711"]))
+        got["end"] = [T.text(w) for _, w in r.ends]
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["handed"] == [[2401], [2106], ["p/pilot_api.py:711"]], got
+    assert got["a constant too"] is None and got["no waker"] is None, got
+    # from the merge job's birth, to the second, to the move; the caller's own name, the object's class and key, the ways
+    assert got["born"] == [True, [["AdderGen.process_job_report", "9", "2026-11-15 03:28:25", "2026-11-15 05:05:12",
+                                   "2026-11-15 05:05:12", [2401], ["JobSpec", "9"], ["self.job_id", ["p/pilot_api.py:711"]]]]], got
+    assert got["stay"][1][0][2] == "2026-11-14 05:05:13", got
+    assert got["stuck"] == got["another way"] == got["no way"] == [False, []], got
+    assert got["end"] == ["process_job_report moved it on 16 s after insertJobOutputReport:2106 wrote a row for it at "
+                          "2026-11-15 05:04:57 on aipanda090, entered from p/api.py::updateJob, for the JobSpec its moving pass "
+                          "ran on (9): process_job_report is handed a JobSpec by the rows listJobOutputReport@2401 selects, "
+                          "and ran on this one in the stay only in that pass (U2); no waker wrote one for its key earlier in "
+                          "the stay (from 2026-11-15 03:28:25; their logs searched whole on every machine); premises: "
+                          "process_job_report's self.job_id comes from the rows listJobOutputReport@2401 selects by the "
+                          "map's ways of it, and from p/pilot_api.py:711 (an API caller's request, not read)"], got
+
+
 def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_pass_reached_the_selection(tmp_path):
     """M3(a)-2: (1) a run of the row printing the time column at the stay's start says no arm wrote it before the
     print, where every arm that may write it in the stay writes the clock -- Watcher.run's lastmod at 78; another value
