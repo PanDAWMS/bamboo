@@ -51,7 +51,8 @@ def _decode_id_token(enc: str) -> dict:
     """
     payload = enc.split(".")[1]
     payload += "=" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload.encode()))
+    parsed: dict = json.loads(base64.urlsafe_b64decode(payload.encode()))
+    return parsed
 
 
 @dataclass
@@ -232,7 +233,8 @@ def _resolve_id_token(user_id: str, settings: Settings) -> Optional[str]:
     util = _utils(user_id, settings)
     valid, token_or_refresh, _dec = util.check_token()
     if valid:
-        return token_or_refresh  # a still-valid id_token
+        id_token: str = token_or_refresh  # a still-valid id_token
+        return id_token
     if not token_or_refresh:
         return None  # no token stored at all
     # Near expiry but a refresh token is available — refresh it.

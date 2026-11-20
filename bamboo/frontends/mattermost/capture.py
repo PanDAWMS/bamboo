@@ -35,7 +35,7 @@ async def _classify_nodes(graph: Any, graph_db: Any) -> list[tuple[str, str, str
     rows: list[tuple[str, str, str]] = []
     for n in graph.nodes:
         nt = getattr(n, "node_type", None)
-        label = nt.value if hasattr(nt, "value") else str(nt or "Node")
+        label = nt.value if nt is not None and hasattr(nt, "value") else str(nt or "Node")
         existing = None
         if graph_db is not None:
             try:
@@ -70,10 +70,10 @@ async def run_capture(
 
     # 2) Ops summary (the curation judgment).
     cause = await io.ask("[bold]What was the cause?[/bold]")
-    resolution = await io.ask(
+    resolution_text = await io.ask(
         "[bold]What was the resolution? (optional, blank to skip)[/bold]", default=""
     )
-    resolution = resolution or None
+    resolution = resolution_text or None
 
     # 3) Extract without storing — this is the preview for the inline review gate.
     io.notice("[dim]Extracting knowledge from the discussion…[/dim]")

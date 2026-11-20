@@ -105,8 +105,12 @@ class Tables:
             families = {frozenset([t["name"], *t["family"]]) for t in tables}
             if len(families) != 1 or any(s is None for _, s in spelled):
                 continue
-            out.live[c] = tuple(s for t, s in spelled if t["inserted"])
-            out.archive[c] = tuple(s for t, s in spelled if not t["inserted"])
+            out.live[c] = tuple(
+                s for t, s in spelled if t["inserted"] and s is not None
+            )
+            out.archive[c] = tuple(
+                s for t, s in spelled if not t["inserted"] and s is not None
+            )
             archived = [t for t in tables if not t["inserted"]]
             if attr := _one(a for t in archived for a in t["partitioned_by_attrs"]):
                 out.since[c] = attr
@@ -214,7 +218,8 @@ class Record:
         data = response.get("data") if response.get("success") else None
         if not isinstance(data, dict) or "answers" not in data:
             return [None] * len(asks)
-        return data["answers"]
+        answers: list[dict | None] = data["answers"]
+        return answers
 
     async def call(self, part: str, call: Awaitable[dict], request: dict) -> dict:
         response = await call
@@ -469,7 +474,8 @@ async def fetch_key(
 
 
 def key_class(question: dict) -> str:
-    return question["subject"].partition(".")[0]
+    subject: str = question["subject"]
+    return subject.partition(".")[0]
 
 
 async def fetch(

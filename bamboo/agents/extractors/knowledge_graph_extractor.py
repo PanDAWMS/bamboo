@@ -12,6 +12,7 @@ import uuid
 from typing import Any
 
 from bamboo.agents.extractors import get_extraction_strategy
+from bamboo.models.graph_element import BaseNode
 from bamboo.models.knowledge_entity import KnowledgeGraph
 
 logger = logging.getLogger(__name__)
@@ -35,14 +36,14 @@ class KnowledgeGraphExtractor:
                   is used.
     """
 
-    def __init__(self, strategy: str = None):
+    def __init__(self, strategy: str | None = None):
         self.strategy = get_extraction_strategy(strategy)
         self._desc_cache: dict[str, str] = {}
         logger.info("KnowledgeGraphExtractor: using strategy '%s'", self.strategy.name)
 
     async def prefetch_hints(
         self,
-        task_data: dict[str, Any] = None,
+        task_data: dict[str, Any] | None = None,
         email_text: str = "",
     ) -> dict[str, str]:
         """Delegate pre-extraction hint fetching to the active strategy."""
@@ -51,10 +52,10 @@ class KnowledgeGraphExtractor:
     async def extract_from_sources(
         self,
         email_text: str = "",
-        task_data: dict[str, Any] = None,
-        external_data: dict[str, Any] = None,
-        task_logs: dict[str, str] = None,
-        doc_hints: dict[str, str] = None,
+        task_data: dict[str, Any] | None = None,
+        external_data: dict[str, Any] | None = None,
+        task_logs: dict[str, str] | None = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph and assign stable node IDs.
 
@@ -128,7 +129,7 @@ class KnowledgeGraphExtractor:
         # ErrorCategoryClassifier; their *descriptions* (raw error messages /
         # LLM summaries from logs) still need incident-specific tokens stripped.
         _DESC_CANONICALIZE_TYPES = frozenset({"Cause", "Resolution", "Procedure", "Task_Context", "Symptom"})
-        prose_nodes = [n for n in graph.nodes if n.node_type.value in _DESC_CANONICALIZE_TYPES]
+        prose_nodes: list[BaseNode] = [n for n in graph.nodes if n.node_type.value in _DESC_CANONICALIZE_TYPES]
         await canonicalize_descriptions(prose_nodes, cache=self._desc_cache)
 
         return graph

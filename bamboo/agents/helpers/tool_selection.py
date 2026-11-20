@@ -162,7 +162,8 @@ def render_tools(
 
     def render_line(d: dict[str, Any]) -> str:
         full = full_schema_for is None or d["name"] in full_schema_for
-        return fmt["full"](d) if full else fmt["compact"](d)
+        line: str = fmt["full"](d) if full else fmt["compact"](d)
+        return line
 
     if token_budget is None:
         return fmt["sep"].join(render_line(d) for d in descs), []
@@ -406,7 +407,7 @@ class ToolSelector:
         s2: list[str] = []
         for r in rows2:
             name = (r.get("metadata") or {}).get("tool_name")
-            if name in descs:
+            if isinstance(name, str) and name in descs:
                 s2.append(name)
 
         # Source #1 (validated past, best-effort): empty/failure is non-fatal.

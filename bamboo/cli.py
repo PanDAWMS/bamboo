@@ -763,7 +763,10 @@ async def fetch_task_data_for_filter(task_id_str: str) -> dict:
     from bamboo.agents.helpers.deps import resolve_task_data
 
     with console.status(f"[bold green]Fetching task {task_id_str} from PanDA..."):
-        return await resolve_task_data(int(task_id_str))
+        data = await resolve_task_data(int(task_id_str))
+    if data is None:
+        raise ValueError(f"no task data for {task_id_str}")
+    return data
 
 
 async def cleanup_databases_interactive():

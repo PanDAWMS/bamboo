@@ -38,7 +38,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -91,6 +91,9 @@ from bamboo.models.graph_element import (
     TaskFeatureNode,
 )
 from bamboo.models.knowledge_entity import KnowledgeGraph
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +404,7 @@ class InvestigationOrchestrator:
         self.allow_mutating_autorun = allow_mutating_autorun
         sid = session_id or uuid.uuid4().hex[:12]
         self.session = InvestigationSession(session_id=sid, max_turns=max_turns)
-        self._llm = None  # lazy
+        self._llm: BaseChatModel | None = None  # lazy
         # Last intent classification, formatted for the per-turn detail message
         # (set in _classify_intent, consumed by _tool_turn). None until first turn.
         self._last_intent_meta: Optional[str] = None
@@ -423,7 +426,7 @@ class InvestigationOrchestrator:
         self._tool_index_built: bool = False
         # (tool_names, prompt_text) of approved runs this session — re-indexed at a
         # higher weight when the session finalises with a Cause (source #1 upweight).
-        self._approved_run_prompts: list[tuple[list[str], str]] = []
+        self._approved_run_prompts: list[tuple[frozenset[str] | list[str], str]] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1518,14 +1521,13 @@ class InvestigationOrchestrator:
 
         # Promote tentative Procedures: canonicalise name to strategy_type:<cause>
         # (per existing schema) and create investigated_by edge carrying per-edge fields.
-        is_abandoned = cause_node is None
         for n in list(self.session.partial_graph.nodes):
             if not isinstance(n, ProcedureNode):
                 continue
             if not n.name.startswith("") or "tentative" not in n.name:
                 continue  # already finalised
             pending = (n.metadata or {}).pop("_pending_edge", {}) or {}
-            if is_abandoned:
+            if cause_node is None:  # abandoned
                 n.metadata.setdefault("status", "tentative")
                 n.metadata.setdefault("session_status", "ongoing")
                 # Without a Cause we can't materialise the investigated_by edge.
@@ -1614,7 +1616,7 @@ class InvestigationOrchestrator:
         rows: list[tuple[str, str, str]] = []
         for n in graph.nodes:
             nt = getattr(n, "node_type", None)
-            label = nt.value if hasattr(nt, "value") else str(nt or "Node")
+            label = nt.value if nt is not None and hasattr(nt, "value") else str(nt or "Node")
             try:
                 existing = await self.deps.graph_db.get_node_description(label, n.name)
             except Exception as exc:  # noqa: BLE001

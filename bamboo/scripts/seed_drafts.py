@@ -88,7 +88,7 @@ async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
     """Return a short block of relevant PanDA doc snippets for the given task."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm
+    from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm, message_text
     from bamboo.llm.errors import log_llm_failure
     from bamboo.mcp.panda_mcp_client import PandaMcpClient
 
@@ -112,7 +112,7 @@ async def _fetch_panda_docs(task_data: dict[str, Any]) -> str:
                 HumanMessage(content=user_content),
             ]
         )
-        raw = response.content.strip()
+        raw = message_text(response.content).strip()
         if raw.startswith("```"):
             raw = "\n".join(ln for ln in raw.splitlines() if not ln.startswith("```")).strip()
         parsed = json.loads(raw)
@@ -147,7 +147,7 @@ async def _generate_email_body(task_data: dict[str, Any], panda_docs: str) -> di
     """Call LLM to generate a structured email_body dict."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from bamboo.llm import get_llm
+    from bamboo.llm import get_llm, message_text
 
     prompt = _DRAFT_PROMPT.format(
         status=task_data.get("status", ""),
@@ -163,10 +163,11 @@ async def _generate_email_body(task_data: dict[str, Any], panda_docs: str) -> di
             HumanMessage(content=prompt),
         ]
     )
-    raw = response.content.strip()
+    raw = message_text(response.content).strip()
     if raw.startswith("```"):
         raw = "\n".join(ln for ln in raw.splitlines() if not ln.startswith("```")).strip()
-    return json.loads(raw)
+    parsed: dict[str, Any] = json.loads(raw)
+    return parsed
 
 
 def _feature_diff(new_task: dict[str, Any], source_task: dict[str, Any]) -> str:
@@ -398,7 +399,7 @@ async def _run(
     # -- Phase D: Cluster --------------------------------------------------
     # Cluster approved-matched by which approved file they matched (same file = same cluster)
     # then further cluster by within-group similarity
-    approved_by_file: dict[str, list[tuple[str, float, dict[str, Any], dict[str, Any]]]] = {}
+    approved_by_file: dict[str, list[tuple[str, float, dict[str, Any], list[dict[str, Any]]]]] = {}
     for raw_error, (matched_file, score, matched_entry, tasks) in approved_matched_groups.items():
         approved_by_file.setdefault(matched_file, []).append(
             (raw_error, score, matched_entry, tasks)

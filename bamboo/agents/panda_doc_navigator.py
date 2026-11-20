@@ -36,7 +36,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from bamboo.config import get_settings
-from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm
+from bamboo.llm import get_embeddings, get_extraction_llm, get_reranker, get_summary_llm, message_text
 from bamboo.llm.errors import log_llm_failure
 from bamboo.utils.errors import log_endpoint_failure
 from bamboo.llm.prompts import (
@@ -55,19 +55,22 @@ logger = logging.getLogger(__name__)
 def _embed_documents_silently(emb, texts: list[str]) -> list[list[float]]:
     _sink = io.StringIO()
     with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
-        return emb.embed_documents(texts)
+        answer: list[list[float]] = emb.embed_documents(texts)
+        return answer
 
 
 def _embed_query_silently(emb, query: str) -> list[float]:
     _sink = io.StringIO()
     with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
-        return emb.embed_query(query)
+        answer: list[float] = emb.embed_query(query)
+        return answer
 
 
 def _predict_silently(model, pairs: list[tuple[str, str]]) -> list[float]:
     _sink = io.StringIO()
     with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
-        return model.predict(pairs).tolist()
+        answer: list[float] = model.predict(pairs).tolist()
+        return answer
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +367,8 @@ class PandaDocNavigator:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(_PANDA_DOCS_TREE_URL, headers=_GH_HEADERS)
                 resp.raise_for_status()
-                return resp.json().get("sha")
+                answer: str | None = resp.json().get("sha")
+                return answer
         except Exception as exc:
             log_endpoint_failure(
                 logger,
@@ -447,7 +451,8 @@ class PandaDocNavigator:
         Schema: ``{node_id: {"content_hash": str, "summary": str, "title": str}}``.
         """
         try:
-            return json.loads(_NODE_CACHE_FILE.read_text())
+            parsed: dict[str, dict] = json.loads(_NODE_CACHE_FILE.read_text())
+            return parsed
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
@@ -494,7 +499,7 @@ class PandaDocNavigator:
                         )),
                     ]
                 )
-            summary = resp.content.strip()
+            summary = message_text(resp.content).strip()
             if summary:
                 say(f"System knowledge summary generated ({len(summary)} chars).")
             return summary
@@ -882,7 +887,7 @@ class PandaDocNavigator:
                                 HumanMessage(content=user_content),
                             ]
                         )
-                        raw = resp.content.strip()
+                        raw = message_text(resp.content).strip()
                         if raw.startswith("```"):
                             raw = "\n".join(
                                 line for line in raw.splitlines() if not line.startswith("```")
@@ -1154,7 +1159,7 @@ class PandaDocNavigator:
                     HumanMessage(content=user_content),
                 ]
             )
-            text = response.content.strip()
+            text = message_text(response.content).strip()
             match = re.search(r"\[.*?\]", text, re.DOTALL)
             if not match:
                 return []

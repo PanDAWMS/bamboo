@@ -83,8 +83,8 @@ class InteractiveMcpClient(McpClient):
         say("─" * 60)
         loop = asyncio.get_event_loop()
         try:
-            text = await loop.run_in_executor(None, input, "> ")
-            return text.strip()
+            line: str = await loop.run_in_executor(None, input, "> ")
+            return line.strip()
         except EOFError:
             logger.warning("InteractiveMcpClient: EOF on stdin — returning empty string")
             return ""

@@ -103,10 +103,10 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
 
     async def find_causes(
         self,
-        symptoms: list[str] = None,
-        task_features: list[str] = None,
-        environment_factors: list[str] = None,
-        components: list[str] = None,
+        symptoms: list[str] | None = None,
+        task_features: list[str] | None = None,
+        environment_factors: list[str] | None = None,
+        components: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Find possible causes ranked by total evidence across all clue types."""
@@ -119,7 +119,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         ]
 
         # cause_id -> {"cause": node, "match_score": int, "resolutions": list}
-        matched: dict[str, dict] = {}
+        matched: dict[str | None, dict] = {}
 
         for clue_values, node_type_substr, rel_type in clue_groups:
             if not clue_values:
@@ -184,7 +184,7 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
         return results[:limit]
 
     async def find_procedures_for_causes(
-        self, cause_names: list[str]
+        self, cause_names: list[str], include_tentative: bool = False
     ) -> list[dict[str, Any]]:
         """Return Procedure nodes linked to the given causes (in-memory stub)."""
         results = []
@@ -325,7 +325,8 @@ class InMemoryGraphBackend(GraphDatabaseBackend):
     async def update_resolution_success_rate(self, resolution_id: str, success: bool):
         """Update resolution success rate based on feedback."""
         if resolution_id in self.nodes:
-            node = self.nodes[resolution_id]
+            # the attempt counters are set on the node here, not declared by its model
+            node: Any = self.nodes[resolution_id]
 
             if not hasattr(node, "total_attempts"):
                 node.total_attempts = 0

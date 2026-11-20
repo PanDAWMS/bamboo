@@ -23,6 +23,13 @@ from bamboo.utils.errors import describe_endpoint_failure, log_endpoint_failure
 logger = logging.getLogger(__name__)
 
 
+def _payload(point: Any) -> dict[str, Any]:
+    """A point's payload; every point this backend stores has one."""
+    payload: dict[str, Any] | None = point.payload
+    assert payload is not None, f"Qdrant point {point.id} has no payload"
+    return payload
+
+
 class QdrantBackend(VectorDatabaseBackend):
     """Qdrant implementation of vector database backend."""
 
@@ -33,6 +40,12 @@ class QdrantBackend(VectorDatabaseBackend):
         self.collection_name = self.settings.qdrant_collection_name
         # Serialises the first connect so concurrent first queries connect once.
         self._connect_lock = asyncio.Lock()
+
+    @property
+    def _connected(self) -> AsyncQdrantClient:
+        """The client, once :meth:`_ensure_connected` has opened it."""
+        assert self.client is not None, "the Qdrant client is not connected"
+        return self.client
 
     async def _ensure_connected(self):
         """Open the client on first use (idempotent, concurrency-guarded).
@@ -118,7 +131,7 @@ class QdrantBackend(VectorDatabaseBackend):
             vector=embedding,
             payload={"content": content, "section": section, **metadata},
         )
-        await self.client.upsert(
+        await self._connected.upsert(
             collection_name=self.collection_name,
             points=[point],
         )
@@ -145,7 +158,7 @@ class QdrantBackend(VectorDatabaseBackend):
                 ]
             )
 
-        response = await self.client.query_points(
+        response = await self._connected.query_points(
             collection_name=self.collection_name,
             query=query_embedding,
             query_filter=query_filter,
@@ -158,11 +171,11 @@ class QdrantBackend(VectorDatabaseBackend):
             {
                 "id": point.id,
                 "score": point.score,
-                "content": point.payload.get("content", ""),
-                "entry": point.payload.get("entry", ""),
+                "content": _payload(point).get("content", ""),
+                "entry": _payload(point).get("entry", ""),
                 "metadata": {
                     k: v
-                    for k, v in point.payload.items()
+                    for k, v in _payload(point).items()
                     if k not in ("content", "entry")
                 },
             }
@@ -180,7 +193,7 @@ class QdrantBackend(VectorDatabaseBackend):
         results = []
         for graph_id in graph_ids:
             try:
-                points, _ = await self.client.scroll(
+                points, _ = await self._connected.scroll(
                     collection_name=self.collection_name,
                     scroll_filter=models.Filter(
                         must=[
@@ -203,11 +216,11 @@ class QdrantBackend(VectorDatabaseBackend):
                         {
                             "id": point.id,
                             "score": 1.0,
-                            "content": point.payload.get("content", ""),
-                            "entry": point.payload.get("entry", ""),
+                            "content": _payload(point).get("content", ""),
+                            "entry": _payload(point).get("entry", ""),
                             "metadata": {
                                 k: v
-                                for k, v in point.payload.items()
+                                for k, v in _payload(point).items()
                                 if k not in ("content", "entry")
                             },
                         }
@@ -221,13 +234,13 @@ class QdrantBackend(VectorDatabaseBackend):
     async def collection_exists(self) -> bool:
         """Return True if the Qdrant collection exists."""
         await self._ensure_connected()
-        response = await self.client.get_collections()
+        response = await self._connected.get_collections()
         return self.collection_name in {c.name for c in response.collections}
 
     async def clear_all(self) -> None:
         """Drop and recreate the Qdrant collection (all vectors deleted)."""
         await self._ensure_connected()
-        await self.client.delete_collection(self.collection_name)
+        await self._connected.delete_collection(self.collection_name)
         logger.info("Qdrant: collection '%s' dropped", self.collection_name)
         await self._ensure_collection()
         logger.info("Qdrant: collection '%s' recreated", self.collection_name)
@@ -236,7 +249,7 @@ class QdrantBackend(VectorDatabaseBackend):
         """Delete a document by ID."""
         await self._ensure_connected()
         try:
-            await self.client.delete(
+            await self._connected.delete(
                 collection_name=self.collection_name,
                 points_selector=models.PointIdsList(points=[doc_id]),
             )
@@ -249,7 +262,7 @@ class QdrantBackend(VectorDatabaseBackend):
         """Retrieve a specific document by ID."""
         await self._ensure_connected()
         try:
-            points = await self.client.retrieve(
+            points = await self._connected.retrieve(
                 collection_name=self.collection_name,
                 ids=[doc_id],
                 with_payload=True,
@@ -258,11 +271,11 @@ class QdrantBackend(VectorDatabaseBackend):
                 point = points[0]
                 return {
                     "id": point.id,
-                    "content": point.payload.get("content", ""),
-                    "entry": point.payload.get("entry", ""),
+                    "content": _payload(point).get("content", ""),
+                    "entry": _payload(point).get("entry", ""),
                     "metadata": {
                         k: v
-                        for k, v in point.payload.items()
+                        for k, v in _payload(point).items()
                         if k not in ("content", "entry")
                     },
                 }
@@ -279,7 +292,7 @@ class QdrantBackend(VectorDatabaseBackend):
         Uses only URL / API key via the Qdrant Snapshot API — no access to the
         server's on-disk storage dir — so it works against any reachable Qdrant.
         """
-        snapshot = await self.client.create_snapshot(collection_name=collection_name)
+        snapshot = await self._connected.create_snapshot(collection_name=collection_name)
         name = getattr(snapshot, "name", "")
         if not name:
             raise RuntimeError(
@@ -301,7 +314,7 @@ class QdrantBackend(VectorDatabaseBackend):
                             fh.write(chunk)
         finally:
             with contextlib.suppress(Exception):
-                await self.client.delete_snapshot(
+                await self._connected.delete_snapshot(
                     collection_name=collection_name, snapshot_name=name
                 )
 
@@ -351,7 +364,7 @@ class QdrantBackend(VectorDatabaseBackend):
 
         await self._ensure_connected()
         server_version = await self._server_version()
-        names = sorted(c.name for c in (await self.client.get_collections()).collections)
+        names = sorted(c.name for c in (await self._connected.get_collections()).collections)
         entries: list[dict[str, str]] = []
         for coll in names:
             snapshot_file = f"qdrant-{coll}.snapshot"

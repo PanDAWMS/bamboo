@@ -151,7 +151,7 @@ async def eval_one(
     exc_msg: str | None = None
     task_data: dict[str, Any] = {}
     doc_hints: dict[str, str] = {}
-    meta: dict[str, str] = {}
+    meta: dict[str, Any] = {}
 
     try:
         task_data = await fetch_task_data(task_id)

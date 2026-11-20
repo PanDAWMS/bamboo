@@ -15,7 +15,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from bamboo.llm import PRESCRIPTION_EMAIL_PROMPT, get_llm
+from bamboo.llm import PRESCRIPTION_EMAIL_PROMPT, get_llm, message_text
 from bamboo.models.knowledge_entity import AnalysisResult
 from bamboo.utils.narrator import thinking
 
@@ -88,4 +88,4 @@ class EmailDrafter:
         ]
         with thinking("Drafting email"):
             response = await self.llm.ainvoke(messages)
-        return response.content
+        return message_text(response.content)

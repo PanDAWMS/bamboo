@@ -53,6 +53,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.embeddings import Embeddings
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from pydantic import SecretStr
 
 from bamboo.config import get_settings
 
@@ -139,19 +140,28 @@ def resolve_context_window(settings: Optional[Any] = None) -> int:
     return _CLOUD_CONTEXT_WINDOW.get(provider, _OLLAMA_FALLBACK_CONTEXT)
 
 
+def message_text(content: str | list[str | dict]) -> str:
+    """A chat model's answer as text.  LangChain types a message's content as a string or a list of blocks; the
+    models this package builds answer with a string, so a list here is a surprise, said rather than stripped."""
+    assert isinstance(content, str), f"a chat answer of {type(content).__name__}, not text"
+    return content
+
+
 def _build_llm(temperature: float) -> BaseChatModel:
     settings = get_settings()
 
     if settings.llm_provider == "openai":
         return ChatOpenAI(
             model=settings.llm_model,
-            api_key=settings.llm_api_key,
+            api_key=SecretStr(settings.llm_api_key),
             temperature=temperature,
         )
     if settings.llm_provider == "anthropic":
-        return ChatAnthropic(
+        # LangChain declares ChatAnthropic's fields with aliases (model / model_name, timeout, stop) that mypy,
+        # without the pydantic plugin, reads as one required keyword each; the call is as LangChain documents it
+        return ChatAnthropic(  # type: ignore[call-arg]
             model=settings.llm_model,
-            api_key=settings.llm_api_key,
+            api_key=SecretStr(settings.llm_api_key),
             temperature=temperature,
         )
     if settings.llm_provider == "ollama":
@@ -167,12 +177,13 @@ def _build_llm(temperature: float) -> BaseChatModel:
         # builds ollama.Client(host=None), which silently falls back to
         # OLLAMA_HOST or http://127.0.0.1:11434 — so OLLAMA_BASE_URL would apply
         # to the /api/ps probe and `bamboo verify` but not to inference itself.
-        return ChatOllama(
+        chat: BaseChatModel = ChatOllama(
             model=settings.llm_model,
             base_url=settings.ollama_base_url or None,
             temperature=temperature,
             reasoning=settings.ollama_reasoning,
         )
+        return chat
     raise ValueError(
         f"Unsupported LLM provider: {settings.llm_provider!r}. "
         "Supported values: 'openai', 'anthropic', 'ollama'."
@@ -238,7 +249,7 @@ def get_embeddings() -> Embeddings:
     if settings.embeddings_provider == "openai":
         return OpenAIEmbeddings(
             model=settings.embedding_model,
-            api_key=settings.effective_embeddings_api_key,
+            api_key=SecretStr(settings.effective_embeddings_api_key),
         )
 
     if settings.embeddings_provider == "local":
@@ -253,7 +264,8 @@ def get_embeddings() -> Embeddings:
         try:
             _sink = io.StringIO()
             with contextlib.redirect_stdout(_sink), contextlib.redirect_stderr(_sink):
-                return HuggingFaceEmbeddings(model_name=settings.embedding_model)
+                embeddings: Embeddings = HuggingFaceEmbeddings(model_name=settings.embedding_model)
+                return embeddings
         except (NameError, AttributeError) as exc:
             # transformers>=4.45 breaks with torch<2.4:
             #   NameError: name 'nn' is not defined

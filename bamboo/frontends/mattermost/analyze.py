@@ -25,7 +25,10 @@ async def _default_fetch(task_id: int) -> dict:
     """Fetch task data via the shared seam (the same one analyze/investigate/populate use)."""
     from bamboo.agents.helpers.deps import resolve_task_data  # noqa: PLC0415
 
-    return await resolve_task_data(task_id)
+    data = await resolve_task_data(task_id)
+    if data is None:
+        raise ValueError(f"no task data for {task_id}")
+    return data
 
 
 async def run_analyze(
