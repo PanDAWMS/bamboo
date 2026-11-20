@@ -110,6 +110,14 @@ that in a rotated file, the string is asked again in the API's pattern mode, a
 regular expression for a line that starts with a stamp inside the stretch
 still wanted and holds the string: one grep per machine and file for all such
 strings.  An answer cut again is asked again from its last record's second on.
+Each side's slack is read by one page at most: past a window's end the rest
+of the slack goes unread, and a page that stops before the window's start is
+followed from the start (rnd14's ask of a big task's ID over 9 minutes found
+the abort's lines filling 1 MB per 1.7 s of log just after its window on
+aipanda087, and was stopped with hours to go, 2026-11-20).  A file on a
+machine is asked at most :data:`CONTINUE_MAX_PAGES` pattern pages in a round;
+what is left is not read, and the output names it.  What the slack or the cap
+leaves is not ``searched``, and the querier reads it as not read.
 A page that reads no further (one second holding more than 1 MB of its
 strings) leaves the string most of its records hold there, the rest of its
 stretch not read, and the others are asked on without it: the asks of one file
@@ -143,8 +151,8 @@ string's (the querier's door, 2026-10-31: a list of the cut strings alone would
 have it ask again strings read whole over their windows once they went on).
 
 **Again.**  ``--again`` records again, as a new round, the asks of a case
-whose latest record holds a cut file not searched over the ask's window
-widened by :data:`CONTINUE_SLACK`: one written without ``searched``, or whose
+whose latest record holds a cut file not searched over the ask's window (the
+slack is not asked again): one written without ``searched``, or whose
 ``searched`` leaves a second of its ``covers`` there out.  Each new record has
 ``replaces``, the round whose record of the ask the querier reads it instead
 of.  A record of an earlier round reads the strings it read in part from that
@@ -191,10 +199,14 @@ TIMEOUT_RETRIES = 2
 #: machine rotates a log once a day, so once is the most a round is expected to need)
 RELIST_TRIES = 2
 #: how far past each end of an ask's window a cut string is asked again: the querier's EDGE, within which a run near
-#: an end of what was searched may go on past it (its door asks again for that once)
+#: an end of what was searched may go on past it (its door asks again for that once).  Each side is read by one page
+#: at most (:func:`slack_read`)
 CONTINUE_SLACK = datetime.timedelta(minutes=10)
 #: most strings one pattern grep takes: its pattern grows with each (pin m's most in one file was 30, 2026-10-30)
 CONTINUE_MAX_STRINGS = 50
+#: most pattern pages one file on one machine is asked in a round: a guard, not a budget -- the most read to the end so
+#: far was 110 (aipanda089's JediDBProxy, 2026-10-31); rnd14's slack went on at 1 MB per 1.7 s of log (2026-11-20)
+CONTINUE_MAX_PAGES = 100
 SECOND = datetime.timedelta(seconds=1)
 #: the open ends of a stretch: a file's start not known, and no end
 LOW, HIGH = datetime.datetime.min, datetime.datetime.max
@@ -308,6 +320,25 @@ def read_before(last: datetime.datetime | None) -> Stretches:
     """What a grep cut after a record stamped *last* read: the file up to the second before, as the cut can fall
     inside that second (none when the answer held no stamped record)."""
     return [] if last is None else [(LOW, last - SECOND)]
+
+
+def slack_read(
+    windows: list[tuple[datetime.datetime, datetime.datetime]], read: Stretches
+) -> Stretches:
+    """The slack around *windows* not asked for any more: each side's :data:`CONTINUE_SLACK` that *read* already
+    reaches into, less every window.  A page that reads into a side is that side's one page: past a window's end the
+    rest goes unread, and before its start the next page begins at the start (rnd14's ask of a task's ID over 9 min
+    read 59 MB of the abort's lines in the 2 min after its window on aipanda087, and went on, 2026-11-20)."""
+    sides = [
+        side
+        for lo, hi in windows
+        for side in (
+            (lo - CONTINUE_SLACK, before(lo)),
+            (after(hi), hi + CONTINUE_SLACK),
+        )
+        if common([side], read)
+    ]
+    return minus(joined(sides), joined(list(windows)))
 
 
 #: a stamp's beginnings that a block of time shares: its size, whether a second starts one, the beginning's length
@@ -572,17 +603,15 @@ def cut_asks(directory: Path) -> list[dict]:
 
 
 def searched_over(f: dict, window: list[str]) -> bool:
-    """Whether a cut file's ``searched`` holds every second of its ``covers`` in *window* widened by
-    :data:`CONTINUE_SLACK`.  A file whose covers are not known (a window holding no stamp) is not read better by asking
-    again."""
+    """Whether a cut file's ``searched`` holds every second of its ``covers`` in *window*.  The slack around it is
+    read by one page a side at most (:func:`slack_read`), so what it leaves is not asked again.  A file whose covers
+    are not known (a window holding no stamp) is not read better by asking again."""
     if "searched" not in f:
         return False
     if not f.get("covers"):
         return True
     lo, hi = (stamp(w) for w in window)
-    wanted = common(
-        [(lo - CONTINUE_SLACK, hi + CONTINUE_SLACK)], stretches_of([f["covers"]])
-    )
+    wanted = common([(lo, hi)], stretches_of([f["covers"]]))
     return not minus(wanted, stretches_of(f["searched"]))
 
 
@@ -859,27 +888,43 @@ class Grepper:
         span = [(f.start or LOW, f.end or HIGH)]
         wanted = {}
         for s in sorted(job.truncated - job.failed.keys()):
+            windows = job.windows.get(s, [])
             around = joined(
-                [
-                    (lo - CONTINUE_SLACK, hi + CONTINUE_SLACK)
-                    for lo, hi in job.windows.get(s, [])
-                ]
+                [(lo - CONTINUE_SLACK, hi + CONTINUE_SLACK) for lo, hi in windows]
             )
-            rest = minus(common(around, span), job.read.get(s, []))
+            read = job.read.get(s, [])
+            rest = minus(minus(common(around, span), read), slack_read(windows, read))
             if rest:
                 wanted[s] = rest
         strings = sorted(wanted)
         for i in range(0, len(strings), CONTINUE_MAX_STRINGS):
-            await self.page(
-                job, {s: wanted[s] for s in strings[i : i + CONTINUE_MAX_STRINGS]}
+            group = {s: wanted[s] for s in strings[i : i + CONTINUE_MAX_STRINGS]}
+            if self.capped(job, group):
+                break
+            await self.page(job, group)
+
+    @staticmethod
+    def capped(job: Job, wanted: dict[str, Stretches]) -> bool:
+        """Whether the file's pattern pages reached :data:`CONTINUE_MAX_PAGES`: *wanted* is then not asked, and goes
+        unread (not ``searched``), said on the output."""
+        pages = sum(1 for r in job.requests if r.get("pattern"))
+        if pages < CONTINUE_MAX_PAGES:
+            return False
+        f = job.file
+        for s, v in sorted(wanted.items()):
+            print(
+                f"page cap: {f.machine} {f.name}: {pages} pages; not read for {s!r}: "
+                f"{stretches_text(v)}"
             )
+        return True
 
     async def page(
         self, job: Job, wanted: dict[str, Stretches], retries: int = TIMEOUT_RETRIES
     ) -> None:
         """One pattern grep for *wanted*; cut, the next from its last record's second on, while it gets further,
-        and one that gets no further goes on without the string most of its records hold.  A grep that fails fails
-        its strings, as a grep of the strings does."""
+        and one that gets no further goes on without the string most of its records hold.  The slack a page reached
+        into is not asked on (:func:`slack_read`), nor anything past :data:`CONTINUE_MAX_PAGES`.  A grep that fails
+        fails its strings, as a grep of the strings does."""
         f = job.file
         pattern = continuation_pattern(wanted)
         asked = self.parts.now()
@@ -957,7 +1002,12 @@ class Grepper:
                 }
                 if held:
                     del rest[min(held, key=lambda s: (-held[s], s))]
-            if rest and rest != wanted:
+            rest = {
+                s: r
+                for s, v in rest.items()
+                if (r := minus(v, slack_read(job.windows.get(s, []), job.read[s])))
+            }
+            if rest and rest != wanted and not self.capped(job, rest):
                 await self.page(job, rest)
 
     async def compressed(self, job: Job) -> bool:
