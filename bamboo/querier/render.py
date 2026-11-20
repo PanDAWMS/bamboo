@@ -474,6 +474,9 @@ TEMPLATES: dict[str, str] = {
     "passes-ran-no-arm": "its {n} pass(es) in the stay ran none of its arms, leaving by one of {left_by} or running on past them",
     "passes-took-none": "its {n} pass(es) in the stay took none of its candidates",
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
+    # the narrow ask (rerun._by_row_texts, prints_naming's asked)
+    "asked-by-its-row-texts": "  {func}: asked by {n} text(s) of its prints holding the key before its arms (rows {lines:join=, }), not by the key alone over {logs:join=, } across a move of the row",
+    "prints-of-the-key-not-asked": "the arm(s) at {lines:join=, } print the key before the write in no print whose text was asked (rows {asked:join=, })",
     # P25 (rerun._writer_caller_take)
     "writer-called-in-a-pass-whose-selection-took-it": "{writer}'s run was called in {caller}'s pass on {machine}, in which its selection {site} handed the row on: its row {line} printed at {at}: {text!r} (P25)",
     "writer-caller-asked": "what called {writer}'s run: {callers:join=, }'s logs on {machine} before it are asked ({n} ask(s)) (P25)",

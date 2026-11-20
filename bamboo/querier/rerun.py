@@ -819,25 +819,30 @@ def _binds_name(record, key: str) -> bool:
     return got is not None and any(v is not None and str(v).strip().strip("'\"") == key for v in got[1].values())
 
 
-def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
+def prints_naming(writers: list, owner: str, lines, columns: set[str], asked: set[int] | None = None) -> dict:
     """Judgement 3's third premise for *owner*: every run that reaches one of its arms at *lines* prints the key the
     asks search by -- a line the map says runs before the arm on every path (``Branch.must_prints``) with a hole it
     says holds a column among *columns* of the row the arm writes (``Branch.must_names``: in the message, the run's
     mark, or an SQL arm's bind map).  Where the map read the must prints' names whole (``Branch.must_names_whole``),
     none naming the key says no run need print it; where it did not, an arm with must prints and no such name is not
     known either way.  One with no must prints: no run need print anything before it.  ``{"held": True | False |
-    None, "why": ...}``, False where any arm says so, None where any is not known, as ``every_log_asked``."""
+    None, "why": ...}``, False where any arm says so, None where any is not known, as ``every_log_asked``.  Where the
+    asks searched by the texts of some prints (*asked*, their lines: :func:`key_texts`), only those prints count: an
+    arm whose must prints name the key in none of them may have run unseen."""
     if not columns:
         return {"held": None, "why": T.Said("prints-no-key-column")}
     if not lines:
         return {"held": None, "why": T.Said("prints-no-arm-of-its-own")}
-    unread, bare, whole, unnamed = [], [], [], []
+    unread, bare, whole, unnamed, unasked = [], [], [], [], []
     for line in sorted(lines):
         for b in (b for j in writers if j.owner == owner for b in j.branches if b.line == line):
             if b.must_prints is None:
                 unread.append(T.Said("line-hole", {"line": line, "hole": b.must_hole or "not read"}))
             elif not b.must_prints:
                 bare.append(line)
+            elif asked is not None and not any(n.row == MUST_ROW_WRITTEN and n.column in columns and n.line in asked
+                                               for n in b.must_names or []):
+                unasked.append(line)
             elif not any(n.row == MUST_ROW_WRITTEN and n.column in columns for n in b.must_names or []):
                 if b.must_names_whole:
                     whole.append(line)
@@ -845,6 +850,9 @@ def prints_naming(writers: list, owner: str, lines, columns: set[str]) -> dict:
                     unnamed.append(line)
     if bare:
         return {"held": False, "why": T.Said("prints-no-line-before", {"lines": sorted(set(bare))})}
+    if unasked:
+        return {"held": False, "why": T.Said("prints-of-the-key-not-asked", {"lines": sorted(set(unasked)),
+                                                                             "asked": sorted(asked or ())})}
     if whole:
         return {"held": False, "why": T.Said("prints-read-whole-none-names", {"lines": sorted(set(whole)),
                                                                               "columns": sorted(columns)})}
@@ -3337,6 +3345,68 @@ def shared_logs(names: list[str]) -> list[str]:
                     counts.setdefault(f, set()).add(node.owner)
         _SHARED[:] = [fragment, {f: len(o) for f, o in counts.items()}]
     return [n for n in names if _SHARED[1].get(n, 0) >= SHARED_LOG]
+
+
+#: a text asked for a key instead of the key alone (:func:`key_texts`) has this much literal text before the key,
+#: spaces left out, where the text after it has less than ``rows.MIN_SHAPE``
+LONE_SIDE = 12
+#: the fragment and, for each function, the literal text either side of each hole of its rows
+_AROUND: list[Any] = [None, {}]
+
+
+def _holes_around() -> dict[str, set[tuple[str, str]]]:
+    """For each function of the map (its owner bare, :func:`_bare`), ``(before, after)`` of each hole of its rows: the
+    literal text right either side (``rows.hole_literals``).  Every hole, whatever the map says it holds: a hole it
+    names no column for may print the key too."""
+    fragment = mapdump.fragment()
+    if _AROUND[0] is not fragment:
+        out: dict[str, set[tuple[str, str]]] = {}
+        for node in getattr(fragment, "function_prints", None) or []:
+            for st in getattr(node, "statements", None) or []:
+                for row in st.rows or []:
+                    for h in row.holes or []:
+                        if (around := R.hole_literals(row.capture or "", h.group or 0)) is not None:
+                            out.setdefault(_bare(node.owner), set()).add(around)
+        _AROUND[:] = [fragment, out]
+    return cast("dict[str, set[tuple[str, str]]]", _AROUND[1])
+
+
+def key_texts(writers: list, owner: str, lines, columns: set[str], key: str) -> dict[int, tuple[str, ...]]:
+    """The harness's narrow ask (out/gm/qk-design.md, the section on the bare asks withheld, delegated design): for each
+    print every run reaching one of *owner*'s arms at *lines* makes before it (``Branch.must_names``: a hole of the
+    message holding a column among *columns* of the row the arm writes, judgement 3's third premise,
+    :func:`prints_naming`), the print's literal text either side of that hole, *key* in it -- getTasksToExecCommand_JEDI's
+    "start jediTaskID=N command=", reactivatePendingTasks_JEDI's "#ATM #KV jediTaskID=N action=reactivate".  A text
+    with less than ``rows.MIN_SHAPE`` characters either side (spaces left out) and less than ``LONE_SIDE`` before is
+    not one (the key's own name before it counts: "jediTaskID=N status=" is one, as the harness found it in the records
+    rare); nor is one another function's hole could print, by the map's rows (its literal text before the hole ending
+    in the text's, and after it starting with it): "failed to lock jediTaskID=N" is two functions'.  ``{print line: texts}``; empty where none is read."""
+    expressions: dict[int, set[str]] = {}
+    for line in sorted(lines):
+        for b in (b for j in writers if j.owner == owner for b in j.branches if b.line == line):
+            for n in b.must_names or []:
+                if n.row == MUST_ROW_WRITTEN and n.column in columns and getattr(n, "part", MUST_PART_MESSAGE) == MUST_PART_MESSAGE:
+                    expressions.setdefault(n.line, set()).add(n.expression)
+    found = R._prints_of(owner, lines) if expressions else None
+    if found is None:
+        return {}
+    others = [around for o, held in _holes_around().items() if o != _bare(owner) for around in held]
+    out: dict[int, set[str]] = {}
+    for st in getattr(found, "statements", None) or []:
+        for row in st.rows or [] if st.line in expressions else []:
+            for h in row.holes or []:
+                if h.expression not in expressions[st.line]:
+                    continue
+                around = R.hole_literals(row.capture or "", h.group or 0)
+                if around is None:
+                    continue
+                before, after = (side.replace(" ", "") for side in around)
+                if not (len(before) >= R.MIN_SHAPE and len(after) >= R.MIN_SHAPE or len(before) >= LONE_SIDE):
+                    continue
+                if any(b.endswith(around[0]) and a.startswith(around[1]) for b, a in others):
+                    continue
+                out.setdefault(st.line, set()).add((around[0] + key + around[1]).strip())
+    return {line: tuple(sorted(texts)) for line, texts in sorted(out.items())}
 
 
 def jedi_routes(mover: str, entries: list[str]) -> list[str]:
@@ -8533,6 +8603,13 @@ class Rerun:
         asking = cast(W.Asking, self._by_key_marks(owner, lines, asking, cls, key))
         rest = self._by_key_marks(owner, lines, rest, cls, key)
         found, missed, holes, searched = self._ask_mover(key, owner, to_hand, asking, rest if way != "key" else None, owners)
+        # the narrow ask: by the texts of its prints holding the key, where the key's asks would be withheld
+        asked: set[int] | None = None
+        if (texts := self._by_row_texts(name, owner, lines, searched, missed, key, writers, subject=subject)):
+            asked = set(texts)
+            strings = tuple(sorted({t for ts in texts.values() for t in ts}))
+            asking, rest = replace(asking, strings=strings), (replace(rest, strings=strings) if rest is not None else None)
+            found, missed, holes, searched = self._ask_mover(key, owner, to_hand, asking, rest if way != "key" else None, owners)
         missed = self._bare_over_a_move(name, searched, missed, holes)
         logs = self._runs_of(found, owner, searched)
         if logs:
@@ -8558,7 +8635,7 @@ class Rerun:
                               entries=_entries_of(writers, owner)), missed
             self.say(f"  {name}: {'no run of its own at' if not hmissed else 'not recorded at'} the stay's start, "
                      f"{lo} .. {hi}, either (G-3)")
-        entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, searched, missed, holes, writers, rest)
+        entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, searched, missed, holes, writers, rest, asked)
         if holes:
             # not found is not "did not run" where the search did not reach
             self.say(f"  {name}: no run of its own found, but {', '.join(holes)} were not searched all the window: it may have run there")
@@ -8581,22 +8658,52 @@ class Rerun:
             self.say(f"  {name}: {said}")
         return None, missed
 
+    def _by_row_texts(self, name: str, owner: str, lines, asking: W.Asking, missed: list, key: str, writers: list,
+                      columns: set[str] | None = None, subject: str = "") -> dict[int, tuple[str, ...]]:
+        """Judgement 3's mover whose asks over *asking* :meth:`_bare_over_a_move` would withhold (:meth:`_withheld`: by
+        the key alone, its marks holding none, over a shared log the records do not answer, a window holding a move of
+        the row) is asked again by the texts of its prints that hold the key before each arm (:func:`key_texts`)
+        instead: the harness's narrow ask (out/gm/qk-design.md, the section on the bare asks withheld, delegated
+        design).  Judgement 3's third premise then counts those prints alone (:func:`prints_naming`'s *asked*); L2's
+        reading of an arm's must prints (:meth:`_column_writes`) asks by them likewise.  Where the records answer the key
+        alone, it is read as before.  ``{print line: texts}``, said once; empty where the rule does not hold or no text
+        is read: the asks go as before.  *columns*: the row's key columns, else *subject*'s (:meth:`_key_columns`)."""
+        shared, _ = self._withheld(asking, missed)
+        if not shared:
+            return {}
+        texts = key_texts(writers, owner, lines, columns if columns is not None else self._key_columns(subject, key), key)
+        if texts and (said := T.text(T.Said("asked-by-its-row-texts", {
+                "func": name, "logs": shared, "lines": sorted(texts), "n": len({t for ts in texts.values() for t in ts})}))) not in self.lines:
+            self.say(said)
+        return texts
+
+    def _withheld(self, asking: W.Asking, missed: list) -> tuple[list[str], list[str]]:
+        """``(logs, moves)``: of the logs of *missed* -- the asks over *asking* the records do not answer -- those
+        :meth:`_bare_over_a_move` withholds: shared ones (:func:`shared_logs`), asked by the key alone over a window
+        holding a move of the row (its statuslog rows' times there).  Nothing where *asking* names its strings."""
+        if not missed or asking.strings or asking.window is None or not self.logs.needs_window:
+            return [], []
+        lo, hi = asking.window
+        moves = [str(s["time"])[:19] for s in self.data.get("statuslog", {}).get("states", []) if lo <= str(s["time"])[:19] <= hi]
+        return (shared_logs(sorted({ask.name for ask, _ in missed})) if moves else []), moves
+
     def _bare_over_a_move(self, name: str, asking: W.Asking, missed: list, holes: dict) -> list:
         """The harness's rnd14 costs (MT-aborting-late: a bare task ID over the DB proxy's logs from the abort on, 105 MB
         and more): of *missed*, the asks no record answers, those of a shared log (:func:`shared_logs`) where *asking*
         goes by the key alone -- its writer marks no run by it -- over a window that holds a move of the row (a
         statuslog row's time) are not made: said, and the log is put in *holes* as not searched over the window, so
         the reading's premise that it was searched whole fails and the writer is not ruled out.  What the records
-        answer is read as before.  Returns the asks left."""
-        if not missed or asking.strings or asking.window is None or not self.logs.needs_window:
-            return missed
-        lo, hi = asking.window
-        moves = [str(s["time"])[:19] for s in self.data.get("statuslog", {}).get("states", []) if lo <= str(s["time"])[:19] <= hi]
-        shared = set(shared_logs(sorted({ask.name for ask, _ in missed}))) if moves else set()
+        answer is read as before.  Judgement 3's mover and L2's reading of an arm's must prints ask such a log again by
+        the texts of the prints holding the key before the arm, where the map gives them (:meth:`_by_row_texts`), and
+        withhold nothing then.  Returns the asks left."""
+        shared_named, moves = self._withheld(asking, missed)
+        shared = set(shared_named)
         if not shared:
             return missed
-        self.say(T.text(T.Said("shared-logs-not-asked-bare", {"func": name, "logs": sorted(shared), "move": moves[-1],
-                                                               "start": lo, "end": hi})))
+        lo, hi = cast("tuple[str, str]", asking.window)
+        if (said := T.text(T.Said("shared-logs-not-asked-bare", {"func": name, "logs": sorted(shared), "move": moves[-1],
+                                                                  "start": lo, "end": hi}))) not in self.lines:
+            self.say(said)
         for log in shared:
             holes.setdefault(log, []).append(f"{lo} .. {hi}: not asked by the key alone (a shared log over the row's move)")
         return [(ask, why) for ask, why in missed if ask.name not in shared]
@@ -8633,7 +8740,8 @@ class Rerun:
         return [name for name, rs in found.items() if any((window is None or spans(r, window)) and of_mover(r, owner) for r in rs)]
 
     def _premises(self, subject: str, key: str, owner: str, lines, to_hand: list[str], asking: W.Asking,
-                  searched: W.Asking, missed: list, holes: dict, writers: list, rest: W.Asking | None) -> dict:
+                  searched: W.Asking, missed: list, holes: dict, writers: list, rest: W.Asking | None,
+                  asked: set[int] | None = None) -> dict:
         """Judgement 3's premises for a mover with no run of its own found: absence rules it out only where all three
         hold (build order 2a; KNOWN_ISSUES.md K19).  ``window``: the whole window was searched; ``logs``: every log its
         runs print to was asked (``every_log_asked``); ``prints``: every run that reaches an arm prints the key the asks
@@ -8644,7 +8752,7 @@ class Rerun:
         ``_ask_mover`` asked last, and *missed* and *holes* what that ask returned."""
         return {"window": self._searched_whole(to_hand, asking, searched, missed, holes, rest),
                 "logs": every_log_asked(owner, lines, to_hand),
-                "prints": prints_naming(list(writers), owner, lines, self._key_columns(subject, key))}
+                "prints": prints_naming(list(writers), owner, lines, self._key_columns(subject, key), asked)}
 
     def _key_columns(self, subject: str, key: str) -> set[str]:
         """The columns of *subject*'s class whose value in the rows file is *key* -- the row's key, as ``held.split``
@@ -14584,6 +14692,12 @@ class Rerun:
         # the caller hands in *subject* for (M3(a)-1's and P3's readings hand none)
         asking = cast(W.Asking, self._by_key_marks(j.owner, [b.line], asking, (subject or getattr(j, "subject", "") or "").partition(".")[0], key))
         runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
+        # the narrow ask: by the texts of its must prints holding the key, where the key's asks would be withheld
+        asked: set[int] | None = None
+        if (texts := self._by_row_texts(func.rpartition(".")[2], j.owner, [b.line], asking, missed, key, [j], columns=keys)):
+            asked = set(texts)
+            asking = replace(asking, strings=tuple(sorted({t for ts in texts.values() for t in ts})))
+            runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
         missed = self._bare_over_a_move(func.rpartition(".")[2], asking, missed, holes)
         self._keep_unanswered(missed)
         if missed_out is not None:
@@ -14681,7 +14795,7 @@ class Rerun:
         found += by_call.values()
         premises = {"window": self._searched_whole(to_hand, asking, asking, missed, holes, None),
                     "logs": every_log_asked(j.owner, [b.line], to_hand),
-                    "prints": prints_naming(writers, j.owner, [b.line], keys)}
+                    "prints": prints_naming(writers, j.owner, [b.line], keys, asked)}
         # a run of its own in the window whose must prints are not read in it: a reading missed, not a run absent
         own = any(of_mover(r, j.owner) and spans(r, (lo, hi)) for rs in runs.values() for r in rs)
         return (sorted(set(found), key=lambda f: f[:4]),

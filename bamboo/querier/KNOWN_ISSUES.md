@@ -2008,6 +2008,21 @@ Asking such a writer by its rows' own texts around the key was measured and left
 holding no key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39
 asks of up to 209 strings).
 
+*Changed (the narrow ask, 2026-11-20, the harness's finding on MT-aborting-late's withheld asks, delegated design):*
+where the rule above would withhold a mover's asks -- judgement 3's, and L2's reading of an arm's must prints
+(`_column_writes`) -- the shared log is asked again by the texts of the prints every run reaching the arm makes before
+it with the key in the message (`Branch.must_names`, judgement 3's third premise), each the literal either side of the
+key's hole with the key in it (`key_texts`, `Rerun._by_row_texts`, `Rerun._withheld`): "start jediTaskID=N command="
+(getTasksToExecCommand_JEDI 4346), "jediTaskID=N status=" (prepareTasksToBeFinished_JEDI 3854, 3907).  Unlike the
+texts left out above, they are asked only where the key alone would be withheld, need `rows.MIN_SHAPE` characters
+either side or `LONE_SIDE` before (the key's name counted), and are dropped where another function's hole in the map
+could print them (its literals either side; "failed to lock jediTaskID=N" is two functions').  The third premise then
+counts the prints asked alone (`prints_naming`'s *asked*): an arm whose key-naming must prints are none of them may
+have run unseen.  Where the records answer the key alone, it is read as before.  MT-aborting-late (T138's run, the one case of T138's and the investigator's 47 that withholds): judgement 3's two movers above are asked by their texts (2 asks, where none was made); the other seven, withheld in L2's reading of other writers' windows (requestTaskParameterRecalculation:471's, doActionForReassign:364's), get no text and stay withheld -- three of them (setScoutJobDataToTasks_JEDI, reactivatePendingTasks_JEDI, releaseThrottledTasks_JEDI) print no key before their status arms by the dump (reactivatePendingTasks_JEDI's "action=reactivate" is a count print after it); why the others get none is not read yet.  NT-scouting-stuck: the records answer the key alone, nothing changes.  *Not known yet:* what the
+door's asks of the marks near the texts' records (K60) cost once a round answers the texts -- the harness counted one
+record of "jediTaskID=N status=" and none of the others over MT-aborting-late's window.  P67's flush prints
+(`_flushed_writes`) are withheld as before.
+
 *Changed (2026-11-20, the map's LFS, `MapFragment.log_file_services`):* `files_of` leaves out, for a function every
 route into which passes pandajedi, the files the map says no JEDI process writes (`jedi_files`): a proxy mixin's
 panda-DBProxy.log (the server's; JEDI binds the logger again for panda-JediDBProxy.log).  This reaches every reader

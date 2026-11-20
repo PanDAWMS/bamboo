@@ -3074,6 +3074,55 @@ def test_a_writer_no_statement_gives_rows_takes_a_row_by_its_key(tmp_path):
     assert json.loads(out.splitlines()[-1]) == ["p/cmd.py::execCommand", "p/jobs.py::touch"]
 
 
+def test_a_mover_withheld_by_the_key_alone_is_asked_by_its_prints_texts_holding_the_key_before_its_arms(tmp_path):
+    """The harness's narrow ask (rerun.key_texts, prints_naming's asked): getTasksToExecCommand_JEDI's must print
+    'start jediTaskID=N command=' before its arm is asked by its text, the key in it; a text another function's row
+    could print ('failed to lock jediTaskID=N'; ' to jediTaskID=N', by a hole the map names no column for), and a print
+    naming another column are not; 'set jediTaskID=N' is long enough before it, the key's name counted.  Judgement 3's
+    prints premise then counts
+    the prints asked alone."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+
+        def hole(expression, group, columns=("JediTaskSpec.jediTaskID",)):
+            return N(expression=expression, group=group, columns=list(columns))
+
+        def row(capture, *holes):
+            return N(capture=capture, holes=list(holes))
+
+        mine = N(owner="p/t.py::T.exec", statements=[
+            N(line=5, rows=[row(r"start\\ jediTaskID=(.*?)\\ command=(.*?)$", hole("tid", 1), hole("cmd", 2, ()))]),
+            N(line=6, rows=[row(r"failed\\ to\\ lock\\ jediTaskID=(.*?)$", hole("tid", 1))]),
+            N(line=7, rows=[row(r"set\\ jediTaskID=(.*?)$", hole("tid", 1))]),
+            N(line=8, rows=[row(r"(.*?)\\ to\\ jediTaskID=(.*?)$", hole("x", 1, ()), hole("tid", 2))]),
+            N(line=9, rows=[row(r"dataset=(.*?)\\ in\\ task$", hole("ds", 1, ("JediDatasetSpec.datasetID",)))])])
+        other = N(owner="p/u.py::U.lock", statements=[N(line=40, rows=[row(r"failed\\ to\\ lock\\ jediTaskID=(.*?)$", hole("t", 1))]),
+                                                   N(line=41, rows=[row(r"moved\\ to\\ jediTaskID=(.*?)\\ with$", hole("m", 1, ()))])])
+        rerun.mapdump.fragment = lambda: N(function_prints=[mine, other])
+        rerun.R._prints_of = lambda owner, lines=None: mine
+        name = lambda line, expression="tid", column="JediTaskSpec.jediTaskID": N(
+            line=line, expression=expression, column=column, row="written", part="message")
+        writers = [N(owner="p/t.py::T.exec", branches=[
+            N(line=50, must_prints=[5, 6, 7, 8], must_names=[name(5), name(6), name(7), name(8)], must_hole="", must_names_whole=True),
+            N(line=60, must_prints=[6, 9], must_names=[name(6), name(9, "ds", "JediDatasetSpec.datasetID")], must_hole="",
+              must_names_whole=True)])]
+        cols = {"JediTaskSpec.jediTaskID"}
+        texts = rerun.key_texts(writers, "p/t.py::T.exec", [50, 60], cols, "53351604")
+        premise = lambda lines, asked: (lambda p: [p["held"], p["why"]])(rerun.prints_naming(writers, "p/t.py::T.exec", lines, cols, asked))
+        print(json.dumps({"texts": {str(k): v for k, v in texts.items()}, "asked 50": premise([50], set(texts)),
+                          "asked both": premise([50, 60], set(texts)), "not narrowed": premise([50, 60], None)}, default=str))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["texts"] == {"5": ["start jediTaskID=53351604 command="], "7": ["set jediTaskID=53351604"]}, got
+    assert got["asked 50"][0] is True, got
+    # the arm at 60 prints the key before its write only in 6, a text not asked: a run reaching it may show nothing asked
+    assert got["asked both"] == [False, "the arm(s) at 60 print the key before the write in no print whose text was asked "
+                                        "(rows 5, 7)"], got
+    assert got["not narrowed"][0] is True, got
+
+
 def test_judgement_3s_prints_premise_holds_only_where_a_line_before_every_arm_names_the_written_rows_key(tmp_path):
     out = _ok(
         _run(
@@ -4009,7 +4058,7 @@ def test_l2_says_each_movers_verdict(tmp_path):
                  writer("p/w.py::refusing", "sent", ["jobStatus='defined'"])]
     # judgement 3: these writers' runs are not known to print the key, so their logs are not asked
     rerun.prints_nothing = lambda owner, lines: False
-    rerun.prints_naming = lambda writers, owner, lines, columns: {"held": None, "why": "not known"}
+    rerun.prints_naming = lambda writers, owner, lines, columns, asked=None: {"held": None, "why": "not known"}
     rerun.every_log_asked = lambda owner, lines, asked: {"held": True, "why": "every file"}
     r.files_of = lambda owner, today, lines: today
     r.logs = N(names=lambda files: list(files), needs_window=True)
@@ -4068,7 +4117,7 @@ def test_l2_asks_a_movers_logs_only_where_judgement_3_could_rule_it_out_and_goes
     # a stay of three hours: the window's last part is the whole of it
     q.since, q.moved = datetime.datetime(2026, 1, 1, 12), datetime.datetime(2026, 1, 1, 15)
     rerun.prints_nothing = lambda owner, lines: owner.endswith("printless")
-    rerun.prints_naming = lambda writers, owner, lines, columns: (
+    rerun.prints_naming = lambda writers, owner, lines, columns, asked=None: (
         {"held": None, "why": "not known"} if owner.endswith("unknown") else {"held": True, "why": "named"})
     rerun.every_log_asked = lambda owner, lines, asked: (
         {"held": False, "why": "the map has no prints of its own for it"} if owner.endswith("printless")
