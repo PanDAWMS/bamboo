@@ -1043,11 +1043,11 @@ async def test_a_continuation_cut_again_goes_on_from_its_last_records_second_whi
             ]
         },
     )
-    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    w = ("2026-10-14 05:50:00", "2026-10-14 06:00:00")
     _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111"], w, SERVER[0])])
     assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
         R.continuation_pattern(
-            {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))]}
+            {"111": [(t("2026-10-14 05:40:00"), t("2026-10-14 06:10:00"))]}
         ),
         R.continuation_pattern(
             {"111": [(t("2026-10-14 05:55:00"), t("2026-10-14 06:10:00"))]}
@@ -1057,8 +1057,102 @@ async def test_a_continuation_cut_again_goes_on_from_its_last_records_second_whi
     assert [x["offset"] for x in f["records"]] == [1, 10, 11]
     assert f["status"] == "answered" and f["searched"] == [
         [f["covers"][0], "2026-10-14 00:59:59"],
-        ["2026-10-14 05:50:00", "2026-10-14 05:54:59"],
+        ["2026-10-14 05:40:00", "2026-10-14 05:54:59"],
     ]
+
+
+async def test_a_page_past_a_windows_end_is_the_slacks_one_page_and_the_rest_of_it_goes_unread(
+    tmp_path,
+):
+    # rnd14 (2026-11-20): MT-aborting-late's ask of its task's ID over 9 min went on through the abort's lines in the
+    # 10 min after its window, 1 MB per 1.7 s of log on aipanda087
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={
+            (SERVER[0], DAY): [
+                {**found(rec(10, "2026-10-14 06:01:00,1 a 111")), "truncated": True},
+                found(rec(11, "2026-10-14 06:05:00,1 a 111")),
+            ]
+        },
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    a = ask(ADDER, ["111"], w, SERVER[0])
+    _, (r,) = await run(tmp_path, panda, [a])
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))]}
+        )
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert [x["offset"] for x in f["records"]] == [1, 10]
+    assert f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 06:00:59"],
+    ]
+    assert R.cut_asks(tmp_path) == []
+
+
+async def test_a_page_that_stops_before_a_windows_start_is_followed_from_the_start(
+    tmp_path,
+):
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={
+            (SERVER[0], DAY): [
+                {**found(rec(10, "2026-10-14 05:52:00,1 a 111")), "truncated": True},
+                found(rec(11, "2026-10-14 06:00:00,1 a 111")),
+            ]
+        },
+    )
+    w = ("2026-10-14 06:00:00", "2026-10-14 06:00:00")
+    _, (r,) = await run(tmp_path, panda, [ask(ADDER, ["111"], w, SERVER[0])])
+    assert [c[3] for c in panda.calls if c[0] == "pattern"] == [
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 05:50:00"), t("2026-10-14 06:10:00"))]}
+        ),
+        R.continuation_pattern(
+            {"111": [(t("2026-10-14 06:00:00"), t("2026-10-14 06:10:00"))]}
+        ),
+    ]
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert [x["offset"] for x in f["records"]] == [1, 10, 11]
+    assert f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:50:00", "2026-10-14 05:51:59"],
+        ["2026-10-14 06:00:00", "2026-10-14 06:10:00"],
+    ]
+
+
+async def test_a_file_is_asked_no_more_pattern_pages_than_the_cap_and_says_what_it_left(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(R, "CONTINUE_MAX_PAGES", 2)
+    panda = FakePanda(
+        lists_with({SERVER[0]: ADDER_FILES, SERVER[1]: []}),
+        {(SERVER[0], DAY): [cut_alone("2026-10-14 01:00:00")]},
+        patterns={
+            (SERVER[0], DAY): [
+                {**found(rec(10, f"2026-10-14 05:{m}:00,1 a 111")), "truncated": True}
+                for m in (32, 34, 36)
+            ]
+        },
+    )
+    w = ("2026-10-14 05:30:00", "2026-10-14 06:00:00")
+    a = ask(ADDER, ["111"], w, SERVER[0])
+    _, (r,) = await run(tmp_path, panda, [a])
+    assert len([c for c in panda.calls if c[0] == "pattern"]) == 2
+    (f,) = r["machines"][SERVER[0]]["files"]
+    assert f["searched"] == [
+        [f["covers"][0], "2026-10-14 00:59:59"],
+        ["2026-10-14 05:20:00", "2026-10-14 05:33:59"],
+    ]
+    assert (
+        f"page cap: {SERVER[0]} {DAY}: 2 pages; not read for '111': "
+        "[['2026-10-14 05:34:00', '2026-10-14 06:10:00']]"
+    ) in capsys.readouterr().out
+    assert R.cut_asks(tmp_path) == [{"ask": a["ask"]}]
 
 
 def stalled_second() -> FakePanda:
@@ -1166,9 +1260,17 @@ async def test_a_cut_file_gives_each_cut_string_what_was_read_for_it_and_searche
             {
                 "truncated": True,
                 "covers": ["2026-10-14 00:00:00", "2026-10-14 06:05:00"],
-                "searched": [["2026-10-14 05:50:00", "2026-10-14 06:04:59"]],
+                "searched": [["2026-10-14 05:50:00", "2026-10-14 05:59:59"]],
             },
             False,
+        ),
+        (  # the slack around the window is not asked again
+            {
+                "truncated": True,
+                "covers": ["2026-10-14 00:00:00", "2026-10-14 07:00:00"],
+                "searched": [["2026-10-14 05:58:00", "2026-10-14 06:00:20"]],
+            },
+            True,
         ),
         (
             {
