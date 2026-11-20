@@ -167,7 +167,7 @@ class HoleAt(NamedTuple):
     of it has them, ``(offset, HoleAt)`` as :attr:`Rendered.holes`: ``{}=:cr_{}`` over ``criteria.items()`` is the
     loop's key twice; ``()`` for a text no rendering in reach spells."""
 
-    stmt: object
+    stmt: ast.AST
     source: str
     reason: str
     repeats: tuple = ()
@@ -304,6 +304,10 @@ class Choice:
     """One of *branches*, the one :attr:`dim` takes.  Interned (see :class:`Str`)."""
 
     __slots__ = ("dim", "branches", "dims", "_text")
+    dim: Dim
+    branches: tuple
+    dims: frozenset
+    _text: Optional[bool]
 
     def __new__(cls, dim: Dim, branches: tuple):
         key = ("C", dim, branches)

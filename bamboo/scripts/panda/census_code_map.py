@@ -40,7 +40,7 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, cast
 
 import click
 
@@ -97,7 +97,7 @@ def resolve_pkg_roots(source_root: Optional[str]) -> dict[str, Path]:
                 dist = Distribution.from_name(dist_name)
             except PackageNotFoundError:
                 continue
-            pkg_dir = Path(dist.locate_file("")).resolve() / pkg
+            pkg_dir = Path(str(dist.locate_file(""))).resolve() / pkg
             if pkg_dir.is_dir():
                 roots[pkg] = pkg_dir
                 break
@@ -232,6 +232,8 @@ def collect_spec_attributes(modules: list[Module]) -> dict[str, set[str]]:
     for mod in modules:
         for cls in (n for n in ast.walk(mod.tree) if isinstance(n, ast.ClassDef)):
             for stmt in cls.body:
+                if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                    continue  # targets_of reads no other statement
                 names = {t.id for t in targets_of(stmt) if isinstance(t, ast.Name)}
                 if not names & callfacts.SPEC_DECLARATION_NAMES:
                     continue
@@ -266,7 +268,7 @@ def collect_declared_vocabularies(modules: list[Module]) -> dict[str, list[str]]
     return out
 
 
-def _literal_strings(node: ast.AST) -> list[str]:
+def _literal_strings(node: Optional[ast.AST]) -> list[str]:
     """Collect string literals from a list/tuple/dict literal expression."""
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
@@ -305,9 +307,10 @@ def collect_where_fields(modules: list[Module]) -> Counter:
     counts: Counter = Counter()
     for mod in modules:
         for const in _string_constants(mod.tree):
-            if "WHERE" not in const.value.upper():
+            text = cast(str, const.value)  # a string constant (_string_constants)
+            if "WHERE" not in text.upper():
                 continue
-            for match in _WHERE_PRED_RE.finditer(const.value):
+            for match in _WHERE_PRED_RE.finditer(text):
                 inlist = match.group("inlist")
                 if inlist is not None:
                     if "'" not in inlist:
@@ -349,7 +352,7 @@ def promote_subjects(
     vocabularies: dict[str, list[str]],
     where_fields: Counter,
     logged_fields: Counter,
-    literal_writes: dict[str, set[str]],
+    literal_writes: dict[str, tuple[set[str], int, int]],
     guarded_writes: set[str],
 ) -> list[SubjectCandidate]:
     """Evaluate the five promotion criteria over every declared attribute.
@@ -431,7 +434,9 @@ class Writer:
     snippet: str
 
 
-def _classify_rhs(value: ast.AST, literal_kind: str, const_kind: str, name_kind: str, other_kind: str) -> str:
+def _classify_rhs(
+    value: Optional[ast.AST], literal_kind: str, const_kind: str, name_kind: str, other_kind: str
+) -> str:
     if isinstance(value, ast.Constant):
         return literal_kind
     if isinstance(value, ast.Attribute):
@@ -461,7 +466,7 @@ def collect_writers(modules: list[Module], subjects: set[str]) -> list[Writer]:
     writers: list[Writer] = []
     for mod in modules:
         for node in ast.walk(mod.tree):
-            if targets_of(node):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and targets_of(node):  # targets_of reads no other node
                 for target in targets_of(node):
                     if isinstance(target, ast.Attribute) and target.attr in subjects:
                         writers.append(
@@ -545,6 +550,8 @@ def collect_literal_writes(modules: list[Module]) -> dict[str, tuple[set[str], i
     total_writes: Counter = Counter()
     for mod in modules:
         for node in ast.walk(mod.tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             for target in targets_of(node):
                 if not isinstance(target, ast.Attribute):
                     continue
@@ -619,7 +626,7 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
                         for key, dash, _val in _TAG_RE.findall(value.value):
                             if dash or key in ("criteria", "reason", "action"):
                                 found[MP_TAG][mod.rel] += 1
-            elif targets_of(node):
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and targets_of(node):  # targets_of reads no other node
                 # Two different things hide under "module constant", and they
                 # feed different consumers:
                 #   EC_Kill = 100 / ST_ready = 0   -> a name<->value pair, which
@@ -639,7 +646,7 @@ def collect_metapatterns(modules: list[Module]) -> dict[str, Counter]:
                 if (
                     isinstance(node.value, ast.List)
                     and not node.value.elts
-                    and any(isinstance(t, ast.Name) and t.id.startswith("new") for t in node.targets)
+                    and any(isinstance(t, ast.Name) and t.id.startswith("new") for t in cast(ast.Assign, node).targets)
                 ):
                     found[MP_FILTER_CHAIN][mod.rel] += 1
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

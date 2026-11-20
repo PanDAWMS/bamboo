@@ -49,7 +49,16 @@ import contextlib
 import logging
 import re
 import string
-from typing import TYPE_CHECKING, Callable, Iterator, NamedTuple, Optional, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Iterator,
+    NamedTuple,
+    Optional,
+    Sequence,
+    TypeGuard,
+    cast,
+)
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -262,7 +271,8 @@ def _own_lists(scope: ast.AST) -> dict[str, InList]:
     """The lists *scope* builds itself; a module's, at its top level."""
     held = getattr(scope, "_in_lists", None)
     if held is not None:
-        return held
+        kept: dict[str, InList] = held
+        return kept
     found: dict[str, InList] = {}
     nodes = scope.body if isinstance(scope, ast.Module) else walk(scope)
     for node in nodes:
@@ -307,7 +317,8 @@ def _imported_lists(func: ast.AST) -> dict[str, InList]:
     assert _CALLS is not None
     cached = getattr(func, "_imported_lists", None)
     if cached is not None and cached[0] == id(_CALLS):
-        return cached[1]
+        imported: dict[str, InList] = cached[1]
+        return imported
     file = _CALLS.types.file_of(func)
     imports = _CALLS.types.imports(file) if file is not None else {}
     local = {held: name for name, held in imports.items()}
@@ -552,13 +563,13 @@ def _format_arguments(node: ast.Call) -> Optional[list[ast.expr]]:
     working, because every reader downstream keys on the two literal
     characters, and the one that does not invented a boundary named ``{1}``.
     """
-    text = rendered_text(node.func.value)
+    text = rendered_text(cast(ast.Attribute, node.func).value)
     if text is None or "{{" in text or "}}" in text:
         # An escaped brace is not a field, but ``_FIELD`` matches the ``{}``
         # inside ``{{}}`` -- so the markers and the holes stop counting the
         # same things, and nothing downstream would say which is which.
         return None
-    if _hole_expressions(node.func.value) != []:
+    if _hole_expressions(cast(ast.Attribute, node.func).value) != []:
         # The receiver has to be text the source wrote, whole.  An f-string, or
         # a concatenation holding one, renders ``{}`` as well, and afterwards
         # there is no telling which hole came from where.
@@ -834,7 +845,7 @@ def interpolations(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> l
     ]
 
 
-def _is_literal(node: ast.expr) -> bool:
+def _is_literal(node: Optional[ast.expr]) -> TypeGuard[ast.Constant]:
     """Whether *node* is a plain string constant."""
     return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
@@ -901,7 +912,7 @@ def _elements(node: ast.expr) -> Optional[list[str]]:
         # cannot see, and ``node.keys`` spells it ``None``.
         if any(key is None for key in node.keys):
             return None
-        node = ast.List(elts=list(node.keys))
+        node = ast.List(elts=list(cast("list[ast.expr]", node.keys)))  # no key is None (above)
     if not isinstance(node, (ast.Tuple, ast.List)):
         return None
     rendered = [rendered_text(element) for element in node.elts]
@@ -934,11 +945,11 @@ def _sequence_values(
     for node in walk(func):
         if _AT_CALL and ruled_out(node):
             continue
-        if any(
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and any(  # targets_of reads no other node
             isinstance(target, ast.Name) and target.id == name
             for target in targets_of(node)
         ):
-            elements = _elements(node.value)
+            elements = _elements(cast(ast.expr, node.value))  # it binds the name: a value
             if elements is None:
                 return None
             found.extend(elements)
@@ -1020,7 +1031,7 @@ def _rewritten_values(
         return []
     try:
         return [
-            re.sub(pattern.value, replacement.value, value)
+            re.sub(cast(str, pattern.value), cast(str, replacement.value), value)  # literals: strings
             for value in _literal_values(func, node.args[2], seen)
         ]
     except re.error:
@@ -1056,7 +1067,7 @@ def _default_values(
         if default is not None
     ]
     return [
-        default.value
+        cast(str, default.value)  # a literal: a string
         for argument, default in paired
         if argument.arg == name and _is_literal(default)
     ]
@@ -1105,14 +1116,14 @@ def _literal_values(
             )
             if elements is not None:
                 found.extend(elements)
-        elif any(
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)) and any(  # targets_of reads no other node
             isinstance(target, ast.Name) and target.id == expression.id
             for target in targets_of(node)
         ):
             if _is_literal(node.value):
-                found.append(node.value.value)
+                found.append(cast(str, node.value.value))  # a literal: a string
             else:
-                found.extend(_rewritten_values(func, node.value, deeper))
+                found.extend(_rewritten_values(func, cast(ast.expr, node.value), deeper))  # it binds the name
     return found
 
 
@@ -1289,7 +1300,7 @@ def _string_value(
             else None
             for part in node.values
         ]
-        return None if any(part is None for part in parts) else "".join(parts)
+        return None if any(part is None for part in parts) else "".join(cast("list[str]", parts))
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _string_value(node.left, bound, scope, hops)
         right = _string_value(node.right, bound, scope, hops)
@@ -1823,6 +1834,7 @@ def _run_fragments(func: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[a
             if way and isinstance(way[0], ast.stmt):
                 fragments.setdefault(id(way[0]), way[0])
         for _at, hole in run.holes:
+            inside: list[ast.stmt]
             if isinstance(hole.stmt, (ast.For, ast.AsyncFor, ast.While)):
                 inside = [
                     node
@@ -2348,6 +2360,8 @@ def binding_window(
     for node in walk(func):
         # ``targets`` first: it is what rules out the nodes with no line number
         # at all, so testing it before ``lineno`` is what keeps this safe.
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other node
         targets = targets_of(node)
         if not targets or node.lineno >= line:
             continue
@@ -2779,9 +2793,9 @@ def scan_binds(
     # its own assignment, or the copy that brought it into *varmap*.  Kept
     # apart from *found* because which of them survive is asked of all of
     # them at once -- a later write is what cancels an earlier one.
-    gated: list[tuple[Bind, ast.AST]] = []
+    gated: list[tuple[Bind, ast.stmt]] = []
 
-    def keep(bind: Bind, gate: ast.AST) -> None:
+    def keep(bind: Bind, gate: ast.stmt) -> None:
         nonlocal excluded
         if at is not None:
             gated.append((bind, gate))
@@ -2801,7 +2815,8 @@ def scan_binds(
             assigned = True
             spelled_keys.add(held.bind)
             if held.bind == key:
-                keep(Bind(held.values, node), node)
+                site = cast(ast.stmt, node)  # the list's site: a statement
+                keep(Bind(held.values, site), site)
             continue
         if (
             lists
@@ -2849,13 +2864,16 @@ def scan_binds(
                     if not isinstance(spelled, ast.Constant):
                         computed += 1
                         continue
-                    spelled_keys.add(spelled.value)
+                    spelled_keys.add(cast(str, spelled.value))  # a placeholder: text
                     if _same_placeholder(spelled.value, key):
                         keep(Bind(value, node), node)
             continue
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other node
         targets = targets_of(node)
         if not targets:
             continue
+        assigned_value = cast(ast.expr, node.value)  # a statement with targets has a value
         for target in targets:
             if (
                 isinstance(target, ast.Subscript)
@@ -2874,16 +2892,16 @@ def scan_binds(
                         computed += 1
                         continue
                     spelled_keys.add(key)
-                    keep(Bind(at_key(node.value, *by_key), node), node)
+                    keep(Bind(at_key(assigned_value, *by_key), node), node)
                     continue
-                spelled_keys.add(target.slice.value)
+                spelled_keys.add(cast(str, target.slice.value))  # a placeholder: text
                 if not _same_placeholder(target.slice.value, key):
                     continue
-                keep(Bind(node.value, node), node)
+                keep(Bind(assigned_value, node), node)
             elif isinstance(target, ast.Name) and target.id == varmap:
                 assigned = True
-                copied = _copied_from(node.value)
-                picked = _picked_from(node.value)
+                copied = _copied_from(assigned_value)
+                picked = _picked_from(assigned_value)
                 if picked is not None:
                     # A copy of some of the original's keys: ``updateSiteData``'s ``{k: varMap[k] for k in
                     # [":FLAG", ":SITE", ":HOURS"]}`` holds those three.
@@ -2907,10 +2925,10 @@ def scan_binds(
                 # spell either, so there is nothing to pair it with.  An ``IN``
                 # list's map unpacked into it -- ``{":comm_owner": "DEFT",
                 # **comm_var_map}`` -- is that list, as ``varMap.update`` of it is.
-                if not isinstance(node.value, ast.Dict):
+                if not isinstance(assigned_value, ast.Dict):
                     continue
                 for spelled, value in zip(
-                    node.value.keys, node.value.values, strict=True
+                    assigned_value.keys, assigned_value.values, strict=True
                 ):
                     if spelled is None and isinstance(value, ast.Name) and value.id in lists:
                         held = lists[value.id]
@@ -2921,7 +2939,7 @@ def scan_binds(
                     if not isinstance(spelled, ast.Constant):
                         computed += 1
                         continue
-                    spelled_keys.add(spelled.value)
+                    spelled_keys.add(cast(str, spelled.value))  # a placeholder: text
                     if not _same_placeholder(spelled.value, key):
                         continue
                     keep(Bind(value, node), node)
@@ -2930,7 +2948,8 @@ def scan_binds(
         writes = [gate for _bind, gate in gated]
         live: set[int] = set()
         run = at if isinstance(at, Execution) else None
-        for one in run.run_at if run is not None else (at,):
+        # gated only where at is (keep): at is a node where no run is
+        for one in run.run_at if run is not None else (cast(ast.AST, at),):
             live |= _live_at(func, varmap, writes, one)
         if run is not None:
             live -= _not_its_text(func, varmap, run, [gate for gate in writes if id(gate) in live], writes)
@@ -3013,7 +3032,7 @@ def _appended(func: ast.AST, listing: str, varmap: str) -> list[ast.stmt]:
 def _live_at(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     varmap: str,
-    writes: list[ast.AST],
+    writes: Sequence[ast.AST],
     at: ast.AST,
 ) -> set[int]:
     """The ``id`` of each of *writes* whose bind the map *at* runs with can still hold.
@@ -3114,8 +3133,8 @@ def _not_its_text(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     varmap: str,
     run: Execution,
-    live: list[ast.AST],
-    writes: list[ast.AST],
+    live: Sequence[ast.AST],
+    writes: Sequence[ast.AST],
 ) -> set[int]:
     """The ``id`` of each of *live* that no pass building *run*'s text fills.
 
@@ -3164,8 +3183,8 @@ def _not_on_its_passes(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     varmap: str,
     run: Execution,
-    live: list[ast.AST],
-    writes: list[ast.AST],
+    live: Sequence[ast.AST],
+    writes: Sequence[ast.AST],
 ) -> set[int]:
     """The ``id`` of each of *live* that no pass building *run*'s text carries to a call of it.
 
@@ -3195,7 +3214,7 @@ def _not_on_its_passes(
     sites = list({id(site): site for site in [*writes, *renewals]}.values())
     rereads = [write for write in writes if _rereads(write, varmap)]
 
-    def reaching_ids(targets: list[ast.AST], at: ast.AST, cut: list[ast.AST]) -> set[int]:
+    def reaching_ids(targets: Sequence[ast.AST], at: ast.AST, cut: Sequence[ast.AST]) -> set[int]:
         return {id(site) for site in surviving_writes(targets, at, rereads, as_run=True, killers=cut)}
 
     kept: set[int] = set()
@@ -3234,7 +3253,8 @@ def _not_building(func: ast.FunctionDef | ast.AsyncFunctionDef, run: Execution) 
             if any(piece is not node and held(parted, piece, node) for piece in mine)
             or any(held(only_through, node, piece) for piece in added)
         ]
-    return store[key]
+    cached: list[ast.stmt] = store[key]
+    return cached
 
 
 def _simple_statements(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
@@ -3249,7 +3269,8 @@ def _simple_statements(func: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast
             and "cases" not in node._fields
             and enclosing_function(node) is func
         ]
-    return store[0]
+    cached: list[ast.stmt] = store[0]
+    return cached
 
 
 def _innermost_loop(func: ast.AST, node: ast.AST) -> Optional[ast.For | ast.AsyncFor | ast.While]:
@@ -3294,7 +3315,8 @@ def _text_reading(
                 one for one in theirs if id(one) not in anywhere and not any(only_through(held, one) for held in mine)
             ]
         store[key] = (calls, mine, added)
-    return store[key]
+    cached: tuple[list[ast.AST], list[ast.AST], list[ast.AST]] = store[key]
+    return cached
 
 
 #: How many ways of building one text are read; past them, the ways are not all known.
@@ -3318,7 +3340,8 @@ def _text_ways(
                 break
             drawn += [one.pieces for one in found]
         store[key] = [_text_statements(func, pieces, calls) for pieces in drawn] or None
-    return store[key]
+    cached: Optional[list[dict[int, ast.AST]]] = store[key]
+    return cached
 
 
 def _every_way(ways: Optional[list[dict[int, ast.AST]]]) -> list[ast.AST]:
@@ -3348,7 +3371,8 @@ def _pairs_read(func: ast.FunctionDef | ast.AsyncFunctionDef):
         key = (test.__name__, id(one), id(other))
         if key not in store:
             store[key] = test(one, other)
-        return store[key]
+        cached: bool = store[key]
+        return cached
 
     return held
 
@@ -3406,7 +3430,7 @@ def inline_binds(call: ast.Call, key: Optional[str] = None) -> list[Bind]:
     """
     if len(call.args) < 2 or not isinstance(call.args[1], ast.Dict):
         return []
-    site = call
+    site: ast.AST = call
     for ancestor in ancestors(call):
         if isinstance(ancestor, ast.stmt):
             site = ancestor
@@ -3480,7 +3504,8 @@ def _evaluation(func: ast.FunctionDef | ast.AsyncFunctionDef) -> "sqleval.Readin
         # valid, but is never the same object as an equal one made later.
         sqleval.clear_memo()
         held[key] = sqleval.evaluate(func, constants, _placed_callees(), _conventions(func))
-    return held[key]
+    cached: sqleval.Reading = held[key]
+    return cached
 
 
 def _conventions(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict:
@@ -3545,7 +3570,8 @@ def assembled_texts(func: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, l
             if texts:
                 found[name] = texts
         held[key] = found
-    return held[key]
+    cached: dict[str, list[str]] = held[key]
+    return cached
 
 
 def _placed_callees():
@@ -3586,7 +3612,7 @@ def _spans_of(drawn: "sqleval.Rendered", anchor: ast.AST) -> list[Span]:
     its call is.
     """
     return [
-        Span(where if isinstance(where, ast.AST) else anchor, start, end)
+        Span(cast(ast.stmt, where if isinstance(where, ast.AST) else anchor), start, end)  # the statement it came by
         for where, start, end in drawn.carried
     ]
 
@@ -3638,7 +3664,8 @@ def every_rendering(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> 
         held = reading._every = {}  # type: ignore[attr-defined]
     if line not in held:
         held[line] = _every_statement(func, reading, line)
-    return held[line]
+    cached: Optional[list[sqleval.Rendered]] = held[line]
+    return cached
 
 
 def _every_statement(
@@ -3853,12 +3880,14 @@ def _executions_read(
     # past both arms, writes nothing the others do not.
     said: set[int] = set()
     read: dict[int, set[str]] = {}
-    for run in found:
-        if any(stop.reason != sqltext.COLUMNS_NOT_READ for stop in run.unread_columns):
-            said.add(id(run.call))
-        if any(stop.reason == sqltext.COLUMNS_NOT_READ for stop in run.unread_columns):
+    for execution in found:
+        if any(stop.reason != sqltext.COLUMNS_NOT_READ for stop in execution.unread_columns):
+            said.add(id(execution.call))
+        if any(stop.reason == sqltext.COLUMNS_NOT_READ for stop in execution.unread_columns):
             continue
-        read.setdefault(id(run.call), set()).update(write.table.lower() for write in sqltext.writes(run.reading))
+        read.setdefault(id(execution.call), set()).update(
+            write.table.lower() for write in sqltext.writes(execution.reading)
+        )
     found = [
         run._replace(
             unread_columns=tuple(
@@ -3871,8 +3900,8 @@ def _executions_read(
         for run in found
     ]
     together: dict[tuple, dict[ast.Call, None]] = {}
-    for run in found:
-        together.setdefault((run.variable, run.sql, run.varmap, run.window), {})[run.call] = None
+    for execution in found:
+        together.setdefault((execution.variable, execution.sql, execution.varmap, execution.window), {})[execution.call] = None
     return (
         [
             run._replace(calls=tuple(together[(run.variable, run.sql, run.varmap, run.window)]))

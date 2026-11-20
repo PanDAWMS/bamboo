@@ -157,7 +157,7 @@ import re
 import string
 from collections import defaultdict, deque
 from functools import partial
-from typing import Callable, Iterator, NamedTuple, Optional, Union, cast
+from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence, Union, cast
 
 from bamboo.codemap import callfacts, objects, pathcond, reach, values
 from bamboo.codemap import calls as C
@@ -310,6 +310,10 @@ class _WayStep(NamedTuple):
         if self.kind == _KEYED:
             return f"{self.owner}:{self.line} {self.path}"
         return f"{self.owner}:{self.line} {self.kind} {self.path}"
+
+
+#: What builds a way, given the lines it is to run without (:meth:`_Reader._one_pass`).
+_Build = Callable[[frozenset[tuple[str, int]]], Optional[list[_WayStep]]]
 
 
 class _Arm(NamedTuple):
@@ -603,7 +607,7 @@ class _Reader:
     ) -> RunStart:
         spec = BUILDERS[bound.builder]
         given, expression = _given(bound.call, spec)
-        common = {
+        common: dict[str, Any] = {
             "line": bound.statement.lineno,
             "at": at,
             "logger": ast.unparse(bound.target),
@@ -1638,7 +1642,7 @@ class _Reader:
             if not given:
                 continue
             named = [*write.keys, *(write.columns if write.kind == "insert" else [])]
-            found = {held for value in named if (held := objects.key_path(value, key))}
+            found = {found_path for value in named if (found_path := objects.key_path(value, key))}
             keys |= found
             if found:
                 at.update(given)
@@ -1905,15 +1909,18 @@ class _Reader:
                             owner,
                             firsts,
                             start,
-                            lambda without, start=start, holder=holder, whole=whole, call=call: (
-                                None
-                                if (
-                                    found := self._reached(
-                                        owner, start, holder, whole, without
+                            cast(
+                                _Build,
+                                lambda without, start=start, holder=holder, whole=whole, call=call: (
+                                    None
+                                    if (
+                                        found := self._reached(
+                                            owner, start, holder, whole, without
+                                        )
                                     )
-                                )
-                                is None
-                                else [*found, _WayStep(owner, line, _KEYED, call.path)]
+                                    is None
+                                    else [*found, _WayStep(owner, line, _KEYED, call.path)]
+                                ),
                             ),
                         )
                         if steps is not None:
@@ -1967,30 +1974,33 @@ class _Reader:
                                     owner,
                                     firsts,
                                     start,
-                                    lambda without, start=start, one=one, call=call, taken=taken, whole=whole, reach=reach, target=target, holder=holder, keyed=keyed: (
-                                        None
-                                        if (
-                                            found := self._way(
-                                                owner,
-                                                line,
-                                                start,
-                                                one,
-                                                call.to,
-                                                taken,
-                                                whole,
-                                                reach,
-                                                target,
-                                                holder,
-                                                without,
+                                    cast(
+                                        _Build,
+                                        lambda without, start=start, one=one, call=call, taken=taken, whole=whole, reach=reach, target=target, holder=holder, keyed=keyed: (
+                                            None
+                                            if (
+                                                found := self._way(
+                                                    owner,
+                                                    line,
+                                                    start,
+                                                    one,
+                                                    call.to,
+                                                    taken,
+                                                    whole,
+                                                    reach,
+                                                    target,
+                                                    holder,
+                                                    without,
+                                                )
                                             )
-                                        )
-                                        is None
-                                        else [
-                                            *found,
-                                            _WayStep(
-                                                target, keyed.line, _KEYED, keyed.path
-                                            ),
-                                        ]
+                                            is None
+                                            else [
+                                                *found,
+                                                _WayStep(
+                                                    target, keyed.line, _KEYED, keyed.path
+                                                ),
+                                            ]
+                                        ),
                                     ),
                                 )
                                 if steps is not None:
@@ -2116,9 +2126,9 @@ class _Reader:
     def _one_pass(
         self,
         owner: str,
-        firsts: list[ast.AST],
+        firsts: Sequence[ast.AST],
         start: str,
-        build: Callable[[frozenset[tuple[str, int]]], Optional[list[_WayStep]]],
+        build: _Build,
     ) -> tuple[Optional[list[_WayStep]], str]:
         """A way *build* makes that runs in one pass (:meth:`_breaks`), else ``(None, where it broke)``.
 
@@ -2142,7 +2152,7 @@ class _Reader:
             without = without | {(step.owner, step.line)}
 
     def _breaks(
-        self, owner: str, firsts: list[ast.AST], start: str, steps: list[_WayStep]
+        self, owner: str, firsts: Sequence[ast.AST], start: str, steps: list[_WayStep]
     ) -> tuple[str, Optional[_WayStep]]:
         """Where the way does not run in one pass from any of *firsts*: ``owner:line..line`` of the first interval no
         way holds -- two events the object is held between by a path, with none of the path's killers
@@ -2344,16 +2354,16 @@ class _Reader:
         spelled = _bare(f"{obj}.{key}")
         printed: set[int] = set()
         node = self.prints.get(owner)
-        for statement in node.statements if node is not None else []:
+        for printing in node.statements if node is not None else []:
             if not any(
                 _bare(hole.expression) == spelled
-                for one in statement.rows
+                for one in printing.rows
                 for hole in one.holes
             ):
                 continue
-            site = self._statement(func, statement.line)
+            site = self._statement(func, printing.line)
             if site is not None and site is not rekey and _flows(rekey, site, killers):
-                printed.add(statement.line)
+                printed.add(printing.line)
         return sorted(kept), sorted(printed)
 
     def _statement(self, func: ast.AST, line: int) -> Optional[ast.stmt]:
@@ -2452,16 +2462,16 @@ class _Reader:
             if binding.how != BIND_FILL
             and any(_same_path(binding.name, one) for one in fields)
         }
-        for one in row.assigns:
-            for attr in one.attrs:
+        for assign in row.assigns:
+            for attr in assign.attrs:
                 if attr == "*":
                     if any(
-                        objects._under(one.path, field) not in (None, "")
+                        objects._under(assign.path, field) not in (None, "")
                         for field in fields
                     ):
-                        lines.add(one.line)
-                elif any(_same_path(f"{one.path}.{attr}", field) for field in fields):
-                    lines.add(one.line)
+                        lines.add(assign.line)
+                elif any(_same_path(f"{assign.path}.{attr}", field) for field in fields):
+                    lines.add(assign.line)
         found += [
             one
             for one in (self._statement(func, line) for line in sorted(lines))
@@ -2611,9 +2621,9 @@ class _Reader:
             elif _on_self(handed):
                 spelled = ast.unparse(handed)
                 objects, _why = self._object_runs(site.file, site.func)
-                lines = {run.line for run in objects if run.logger == spelled}
-                if lines and caller in self.prints:
-                    found[caller].update(lines)
+                run_lines = {run.line for run in objects if run.logger == spelled}
+                if run_lines and caller in self.prints:
+                    found[caller].update(run_lines)
                 else:
                     stops.append(HANDED_OTHER.format(at=at, logger=spelled))
             else:
@@ -2781,7 +2791,7 @@ def _column_binds(
 
 def _read_from(func: ast.AST, bind: sql.Bind, inside: set[int]) -> bool:
     """Whether *bind*'s site, or a statement binding a name its value is read from, followed back, is in *inside*."""
-    todo = [(bind.site, bind.value)]
+    todo: list[tuple[ast.AST, ast.expr]] = [(bind.site, bind.value)]
     seen: set[int] = set()
     while todo:
         site, value = todo.pop()
@@ -2839,7 +2849,7 @@ def _site_statement(site: ast.AST) -> Optional[ast.AST]:
 
 def _loops(node: ast.AST, func: ast.AST) -> list[ast.AST]:
     """The loops of *func* holding *node*."""
-    held = []
+    held: list[ast.AST] = []
     for one in pathcond.ancestors(node):
         if one is func:
             break

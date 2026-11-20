@@ -26,13 +26,13 @@ import functools
 import itertools
 import re
 from pathlib import Path
-from typing import Any, Iterator, NamedTuple, Optional
+from typing import Any, Iterator, NamedTuple, Optional, TypeVar, Union, cast
 
 import sqlglot
 from pydantic import BaseModel, Field
 from sqlglot import exp
 from sqlglot.errors import ErrorLevel, ParseError, SqlglotError
-from sqlglot.optimizer.scope import ScopeType, traverse_scope
+from sqlglot.optimizer.scope import Scope, ScopeType, traverse_scope
 
 # ``UPDATE [/*+ hint */] <schema>.<table> [alias] SET <assignments> [WHERE ...]``.
 # The schema is usually an f-string placeholder, which the reading leaves as
@@ -633,7 +633,7 @@ def _one_row_each(arm: exp.Select) -> bool:
     return False
 
 
-def _arms(tree: exp.Expression) -> list[exp.Select]:
+def _arms(tree: exp.Expr) -> list[exp.Select]:
     """The ``SELECT`` s whose rows a set operation returns, each arm in parentheses or not; ``[]`` where one is
     something else.  A row of ``A EXCEPT B`` (``MINUS``) or ``A INTERSECT B`` is a row of ``A``; of a ``UNION``, of
     either arm."""
@@ -812,7 +812,7 @@ def _spelled(sql: str, tokens: list, lo: int, hi: int, written: bool = False) ->
 _IN_LIST = re.compile(r"(\bIN\s*\()([^()]*)(\))", re.IGNORECASE)
 
 
-def _listed_once(match: re.Match) -> str:
+def _listed_once(match: re.Match[str]) -> str:
     items = match.group(2).split(",")
     kept: dict[str, str] = {}
     for item in items:
@@ -1557,7 +1557,7 @@ _DATED: Optional[dict[str, frozenset[str]]] = None
 class Parsed(NamedTuple):
     """A statement as a tree, or why it is not one."""
 
-    tree: Optional[exp.Expression]
+    tree: Optional[exp.Expr]
     failure: str
     #: The text around where the parser stopped, holes spelled ``{}`` again.
     near: str = ""
@@ -1899,7 +1899,7 @@ def _is_hole(node: exp.Expression) -> bool:
     return isinstance(node, exp.Column) and not node.table and node.name.startswith(_HOLE_NAME)
 
 
-def _holes_stand_for_what_is_missing(tree: exp.Expression) -> bool:
+def _holes_stand_for_what_is_missing(tree: exp.Expr) -> bool:
     """Whether every node missing a required part has a hole as a direct part.
 
     ``CASE {} ELSE {} END`` -- ``getJobs`` orders by a ``CASE`` whose ``WHEN``
@@ -1924,7 +1924,11 @@ def _holes_stand_for_what_is_missing(tree: exp.Expression) -> bool:
     )
 
 
-def _one_of_each(tree: exp.Expression) -> exp.Expression:
+#: A parsed tree, handed back as it came.
+_Tree = TypeVar("_Tree", bound=exp.Expr)
+
+
+def _one_of_each(tree: _Tree) -> _Tree:
     """*tree* with an ``IN`` list's repeated items said once: ``x IN (a, a)`` asks what ``x IN (a)`` does.
 
     A list a loop of unknown length builds is run once and twice
@@ -2004,6 +2008,10 @@ class _Root(NamedTuple):
     scope_type: None = None
 
 
+#: A scope sqlglot builds, or an ``UPDATE``'s or ``DELETE``'s own rows (:class:`_Root`).
+_Scope = Union[Scope, _Root]
+
+
 def _kind(scope) -> str:
     """:data:`ROW`, or the kind of subquery *scope* is inside, by the ``NOT``\\ s above it."""
     negations, inside, picks = 0, False, False
@@ -2078,7 +2086,7 @@ def _compared(column: exp.Column) -> Optional[tuple[bool, list[exp.Expression], 
     return None
 
 
-def _negations(node: exp.Expression) -> Optional[int]:
+def _negations(node: exp.Expr) -> Optional[int]:
     """The ``NOT``\\ s between *node* and the clause it is a term of.
 
     ``None`` when one covers an ``AND`` or ``OR`` above the comparison:
@@ -2108,7 +2116,7 @@ def _chain(scope, root) -> list:
     return found
 
 
-def _projected(name: str, source) -> Optional[tuple[exp.Column, object]]:
+def _projected(name: str, source) -> Optional[tuple[exp.Column, Any]]:
     """The column a derived table or ``WITH`` clause hands out as *name*, and its scope."""
     for projection in source.expression.selects:
         if projection.alias_or_name.lower() == name and isinstance(projection.unalias(), exp.Column):
@@ -2150,7 +2158,7 @@ def _owner(column: exp.Column, scope, root, depth: int = 0) -> tuple[tuple[str, 
         if len(having) + len(handing) == 1 and not unknown:
             if having:
                 return (_table_name(having[0]),), ""
-            projected = _projected(name, handing[0])
+            projected = cast("tuple[exp.Column, Any]", _projected(name, handing[0]))  # handing: the ones projecting it
             if depth < 8:
                 return _owner(projected[0], projected[1], None, depth + 1)
         if having or handing or unknown:
@@ -2159,10 +2167,10 @@ def _owner(column: exp.Column, scope, root, depth: int = 0) -> tuple[tuple[str, 
     return (), OWNER_UNDECIDED
 
 
-def _scopes(tree: exp.Expression) -> tuple[list[tuple[object, str, str]], Optional[_Root]]:
+def _scopes(tree: exp.Expr) -> tuple[list[tuple[_Scope, str, str]], Optional[_Root]]:
     """Every scope of *tree* with the verb whose rows it picks and its kind, and the ``UPDATE``/``DELETE`` root."""
     root: Optional[_Root] = None
-    found: list[tuple[object, str, str]] = []
+    found: list[tuple[_Scope, str, str]] = []
     if isinstance(tree, (exp.Update, exp.Delete)):
         target = tree.this
         sources = {target.alias_or_name: target} if isinstance(target, exp.Table) else {}
@@ -2590,6 +2598,7 @@ def equalities(sql: str) -> tuple[Equality, ...]:
         if isinstance(node.parent, exp.Update) or node.find_ancestor(exp.Merge) is not None:
             continue
         holder = node.find_ancestor(exp.Select, exp.Update, exp.Delete)
+        scope: Optional[_Scope]
         if isinstance(holder, (exp.Update, exp.Delete)):
             scope = root
         else:
@@ -2677,7 +2686,7 @@ def _term(column: exp.Column, scope, root, verb: str, kind: str, regions: tuple 
     placeholders = [value for value in values if isinstance(value, exp.Placeholder)]
     binds = tuple(f":{value.name}" for value in placeholders if not _NAMED_HOLE.search(value.name))
     undecided = undecided or len(binds) < len(placeholders)
-    negations = _negations(column.parent)
+    negations = _negations(cast(exp.Expr, column.parent))  # a compared column sits in its comparison
     if negations is None:
         return None
     owners, why = _owner(column, scope, root)
@@ -2739,12 +2748,12 @@ def _decides(
     ruled = {value.sql() for value in values}
     quoted = all(isinstance(value, exp.Literal) and value.is_string for value in values)
 
-    def same(other: Optional[exp.Expression]) -> bool:
+    def same(other: Optional[exp.Expr]) -> bool:
         if not isinstance(other, exp.Column) or other.name.lower() != column.name.lower():
             return False
         return other is column or _owner(other, scope, root) == (owner, "")
 
-    def rules_out(node: exp.Expression) -> bool:
+    def rules_out(node: exp.Expr) -> bool:
         negated = False
         while isinstance(node, (exp.Paren, exp.Not)):
             negated ^= isinstance(node, exp.Not)
@@ -2752,8 +2761,8 @@ def _decides(
         if isinstance(node, (exp.And, exp.Or)):
             if negated:
                 return False  # ``NOT (a OR b)`` -- read only as the term it is
-            sides = (rules_out(node.this), rules_out(node.expression))
-            return any(sides) if isinstance(node, exp.And) else all(sides)
+            halves = (rules_out(node.this), rules_out(node.expression))
+            return any(halves) if isinstance(node, exp.And) else all(halves)
         if isinstance(node, exp.Is) and isinstance(node.expression, exp.Null):
             # ``col IS NULL`` holds no value at all, which is every value excluded.
             return excluding and not negated and same(node.this)
@@ -2761,7 +2770,7 @@ def _decides(
             return False
         sides = [node.this] if isinstance(node, exp.In) else [node.this, node.expression]
         tested = next((side for side in sides if same(side)), None)
-        compared = _compared(tested) if tested is not None else None
+        compared = _compared(cast(exp.Column, tested)) if tested is not None else None  # same() holds only for a column
         if compared is None:
             return False
         excludes, said, open_ = compared
@@ -3037,7 +3046,7 @@ def _connectives(where: exp.Where) -> set[int]:
     return found
 
 
-def _term_holding(node: exp.Expression, where: exp.Where, joins: set[int]) -> exp.Expression:
+def _term_holding(node: exp.Expr, where: exp.Where, joins: set[int]) -> exp.Expr:
     """The term of *where*'s clause that *node* is part of, its brackets off."""
     while node.parent is not None and node.parent is not where and id(node.parent) not in joins:
         node = node.parent
@@ -3096,7 +3105,7 @@ def _respelled(fragment: str, sql: str) -> str:
     """*fragment* of the parsed text with each named hole spelled as *sql* has it."""
     holes = [(match.group(0), _after_hole(sql, match.end()).isalpha()) for match in _HOLE.finditer(sql)]
 
-    def back(match: re.Match) -> str:
+    def back(match: re.Match[str]) -> str:
         number = int(match.group(1)) - 1
         if number >= len(holes):
             return match.group(0)
@@ -3248,12 +3257,12 @@ def _as_terms(condition: Condition) -> tuple[str, ...]:
     return (f"({' OR '.join(rendered)})",)
 
 
-_CLOCKS = {exp.CurrentDate: "CURRENT_DATE", exp.Systimestamp: "SYSTIMESTAMP"}
+_CLOCKS: dict[type[exp.Expr], str] = {exp.CurrentDate: "CURRENT_DATE", exp.Systimestamp: "SYSTIMESTAMP"}
 #: Seconds in each unit an ``INTERVAL`` names.
 _INTERVAL_UNITS = {"DAY": 86400.0, "HOUR": 3600.0, "MINUTE": 60.0, "SECOND": 1.0}
 #: How :class:`Test` turns a comparison round to put its column on the left.
 _TURNED = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
-_ORDERS = {exp.LT: "<", exp.LTE: "<=", exp.GT: ">", exp.GTE: ">="}
+_ORDERS: dict[type[exp.Binary], str] = {exp.LT: "<", exp.LTE: "<=", exp.GT: ">", exp.GTE: ">="}
 
 
 def _clock_name(node: exp.Expression) -> str:
@@ -3300,7 +3309,7 @@ def _clock_side(node: exp.Expression, text: str) -> Optional[Side]:
     if isinstance(amount, exp.Placeholder) and not _NAMED_HOLE.search(amount.name):
         return Side("clock", text, binds=(f":{amount.name}",), clock=name, scale_seconds=sign * 86400.0)
     if isinstance(amount, exp.Interval):
-        unit = (amount.args.get("unit").name if amount.args.get("unit") is not None else "").upper()
+        unit = (named.name if (named := amount.args.get("unit")) is not None else "").upper()
         try:
             count = float(amount.this.name)
         except (AttributeError, ValueError):
@@ -3507,7 +3516,7 @@ def _test(node: Optional[exp.Expression], text: str, scope, root, sql: str) -> T
                 Twin("test", test=Test("compare", text, owner, node.this.name, "<=", (_side(node.args["high"], scope, root, sql),))),
             ),
         )
-    if isinstance(node, (exp.EQ, exp.NEQ, *_ORDERS)):
+    if isinstance(node, (exp.EQ, exp.NEQ, exp.LT, exp.LTE, exp.GT, exp.GTE)):  # = and <>, and _ORDERS' keys
         left, right = node.this, node.expression
         op = "=" if isinstance(node, exp.EQ) else "<>" if isinstance(node, exp.NEQ) else _ORDERS[type(node)]
         if _column_owner(left, scope, root) is None and _column_owner(right, scope, root) is not None:
@@ -3722,7 +3731,7 @@ def _readings(sql: str, held: bool) -> tuple[_Read, ...]:
     ctes: dict[str, exp.Expression] = {}
     entered: set[int] = set()
 
-    def required(node: Optional[exp.Expression]) -> list[_Read]:
+    def required(node: Optional[exp.Expr]) -> list[_Read]:
         if node is None or id(node) in entered:
             return []
         entered.add(id(node))
@@ -3850,7 +3859,7 @@ def outright(sql: str) -> tuple[tuple[Term, ...], ...]:
     ctes: dict[str, exp.Expression] = {}
     entered: set[int] = set()
 
-    def rows(node: Optional[exp.Expression]) -> list[tuple[Term, ...]]:
+    def rows(node: Optional[exp.Expr]) -> list[tuple[Term, ...]]:
         if node is None or id(node) in entered:
             return [()]
         entered.add(id(node))
@@ -3872,6 +3881,7 @@ def outright(sql: str) -> tuple[tuple[Term, ...], ...]:
         for cte in (node.args.get("with_") or exp.With()).expressions:
             ctes[cte.alias_or_name.lower()] = cte.this
         where = node.args.get("where")
+        entry: Optional[tuple[Optional[_Scope], str, str]]
         if isinstance(node, (exp.Update, exp.Delete)):
             entry = (root, "updated" if isinstance(node, exp.Update) else "deleted", ROW)
         else:
@@ -3904,7 +3914,7 @@ _ENDS_AN_ORDER = frozenset(
 )
 
 
-def _rows_from(node: Optional[exp.Expression], ctes: dict[str, exp.Expression], entered: set[int]) -> Iterator[exp.Expression]:
+def _rows_from(node: Optional[exp.Expr], ctes: dict[str, exp.Expression], entered: set[int]) -> Iterator[exp.Expr]:
     """Every query whose rows *node* returns: itself, a set operation's sides, its derived tables and ``WITH`` clauses."""
     if node is None or id(node) in entered:
         return
@@ -3941,19 +3951,20 @@ def _bound(node: exp.Expression, sql: str) -> Optional[str]:
     if isinstance(node, exp.Placeholder):
         return _respelled(f":{node.name}", sql)
     if isinstance(node, exp.Literal) and not node.is_string:
-        return node.this
+        number: str = node.this  # a number literal's text
+        return number
     if _is_hole(node):
         return _respelled(node.name, sql)
     return None
 
 
-def _order_text(query: exp.Expression, order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
+def _order_text(query: exp.Expr, order: exp.Order, read: Parsed, sql: str, tokens: list) -> str:
     """*order*'s list as the statement spells it."""
     span = _order_span(query, tokens)
     return " ".join(_spelled_read(read, sql, *span).split()) if span is not None else ""
 
 
-def _order_span(query: exp.Expression, tokens: list) -> Optional[tuple[int, int]]:
+def _order_span(query: exp.Expr, tokens: list) -> Optional[tuple[int, int]]:
     """Where *query*'s ``ORDER BY`` list is in the parsed text, if it has one.
 
     Found as the first ``ORDER BY`` after the rest of *query* that comes
@@ -3963,7 +3974,8 @@ def _order_span(query: exp.Expression, tokens: list) -> Optional[tuple[int, int]
     before = [
         node.meta["start"]
         for part in ("expressions", "from_", "joins", "where", "group", "having", "this", "expression")
-        for value in ([query.args.get(part)] if not isinstance(query.args.get(part), list) else query.args.get(part))
+        for held in [query.args.get(part)]
+        for value in (held if isinstance(held, list) else [held])
         if isinstance(value, exp.Expression)
         for node in value.find_all(exp.Identifier, exp.Literal)
         if "start" in node.meta
@@ -4059,7 +4071,7 @@ def ordering_spans(sql: str) -> tuple[tuple[tuple[tuple[int, int], ...], ...], .
         if text not in orders:
             orders.append(text)
             places.append([])
-        places[orders.index(text)].append((_plain_span(read, sql, *span),))
+        places[orders.index(text)].append((_plain_span(read, sql, *cast("tuple[int, int]", span)),))  # text: a span
     return tuple(tuple(one) for one in places)
 
 
@@ -4270,7 +4282,7 @@ def filled(text: str, values: dict[str, object]) -> str:
     touched.
     """
 
-    def put(match: re.Match) -> str:
+    def put(match: re.Match[str]) -> str:
         spelled = match.group(0)
         if spelled.startswith("'"):
             return spelled
@@ -4380,7 +4392,11 @@ def _printed_map(text: str) -> Optional[dict[object, object]]:
         return None
     if not isinstance(tree.body, ast.Dict) or any(key is None for key in tree.body.keys):
         return None
-    return {_printed_value(key): _printed_value(value) for key, value in zip(tree.body.keys, tree.body.values, strict=True)}
+    # no key is None (above)
+    return {
+        _printed_value(cast(ast.expr, key)): _printed_value(value)
+        for key, value in zip(tree.body.keys, tree.body.values, strict=True)
+    }
 
 
 def cut(message: str, lead: str = "", gap: str = "") -> Optional[tuple[str, dict[object, object]]]:
