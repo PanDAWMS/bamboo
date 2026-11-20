@@ -5146,6 +5146,11 @@ class Rerun:
         attribute = PT.history(q.subject) is None
         if attribute:
             self.result["wrote"] = self._wrote_said(w)
+        # P25: what called the writer's run, and which of the caller's selections handed it the row
+        # said once: H2 reads a writer's run again for each arm and possible left
+        if attribute and question is not None and (took := self._writer_caller_take(w, q.subject, q.key)) is not None:
+            if (took_said := T.text(took)) not in self.lines:
+                self.say(took_said)
 
         # H3
         self.start("H3", "what its guard reads")
@@ -6776,6 +6781,11 @@ class Rerun:
         for p in left:
             arm = p.branch.chosen if p.branch is not None else None
             via = cast("Verdict | None", p.branch.via) if p.branch is not None else None
+            # H-3 at the row (the harness's T check of 138d46a, NR-J-7425287514-relocationFlag): a writer run in JEDI's
+            # processes alone did not record a row its host the records name another service's
+            if arm is not None and (off := self._jedi_only_off(f"{arm.candidate.rel}::{arm.candidate.func}", state)) is not None:
+                self.say(f"  not its row: {p.arm} -- {T.text(off)}")
+                continue
             recs = recorders(subject, f"{arm.candidate.rel}::{arm.candidate.func}", arm.line) if arm is not None else []
             if via is not None:
                 recs = [r for r in recs if _bare(r.caller) == via.candidate.owner and via.line in r.points]
@@ -6791,6 +6801,111 @@ class Rerun:
                                          for x in p.premises])
             out.append(p)
         return out
+
+    def _writer_caller_take(self, w: Wrote, subject: str, key: str) -> T.Said | None:
+        """P25 (out/gm/qk-design.md, the section on P25, delegated design; the investigator's u15 NR-T mergeWalltime 2):
+        what called the writer's run *w.question*, and which of the caller's selections handed it the row.  The writer's
+        callers by the map's calls (:func:`map_reach.callers`) that own a selection whose ``hand_ons`` name a print sure
+        to be made where the row is handed on (``sure_prints``) are asked by *key* on the run's machine over EDGE before
+        the run began -- by the caller's marks holding the key where it marks its runs so (:meth:`_by_key_marks`), and
+        not by the bare key over a shared log whose window holds the row's move (:meth:`_bare_over_a_move`).  A record
+        of such a print, under the caller's own mark, there: the caller's pass in which that
+        selection took the row -- prepareTasksToBeFinished_JEDI's 3768 'got jediTaskID=N 1/2 finished for reset in
+        running', sqlEA@3741's, before setScoutJobData_JEDI's run.  The last one before the run is said with its text.
+        Asks the records do not answer are kept and said.  Where the callers were asked and no such record is there,
+        that is said: what called the run is not read (the pass may have begun before the window, or another caller,
+        whose selection has no sure print, called it); None where no such caller is asked."""
+        run = w.question
+        machine, first = getattr(run, "machine", None), getattr(run, "first", None)
+        c = w.chosen.candidate
+        if not machine or not first:
+            return None
+        fragment = mapdump.fragment()
+        sure: dict[tuple[str, int], Any] = {}
+        for r in getattr(fragment, "read_sites", None) or []:
+            for h in getattr(r, "hand_ons", None) or []:
+                for sp in getattr(h, "sure_prints", None) or []:
+                    sure.setdefault((_bare(r.owner), sp.line), r)
+        if not sure:
+            return None
+        try:
+            fn = R.function(c.rel, c.func, list(c.lines))
+        except (LookupError, ValueError, SyntaxError):
+            return None
+        callers = [x for x in sorted(MR.callers(f"{c.rel}::{pathcond.qualified_name(fn.node)}"))
+                   if any(o == _bare(x) for o, _ in sure)]
+        if not callers:
+            return None
+        hi = W.when(str(first))
+        window = (f"{hi - EDGE:%Y-%m-%d %H:%M:%S}", f"{hi + CLOCKS_APART:%Y-%m-%d %H:%M:%S}")
+        found: list[tuple] = []
+        missed: list = []
+        asked: list[str] = []
+        for caller in callers:
+            lines = sorted(n for o, n in sure if o == _bare(caller))
+            rel, _, func = _bare(caller).partition("::")
+            try:
+                cfn = R.function(rel, func, lines)
+            except (LookupError, ValueError, SyntaxError):
+                continue
+            rows = [row for row in cfn.rows if row.line in lines]
+            prints = R._prints_of(caller)
+            files = jedi_files(caller, sorted({f for st in prints.statements for f in st.log_files}) if prints else [])
+            names = self.logs.names(files)
+            if not rows or not names:
+                continue
+            asking = self._by_key_marks(caller, lines, W.Asking(window, machine, T.Said("for-the-writer-s-caller", {
+                "writer": c.func, "start": window[0], "end": window[1], "machine": machine.split(".")[0]})),
+                subject.partition(".")[0], key)
+            assert asking is not None
+            runs, more, holes = self._ask(key, names, asking, {}, quiet=True)
+            asked.append(caller.rpartition("::")[2])
+            missed += self._bare_over_a_move(func, asking, more, holes)
+            for rs in runs.values():
+                for rr in rs:
+                    if not of_mover(rr, _bare(caller)) or rr.machine != machine:
+                        continue
+                    for rec in getattr(rr, "found_by", None) or []:
+                        if W.when(rec.stamp) > hi + CLOCKS_APART:
+                            continue
+                        for row in rows:
+                            if row.matches(rec, self.mode)[0]:
+                                found.append((W.when(rec.stamp), caller, row.line, rec))
+        if missed:
+            self._keep_unanswered(missed)
+            return T.Said("writer-caller-asked", {"writer": c.func, "callers": [x.rpartition("::")[2] for x in callers],
+                                                  "machine": machine.split(".")[0], "n": len({ask.key for ask, _ in missed})})
+        if not found:
+            return T.Said("writer-caller-not-read", {
+                "writer": c.func, "callers": asked, "machine": machine.split(".")[0], "start": window[0], "end": window[1],
+            }) if asked else None
+        at, caller, line, rec = max(found, key=lambda f: f[0])
+        site = sure[(_bare(caller), line)]
+        return T.Said("writer-called-in-a-pass-whose-selection-took-it", {
+            "writer": c.func, "caller": _bare(caller).rpartition("::")[2], "machine": machine.split(".")[0],
+            "site": f"{site.owner.split('::')[-1]}@{site.anchor.line_start}", "line": line, "at": str(rec.stamp)[:23],
+            "text": rec.text})
+
+    def _jedi_only_off(self, owner: str, state: dict) -> T.Said | None:
+        """H-3 at an H2 row (the harness's T check of 138d46a): pandajedi's code runs in JEDI's processes alone, so a
+        writer every route of which passes ``pandajedi/`` (:func:`jedi_routes` over its junctions' ``called_from``)
+        records history rows on JEDI's machines; a row whose host (the statuslog's ``host``, the history row's
+        modificationhost) the records name another service's
+        machine is not its row -- unThrottleUserJobs, called from AtlasAnalWatchDog alone, at a row of aipanda094, a
+        server.  The row's host is the recording process's, as :meth:`_recorded` reads it.  None where the host or its
+        service is not known, the service is JEDI's, or a route of the writer does not pass ``pandajedi/``."""
+        host = str((state or {}).get("host") or (state or {}).get("modificationhost") or "")
+        service_of = getattr(self.logs, "service_of", None)
+        service = service_of(host) if host and service_of is not None else None
+        if service is None or service == "jedi":
+            return None
+        fragment = mapdump.fragment()
+        entries = list(dict.fromkeys(e for j in getattr(fragment, "junctions", None) or [] if _bare(j.owner) == _bare(owner)
+                                     for e in getattr(j, "called_from", None) or []))
+        sites = jedi_routes(owner, entries)
+        if not sites:
+            return None
+        return T.Said("not-its-row-a-jedi-writer", {"host": host.split(".")[0], "service": service, "sites": sites})
 
     def _recorder_read(self, rec: Recorder, subject: str, key: str, state: dict,
                        asking: W.Asking) -> tuple[str, T.Said | None, Run | None, list[Run]]:
@@ -8770,12 +8885,15 @@ class Rerun:
                                                  *([T.Said("the-key-from-the-callers", {"reader": where, "callers": [
                                                      c.split("::")[-1] for c in via]})] if via else [])]}))
                 return True
+            # the harness's T check (MJ-merging-stuck): wakers whose write no row could show are none of "searched whole"
+            hidden = T.Said("wakers-unshown-clause", {"writes": unshown}) if unshown else ""
             if q.before is None:
                 self.need(T.Said("a-waker-s-write-in-the-window", {
-                    "mover": func, "reader": where, "wakers": wakers_said, "since": since, "until": until, "outside": told}), None, "K55")
+                    "mover": func, "reader": where, "wakers": wakers_said, "since": since, "until": until, "outside": told,
+                    "unshown": hidden}), None, "K55")
             self.need(T.Said("a-waker-s-write-in-the-stay", {
                 "mover": func, "reader": where, "wakers": wakers_said, "since": since, "before": q.before,
-                "outside": told}), None, "K55")
+                "outside": told, "unshown": hidden}), None, "K55")
         at, p, owner, line, printed = stay[-1]
         if q.before is None:
             self.say(f"{owner.split('::')[-1]}:{line} wrote a row {where} selects for the key at {at:%Y-%m-%d %H:%M:%S} "
@@ -10824,7 +10942,7 @@ class Rerun:
             missed += more
             for rs in runs.values():
                 for run in rs:
-                    if (of_mover(run, upper) and run.machine == machine
+                    if (of_mover(run, _bare(upper)) and run.machine == machine
                             and W.when(run.first) <= hi + CLOCKS_APART and W.when(run.last) >= hi - CLOCKS_APART):
                         found.setdefault(upper, []).append(run)
         if missed:

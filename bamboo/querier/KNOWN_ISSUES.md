@@ -1948,6 +1948,32 @@ a proxy mixin's two files a JEDI process writes: the map's model says panda-DBPr
 panda-JediDBProxy.log under a knight, but holds it as no field, so panda-DBProxy.log is still asked on JEDI's machines
 (the records hold no `_JEDI` method's line in it there).
 
+*Changed (P25, 2026-11-20, the investigator's u15 NR-T-53639338-mergeWalltime 2, delegated design):* for an
+attribute whose writer's run H2 read, H3 first says what called that run and which of the caller's selections handed
+it the row (`Rerun._writer_caller_take`).  The writer's callers by the map's calls that own a selection whose
+`hand_ons` name a print sure to be made where the row is handed on (`sure_prints`) are asked by the key on the run's
+machine over EDGE before it.  A record of such a print under the caller's own mark there is the caller's pass in which
+that selection took the row; the last before the run is said with its text.  mergeWalltime: setScoutJobData_JEDI's run
+(087, 15:27:31) was called in prepareTasksToBeFinished_JEDI's pass whose sqlEA@3741 handed the task on -- 3768 'got
+jediTaskID=N 1/2 finished for reset in running' at 15:27:28,719, the hand's line; the main selection@3696's hand-on
+names no sure print, so it is not said to have taken it.  Asks the records do not answer are kept; where the callers
+were asked and no such record is there, that is said, and what called the run is left not read (the pass may have
+begun before EDGE, or a caller whose selection has no sure print called it): 9 of T138's 18 value cases whose
+writer's callers own such a selection, 2 said with the pass (mergeWalltime, workDiskUnit).  *Not read:* the
+selection's terms at that pass (the hand's "running, walltimeUnit NULL, finished >= 1"); assessmentTime's form, where
+the writer is the selecting function itself and the print is absent.
+
+*Changed (H-3 at an H2 row, 2026-11-20, the harness's T check of 138d46a: NR-J-7425287514-relocationFlag's END went
+from storeJobs:372 to one of 2 arms):* H2's reading of an arm that may have written at a row (`_recorded`) first reads
+where the row was recorded.  A writer every route of which passes `pandajedi/` (`jedi_routes`) runs in JEDI's processes
+alone; a row whose host (the statuslog's `host`) the records name another service's machine (`RecordedLogs.service_of`,
+one service named alike in every record) is not its row (`Rerun._jedi_only_off`, not-its-row-a-jedi-writer).
+unThrottleUserJobs, called from AtlasAnalWatchDog alone, may not have written at the 'activated' row of aipanda094, a
+server, so storeJobs:372 is the one writer left again -- by a reason, where M reached it only because unThrottleUserJobs
+stayed unexamined there.  The row's host is the recording process's, as K67's recorder reading already holds it.
+And A2's stops (a-waker-s-write-in-the-stay / -window) say "none shown" and name the wakers whose write no row could
+show, where "searched whole" read as more than the line before them (MJ-merging-stuck).
+
 *Changed (P72, 2026-11-20, the harness's T check: NT-scouting-stuck's S1 still asked "vo=atlas"):* B's rule needs the
 function's marks in the walk's records, and NT-scouting-stuck's hold none, so the hole fell back to the row's 'atlas'
 (every recorded mark of the function, ~114k lines in records-n, says vo=None).  A hole that is the function's

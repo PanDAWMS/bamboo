@@ -474,6 +474,13 @@ TEMPLATES: dict[str, str] = {
     "passes-ran-no-arm": "its {n} pass(es) in the stay ran none of its arms, leaving by one of {left_by} or running on past them",
     "passes-took-none": "its {n} pass(es) in the stay took none of its candidates",
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
+    # P25 (rerun._writer_caller_take)
+    "writer-called-in-a-pass-whose-selection-took-it": "{writer}'s run was called in {caller}'s pass on {machine}, in which its selection {site} handed the row on: its row {line} printed at {at}: {text!r} (P25)",
+    "writer-caller-asked": "what called {writer}'s run: {callers:join=, }'s logs on {machine} before it are asked ({n} ask(s)) (P25)",
+    "writer-caller-not-read": "what called {writer}'s run: no record of a sure row of {callers:join=, } by the key on {machine} from {start} to {end}, so it is not read here (P25)",
+    "for-the-writer-s-caller": "for what called {writer}'s run, from {start} to {end} on {machine}",
+    # H-3 at an H2 row (rerun._jedi_only_off)
+    "not-its-row-a-jedi-writer": "it runs in JEDI's processes alone (every route into it passes {sites:join=, }), and the row was recorded on {host}, a {service} machine as the records say (H-3)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
     "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{before:join=}{kept:join=}{refused}{idle}; premises: {premises:join=; }{unknown:join=}",
@@ -571,10 +578,11 @@ TEMPLATES: dict[str, str] = {
     "h-rows-stand-for-the-term-s": "the {inner} rows the term counts are the row's; its {cls} rows by {via} stand for them (which of them hold those rows is not read)",
     "h-a-later-write-not-read": "a write of the term's columns later than its row's move (a queued update) is not read: the move came {delta} s after it",
     "an-outside-writer-of-the-table": "{system} writes {table} too, with no log here",
-    "a-waker-s-write-in-the-stay": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {before}, before {mover} moved it on: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
+    "a-waker-s-write-in-the-stay": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {before}, before {mover} moved it on: none shown in PanDA's logs, searched whole{unshown}{outside} (KNOWN_ISSUES.md K55)",
     "no-row-its-wakers-wrote-in-the-window": "{mover} takes the row only by the rows {reader} selects ({column}), and its wakers ({wakers:join=, }) wrote none for the key from {since} to {until}, the window's end, every one's log searched whole and the table written here alone: no row it takes came for the key (A2s); premises: {premises:join=; }",
     "the-wakers-write-every-row-it-takes": "the map's wakers of {reader} are every writer of the rows it selects",
-    "a-waker-s-write-in-the-window": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {until}, the window's end, with {mover} not having taken it: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
+    "a-waker-s-write-in-the-window": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {until}, the window's end, with {mover} not having taken it: none shown in PanDA's logs, searched whole{unshown}{outside} (KNOWN_ISSUES.md K55)",
+    "wakers-unshown-clause": "; of the wakers, {writes:join=, } print no row a run would show their write by, so a write of theirs is not shown absent",
     # M3(a)-2: a time column closed by a run of the row printing it; a pass reaching a selection told by its key line
     "held-as-printed": "{column} held {value} until {at}: {where} printed it then on {machine}, of the row by its key, and the arms that may write it in the stay ({arms:join=, }) write the clock",
     "for-a-print-of-the-column": "from {start} to {end}, for the key: {where}'s print of {column}",
