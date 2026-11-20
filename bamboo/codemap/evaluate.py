@@ -135,12 +135,11 @@ class Env:
         A hole ``{str(x)}`` that reads back as a literal other than a string
         says what ``x`` was, too (``str(self.job.altStgOutFileList())``).
         """
-        try:
+        value, shared = _printed_literal(printed)
+        if not shared:
             value = ast.literal_eval(printed)
-        except (ValueError, SyntaxError):
-            value = printed
         self.put(text, value, source)
-        inner = re.fullmatch(r"str\((.+)\)", text)
+        inner = _str_of(text)
         if (
             inner
             and not isinstance(value, str)
@@ -163,6 +162,32 @@ class Env:
         """Whether :meth:`lookup` gives *text* a value, without taking it; a reader extending one extends both."""
         key = self.canonical(text)
         return key in self.values and text not in self.stale and key not in self.stale
+
+
+#: The values a printed text reads back as that no one can change, and so may be handed to every env
+_IMMUTABLE = (str, bytes, int, float, complex, type(None), type(Ellipsis))
+
+
+def _unchangeable(value: Any) -> bool:
+    return isinstance(value, _IMMUTABLE) or (isinstance(value, tuple) and all(_unchangeable(v) for v in value))
+
+
+@functools.lru_cache(maxsize=None)
+def _printed_literal(printed: str) -> tuple[Any, bool]:
+    """*printed* as :meth:`Env.put_printed` reads it, and whether that value can be handed out again: read once per
+    text, as a walk builds an env with the same holes at every test on every path.  A list, a dict or a set is read
+    anew for each env (``False``), as one env's reader may change it."""
+    try:
+        value = ast.literal_eval(printed)
+    except (ValueError, SyntaxError):
+        return printed, True
+    return value, _unchangeable(value)
+
+
+@functools.lru_cache(maxsize=None)
+def _str_of(text: str) -> Optional[re.Match]:
+    """The match of a hole ``str(x)``'s text, read once per text (:meth:`Env.put_printed`)."""
+    return re.fullmatch(r"str\((.+)\)", text)
 
 
 def strip_annotation(text: str) -> str:
@@ -440,10 +465,25 @@ def _parsed_test(test: str) -> tuple[ast.expr, tuple[tuple[str, ast.AST], ...]]:
     return tree, tuple(found.items())
 
 
+@functools.lru_cache(maxsize=None)
+def _fits(
+    test: str, outcome: bool, known: tuple[tuple[str, bool], ...], unknown: tuple[str, ...]
+) -> tuple[tuple[bool, ...], ...]:
+    """The values of the *unknown* atoms, in their order, with which *test* comes out *outcome*, its other atoms
+    *known*: :func:`solve`'s assignments, read once per test and truths of its atoms.  Every atom is fixed, so
+    :func:`truth` reads no env (an empty one is handed)."""
+    tree, _ = _parsed_test(test)
+    return tuple(
+        values
+        for values in itertools.product((True, False), repeat=len(unknown))
+        if truth(tree, {**dict(known), **dict(zip(unknown, values, strict=True))}, Env()) is outcome
+    )
+
+
 def solve(test: str, outcome: bool, env: Env) -> Solved:
     """What *test* coming out *outcome* says of its unknown atoms.  The test is parsed once per text
     (:func:`_parsed_test`): the walk solves the same test on every path through it."""
-    tree, parsed = _parsed_test(test)
+    _, parsed = _parsed_test(test)
     found: dict[str, ast.AST] = dict(parsed)
     known: dict[str, bool] = {}
     unknown: list[str] = []
@@ -453,11 +493,7 @@ def solve(test: str, outcome: bool, env: Env) -> Solved:
             unknown.append(text)
         else:
             known[text] = value
-    fits = []
-    for values in itertools.product((True, False), repeat=len(unknown)):
-        fixed = {**known, **dict(zip(unknown, values, strict=True))}
-        if truth(tree, fixed, env) is outcome:
-            fits.append(dict(zip(unknown, values, strict=True)))
+    fits = [dict(zip(unknown, values, strict=True)) for values in _fits(test, outcome, tuple(known.items()), tuple(unknown))]
     settled = {
         one: fits[0][one]
         for one in unknown

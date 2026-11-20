@@ -426,6 +426,40 @@ def test_equal_paths_merge_and_many_are_widened(monkeypatch):
     assert len(walker.widen([a, walker.Path(state={"x": 1}, arm=True)], "x")) == 2
 
 
+def test_a_left_path_keeps_its_key_while_its_fields_are_the_same_objects(module, calls, monkeypatch):
+    """A path that has left is walked no more, and :func:`walker.merge` reads its key after every statement: the key is
+    kept while each field holds the object it held (:meth:`walker.Path.key`).  That holds only while no reader writes a
+    left path's field in place, so every key the walks here read is checked against its parts."""
+    read = walker.Path.key
+    kept = []
+
+    def key(self):
+        found = read(self)
+        assert found == repr(self.key_parts())
+        if self.left:
+            kept.append(found)
+        return found
+
+    monkeypatch.setattr(walker.Path, "key", key)
+    _walker(module, calls, "checked", "A1", target="job.status", require_all=False).run(
+        walker.region_of(_at(module, "S1"))
+    )
+    _walker(module, calls, "called", "A3", target="job.status", relevant={"n"}, require_all=False).run(
+        walker.region_of(_at(module, "S2"))
+    )
+    _walker(
+        module, calls, "looped", "S3", target="job.status", relevant={"isOK"}, decide=_decide, require_all=False
+    ).run(walker.region_of(_at(module, "S3")))
+    _asked(module, calls, "forgot", "G4", "G3", {"flag", "kind", "job.ready", "job.status"})
+    assert kept
+    left = walker.Path(state={"x": 1}, facts={"a": True}, left="return at 1")
+    held = left.key()
+    assert left.key() is held
+    left.facts = {}
+    assert left.key() != held
+    assert "_left_key" not in left.copy().__dict__
+
+
 def test_too_many_paths_stop_the_walk(module, calls, monkeypatch):
     monkeypatch.setattr(walker, "MAX_PATHS", 1)
     w = _walker(module, calls, "checked", "A1", target="job.status", require_all=False)
