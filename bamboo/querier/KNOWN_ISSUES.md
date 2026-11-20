@@ -2008,6 +2008,15 @@ Asking such a writer by its rows' own texts around the key was measured and left
 holding no key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39
 asks of up to 209 strings).
 
+*Changed (A2's asks, 2026-11-20, found with P20's rest):* A2's reading of the wakers' writes (`Rerun._waker_writes`)
+asked their logs naming no runs it reads, so the door asked every mark near the key's records whole: NJ-merging-late's
+merge job over DBProxy asked 22 asks of 500 marks of other calls (archiveJob, propagateResultToJEDI, getJobs ...),
+none of them a waker's.  It now names the waker's own method (`owners_of`): another call's mark is read from the key's
+records alone, as cut, as judgement 3's asks read them.  NJ-merging-late's branch reads to its END from the records at
+hand ("process_job_report moved it on 16 s after insertJobOutputReport:2106 wrote a row for it ..."), and
+NT-toincexec-late asks one mark (insertTaskParamsPanda's) where it asked eight; the other A2 cases measured say only
+the door's notes otherwise.
+
 *Changed (P47, 2026-11-20, the investigator's u1 NT-toabort-late 8, delegated design; the map's MSG, bf49753):* where
 the worker an agent's cycles hand their parts to is handed parts another way too (`agents.Selection.others`), a way in
 a message processor's file is read in the map's message receivers (`message_ways`, `MapFragment.message_receivers`):

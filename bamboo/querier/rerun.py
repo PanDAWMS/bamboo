@@ -9117,7 +9117,10 @@ class Rerun:
         """A2's reading of *wakers*' writes for *key* from *since* to *until* (:meth:`_waker_turn`): each waker's logs
         asked by the key over that span on every machine, each whole; a run wrote where a row of it prints only on a
         path through the waker's line (``implying_rows``), the printed value one of *values*.  ``(writes, the asks no
-        record answers, why not read)``: each write ``(when, pass, owner, line, values shown)``; the reason a waker's
+        record answers, why not read)``: each write ``(when, pass, owner, line, values shown)``.  The door asks no
+        other method's mark whole (``owners``: the waker's own): another call's mark near the key's records is read from
+        those records alone (NJ-merging-late's merge job over DBProxy asked 101 other jobs' archiveJob and
+        propagateResultToJEDI marks whole otherwise).  The reason a waker's
         runs are not all read, said, with no writes.  *quiet*: each waker's ask not said (P14's many wakers); *why*: the
         asks' reason, where not the stay's."""
         writes: list = []
@@ -9131,7 +9134,8 @@ class Rerun:
             asking = W.Asking((since, until), None, why or T.Said("over-the-stay-for-its-wakers", {"start": since, "end": until, "reader": where}))
             if not quiet:
                 self.say(f"{wfunc}, a waker of {where}: logs {files}, asked {asking.why}")
-            runs, missed, holes = self._ask(key, to_hand, asking, quiet=quiet)
+            # the waker's own runs are what it reads: no other method's mark is asked whole near the key's records
+            runs, missed, holes = self._ask(key, to_hand, asking, owners_of([owner]), quiet=quiet)
             asked.append((owner, wlines, rel, wfunc, to_hand, asking, runs, missed, holes))
         missed_all = [m for a in asked for m in a[7]]
         if missed_all:

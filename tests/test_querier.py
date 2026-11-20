@@ -18239,6 +18239,36 @@ def test_p74_what_called_the_caller_is_read_by_the_linked_value_on_the_moving_pa
         "AtlasAnalWatchDog.doForWaitingJobs) are asked by the linked value (1 ask(s))"), got
 
 
+def test_a2_asks_a_wakers_logs_for_its_own_runs_alone(tmp_path):
+    """A2's waker asks (rerun._waker_writes) name the waker's own method as the runs read (owners): the door asks no
+    other method's mark whole near the key's records (NJ-merging-late's merge job asked 101 other jobs' archiveJob and
+    propagateResultToJEDI marks over DBProxy otherwise)."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "A2", [], "outside"
+        rerun.R._prints_of = lambda owner, lines=(): N(statements=[N(log_files=["panda-DBProxy.log"])])
+        rerun.R.mark_heads = lambda rel, func: ("insertJobOutputReport <",)
+        r.files_of = lambda owner, files, lines: files
+        r.logs = N(names=lambda files: list(files))
+        got = []
+
+        def ask(key, names, asking, owners=None, whole=False, quiet=False):
+            got.append(owners)
+            return {}, [(N(key="k", name=names[0]), "")], {}
+
+        r._ask = ask
+        w = N(owner="p/job_standalone_module.py::insertJobOutputReport", line=2106, value="")
+        writes, missed, why = r._waker_writes([w], "9", "2026-11-15 03:28:25", "2026-11-15 05:05:12", "listJobOutputReport@2401", set())
+        print(json.dumps({"owners": got, "missed": len(missed)}, default=list))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"owners": [{"insertJobOutputReport": ["insertJobOutputReport <"]}], "missed": 1}, got
+
+
 def test_p20_a_caller_whose_key_comes_from_a_selections_rows_is_read_by_their_wakers(tmp_path):
     """P20's rest (agents.rows_handing, rerun.caller_key_ways, rerun._caller_waker_turn): process_job_report's runs hold
     the merge job's key in self.job_id, which the S step's ways bring from the rows listJobOutputReport@2401 selects
