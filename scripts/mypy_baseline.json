@@ -40,7 +40,6 @@
   "bamboo/codemap/strategy.py": 12,
   "bamboo/codemap/trace.py": 91,
   "bamboo/codemap/values.py": 13,
-  "bamboo/mcp/external_mcp_client.py": 1,
   "bamboo/querier/asked.py": 2,
   "bamboo/querier/attr_time.py": 4,
   "bamboo/querier/callers.py": 10,
