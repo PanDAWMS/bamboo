@@ -611,3 +611,21 @@ def test_a_head_keeps_the_guards_at_it_or_inside_it_and_must_hold_the_node() -> 
     assert tests(at["A1"]) == []
     with pytest.raises(ValueError):
         pathcond.guards(at["A1"], func, at["E1"])
+
+
+def test_a_test_solved_again_is_read_from_its_one_parse() -> None:
+    """:func:`evaluate.solve` parses a test once per text: the walk solves the same test on every path through it.
+    What it says is the same each time, and so are the atoms' nodes."""
+    text = "job.status == 'failed' and attempt < 3"
+    first = evaluate.solve(text, True, _env(attempt=1))
+    again = evaluate.solve(text, True, _env(attempt=1))
+    assert (first.known, first.settled, first.open, first.consistent) == (
+        again.known,
+        again.settled,
+        again.open,
+        again.consistent,
+    )
+    assert first.settled == {"job.status == 'failed'": True}
+    assert evaluate._parsed_test(text) is evaluate._parsed_test(text)
+    other = evaluate.solve(text, False, _env(attempt=5))
+    assert other.known == {"attempt < 3": False} and other.open == ["job.status == 'failed'"]

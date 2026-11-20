@@ -770,3 +770,14 @@ def test_a_statements_readings_kept_per_statement_are_what_reading_it_again_give
             walker.deep_binds(stmt).add("handed")
             walker.own_calls(stmt).clear()
             walker.mutating_roots(stmt).add("handed")
+
+
+def test_a_walks_hits_and_touches_are_read_once_per_name_and_are_what_affects_says(module, calls):
+    """:meth:`Walker.hits` and :meth:`Walker.touches` scan the walk's *relevant* chains once per name -- a path binds
+    the same names at every statement it passes -- and say what :func:`walker.affects` says of each chain."""
+    w = _walker(module, calls, "checked", "A1", target="job.status", relevant={"job", "x.y", "status"}, require_all=False)
+    for _ in range(2):
+        for name in ("job", "job.status", "job.status.x", "x", "x.y[0]", "status", "other"):
+            assert set(w.hits(name)) == {c for c in w.relevant if walker.affects(name, {c})}
+            assert w.touches(name) == (name in w.relevant or any(walker.affects(name, {r}) for r in w.relevant))
+    assert w.hits("job") is w.hits("job")

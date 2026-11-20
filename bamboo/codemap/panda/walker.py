@@ -984,6 +984,9 @@ class Walker:
         self.target_root = root(target) if target else ""
         self.relevant = set(relevant) | ({target} if target else set())
         self.rel_roots = {root(c) for c in self.relevant} - {""}
+        #: :meth:`hits` and :meth:`touches` per name, read once: *relevant* is the walk's own and does not change.
+        self._hits: dict[str, tuple[str, ...]] = {}
+        self._touches: dict[str, bool] = {}
         self.order = order
         self.decide = decide
         self.check_row = check_row
@@ -1230,10 +1233,7 @@ class Walker:
         except Exception:
             return
         for atom, truth in solved.settled.items():
-            if chains(atom) and all(
-                c in self.relevant or any(affects(c, {r}) for r in self.relevant)
-                for c in chains(atom)
-            ):
+            if chains(atom) and all(self.touches(c) for c in chains(atom)):
                 q.facts[atom] = truth
 
     def truth(self, test: ast.expr, p: Path, env: evaluate.Env) -> Any:
@@ -1417,9 +1417,25 @@ class Walker:
             if any(changed(c, None) for c in chains(atom)):
                 del q.facts[atom]
 
+    def hits(self, bound: str) -> tuple[str, ...]:
+        """The chains of :attr:`relevant` a binding of *bound* changes (:func:`affects`), read once per name: a
+        path binds the same names at every statement it passes, and *relevant* does not change."""
+        held = self._hits.get(bound)
+        if held is None:
+            held = self._hits[bound] = tuple(c for c in self.relevant if affects(bound, {c}))
+        return held
+
+    def touches(self, chain: str) -> bool:
+        """Whether *chain* is one of :attr:`relevant` or one a binding of which changes one of them; read once per
+        chain, as :meth:`hits`."""
+        held = self._touches.get(chain)
+        if held is None:
+            held = self._touches[chain] = chain in self.relevant or any(affects(chain, {r}) for r in self.relevant)
+        return held
+
     def bind(self, q: Path, pairs: list[tuple[str, Optional[ast.expr]]]) -> None:
         for t, vnode in pairs:
-            hit = [c for c in self.relevant if affects(t, {c})]
+            hit = self.hits(t)
             if not hit:
                 continue
             value = self.value_of(q, t, vnode)
