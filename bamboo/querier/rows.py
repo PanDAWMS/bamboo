@@ -650,6 +650,58 @@ def _map_usable(pattern: str) -> bool:
     return len(_map_text(pattern).replace(" ", "")) >= MIN_SHAPE
 
 
+def hole_literals(capture: str, group: int) -> tuple[str, str] | None:
+    r"""The literal text right before and right after the *group*-th group of a map row's ``capture`` (every hole a
+    group, :attr:`SkeletonHole.group`), escapes undone: ``("update_job(", ", ")`` for pilot_api's update_job 516,
+    ``update_job\(([^,]*),\ ...``.  None where the group is not one of the pattern's own (inside another group) or
+    the capture has no such group."""
+    parts: list[tuple[str, str | int]] = []
+    i, depth, count = 0, 0, 0
+    while i < len(capture):
+        c = capture[i]
+        if c == "\\" and i + 1 < len(capture):
+            if depth == 0:
+                parts.append(("lit", capture[i + 1]))
+            i += 2
+        elif c == "[":
+            # a class, up to its closing bracket (a first ']' or one escaped is in it)
+            j = i + 1 + (capture[i + 1:i + 2] == "^")
+            j += capture[j:j + 1] == "]"
+            while j < len(capture) and capture[j] != "]":
+                j += 2 if capture[j] == "\\" else 1
+            if depth == 0:
+                parts.append(("other", ""))
+            i = j + 1
+        elif c == "(":
+            if not capture.startswith("(?", i) or capture.startswith("(?P<", i):
+                count += 1
+                if depth == 0:
+                    parts.append(("group", count))
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+        else:
+            if depth == 0:
+                parts.append(("other", "") if c in ".*+?{}|^$" else ("lit", c))
+            i += 1
+    at = next((k for k, p in enumerate(parts) if p == ("group", group)), None)
+    if at is None:
+        return None
+    before: list[str] = []
+    after: list[str] = []
+    for kind, text in reversed(parts[:at]):
+        if kind != "lit":
+            break
+        before.append(str(text))
+    for kind, text in parts[at + 1:]:
+        if kind != "lit":
+            break
+        after.append(str(text))
+    return "".join(reversed(before)), "".join(after)
+
+
 @dataclass
 class Row:
     rel: str

@@ -1042,16 +1042,117 @@ def test_a_mark_the_calls_share_is_asked_only_near_the_keys_records_joined_per_m
                        ["2026-09-28 08:40:00", "2026-09-28 09:40:00"], "near them: a mark the calls share"],
                       ["aipanda094.cern.ch", ["getTasks_JEDI < vo=None label=None >"],
                        ["2026-09-28 11:30:00", "2026-09-28 12:00:00"], "near them: a mark the calls share"]]
-    # the key's class given: a mark holding another class's identity (the job's PandaID, for a task's key) names who
-    # makes the calls, not the row: asked near the key's records too (M1's three windows joined, 08:40-10:20); for a
-    # job's key the job's mark is its calls' own, as with no class
-    near = "near them: a mark the calls share"
-    assert task == [["aipanda093.cern.ch", ["getTasks_JEDI < vo=None label=None >", "process <h_1-2>", "updateJob < PandaID=777 >"],
-                     ["2026-09-28 08:40:00", "2026-09-28 10:20:00"], near],
-                    ["aipanda094.cern.ch", ["getTasks_JEDI < vo=None label=None >"],
-                     ["2026-09-28 11:30:00", "2026-09-28 12:00:00"], near]], task
+    # the key's class given: a mark naming another row (the job's PandaID, for a task's key, where the job's rows do
+    # not reference the task) is not asked: the key's records under it are read as its run (the harness's rnd14 (a));
+    # for a job's key the job's mark is its calls' own, as with no class
+    assert task == shared[1:], task
     assert job == shared, job
     assert child == shared, child
+
+
+def test_rnd14_a_mark_naming_another_row_is_read_from_the_records_and_a_writer_asked_by_its_key_mark(tmp_path):
+    """The harness's rnd14.  (a) For the question's key, a mark whose holes name another row -- a class's identity, or
+    a column referencing one -- of a class neither the key's nor a child of it is read from the key's records alone:
+    a harvester's updateWorkers mark and insertNewJob's task mark for a job's key; a task's dataset mark for the task's
+    key is its calls' own.  (2) A writer's logs are asked by its marks holding the key where it has them."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            from bamboo.querier import mapdump
+            from bamboo.querier import recorded as RD
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import windows as W
+
+            def run(at, mark, columns):
+                return N(owner=at, runs=[N(line=1, at=at, builder="create_tagged_logger", mark=mark,
+                                           key=[N(columns=c) for c in columns])],
+                         statements=[N(log_files_basis="logger", runs=[1], handed_runs=[], log_files=["db.log"], rows=[])])
+
+            ref = lambda attr, to, table: N(attrs=[attr], table_attrs=[to], columns=["x"], table=table, table_columns=["x"])
+            tables = [N(spec_class="JobSpec", name="jobs", identity_attrs=["JobSpec.PandaID"],
+                        references=[ref("JobSpec.jediTaskID", "JediTaskSpec.jediTaskID", "jedi_tasks")]),
+                      N(spec_class="JediTaskSpec", name="jedi_tasks", identity_attrs=["JediTaskSpec.jediTaskID"], references=[]),
+                      N(spec_class="JediDatasetSpec", name="jedi_datasets", identity_attrs=["JediDatasetSpec.datasetID"],
+                        references=[ref("JediDatasetSpec.jediTaskID", "JediTaskSpec.jediTaskID", "jedi_tasks")]),
+                      N(spec_class="WorkerSpec", name="workers", identity_attrs=["WorkerSpec.harvesterID"], references=[])]
+            prints = [run("p/db.py::P.updateWorkers", "harvesterID={} pid={}", [["WorkerSpec.harvesterID"], []]),
+                      run("p/db.py::P.insertNewJob", "JediTaskID={} idPool={}", [["JobSpec.jediTaskID"], []]),
+                      run("p/db.py::P.updateDataset", "datasetID={}", [["JediDatasetSpec.datasetID"]]),
+                      run("p/db.py::P.getTasks", "vo={}", [[]])]
+            mapdump._FRAGMENT[:] = [N(tables=tables, function_prints=prints)]
+            RD._SHARES[:] = []
+            marks = {"m1": {"updateWorkers < harvesterID=H pid=7 >", "insertNewJob < JediTaskID=NULL idPool=3 >",
+                            "updateDataset < datasetID=9 >", "getTasks < vo=None >"}}
+            got = {"job": sorted(f"{t}: {why}" for (_, t), why in RD._another_rows_marks("db.log", marks, "JobSpec").items()),
+                   "task": sorted(t for (_, t) in RD._another_rows_marks("db.log", marks, "JediTaskSpec"))}
+            # (2)
+            RR.key_marks = lambda owner, line, cls, key: (f"f < jediTaskID={key} >",) if owner == "m.py::f" else ()
+            r = RR.Rerun.__new__(RR.Rerun)
+            a = W.Asking(("2026-01-01 00:00:00", "2026-01-01 01:00:00"), None, "w")
+            got["marked"] = list(r._by_key_marks("m.py::f", [3], a, "JediTaskSpec", "7").strings)
+            got["unmarked"] = list(r._by_key_marks("m.py::g", [3], a, "JediTaskSpec", "7").strings)
+            got["named"] = list(r._by_key_marks("m.py::f", [3], W.Asking(None, None, "w", ("s",)), "JediTaskSpec", "7").strings)
+            got["none"] = r._by_key_marks("m.py::f", [3], None, "JediTaskSpec", "7")
+            # a waker's runs read as cut: its own (by the method its mark names), not another method's
+            log = N(partial={("m1", "updateWorkers < harvesterID=H pid=7 >"): "a mark naming another row's calls (WorkerSpec)"})
+            runs = {"db.log": [N(machine="m1", token="updateWorkers < harvesterID=H pid=7 >", log=log),
+                               N(machine="m1", token="insertJobOutputReport < PandaID=5 >", log=log)]}
+            got["cut"] = [sorted(t for _, t in RR.cut_runs(runs, ["db.log"], f"p/db.py::{f}"))
+                          for f in ("updateWorkers", "insertJobOutputReport")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["job"] == ["insertNewJob < JediTaskID=NULL idPool=3 >: a mark naming another row's calls (JediTaskSpec)",
+                          "updateDataset < datasetID=9 >: a mark naming another row's calls (JediDatasetSpec)",
+                          "updateWorkers < harvesterID=H pid=7 >: a mark naming another row's calls (WorkerSpec)"], got
+    # for the task's key, the dataset (a child) and the job (a child) marks are the calls' own; the harvester's is not
+    assert got["task"] == ["updateWorkers < harvesterID=H pid=7 >"], got
+    assert got["marked"] == ["f < jediTaskID=7 >"] and got["unmarked"] == [] and got["named"] == ["s"], got
+    assert got["none"] is None, got
+    assert got["cut"] == [["updateWorkers < harvesterID=H pid=7 >"], []], got
+
+
+def test_lfs_a_function_running_in_jedi_alone_is_looked_for_in_the_files_jedi_writes(tmp_path):
+    """The map's LFS: where every route into a function passes pandajedi, its files the map says no JEDI process writes
+    are left out (panda-DBProxy.log, the server's); a function entered from pandaserver keeps both; a file the map does
+    not list stays; a dump with no such table changes nothing."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+
+            lfs = [N(file="panda-DBProxy.log", services=["server"]), N(file="panda-JediDBProxy.log", services=["jedi"])]
+            junctions = [N(owner="p/db.py::M.prep", called_from=["pandajedi/jediorder/Post.py:75 -> p/tb.py:5"]),
+                         N(owner="p/db.py::M.ins", called_from=["pandajedi/jediorder/Gen.py:9", "pandaserver/api/x.py:3"])]
+            files = ["panda-DBProxy.log", "panda-JediDBProxy.log", "panda-other.log"]
+            got = {}
+            for name, table in (("lfs", lfs), ("none", [])):
+                RR.mapdump._FRAGMENT[:] = [N(junctions=junctions, log_file_services=table)]
+                r = RR.Rerun.__new__(RR.Rerun)
+                got[name] = {o: r._jedi_files(o, list(files)) for o in ("p/db.py::prep", "p/db.py::ins")}
+                # judgement 3's premise: a file left out is not one missed
+                RR.R.ROWS_FROM = "graph"
+                RR.R._prints_of = lambda o, lines=(): N(statements=[N(log_files_basis="logger",
+                                                                      log_files=["panda-DBProxy.log", "panda-JediDBProxy.log"])])
+                got[name + " every"] = [RR.every_log_asked(o, [1], ["panda-JediDBProxy.log"])["held"]
+                                        for o in ("p/db.py::prep", "p/db.py::ins")]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["lfs"]["p/db.py::prep"] == ["panda-JediDBProxy.log", "panda-other.log"], got
+    assert got["lfs"]["p/db.py::ins"] == ["panda-DBProxy.log", "panda-JediDBProxy.log", "panda-other.log"], got
+    assert got["none"]["p/db.py::prep"] == ["panda-DBProxy.log", "panda-JediDBProxy.log", "panda-other.log"], got
+    assert got["lfs every"] == [True, False] and got["none every"] == [False, False], got
 
 
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
@@ -7730,13 +7831,26 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
                      # a prefix of other holes than the mark's (another logger's): no text to ask
                      "odd": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"odd\\ <\\ a=.*?\\ b=.*?\\ >\\ "),
                      # one of the mark's holes but not its text
-                     "odd2": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"odd2\\ <\\ taskid=.*?\\ >\\ ")}
+                     "odd2": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"odd2\\ <\\ taskid=.*?\\ >\\ "),
+                     # a row printing the key in a hole of its own with no mark (feed_contents_to_tasks' "failed to get
+                     # taskSpec for jediTaskID=..."): the marks do not ask its lines; its own text around the hole does,
+                     # and where none can be read off its capture, or too short a one, the key alone does
+                     "mixed": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"mixed\\ <\\ jediTaskID=.*?\\ >\\ "),
+                     "mixed text": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"mixed\\ text\\ <\\ jediTaskID=.*?\\ >\\ "),
+                     "mixed short": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"mixed\\ short\\ <\\ jediTaskID=.*?\\ >\\ "),
+                     # one printing another column there: the marks ask every line holding the key
+                     "mixed other": ([["JediTaskSpec.jediTaskID"]], "jediTaskID={}", r"mixed\\ other\\ <\\ jediTaskID=.*?\\ >\\ ")}
+            unmarked = {"mixed": (["JediTaskSpec.jediTaskID"], ""), "mixed other": (["JediTaskSpec.status"], ""),
+                        "mixed text": (["JediTaskSpec.jediTaskID"], r"failed\\ for\\ jediTaskID=([^\\ ]*)\\ now"),
+                        "mixed short": (["JediTaskSpec.jediTaskID"], r"=(.*)")}
 
             def prints(owner, lines=()):
                 if owner.split("::")[-1] not in marks:
                     return None
                 holes, mark, prefix = marks[owner.split("::")[-1]]
-                return N(runs=[N(key=[N(columns=c) for c in holes], mark=mark)], statements=[N(rows=[N(prefix=prefix), N(prefix="")])])
+                columns, capture = unmarked.get(owner.split("::")[-1], ([], ""))
+                bare = N(prefix="", capture=capture, holes=[N(columns=columns, group=1)])
+                return N(runs=[N(key=[N(columns=c) for c in holes], mark=mark)], statements=[N(rows=[N(prefix=prefix), bare])])
 
             rerun.R._prints_of = prints
             r = object.__new__(rerun.Rerun)
@@ -7785,7 +7899,8 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
             got["F3 said, timed"] = [x for x in r.lines if x.startswith("F3") and ("409" in x or "Panda:31" in x)]
             got["key marks"] = [list(rerun.key_marks(f"p.py::{f}", 1, cls, "53")) for f, cls in (
                 ("changeTaskSplitRulePanda", "JediTaskSpec"), ("initialize_cpu_time_task", "JobSpec"), ("massage", "JediTaskSpec"),
-                ("odd", "JediTaskSpec"), ("odd2", "JediTaskSpec"), ("none", "JediTaskSpec"))]
+                ("odd", "JediTaskSpec"), ("odd2", "JediTaskSpec"), ("none", "JediTaskSpec"), ("mixed", "JediTaskSpec"),
+                ("mixed other", "JediTaskSpec"), ("mixed text", "JediTaskSpec"), ("mixed short", "JediTaskSpec"))]
             # the row's creation not known: neither the life nor the birth's row can be placed
             r.data["rows"]["task"].pop("creationDate")
             tries_of("no creation, F3", *asks["marked by the key"])
@@ -7853,7 +7968,9 @@ def test_an_attributes_time_is_its_value_where_every_writer_writes_now_else_the_
         "'; jediTaskID=53; siteID=', 'changeTaskSplitRulePanda < jediTaskID=53 >'"]
     # the text around the key's hole of the mark as the rows print it: a job's key at the first hole takes the
     # function's name; no text for a mark not by the class's key, a prefix of other holes, or no prints
-    assert got["key marks"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["initialize_cpu_time_task < PandaID=53; jediTaskID="], [], [], [], []]
+    assert got["key marks"] == [["changeTaskSplitRulePanda < jediTaskID=53 >"], ["initialize_cpu_time_task < PandaID=53; jediTaskID="],
+                                [], [], [], [], [], ["mixed other < jediTaskID=53 >"],
+                                ["failed for jediTaskID=53 now", "mixed text < jediTaskID=53 >"], []], got["key marks"]
     assert got["no creation, F3"] == ("H2: the object's life, to ask initialize_cpu_time_task:408 over: the row's creation time "
                                       "is not known")
     assert got["no creation, a birth"] == ("H2: when the row was made, for the birth getTasksToRefine_JEDI:1188 (its creation "

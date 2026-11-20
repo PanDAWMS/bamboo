@@ -657,13 +657,16 @@ class RecordedLogs:
                     and not unmarked(name, r.token, r.text)):
                 marks.setdefault(r.machine, set()).add(r.token)
         partial = _partial(got, marks, owners, whole)
+        cls = self.key_class[1] if self.key_class is not None and self.key_class[0] == key else None
+        if cls is not None and not whole:
+            # the harness's rnd14 (a): a mark naming another row's calls, not the key's -- read from its records alone
+            partial.update(_another_rows_marks(name, marks, cls))
         marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in partial})}
         narrowed = {} if whole else _narrowed(marks, owners)
         keyed_heads = _keyed_heads(got, narrowed, owners, pattern)
         why = "the records of the key's runs whose mark does not hold the key"
         # a mark the calls share, by the map, only within 2 EDGE of the key's records under it on its machine, the
         # windows of one machine joined where they overlap (KNOWN_ISSUES.md K60)
-        cls = self.key_class[1] if self.key_class is not None and self.key_class[0] == key else None
         share = set() if whole else _calls_share(name, marks, cls)
         own_marks = {m: kept for m, t in marks.items() if (kept := {x for x in t if (m, x) not in share})}
         asks = [(Ask(name, tuple(sorted(_strings(m, t, narrowed, owners, keyed_heads, key))), window, m), why)
@@ -861,25 +864,60 @@ def _calls_share(log: str, marks: dict[str, set[str]], cls: str | None = None) -
         _SHARES[:] = [fragment, _share_index(fragment)]
     index = _SHARES[1].get(log, [])
     out = set()
+    ident = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or []}
     own = None
     if cls is not None:
         mine = {cls} | {a.partition(".")[0] for a in references_to(cls)}
-        own = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or [] if a.partition(".")[0] in mine}
+        own = {a for a in ident if a.partition(".")[0] in mine}
     for machine, tokens in marks.items():
         for token in tokens:
-            hits = [not time and not (held & own if own is not None else held)
-                    for rx, time, held in index if rx.fullmatch(token.strip())]
+            hits = [not time and not (cols & ident & own if own is not None else cols & ident)
+                    for rx, time, cols in index if rx.fullmatch(token.strip())]
             if hits and all(hits):
                 out.add((machine, token))
+    return out
+
+
+def _another_rows_marks(log: str, marks: dict[str, set[str]], cls: str) -> dict[tuple[str, str], str]:
+    """The harness's rnd14 (a): the ``(machine, mark)`` among *marks* that every map mark of a run printing into *log*
+    reading it says names another row than the key's -- a hole holding a class's identity, or a column referencing one
+    (the schema's foreign keys), each of a class that is neither *cls* nor one whose rows reference it
+    (:func:`references_to`) -- with why.  Such a mark is every call one harvester makes through one server process
+    (updateWorkers ``< harvesterID=... pid=... >``: 14245 lines in 10 min of NJ-merging-stuck's DBProxy), or every
+    job of one task insertNewJob writes (``<JediTaskID=... idPool=...``): asked, it reads other rows' calls; the key's
+    records under it are read as its run, cut at both ends.  None with no map installed."""
+    fragment = mapdump.fragment()
+    if fragment is None:
+        return {}
+    if not _SHARES or _SHARES[0] is not fragment:
+        _SHARES[:] = [fragment, _share_index(fragment)]
+    index = _SHARES[1].get(log, [])
+    tables = getattr(fragment, "tables", None) or []
+    ident = {a for t in tables for a in t.identity_attrs or []}
+    refs: dict[str, str] = {}
+    for t in tables:
+        for ref in getattr(t, "references", None) or []:
+            for i, attr in enumerate(ref.attrs or []):
+                if attr and i < len(ref.table_attrs or []) and ref.table_attrs[i]:
+                    refs.setdefault(attr, ref.table_attrs[i])
+    mine = {cls} | {a.partition(".")[0] for a in references_to(cls)}
+
+    def named(cols: frozenset[str]) -> set[str]:
+        return {(c if c in ident else refs[c]).partition(".")[0] for c in cols if c in ident or c in refs}
+
+    out = {}
+    for machine, tokens in marks.items():
+        for token in tokens:
+            hits = [named(cols) for rx, _, cols in index if rx.fullmatch(token.strip())]
+            if hits and all(n and not n & mine for n in hits):
+                out[(machine, token)] = "a mark naming another row's calls (" + ", ".join(sorted(set().union(*hits))) + ")"
     return out
 
 
 def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool, frozenset[str]]]]:
     """For every log, each map mark of a run printing into it (``records.runs_into``) as a pattern of the token a line
     carries -- ``method < tag >`` for create_tagged_logger and make_logger, ``<stamp>`` for a MsgWrapper's stamp, the
-    mark itself for the others, a hole any text -- whether it is a time stamp, and the identity columns its holes
-    hold."""
-    ident = {a for t in getattr(fragment, "tables", None) or [] for a in t.identity_attrs or []}
+    mark itself for the others, a hole any text -- whether it is a time stamp, and the columns its holes hold."""
     out: dict[str, list[tuple[re.Pattern[str], bool, frozenset[str]]]] = {}
     for log, runs in runs_into(fragment).items():
         for run in runs:
@@ -894,7 +932,7 @@ def _share_index(fragment) -> dict[str, list[tuple[re.Pattern[str], bool, frozen
                 rx = "<" + body + ">"
             else:
                 rx = body
-            out.setdefault(log, []).append((re.compile(rx), time, frozenset(ident & {c for k in run.key for c in k.columns})))
+            out.setdefault(log, []).append((re.compile(rx), time, frozenset(c for k in run.key for c in k.columns)))
     return out
 
 

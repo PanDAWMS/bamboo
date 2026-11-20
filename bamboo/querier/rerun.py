@@ -873,7 +873,7 @@ def every_log_asked(owner: str, lines, asked: list[str]) -> dict:
         return {"held": False, "why": T.Said("logs-no-prints-of-its-own")}
     if bases := sorted({s.log_files_basis for s in found.statements} - {"logger"}):
         return {"held": False, "why": T.Said("logs-placed-by", {"bases": bases})}
-    files = sorted({f for s in found.statements for f in s.log_files})
+    files = jedi_files(owner, sorted({f for s in found.statements for f in s.log_files}))
     if not files:
         return {"held": False, "why": T.Said("logs-in-no-file")}
     if missing := [f for f in files if f not in asked]:
@@ -3092,22 +3092,51 @@ def _around_group(capture: str, group: int, value: str) -> str:
 def marks_holding(owner: str, line: int, holds: Callable[[Any], bool], value: str) -> tuple[str, ...]:
     """What *owner*'s lines carry where its run's mark holds *value* in the first hole of the mark's key that *holds*
     picks: each printed prefix of its rows that has the mark's holes (``.*?``, in the mark's order) cut to the text
-    around that hole, *value* in it (:func:`key_marks`, the hole holding the class's identity)."""
+    around that hole, *value* in it (:func:`key_marks`, the hole holding the class's identity).  A row of the function
+    that prints it in a hole of its own under no such mark -- a logger that writes none -- holds no mark, and the marks
+    would not ask its lines: its own text around that hole, *value* in it, is asked too (:func:`rows.hole_literals`,
+    pilot_api update_job's "update_job(N, ", feed_contents_to_tasks' "failed to get taskSpec for jediTaskID=N"); none
+    at all where such a text has fewer than ``rows.MIN_SHAPE`` characters besides the value or cannot be read off the
+    row's capture: the function is asked by *value* alone."""
     found = R._prints_of(owner, [line])
     if found is None:
         return ()
-    prefixes = {r.prefix for st in (getattr(found, "statements", None) or []) for r in st.rows or [] if r.prefix}
+    rows = [r for st in (getattr(found, "statements", None) or []) for r in st.rows or []]
+    prefixes = {r.prefix for r in rows if r.prefix}
     out = set()
+    covered: set[str] = set()
     for run in getattr(found, "runs", None) or []:
         at = [i for i, k in enumerate(run.key or []) if holds(k)]
         for prefix in prefixes if at else ():
             parts = [re.sub(r"\\(.)", r"\1", p) for p in prefix.split(".*?")]
             if len(parts) != len(run.key) + 1 or any(p not in "".join(parts) for p in run.mark.split("{}")):
                 continue
+            covered.add(prefix)
             text = (parts[at[0]] + value + parts[at[0] + 1]).strip()
             if text != value:
                 out.add(text)
+    if not out:
+        return ()
+    # a row printing it in a hole of its own under no such mark: asked by its own text around the hole
+    for r in rows:
+        if r.prefix in covered:
+            continue
+        for h in getattr(r, "holes", None) or []:
+            if not (getattr(h, "columns", None) and holds(h)):
+                continue
+            around = R.hole_literals(getattr(r, "capture", "") or "", getattr(h, "group", 0) or 0)
+            if around is None or len((around[0] + around[1]).replace(" ", "")) < R.MIN_SHAPE:
+                return ()
+            out.add((around[0] + value + around[1]).strip())
     return tuple(sorted(out))
+
+
+def cut_runs(runs: dict[str, list], names: list[str], owner: str) -> set[tuple[str, str]]:
+    """``(machine, mark)`` of *owner*'s runs among *runs* of the logs *names* that the door read from the key's records
+    alone, as cut (``Log.partial``: another row's calls, rnd14 (a); a method no step asked): the lines of such a run
+    that do not hold the key were not read."""
+    return {(run.machine, run.token) for name in names for run in runs.get(name, [])
+            if of_mover(run, owner) and (run.machine, run.token) in run.log.partial}
 
 
 def mark_values(token: str, mark: str) -> list[str] | None:
@@ -3248,6 +3277,37 @@ def prints_key(owner: str, lines, columns: set[str]) -> bool:
 def _entries_of(writers: list, owner: str) -> list[str]:
     """The ``called_from`` entries of *owner*'s junctions among *writers*, each once."""
     return list(dict.fromkeys(e for w in writers if w.owner == owner for e in getattr(w, "called_from", None) or []))
+
+
+#: the fragment it was read on, and whether each owner runs in JEDI's processes alone
+_JEDI_ONLY: list[Any] = [None, {}]
+
+
+def jedi_files(owner: str, files: list[str]) -> list[str]:
+    """The map's LFS (``MapFragment.log_file_services``, the querier's ask of 11-19): where *owner* runs in JEDI's
+    processes alone (:func:`jedi_routes` over its junctions' ``called_from``), the files of *files* the map says no JEDI
+    process writes are left out: a proxy mixin's panda-DBProxy.log, which only the server's processes write (JEDI binds
+    the logger again: panda-JediDBProxy.log).  A file the map does not list stays, and so does every file where none
+    would be left, or the dump has no such table.  Every reader of a function's files reads it -- where its rows are
+    looked for (``Rerun.files_of``), judgement 3's premise that every file was asked (:func:`every_log_asked`), a
+    caller's callees' logs -- so a file left out is neither asked nor missed."""
+    if len(files) < 2:
+        return files
+    fragment = mapdump.fragment()
+    table = {row.file: set(row.services or []) for row in getattr(fragment, "log_file_services", None) or []}
+    if not table:
+        return files
+    if _JEDI_ONLY[0] is not fragment:
+        _JEDI_ONLY[:] = [fragment, {}]
+    held = _JEDI_ONLY[1]
+    if owner not in held:
+        entries = list(dict.fromkeys(e for j in getattr(fragment, "junctions", None) or []
+                                     if _bare(j.owner) == _bare(owner) for e in getattr(j, "called_from", None) or []))
+        held[owner] = bool(jedi_routes(owner, entries))
+    if not held[owner]:
+        return files
+    kept = [f for f in files if f not in table or "jedi" in table[f]]
+    return kept or files
 
 
 def jedi_routes(mover: str, entries: list[str]) -> list[str]:
@@ -4609,8 +4669,13 @@ class Rerun:
         return lambda r: KH.other_column(r, log.name, key, cls)
 
     def files_of(self, owner: str, today: list[str], lines) -> list[str]:
-        """Where *owner*'s own rows are looked for (``R.own_log_files``)."""
-        return R.own_log_files(owner, list(today), lines)
+        """Where *owner*'s own rows are looked for (``R.own_log_files``), less the files no process it runs in writes
+        (:meth:`_jedi_files`)."""
+        return self._jedi_files(owner, R.own_log_files(owner, list(today), lines))
+
+    def _jedi_files(self, owner: str, files: list[str]) -> list[str]:
+        """:func:`jedi_files`."""
+        return jedi_files(owner, files)
 
     def warn_split(self, owner: str, lines) -> None:
         if split := R.split_files(owner, lines):
@@ -8296,6 +8361,10 @@ class Rerun:
             entry["verdict"] = "no-log"
             entry["premises"] = self._premises(subject, key, owner, lines, to_hand, asking, asking, [], {}, writers, rest)
             return None, []
+        # (2): by the writer's marks holding the key, where it has them
+        cls = subject.partition(".")[0]
+        asking = cast(W.Asking, self._by_key_marks(owner, lines, asking, cls, key))
+        rest = self._by_key_marks(owner, lines, rest, cls, key)
         found, missed, holes, searched = self._ask_mover(key, owner, to_hand, asking, rest if way != "key" else None, owners)
         logs = self._runs_of(found, owner, searched)
         if logs:
@@ -8343,6 +8412,16 @@ class Rerun:
                 entry["reasons"].append({"code": "K19", "record": said})
             self.say(f"  {name}: {said}")
         return None, missed
+
+    def _by_key_marks(self, owner: str, lines: list[int], asking: W.Asking | None, cls: str, key: str) -> W.Asking | None:
+        """The harness's rnd14 (MT-aborting-late's bare task ID, 42161 records in 9 min of DBProxy): *asking* by the
+        writer's marks holding *key* (:func:`key_marks`) where it marks its runs by it -- every line of such a run holds
+        the mark, and no other function's -- else as it is, by the key alone; one that names its strings already, too.
+        release_task_on_hold's "release_task_on_hold < jediTaskID=N >", TaskCommando runImpl's "< jediTaskID=N >"."""
+        if asking is None or asking.strings:
+            return asking
+        marks = tuple(sorted({m for line in lines for m in key_marks(owner, line, cls, key)}))
+        return replace(asking, strings=marks) if marks else asking
 
     def _ask_mover(self, key: str, owner: str, to_hand: list[str], asking: W.Asking, rest: W.Asking | None,
                    owners: Owners | None = None):
@@ -8685,8 +8764,14 @@ class Rerun:
                                 f"{T.text(every['why'])}): its writes are not read (A2)")
             fn = R.function(rel, wfunc, wlines)
             # C: a write no row could show is not shown absent by finding none (said only where none is found)
-            unshown += [f"{wfunc}:{line}" for line in wlines
-                        if (st := R.statement_at(fn.node, line)) is None or not _showable(fn, st)]
+            hidden = [line for line in wlines if (st := R.statement_at(fn.node, line)) is None or not _showable(fn, st)]
+            unshown += [f"{wfunc}:{line}" for line in hidden]
+            # rnd14 (a): a run of the waker under a mark read from the key's records alone (another row's calls) is
+            # cut -- a write its other lines show is not read -- where a write of it would show (not for C's alone)
+            cut = cut_runs(runs, to_hand, owner)
+            if cut and len(hidden) < len(wlines):
+                return [], [], (f"{wfunc}'s runs of the key under {len(cut)} mark(s) read from the key's records alone, as "
+                                "cut: a write of it there is not shown (A2)")
             for name in to_hand:
                 for run in runs.get(name, []):
                     if not of_mover(run, owner):
@@ -10262,7 +10347,7 @@ class Rerun:
                     linked[bare] = held
                 else:
                     continue
-            printing[bare] = (lines, o, {f for st in found.statements for f in st.log_files})
+            printing[bare] = (lines, o, set(jedi_files(o, sorted({f for st in found.statements for f in st.log_files}))))
         files = {f for _, _, fs in printing.values() for f in fs}
         to_hand = self.logs.names(sorted(files))
         if not printing or not to_hand:
@@ -10271,7 +10356,24 @@ class Rerun:
         start, end = up.window[0], up.before or up.window[1]
         asking = W.Asking((start, end), None, T.Said("for-the-callers-callees", {"caller": func, "start": start, "end": end,
                                                                                  "n": len(printing)}))
-        runs, missed, _holes = self._ask(up.key, to_hand, asking, {}, quiet=True)
+        # (2), the harness's rnd14: a log every callee printing into which marks its runs by the key is asked by those
+        # marks, not the bare key (a JobGenerator thread's brokers over a 19 h window); any other, by the key
+        by_log: dict[str, set[str] | None] = {}
+        for bare, (_, o, fs) in printing.items():
+            km = set() if bare in linked else set(key_marks(o, 0, cls, up.key))
+            for f in fs:
+                had = by_log.get(f, set())
+                by_log[f] = None if had is None or not km else had | km
+        groups: dict[tuple[str, ...], list[str]] = {}
+        for name in to_hand:
+            groups.setdefault(tuple(sorted(by_log.get(name) or ())), []).append(name)
+        runs: dict[str, list] = {}
+        missed: list = []
+        for strings, names in groups.items():
+            got, more, _holes = self._ask(up.key, names, replace(asking, strings=strings) if strings else asking, {}, quiet=True)
+            missed += more
+            for name, rs in got.items():
+                runs.setdefault(name, []).extend(rs)
         for bare, (column, values, texts) in linked.items():
             names = self.logs.names(sorted(printing[bare][2]))
             for value in values:
@@ -12802,7 +12904,8 @@ class Rerun:
         start = W.when(begun[-1].records[0].stamp) if begun else q.moved
         prints = {line: st for st in own if (line := self._row_key_print(q.mover, st, q.subject, under_ifs=True)) is not None}
         found = R._prints_of(q.mover, sorted(prints)) if prints else None
-        files = sorted({f for pst in getattr(found, "statements", None) or [] if pst.line in prints for f in pst.log_files})
+        files = jedi_files(q.mover, sorted({f for pst in getattr(found, "statements", None) or [] if pst.line in prints
+                                            for f in pst.log_files}))
         to_hand = self.logs.names(files)
         arms = list(arms_of(q.writers, q.mover, q.subject, q.observed).values())
         if not to_hand or not arms or start <= q.since:
@@ -14096,6 +14199,9 @@ class Rerun:
         lo, hi = W._down(window[0]), W._down(window[1])
         asking = W.Asking((lo, hi), None, T.Said("for-the-column-s-writes", {
             "start": lo, "end": hi, "where": f"{func.rpartition('.')[2]}:{b.line}"}))
+        # (2): by the writer's marks holding the key, where it has them
+        if subject:
+            asking = cast(W.Asking, self._by_key_marks(j.owner, [b.line], asking, subject.partition(".")[0], key))
         runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
         self._keep_unanswered(missed)
         if missed_out is not None:

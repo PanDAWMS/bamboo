@@ -1943,6 +1943,30 @@ of the parameter hands (`Rerun._handed_literal`, the map's ParameterFrom), else 
 ("prepareTasksToBeFinished_JEDI < vo=").  A hole that is no parameter is filled from the row as before.  Measured on
 the 7 cases reaching the mark heads: outputs unchanged; NT-scouting-stuck's 18 S1 asks now ask the head before vo.
 
+*Changed (2026-11-20, the harness's rnd14 (2)/(b): MT-aborting-late's bare task ID returned 42161 records in 9 min of
+DBProxy):* judgement 3's asks of a mover (`_absence`), the column writes' asks of a writer (`_column_writes`) and the
+callee asks of a caller's passes (`_call_tied`, by log: only where every callee printing into it has them) go by the
+writer's marks holding the key (`key_marks`, `Rerun._by_key_marks`) -- "release_task_on_hold < jediTaskID=N >" --
+where it marks its runs by it; a writer with no such mark is still asked by the key alone.  A row of the writer that
+prints the key in a hole of its own under no such mark (a logger that writes none) is asked by its own text around that
+hole, the key in it (`marks_holding`, for every asker of marks; `rows.hole_literals` reads it off the row's capture):
+"update_job(N,", "failed to get taskSpec for jediTaskID=N", "lastJediTaskID=N"; where no such text of three characters
+can be read, the writer is asked by the key alone.  Measured: feed_contents_to_tasks's "failed to get taskSpec for
+jediTaskID=..." had been lost to the marks, and with it Tr's two passes that chose its arm 158 by positive evidence;
+asking such writers by the key alone instead made 13 cases ask pilot_api's logs by a bare PandaID over up to 21 h.  Over
+the map (x14ws) 6 functions print so: it, AtlasProdTaskBroker's runImpl, getTasksToBeProcessed_JEDI, pilot_api's
+update_job, resubmit_request and JobGenerator.start (a WorkQueue's).
+
+*Changed (2026-11-20, the map's LFS, `MapFragment.log_file_services`):* `files_of` leaves out, for a function every
+route into which passes pandajedi, the files the map says no JEDI process writes (`jedi_files`): a proxy mixin's
+panda-DBProxy.log (the server's; JEDI binds the logger again for panda-JediDBProxy.log).  This reaches every reader
+of a function's logs (H2's makers, L2's marks, F-4, L4, a caller's callees' logs, the mover's arms' asks), not the
+machines alone as H-3's ask reading does, and judgement 3's premise that every file was asked (`every_log_asked`): a
+file left out is not one missed -- read with the asks alone, the premise failed on it and NT-assigning-late's
+updateTaskStatusByContFeeder_JEDI went unasked.  A dump without the table changes nothing.  Measured (59 cases reaching
+a JEDI-only function's proxy logs, x14 against x15, which differ by the table alone): no END or STOP moves; 17 asks go
+(NT-scouting-stuck 9, MT-aborting-late 7, MT-ready-late 1); NT-pending-late's END names 9 machines asked, not 18.
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row
@@ -2164,6 +2188,16 @@ mark the calls' own; one holding another class's identity names who makes the ca
 the key's records.  Other keys (a linked row's value, ...) keep the old rule.  Measured (p7xm, 49 cases): the 21 it
 reaches by the records (all updateWorkers for a job's key) say the mark is shared and read it from a wider record; no
 outcome moves.
+
+*Changed (2026-11-20, the harness's rnd14 (a): NJ-merging-stuck's 10-min ask of an updateWorkers mark returned 14245
+lines, all that harvester's calls):* near the key's records is still every call of a mark that names another row.  For
+the question's key, a mark whose holes name a row of a class neither the key's nor a child of it -- a hole holding its
+identity, or a column referencing it (insertNewJob's `<JediTaskID=... idPool=...`, the task's, for a job's key) -- is
+not asked: the key's records under it are read as its run, cut at both ends (`_another_rows_marks`, with `_partial`'s).
+A reader that finds no write in such a run does not say none was written: A2's wakers (`_waker_writes`, `cut_runs`)
+read a waker whose write a row would show, with a run of the key under a mark read so, as not read (C's wakers, whose
+writes no row shows, are said as before).  Measured: MJ-transferring-late's S2 ask of updateWorkers' mark went, and its
+branch ends (updateWorkers' write shows by no row, C).
 
 ### K61. The early exits above a statement are its guards, for every reader
 
