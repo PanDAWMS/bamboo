@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import functools
 import re
+from typing import Any, cast
 
 from bamboo.codemap import pathcond
 
@@ -80,8 +81,8 @@ def run_loggers(func: ast.AST) -> frozenset[str]:
     bound = {t.id for n in R.own_nodes(func) if isinstance(n, (ast.Assign, ast.AnnAssign)) for t in _targets(n) if isinstance(t, ast.Name)}
     out = set()
     for n in R.own_nodes(func):
-        if R.is_print(n) and isinstance(n.value.func.value, ast.Name) and n.value.func.value.id in params | bound:
-            out.add(n.value.func.value.id)
+        if R.is_print(n) and isinstance(recv := cast(Any, n).value.func.value, ast.Name) and recv.id in params | bound:
+            out.add(recv.id)
     out |= attribute_loggers(func)
     return frozenset(out)
 
@@ -125,8 +126,8 @@ def attribute_loggers(func: ast.AST) -> frozenset[str]:
         return frozenset()
     out = set()
     for n in R.own_nodes(func):
-        if R.is_print(n) and _self_attr(n.value.func.value):
-            name = _self_attr(n.value.func.value)
+        if R.is_print(n) and _self_attr(cast(Any, n).value.func.value):
+            name = _self_attr(cast(Any, n).value.func.value)
             values = _class_bindings(cls).get(name, [])
             if len(values) == 1 and puts_mark(values[0]):
                 out.add(name)
@@ -134,7 +135,7 @@ def attribute_loggers(func: ast.AST) -> frozenset[str]:
 
 
 def _targets(n: ast.AST) -> list[ast.expr]:
-    ts = n.targets if isinstance(n, ast.Assign) else [n.target]
+    ts = n.targets if isinstance(n, ast.Assign) else [cast(Any, n).target]
     return [e for t in ts for e in (t.elts if isinstance(t, ast.Tuple) else [t])]
 
 
@@ -202,7 +203,7 @@ def leave(func: ast.AST, left: str) -> tuple[str, int | None, ast.ExceptHandler 
                 if c == "RERAISE":
                     break  # out of this try; the next one outwards decides
                 if c in ("TB", "LOG") and conditional(h, loggers):
-                    held = c if held is None else min(held, c, key=STRENGTH.get)
+                    held = c if held is None else min(held, c, key=cast(Any, STRENGTH.get))
                     break  # its other way raises again: the next one outwards decides that way
                 if held is not None and STRENGTH[held] < STRENGTH[c]:
                     # both ways must print for the log to decide; a LOG carries no handler whose rows could be

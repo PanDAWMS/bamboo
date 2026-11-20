@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import functools
+from typing import cast
 
 from bamboo.codemap import trace  # noqa: E402
 from bamboo.codemap.calls import Types  # noqa: E402
@@ -83,7 +84,7 @@ class Asked(list):
             for q in new:
                 self._asked.add(q)
                 self.asked.append(q)
-                answer = self.asker.ask(q)
+                answer = cast(trace.Asker, self.asker).ask(q)
                 for s in answer.steps:
                     k = _key(s)
                     if k not in self._have:
@@ -173,7 +174,7 @@ def parameters(steps, owner: str, line: int) -> None:
     func = containing_function(R.tree(rel), line, owner)
     if func is None:
         return
-    a = func.args
+    a = cast("ast.FunctionDef | ast.AsyncFunctionDef", func).args
     names = {
         x.arg
         for x in [

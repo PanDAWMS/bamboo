@@ -2671,8 +2671,8 @@ def judge(
                 if outer is inner or outer.log.name == inner.log.name or not outer.machine or outer.machine != inner.machine:
                     continue
                 pairs = [(c, sn) for c in candidates if runs_of.get(c.owner) is inner for sn in seens.values() if sn.run is outer]
-                if (found := held_in_calls(inner, pairs, called_at)) is not None:
-                    joined[id(inner)] = (outer, *found)
+                if (held_at := held_in_calls(inner, pairs, called_at)) is not None:
+                    joined[id(inner)] = (outer, *held_at)
                     break
         roots = [r for r in runs if id(r) not in joined]
         if joined and len(roots) == 1 and all(outer is roots[0] for outer, *_ in joined.values()):
@@ -2689,8 +2689,8 @@ def judge(
 
     bracket = None
     if subject and observed and question_run is not None:
-        in_run = [sn for sn in seens.values() if sn.run is question_run]
-        bracket = bracket_of(subject_values(in_run, subject), observed)
+        seen_in_run = [sn for sn in seens.values() if sn.run is question_run]
+        bracket = bracket_of(subject_values(seen_in_run, subject), observed)
 
     # each arm's run as its proofs read it: less the rows printed for other objects than the one it writes
     arm_seen: dict[tuple[str, int], R.Seen] = {}
@@ -2814,7 +2814,7 @@ def judge(
             if loops_empty := empty_loops(fn, stmt, callee):
                 v.kind = "excluded"
                 v.reasons.append(loops_empty)
-            proof = PR.prove(fn, psn, stmt)
+            proved = PR.prove(fn, psn, stmt)
             if v.kind == "kept":
                 implying = [fn.row_at(s) for s in R.implying_rows(fn.node, stmt)]
                 proven = [r.line for r in implying if r is not None and psn.proven(r)]
@@ -2822,9 +2822,9 @@ def judge(
                     v.kind = "positive"
                     v.reasons.append(f"row(s) {proven} print only on a path through it")
                     v.proven = proven
-                elif proof.kind == "positive":
+                elif proved.kind == "positive":
                     v.kind = "positive"
-                    v.reasons.append(proof.reason)
+                    v.reasons.append(proved.reason)
                 elif (around := rows_around(fn, psn, stmt)) is not None:
                     v.kind = "positive"
                     v.reasons.append(f"rows {around[0]} and {around[1]} printed in a row, which only a path through it prints")
@@ -2840,10 +2840,10 @@ def judge(
                     else f"a traceback frame of {fn.shown} cannot be placed in the corpus: no row after {line} is required"
                 )
             where = f"{Path(c.rel).name}::{c.func}:{line}"
-            if proof.kind == "positive" and v.kind == "excluded":
-                p_notes.append(f"P twin: {where} excluded ({'; '.join(v.reasons)}), but {proof.reason}")
-            elif proof.kind == "inconsistent":
-                p_notes.append(f"P inconsistent: {where}: {proof.reason}")
+            if proved.kind == "positive" and v.kind == "excluded":
+                p_notes.append(f"P twin: {where} excluded ({'; '.join(v.reasons)}), but {proved.reason}")
+            elif proved.kind == "inconsistent":
+                p_notes.append(f"P inconsistent: {where}: {proved.reason}")
             verdicts.append(v)
 
     # D-4 on each kept call arm: the list it hands holds no element of the key's turn where that turn did not reach
@@ -2869,10 +2869,10 @@ def judge(
                 int(line) for other in standing if other.owner != c.owner
                 for site in called_at(sn.fn, other) for file, _, line in [site.rpartition(":")] if file == c.rel
             }
-            proof = PR.prove(sn.fn, sn, stmt, PR.Reaching(observed, frozenset(lines)))
-            if proof.kind == "positive":
+            proved = PR.prove(sn.fn, sn, stmt, PR.Reaching(observed, frozenset(lines)))
+            if proved.kind == "positive":
                 v.kind = "positive"
-                v.reasons.append(f"{proof.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
+                v.reasons.append(f"{proved.reason}; read with the other verdicts: a call reaching no writer of {observed!r} left standing does not write it")
 
     # P36 on each kept arm: a print after its write on every way holds the written row's key, and every record of it in
     # the run holds another key (after_key_others)

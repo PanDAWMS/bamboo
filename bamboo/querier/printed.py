@@ -319,7 +319,7 @@ def _effects(where: tuple[str, int], node: ast.AST, seen: frozenset) -> tuple[fr
                 method = _self_method(where, f.attr)
                 if method is None:
                     return None
-                if (key := (method[0], method[1].lineno)) not in seen:
+                if (key := (method[0], cast(Any, method[1]).lineno)) not in seen:
                     inner = _method_effects(where, method[1], seen | {key})
                     if inner is None:
                         return None
@@ -390,7 +390,7 @@ def innermost_loop(node: ast.AST, func: ast.AST) -> ast.AST | None:
 
 
 def loops_around(node: ast.AST, func: ast.AST) -> list[ast.AST]:
-    out = []
+    out: list[ast.AST] = []
     previous = node
     for a in pathcond.ancestors(node):
         if a is func:
@@ -608,7 +608,7 @@ class Hole:
 @functools.lru_cache(maxsize=None)
 def _statements(func: ast.AST) -> list[tuple[int, ast.AST, frozenset[str], frozenset[str]]]:
     """``(line, node, texts bound, names a call is handed)`` for every node of *func* that binds or calls."""
-    out = []
+    out: list[tuple[int, ast.AST, frozenset[str], frozenset[str]]] = []
     for n in R.own_nodes(func):
         if not isinstance(n, (ast.stmt, ast.ExceptHandler)) or n is func:
             continue
@@ -1047,7 +1047,7 @@ def _callers_in_run(fn: R.Function, sn: R.Seen) -> bool:
     from . import callers
 
     for rel, caller, call_line in callers.unconfirmed(fn.node):
-        theirs = R.seen(R.function(rel, caller.name, (call_line,)), sn.run, sn.mode)
+        theirs = R.seen(R.function(rel, cast(Any, caller).name, (call_line,)), sn.run, sn.mode)
         if not any(theirs.hits.values()):
             return False
     return True
