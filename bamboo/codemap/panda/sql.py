@@ -61,7 +61,7 @@ from typing import (
 )
 
 from bamboo.codemap import callfacts
-from bamboo.codemap.astwalk import walk
+from bamboo.codemap.astwalk import of_kinds, walk
 from bamboo.codemap.panda import sqleval, sqltext
 from bamboo.codemap.pathcond import (
     BIND_ANNOTATED,
@@ -2758,6 +2758,11 @@ class BindScan(NamedTuple):
     """
 
 
+#: The statements :func:`scan_binds` reads a bind from: an assignment to the map or a key of it, or a call of its
+#: ``update`` / ``append``.
+_BIND_KINDS: tuple[type[ast.AST], ...] = (ast.Assign, ast.AnnAssign, ast.Expr)
+
+
 def scan_binds(
     func: ast.FunctionDef | ast.AsyncFunctionDef,
     varmap: str,
@@ -2805,7 +2810,8 @@ def scan_binds(
             excluded += 1
 
     lists = {one.values_map: one for one in in_lists(func).values()}
-    for node in walk(func):
+    # Only these fill a bind: an IN list's site is an assignment, and every other node falls through to the end.
+    for node in of_kinds(func, _BIND_KINDS):
         if _AT_CALL and ruled_out(node):
             continue
         if varmap in lists and node is lists[varmap].site:

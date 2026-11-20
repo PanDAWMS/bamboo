@@ -59,12 +59,12 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, Sequence, cast
 
 from pydantic import BaseModel, Field
 
 from bamboo.codemap import pathcond
-from bamboo.codemap.astwalk import walk
+from bamboo.codemap.astwalk import of_kinds, walk
 from bamboo.codemap.callfacts import LOG_METHODS
 from bamboo.codemap.calls import spells
 from bamboo.codemap.models import (
@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     from bamboo.codemap.calls import Calls
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_STATEMENTS = (ast.stmt,)
 
 #: Whether an object's attribute holds from one statement to another: ``(func, arm, printed, written, attribute)``.
 _Kept = Callable[[ast.AST, ast.stmt, ast.stmt, ast.expr, str], bool]
@@ -1644,10 +1645,8 @@ def _parented(tree: ast.AST) -> None:
 def _function_at(tree: ast.AST, line: int) -> Optional[ast.AST]:
     """The innermost ``def`` holding *line*."""
     best = None
-    for node in walk(tree):
-        if isinstance(node, _FUNCTIONS) and node.lineno <= line <= (
-            node.end_lineno or node.lineno
-        ):
+    for node in cast(tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], of_kinds(tree, _FUNCTIONS)):
+        if node.lineno <= line <= (node.end_lineno or node.lineno):
             if best is None or node.lineno >= best.lineno:
                 best = node
     return best
@@ -1656,8 +1655,8 @@ def _function_at(tree: ast.AST, line: int) -> Optional[ast.AST]:
 def _statement_at(func: ast.AST, line: int) -> Optional[ast.stmt]:
     """The innermost statement of *func* holding *line*, *func* itself left out."""
     best: Optional[ast.stmt] = None
-    for node in walk(func):
-        if not isinstance(node, ast.stmt) or node is func:
+    for node in cast(tuple[ast.stmt, ...], of_kinds(func, _STATEMENTS)):
+        if node is func:
             continue
         if node.lineno <= line <= (node.end_lineno or node.lineno):
             if best is None or (

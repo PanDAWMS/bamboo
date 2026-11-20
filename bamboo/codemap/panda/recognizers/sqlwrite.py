@@ -67,7 +67,7 @@ from typing import (
 )
 
 from bamboo.codemap import callfacts, objects, pathcond, values
-from bamboo.codemap.astwalk import walk
+from bamboo.codemap.astwalk import derived, walk
 from bamboo.codemap.calls import (
     UNSET,
     Calls,
@@ -5565,6 +5565,28 @@ def _item_in(value: Optional[ast.AST], item: int) -> _Paths:
     return _NOTHING
 
 
+def _outside_comprehensions(func: ast.AST) -> frozenset[int]:
+    """The ids of the names under *func* that no comprehension holds on their way up to it -- the way
+    :meth:`_PathCarry._comprehension` walks, by the parents -- so no comprehension binds them whatever they spell.  Read
+    once for each function, where the reader walked the parents of each name it read: 24 million times a build."""
+
+    def outside() -> frozenset[int]:
+        found = set()
+        for node in walk(func):
+            if not isinstance(node, ast.Name):
+                continue
+            scope = getattr(node, "parent", None)
+            while scope is not None and scope is not func:
+                if isinstance(scope, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                    break
+                scope = getattr(scope, "parent", None)
+            else:
+                found.add(id(node))
+        return frozenset(found)
+
+    return derived(func, "_outside_comprehensions", outside)
+
+
 class _PathCarry:
     """Which parts of which names hold the rows in one function, as it runs: a holding is a name and an access path.
 
@@ -5626,6 +5648,9 @@ class _PathCarry:
         self.dicts = reading.dicts_of(func)
         self.writes: list[_Write] = []
         self.by_name: dict[str, list[_Write]] = {}
+        #: The names a write of which holds a part of the rows (:meth:`_grow` is where a write's paths grow): any other
+        #: name holds none of them wherever it is read (:meth:`_of_name`).
+        self.holding: set[str] = set()
         for write in reading.writes_of(func, deciding):
             self._add(write.fresh())
         arguments = getattr(func, "args", None)
@@ -5668,6 +5693,7 @@ class _PathCarry:
         dicts in."""
         carry = _PathCarry.__new__(_PathCarry)
         carry.writes, carry.by_name, carry.dicts, carry.deciding = [], {}, dicts, deciding
+        carry.holding = set()
         carry.unread_kept, carry.names = unread_kept, names if names is not None else _name_kinds(func)
         carry._read(func)
         arguments = getattr(func, "args", None)
@@ -5865,6 +5891,7 @@ class _PathCarry:
                 new = write.forced | self._value(write)
                 if not new <= write.paths:
                     write.paths = write.paths | new
+                    self.holding.add(write.name)
                     grown[write.name] = grown.get(write.name, 0) + 1
                     growing = True
 
@@ -5897,14 +5924,16 @@ class _PathCarry:
     # -- the reads -----------------------------------------------------------
 
     def _of_name(self, name: str, at: ast.AST) -> _Paths:
-        writes = self.by_name.get(name)
-        if not writes or not any(write.paths for write in writes):
+        if name not in self.holding:
             return _NOTHING
+        writes = self.by_name[name]
         statement = at if isinstance(at, (ast.stmt, ast.ExceptHandler)) else site_of(at)
         reached = self.reading.surviving(self.func, name, statement, writes)
         return frozenset(path for write in writes if id(write.node) in reached for path in write.paths)
 
     def _comprehension(self, name: str, node: ast.AST) -> Optional[_Paths]:
+        if id(node) in _outside_comprehensions(self.func):
+            return None
         scope = getattr(node, "parent", None)
         while scope is not None and scope is not self.func:
             if isinstance(scope, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):

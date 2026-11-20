@@ -413,3 +413,57 @@ def test_the_part_a_step_takes_holds_the_parts_under_it(
     step: str, spelled: list[str], element: bool, under: list[str]
 ) -> None:
     assert paths_under(step, spelled, element) == under
+
+
+COMPREHENSIONS = """
+def f(self, other):
+    res = self.cur.fetchall()  # rows
+    ids = [r[0] for r in res]
+    pairs = {k: [v for v in res if v] for k in other}
+    g(ids, pairs, [other for _ in res], (x for x in [res]))
+    h(r, k, v, x, res)
+"""
+
+
+def _carry(text: str) -> tuple[ast.AST, _PathCarry]:
+    tree = ast.parse(textwrap.dedent(text))
+    attach_parents(tree)
+    lines = textwrap.dedent(text).splitlines()
+    statements = {node.lineno: node for node in ast.walk(tree) if isinstance(node, ast.stmt)}
+    rows = [statements[n] for n, line in enumerate(lines, 1) if line.rstrip().endswith("# rows")]
+    reading = _Reading(Calls(Types({}, {})), set(), reach.ReachGraph([]), True)
+    return tree, _PathCarry(reading, "f.py", tree.body[0], start=rows)
+
+
+@pytest.mark.parametrize("title", [*SHAPES, "comprehensions"])
+def test_the_names_holding_rows_are_those_a_write_of_which_holds_a_path(title):
+    """``_of_name`` answers nothing for a name outside :attr:`_PathCarry.holding` without scanning its writes."""
+    _tree, carry = _carry(COMPREHENSIONS if title == "comprehensions" else SHAPES[title])
+    assert carry.holding == {write.name for write in carry.writes if write.paths}
+
+
+@pytest.mark.parametrize("title", [*SHAPES, "comprehensions"])
+def test_a_name_no_comprehension_holds_reads_as_it_did_walking_up_its_parents(title, monkeypatch):
+    """:func:`sqlwrite._outside_comprehensions` holds the names :meth:`_PathCarry._comprehension` would find no
+    comprehension above; every name reads the same with it as by walking the parents each time."""
+    from bamboo.codemap.panda.recognizers import sqlwrite
+
+    tree, carry = _carry(COMPREHENSIONS if title == "comprehensions" else SHAPES[title])
+    func = tree.body[0]
+    names = [node for node in ast.walk(func) if isinstance(node, ast.Name)]
+    outside = sqlwrite._outside_comprehensions(func)
+    kinds = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+    for node in names:
+        above = []
+        scope = node.parent
+        while scope is not None and scope is not func:
+            above.append(scope)
+            scope = getattr(scope, "parent", None)
+        assert (id(node) in outside) == (not any(isinstance(one, kinds) for one in above))
+    passed = [carry.held(node, node) for node in names]
+    monkeypatch.setattr(sqlwrite, "_outside_comprehensions", lambda _func: frozenset())
+    _tree, again = _carry(COMPREHENSIONS if title == "comprehensions" else SHAPES[title])
+    names_again = [node for node in ast.walk(_tree.body[0]) if isinstance(node, ast.Name)]
+    assert [again.held(node, node) for node in names_again] == passed
+    if title == "comprehensions":
+        assert any(passed) and len(outside) < len(names)

@@ -1241,3 +1241,50 @@ def test_what_a_parameter_declared_a_value_is_handed_the_definition_changes_noth
 
     assert asked("job.handOn()") is None
     assert asked("job.keepOn()") == ("PandaID", changes.STORED)
+
+
+class _Every:
+    """A node's words that meet whatever is asked: the reading with no node passed over."""
+
+    def isdisjoint(self, _other: object) -> bool:
+        return False
+
+
+class _EveryNode(dict):
+    def get(self, _key: object, _default: object = None) -> _Every:
+        return _Every()
+
+
+def _every_reading(tmp_path: Path, monkeypatch) -> list:
+    asked = [
+        ("'filled' in params", "read", False),
+        ("'again' in params", "read", False),
+        ("tasks", "other", False),
+        ("'seen' in params", "other", True),
+        ("'x' in params", "holders", False),
+        ("'x' in params", "texts", False),
+        ("'x' in params", "parts", False),
+        ("'x' in params.inputs", "declared_parts", False),
+        ("':a' in params", "plain", False),
+        ("':a' in params", "wrapped", False),
+    ]
+    found: list = [
+        _object_changes(tmp_path / f"o{index}", test, name, bound_by_loop=loop)
+        for index, (test, name, loop) in enumerate(asked)
+    ]
+    found.append(_holder_changes(tmp_path / "built", walked=True))
+    found.append(_holder_changes(tmp_path / "run", walked=False))
+    found.append({attribute: _asked(tmp_path / attribute, attribute) for attribute in ("PandaID", "jobStatus")})
+    return found
+
+
+def test_a_node_spelling_nothing_the_reading_holds_is_passed_over_and_changes_nothing(tmp_path, monkeypatch):
+    """``_own_changes`` reads only the nodes spelling a name it holds, a name bound to a part, or the field asked
+    (:func:`changes._spelled`): every way to a change goes through ``holds`` or ``_as_part`` of a node inside the one
+    it is at.  Read again with every node read, each reading here says the same."""
+    passed = _every_reading(tmp_path / "passed", monkeypatch)
+    monkeypatch.setattr(changes, "_spelled", lambda _func: _EveryNode())
+    monkeypatch.setattr(changes, "_spelled_in", lambda _inner: _Every())
+    every = _every_reading(tmp_path / "every", monkeypatch)
+    assert passed == every
+    assert any(passed)

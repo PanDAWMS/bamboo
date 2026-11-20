@@ -22,7 +22,7 @@ import functools
 from typing import Callable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import evaluate
-from bamboo.codemap.astwalk import walk
+from bamboo.codemap.astwalk import derived, walk
 from bamboo.codemap.reaching import reaching, reaching_exit
 
 
@@ -89,7 +89,12 @@ def enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFun
 
 def declared_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     """The names *scope*'s own statements declare ``global``, and those they declare ``nonlocal`` -- not a nested
-    function's or class's."""
+    function's or class's.  Held on *scope* (:func:`astwalk.derived`): a name read in a nested function asks it of
+    every scope out to the module, 19,054 times a build."""
+    return derived(scope, "_declared_names", lambda: _declared_names(scope))
+
+
+def _declared_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     globals_: set[str] = set()
     nonlocals: set[str] = set()
     stack = list(ast.iter_child_nodes(scope))
