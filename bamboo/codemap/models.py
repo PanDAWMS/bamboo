@@ -2113,6 +2113,38 @@ class JunctionNode(BaseNode):
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+#: The services whose processes write logs, by the package their code is under: the server's (its API and daemons)
+#: and JEDI's (its master and knights).
+SERVICE_SERVER = "server"
+SERVICE_JEDI = "jedi"
+
+
+class LogFileServices(BaseModel):
+    """Which services' processes write one log file (:attr:`MapFragment.log_file_services`).
+
+    A ``db_proxy_mods`` method's lines land in ``panda-DBProxy.log`` or ``panda-JediDBProxy.log``
+    (:attr:`JunctionNode.log_files` names both): ``OraDBProxy`` opens ``DBProxy`` as ``_logger``, and
+    ``JediDBProxy`` binds ``OraDBProxy._logger`` to its own logger when it is imported -- only JEDI's processes
+    import it.  So the server's processes write ``panda-DBProxy.log`` and JEDI's ``panda-JediDBProxy.log``.  A file
+    is written by a service's processes where the module declaring its logger is among the modules they import
+    (:func:`~bamboo.codemap.panda.recognizers.logfile.import_reach`) and no module they import binds that logger
+    again.
+    """
+
+    file: str = Field(description="The log file: ``panda-DBProxy.log``.")
+    services: list[str] = Field(
+        description=f"{SERVICE_SERVER!r} and / or {SERVICE_JEDI!r}, sorted; empty where neither imports the module."
+    )
+    declared_in: str = Field(description="The module declaring the logger, as the map spells a file.")
+    rebound_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The modules binding that logger's name again from outside (``OraDBProxy._logger = logger``), sorted: "
+            "a service importing one writes there instead."
+        ),
+    )
+
+
 class LogSiteNode(BaseNode):
     """Where one function's diagnostics land, for a function that owns no junction.
 
@@ -5399,6 +5431,8 @@ class MapFragment(BaseModel):
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     log_sites: list[LogSiteNode] = Field(default_factory=list)
+    #: Which services' processes write each log file the map names (:class:`LogFileServices`), by file.
+    log_file_services: list[LogFileServices] = Field(default_factory=list)
     read_sites: list["ReadSiteNode"] = Field(default_factory=list)
     function_prints: list["FunctionPrintsNode"] = Field(default_factory=list)
     reach_graph: list["ReachNode"] = Field(default_factory=list)

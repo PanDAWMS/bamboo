@@ -921,6 +921,10 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         # map keeps, as the trigger reach is.
         self._log_files = logfile.attach(fragment, self._modules, cadence)
         self._declared_files = logfile.declared_files(self._modules)
+        # Which services' processes write each of those files: the proxy mixins' two by the import that binds
+        # their logger again in JEDI's processes.
+        if self._calls is not None:
+            fragment.log_file_services = logfile.file_services(self._modules, self._calls.types, self._declared_files)
 
         lap("dispatch and log files")
         # After the log files, because the file an emit lands in is resolved

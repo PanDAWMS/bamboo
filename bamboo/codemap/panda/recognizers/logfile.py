@@ -55,11 +55,14 @@ from typing import NamedTuple, Optional
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
-from bamboo.codemap.calls import Calls, CallSite, Target, bind
+from bamboo.codemap.calls import Calls, CallSite, Target, Types, bind, checking_test
 from bamboo.codemap.models import (
     LOG_FILES_FOLLOWED,
     LOG_FILES_OF_MODULE,
     LOG_FILES_PARTLY,
+    SERVICE_JEDI,
+    SERVICE_SERVER,
+    LogFileServices,
     LogSiteNode,
     SourceModule,
 )
@@ -768,21 +771,138 @@ class LoggerFiles:
         )
 
     def _rebindings(self) -> dict[tuple[str, str], list[tuple[str, ast.expr]]]:
-        """``{(module, name): [(module that rebinds it, value)]}`` for ``module.name = value`` at module scope."""
-        found: dict[tuple[str, str], list[tuple[str, ast.expr]]] = defaultdict(list)
-        for file in self.types.corpus_files():
-            tree = self.types.tree(file)
-            if tree is None:
-                continue
-            for statement in _module_statements(tree):
-                value = pathcond.written_value(statement)
-                for held in pathcond.targets_of(statement):
-                    if not (isinstance(held, ast.Attribute) and isinstance(held.value, ast.Name)):
-                        continue
-                    module = self.types.module_named(file, held.value)
-                    if module is not None and value is not None:
-                        found[(module, held.attr)].append((file, value))
-        return dict(found)
+        """:func:`rebindings` of the corpus."""
+        return rebindings(self.types)
+
+
+def rebindings(types: Types) -> dict[tuple[str, str], list[tuple[str, ast.expr]]]:
+    """``{(module, name): [(module that rebinds it, value)]}`` for ``module.name = value`` at module scope."""
+    found: dict[tuple[str, str], list[tuple[str, ast.expr]]] = defaultdict(list)
+    for file in types.corpus_files():
+        tree = types.tree(file)
+        if tree is None:
+            continue
+        for statement in _module_statements(tree):
+            value = pathcond.written_value(statement)
+            for held in pathcond.targets_of(statement):
+                if not (isinstance(held, ast.Attribute) and isinstance(held.value, ast.Name)):
+                    continue
+                module = types.module_named(file, held.value)
+                if module is not None and value is not None:
+                    found[(module, held.attr)].append((file, value))
+    return dict(found)
+
+
+#: Each service and the package its processes' own code is under (:data:`~bamboo.codemap.models.SERVICE_SERVER`).
+SERVICE_PACKAGES = ((SERVICE_SERVER, "pandaserver/"), (SERVICE_JEDI, "pandajedi/"))
+
+
+def runtime_imports(types: Types, file: str) -> set[str]:
+    """The corpus modules *file* imports when it runs: each ``import`` and ``from ... import`` anywhere in it -- a
+    function's too, run when the function is -- but those only a type checker runs (``if TYPE_CHECKING:``), each
+    package a dotted name passes through, and each ``importlib.import_module`` / ``__import__`` of a literal name
+    (``workflow_core`` imports ``pandajedi.jediorder.JediMsgProcessor`` so)."""
+    tree = types.tree(file)
+    if tree is None:
+        return set()
+    package = file[: -len(".py")].split("/")[:-1]
+    found: set[str] = set()
+
+    def module(dotted: str) -> None:
+        parts = dotted.split(".")
+        for size in range(1, len(parts) + 1):
+            held = types.module_file(".".join(parts[:size]))
+            if held is not None:
+                found.add(held)
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, ast.If):
+            test = checking_test(node.test)
+            for branch in (node.orelse if test is True else node.body if test is False else node.body + node.orelse):
+                visit(branch)
+            visit(node.test)
+            return
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                module(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = package[: len(package) - (node.level - 1)] if node.level > 1 else package
+                dotted = ".".join([*base, *([node.module] if node.module else [])])
+            else:
+                dotted = node.module or ""
+            module(dotted)
+            for alias in node.names:
+                held = types.module_file(f"{dotted}.{alias.name}")
+                if held is not None:
+                    found.add(held)
+        elif isinstance(node, ast.Call):
+            called = node.func
+            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+            first = node.args[0] if node.args else None
+            if name in ("import_module", "__import__") and isinstance(first, ast.Constant) and isinstance(first.value, str):
+                module(first.value)
+        for inner in ast.iter_child_nodes(node):
+            visit(inner)
+
+    visit(tree)
+    found.discard(file)
+    return found
+
+
+def import_reach(types: Types) -> dict[str, set[str]]:
+    """``{service: the corpus modules its processes import}``: from every module of the service's package
+    (:data:`SERVICE_PACKAGES`, tests left out as the corpus leaves them), what :func:`runtime_imports` names,
+    followed.  JEDI's reach holds the server's modules its knights use; the server's holds no module of JEDI's but
+    those it imports by name (``jedi_config``, ``JediMsgProcessor``)."""
+    files = types.corpus_files()
+    reach: dict[str, set[str]] = {}
+    for service, package in SERVICE_PACKAGES:
+        seen = {file for file in files if file.startswith(package)}
+        pending = list(seen)
+        while pending:
+            for held in runtime_imports(types, pending.pop()):
+                if held not in seen:
+                    seen.add(held)
+                    pending.append(held)
+        reach[service] = seen
+    return reach
+
+
+def _logger_names(tree: ast.Module, rel_path: str) -> set[str]:
+    """The names *rel_path*'s own statements bind to the logger it declares (:func:`logger_name`): ``_logger`` in
+    ``OraDBProxy``."""
+    found: set[str] = set()
+    for statement in _module_statements(tree):
+        value = pathcond.written_value(statement)
+        if value is None or not any(
+            isinstance(node, ast.Call) and _opened_name(node, rel_path) for node in walk(value)
+        ):
+            continue
+        found.update(held.id for held in pathcond.targets_of(statement) if isinstance(held, ast.Name))
+    return found
+
+
+def file_services(modules: list[SourceModule], types: Types, declared: dict[str, str]) -> list[LogFileServices]:
+    """:class:`LogFileServices` of each file a module declares (:func:`declared_files`), by file: the services
+    whose processes import the declaring module (:func:`import_reach`), less those whose processes also import a
+    module binding the declared logger's name again (:func:`rebindings`) -- ``JediDBProxy``'s ``OraDBProxy._logger
+    = logger``, so JEDI's processes write ``panda-JediDBProxy.log`` where the server's write ``panda-DBProxy.log``."""
+    reach = import_reach(types)
+    rebound = rebindings(types)
+    trees = {module.rel_path: module.tree for module in modules}
+    found: list[LogFileServices] = []
+    for rel_path, file in sorted(declared.items(), key=lambda one: (one[1], one[0])):
+        tree = trees.get(rel_path)
+        names = _logger_names(tree, rel_path) if tree is not None else set()
+        by = sorted({rebinder for name in names for rebinder, _value in rebound.get((rel_path, name), [])} - {rel_path})
+        services = [
+            service
+            for service, _package in SERVICE_PACKAGES
+            if rel_path in reach[service] and not any(one in reach[service] for one in by)
+        ]
+        found.append(LogFileServices(file=file, services=sorted(services), declared_in=rel_path, rebound_by=by))
+    return found
 
 
 def _module_statements(tree: ast.Module):

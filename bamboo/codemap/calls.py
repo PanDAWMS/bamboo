@@ -2741,7 +2741,7 @@ def _module_statements(body: list[ast.stmt]):
     return (node for node, _checking in _checked_statements(body))
 
 
-def _checking_test(test: ast.expr) -> Optional[bool]:
+def checking_test(test: ast.expr) -> Optional[bool]:
     """``True`` for the test of ``if TYPE_CHECKING:``, ``False`` for ``if not TYPE_CHECKING:``, ``None`` for any other."""
     negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
     inner = test.operand if isinstance(test, ast.UnaryOp) and negated else test
@@ -2755,7 +2755,7 @@ def _checked_statements(body: list[ast.stmt], checking: bool = False):
     for node in body:
         yield node, checking
         if isinstance(node, ast.If):
-            test = _checking_test(node.test)
+            test = checking_test(node.test)
             yield from _checked_statements(node.body, checking or test is True)
             yield from _checked_statements(node.orelse, checking or test is False)
         elif isinstance(node, ast.Try):

@@ -23826,3 +23826,66 @@ def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_consta
         ("JediTaskSpec.status", "==", ["'running'"], "taskSpec"),
     ]
     assert atoms["JediTaskSpec.status"] == [("JediTaskSpec.oldStatus", "is", ["None"], "taskSpec")]
+
+
+def test_a_log_file_is_written_by_the_services_whose_processes_import_its_logger_and_do_not_bind_it_again(tmp_path):
+    """``OraDBProxy`` opens ``DBProxy`` as ``_logger``; ``JediDBProxy``, which only JEDI's processes import, binds
+    ``OraDBProxy._logger`` to its own: the server writes ``panda-DBProxy.log`` and JEDI ``panda-JediDBProxy.log``.  A
+    module both import is both's; one only the server imports is the server's.  An import only a type checker runs
+    does not count, and ``importlib.import_module`` of a literal name does."""
+    from pathlib import Path as _Path
+
+    from bamboo.codemap import calls as calls_mod
+
+    sources = {
+        "pandaserver/__init__.py": "",
+        "pandaserver/taskbuffer/__init__.py": "",
+        "pandaserver/taskbuffer/OraDBProxy.py": (
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from pandajedi.jedicore import JediDBProxy\n"
+            '_logger = PandaLogger().getLogger("DBProxy")\n'
+            "class DBProxy:\n    pass\n"
+        ),
+        "pandaserver/taskbuffer/TaskBuffer.py": (
+            'from pandaserver.taskbuffer import OraDBProxy\n_logger = PandaLogger().getLogger("TaskBuffer")\n'
+        ),
+        "pandaserver/daemons/__init__.py": "",
+        "pandaserver/daemons/datasetManager.py": (
+            'from pandaserver.taskbuffer import TaskBuffer\n_logger = PandaLogger().getLogger("datasetManager")\n'
+        ),
+        "pandaserver/workflow/__init__.py": "",
+        "pandaserver/workflow/workflow_core.py": (
+            'import importlib\ndef proxy():\n    return importlib.import_module("pandajedi.jediorder.JediMsgProcessor")\n'
+        ),
+        "pandajedi/__init__.py": "",
+        "pandajedi/jedicore/__init__.py": "",
+        "pandajedi/jedicore/JediDBProxy.py": (
+            "from pandaserver.taskbuffer import OraDBProxy\n"
+            'logger = PandaLogger().getLogger("JediDBProxy")\n'
+            "OraDBProxy._logger = logger\n"
+        ),
+        "pandajedi/jedicore/JediTaskBuffer.py": (
+            "from pandaserver.taskbuffer import TaskBuffer\nfrom pandajedi.jedicore import JediDBProxy\n"
+        ),
+        "pandajedi/jediorder/__init__.py": "",
+        "pandajedi/jediorder/JediMsgProcessor.py": '_logger = PandaLogger().getLogger("JediMsgProcessor")\n',
+    }
+    for rel, text in sources.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    roots = {package: _Path(tmp_path / package) for package in ("pandaserver", "pandajedi")}
+    types = calls_mod.Types(roots, {})
+    modules = [_module(text, rel) for rel, text in sources.items()]
+    declared = logfile.declared_files(modules)
+
+    found = {one.file: (one.services, one.declared_in, one.rebound_by) for one in logfile.file_services(modules, types, declared)}
+
+    assert found == {
+        "panda-DBProxy.log": (["server"], "pandaserver/taskbuffer/OraDBProxy.py", ["pandajedi/jedicore/JediDBProxy.py"]),
+        "panda-JediDBProxy.log": (["jedi"], "pandajedi/jedicore/JediDBProxy.py", []),
+        "panda-TaskBuffer.log": (["jedi", "server"], "pandaserver/taskbuffer/TaskBuffer.py", []),
+        "panda-datasetManager.log": (["server"], "pandaserver/daemons/datasetManager.py", []),
+        "panda-JediMsgProcessor.log": (["jedi", "server"], "pandajedi/jediorder/JediMsgProcessor.py", []),
+    }
