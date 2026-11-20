@@ -2424,6 +2424,9 @@ class Passes:
     #: a late value's stay ``(start, move)``, for a mover L2 follows that did not move it (``Rerun._late_absence``): its
     #: passes in the stay are read, and none there excludes it
     stay: tuple[str, str] | None = None
+    #: P70: where L2 read the mover's selection as holding for the row only in brief spans, the last take's end less
+    #: SLACK, and why: its passes ending before it are said, not judged (``Rerun._last_take``)
+    begin: tuple[str, T.Said] | None = None
 
 
 @dataclass
@@ -8528,6 +8531,12 @@ class Rerun:
                 self.say(f"window: from {since}, when the statuslog shows {self.args.observed!r}")
             found, moved_on = self._stay_edges(fn, q.owner, [a.line for a in q.arms], q.subject or self.args.subject,
                                                q.key, found, since, whole)
+            # P70: a mover L2 read the selection of as taking the row in brief spans is read from the last take on
+            # (``Passes.begin``); the passes before it are said, not judged -- where any are left after it
+            if q.begin is not None and (kept := [p for p in found if p.last[:19] >= q.begin[0]]) and len(kept) < len(found):
+                self.say(T.text(T.Said("passes-before-the-last-take", {"n": len(found) - len(kept), "begin": q.begin[0],
+                                                                        "why": q.begin[1]})))
+                found = kept
         if self.logs.needs_window:
             # a search returns its files' records whatever the window; the statuslog says nothing after its as_of
             # (the file door keeps them: KNOWN_ISSUES.md K4)
@@ -12725,6 +12734,8 @@ class Rerun:
             elif armed:
                 verdict, premises = self._late_absence(q, owner, armed, "could have" if spans else "by key", said, reasons,
                                                        asking, rest, owners)
+                if verdict == "ran" and (take := self._last_take(owner, q)) is not None:
+                    self._late_ran = (*self._late_ran[:-1], replace(self._late_ran[-1], begin=take))
             else:
                 verdict = "could have" if spans else "by key"
                 said.append(T.Said("taken-by-its-key"))
@@ -12759,6 +12770,89 @@ class Rerun:
         left = [o for o, v in out if v not in ("moved it", "write refuses", "refused", "not reached", "did not run")]
         self.say(f"not ruled out: {len(left)} mover(s)")
         return out
+
+    def _last_take(self, owner: str, q: Missed) -> tuple[str, T.Said] | None:
+        """P70 (out/gm/qk-design.md, the P70 walk continued, the delegated design): where one of *owner*'s own selections of
+        the row (its statements among L2's paths, whichever mover they give rows to) has a condition every build
+        requires, read on terms comparing columns with the clock (:meth:`_tree_spans`), that surely held for the row in
+        two spans or more before the move, the last reaching the move, and surely failed from the stay's start to the
+        last one but in them (on the writes the records show) -- so the
+        statement could give it the row in those spans alone, and the value did not move in them --
+        getTasksToExecCommand_JEDI's ``modificationtime < :timeLimit`` at 4588, true for seconds every five minutes,
+        each time a pass took the row and wrote it again (NT-finishing-late, 87 of them): each span ends at the write
+        of the pass that took the row, so its passes are read from just after the take before the last (21:35:56), the
+        last take (21:41:07) and the move among them.  ``(that time, why)``; None otherwise, with fewer than three
+        spans, and where more than one such condition is read."""
+        own = {(st.owner, st.line): st for sts in q.paths.values() for st in sts if _bare(st.owner) == _bare(owner)}
+        terms: dict[str, tuple[str, list, list, list]] = {}
+        for (o, line), st in sorted(own.items(), key=lambda kv: kv[0]):
+            st = self._filled(st, q)
+            for reading in st.condition_trees:
+                if reading.entry not in (st.conditions or []) or reading.entry in terms:
+                    continue  # a term some build lacks
+                if (got := self._tree_spans(reading.tree, q)) is not None and got[0]:
+                    terms[reading.entry] = (f"{o.split('::')[-1]}@{line}", *got)
+        if len(terms) != 1:
+            return None
+        text, (where, strict, failed, premises) = next(iter(terms.items()))
+        held = [s for s in _union(list(strict)) if s[0] < q.moved]
+        if len(held) < 2 or held[-1][1] < q.moved - datetime.timedelta(seconds=1):
+            return None
+        # every second from the stay's start to the last span read, held or failed: no take but in the spans
+        second = datetime.timedelta(seconds=1)
+        reach = q.since
+        for a, b in _union([*held[:-1], *failed]):
+            if a - second > reach:
+                break
+            reach = max(reach, b)
+        if reach + second < held[-1][0] or len(held) < 3:
+            return None
+        # each span ends at the write of the pass that took the row, a record of it: the passes ending by the take
+        # before the last are earlier takes, on the records' own clock (CLOCKS_APART)
+        end, prev = held[-2][1], held[-3][1]
+        return W._down(prev + CLOCKS_APART), T.Said("the-last-take", {
+            "where": [f"{where}'s {text}"], "n": len(held) - 1, "first": f"{held[0][0]:%Y-%m-%d %H:%M:%S}",
+            "end": f"{end:%Y-%m-%d %H:%M:%S}", "observed": q.observed, "moved": f"{q.moved:%Y-%m-%d %H:%M:%S}",
+            "prev": f"{prev:%Y-%m-%d %H:%M:%S}",
+            "premises": T.Said("the-last-take-premises", {"premises": premises}) if premises else ""})
+
+    def _tree_spans(self, node, q: Missed) -> tuple[list, list, list] | None:
+        """``(held, failed, premises)``: where a condition tree surely held for the row and where it surely failed, from
+        its terms comparing a column with the clock on the writes the records show (:meth:`_timeline_spans`,
+        :meth:`_timeline_failed_spans`) -- ``any`` holding where one of its items does and failing where all do, ``all``
+        the other way round.  A term read sure nowhere is read with the arms no record reads named as having not written
+        its column, as Q1 part 1 says it (``timeline-term-held-if``), and those are the premises (:func:`_named_open`).
+        None where a leaf is no such term."""
+        if node.node in ("any", "all"):
+            got = [self._tree_spans(item, q) for item in node.items]
+            parts = [p for p in got if p is not None]
+            if not parts or len(parts) < len(got):
+                return None
+            held, failed, premises = list(parts[0][0]), list(parts[0][1]), list(parts[0][2])
+            for h, f, n in parts[1:]:
+                held, failed = ((_union(held + h), _intersect(failed, f)) if node.node == "any"
+                                else (_intersect(held, h), _union(failed + f)))
+                premises += [x for x in n if x not in premises]
+            return _union(held), _union(failed), premises
+        if node.node != "compare" or not node.settled:
+            return None
+        sure = self._timeline_spans(node, q)
+        if sure is None:
+            return None
+        fails: list = self._timeline_failed_spans(node, q) or []
+        named: list = []
+        if not sure or not fails:
+            kept = getattr(self, "_assuming", None)
+            self._assuming = {}
+            try:
+                a_held = self._timeline_spans(node, q) or []
+                a_failed = self._timeline_failed_spans(node, q) or []
+            finally:
+                arms, self._assuming = self._assuming or {}, kept
+            if node.subject in arms and ((not sure and a_held) or (not fails and a_failed)):
+                sure, fails = sure or a_held, fails or a_failed
+                named = _named_open(node.subject, arms, self._timeline(node.subject, q))
+        return _union(list(sure)), _union(list(fails)), named
 
     def _late_absence(self, q: Missed, owner: str, arms: dict, verdict: str, said: list, reasons: list,
                       asking: W.Asking, rest: W.Asking | None, owners: Callable[[], Owners]) -> tuple[str, dict | None]:

@@ -1973,6 +1973,16 @@ updateTaskStatusByContFeeder_JEDI went unasked.  A dump without the table change
 a JEDI-only function's proxy logs, x14 against x15, which differ by the table alone): no END or STOP moves; 17 asks go
 (NT-scouting-stuck 9, MT-aborting-late 7, MT-ready-late 1); NT-pending-late's END names 9 machines asked, not 18.
 
+*Changed (2026-11-20, P70, out/gm/qk-design.md, the P70 walk continued on 2026-11-20 00:32, the delegated design):* a late value's mover that L2
+follows (it ran, it did not move the value) is read by S2 from just after the take before the last, where one of its
+own selections of the row has a condition every build requires, read on terms comparing columns with the clock
+(`_tree_spans`; a term sure nowhere read with the open arms named, as Q1 part 1 says it, and they are the premise),
+that held for the row in three spans or more before the move -- the last reaching the move, and failing between them
+from the stay's start: each span ends at the write of the pass that took the row (`Rerun._last_take`,
+`Passes.begin`).  NT-finishing-late's getTasksToExecCommand_JEDI (`modificationtime < :timeLimit`, 87 spans of seconds)
+was read from six hours before the move and stopped on a one-record pass at 15:50:01; it is now read from 21:35:57, and
+stops on the last take's pass at 21:41:07, a record under the method's shared mark, read as cut.
+
 *Changed (M3(a)-2, 2026-11-15, out/gm/qk-design.md "M3(a)-2", tmaeno "OK" 2026-11-15):* two readings for a late
 question's statement whose turn decides.  (1) Where the turn reads a time column M3(a)-1 starts the stay with but
 leaves arms that may write it in the stay, and every such arm writes the clock (`attr_time.NOW`), a run of the row

@@ -1155,6 +1155,58 @@ def test_lfs_a_function_running_in_jedi_alone_is_looked_for_in_the_files_jedi_wr
     assert got["lfs every"] == [True, False] and got["none every"] == [False, False], got
 
 
+def test_p70_a_mover_taking_the_row_in_brief_spans_is_read_from_just_after_the_take_before_the_last(tmp_path):
+    """P70: getTasksToExecCommand_JEDI's ``modificationtime < :timeLimit`` held for the row for seconds every five
+    minutes, each span ended by the write of the pass that took it; S2 reads its passes from just after the take before
+    the last, not from six hours before the move (NT-finishing-late's first pass, one record, decided nothing)."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+
+            D = lambda s: datetime.datetime.fromisoformat("2026-11-13 " + s)
+            RR._bare = lambda o: o
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines = []
+            term = N(node="compare", settled=True, subject="JediTaskSpec.modificationTime", text="t<:x")
+            st = N(owner="p/db.py::getCmd", line=10, conditions=["t<:x@9"],
+                   condition_trees=[N(entry="t<:x@9", tree=N(node="any", items=[N(node="all", items=[term])]))])
+            r._filled = lambda st, q: st
+            r._timeline = lambda subject, q: None
+            held = [(D("14:17:19"), D("14:17:28")), (D("21:35:50"), D("21:35:56")), (D("21:40:56"), D("21:41:07")),
+                    (D("21:46:07"), D("21:46:12"))]
+            failed = [(D("14:12:19"), D("14:17:19")), (D("14:17:28"), D("21:35:50")), (D("21:35:56"), D("21:40:56")),
+                      (D("21:41:07"), D("21:46:07"))]
+            q = N(paths={"p/x.py::run": [st]}, since=D("14:12:19"), moved=D("21:46:12"), observed="finishing")
+            got = {}
+            for name, h, f in (("takes", held, failed), ("a gap", held, failed[:1] + failed[2:]), ("two", held[2:], failed[3:])):
+                r._timeline_spans = lambda t, q, h=h: list(h)
+                r._timeline_failed_spans = lambda t, q, f=f: list(f)
+                take = r._last_take("p/db.py::getCmd", q)
+                got[name] = None if take is None else [take[0], T.text(take[1])]
+            # any: held where one item holds, failed where all fail
+            other = N(node="compare", settled=True, subject="JediTaskSpec.status", text="s=:y")
+            spans = {"t<:x": ([(D("10:00:00"), D("10:05:00"))], [(D("10:05:00"), D("11:00:00"))]),
+                     "s=:y": ([(D("10:30:00"), D("10:40:00"))], [(D("10:00:00"), D("10:30:00")), (D("10:40:00"), D("11:00:00"))])}
+            r._timeline_spans = lambda t, q: spans[t.text][0]
+            r._timeline_failed_spans = lambda t, q: spans[t.text][1]
+            h, f, _ = r._tree_spans(N(node="any", items=[term, other]), q)
+            got["any"] = [[[f"{a:%H:%M}", f"{b:%H:%M}"] for a, b in x] for x in (h, f)]
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["takes"][0] == "2026-11-13 21:35:57", got
+    assert "from just after the take before the last (2026-11-13 21:35:56), the last at 2026-11-13 21:41:07" in got["takes"][1], got
+    assert got["a gap"] is None and got["two"] is None, got
+    assert got["any"] == [[["10:00", "10:05"], ["10:30", "10:40"]], [["10:05", "10:30"], ["10:40", "11:00"]]], got
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(
