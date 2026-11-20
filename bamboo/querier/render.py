@@ -842,6 +842,8 @@ TEMPLATES: dict[str, str] = {
     "history-no-column-why": "its status history here holds no {attr}",
     "logs-not-asked-not-ruled-out": "its logs are not asked: a run not found would not rule it out ({failing:join=; }) (KNOWN_ISSUES.md K15)",
     "premise-why": "{premise}: {why}",
+    # the harness's rnd14 costs: a writer marking no run by the key, over a window holding the row's move
+    "shared-logs-not-asked-bare": "  {func}: {logs:join=, } not asked by the key alone from {start} to {end} (the records do not answer it): its marks hold no key, and the window holds the row's move at {move}, where every call of the key's object and of the rows tied to it prints the key there (the logs most functions print into); not searched there",
     # P70: a mover read from its last take on
     "the-last-take": "{where:join=, } surely held for the row in {n} span(s) from {first} to {end} before the one it was moved on in, and surely failed between them, on the writes the records show{premises}; the value stayed {observed!r} till {moved}: its passes are read from just after the take before the last ({prev}), the last at {end}",
     "the-last-take-premises": ", where {premises:join= and }",

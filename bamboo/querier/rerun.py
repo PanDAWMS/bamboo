@@ -3313,6 +3313,26 @@ def jedi_files(owner: str, files: list[str]) -> list[str]:
     return kept or files
 
 
+#: a log this many functions print into, or more, is shared: the DB proxy's two, 482 functions each on x14ws (the next
+#: log has 47).  A bare key asked over it returns every call of the key's object and of every row tied to it
+SHARED_LOG = 100
+#: the fragment the counts were read on, and the count of functions printing into each log
+_SHARED: list[Any] = [None, {}]
+
+
+def shared_logs(names: list[str]) -> list[str]:
+    """Of *names*, the logs at least ``SHARED_LOG`` functions print into, by the map's function prints."""
+    fragment = mapdump.fragment()
+    if _SHARED[0] is not fragment:
+        counts: dict[str, set[str]] = {}
+        for node in getattr(fragment, "function_prints", None) or []:
+            for st in getattr(node, "statements", None) or []:
+                for f in getattr(st, "log_files", None) or []:
+                    counts.setdefault(f, set()).add(node.owner)
+        _SHARED[:] = [fragment, {f: len(o) for f, o in counts.items()}]
+    return [n for n in names if _SHARED[1].get(n, 0) >= SHARED_LOG]
+
+
 def jedi_routes(mover: str, entries: list[str]) -> list[str]:
     """H-3's reading turned to the asks (the harness's T check, NT-scouting-stuck, 2026-11-19): pandajedi's code runs
     in JEDI's processes alone (pandaserver does not import it), so a mover in ``pandajedi/``, or one every route of
@@ -8369,6 +8389,7 @@ class Rerun:
         asking = cast(W.Asking, self._by_key_marks(owner, lines, asking, cls, key))
         rest = self._by_key_marks(owner, lines, rest, cls, key)
         found, missed, holes, searched = self._ask_mover(key, owner, to_hand, asking, rest if way != "key" else None, owners)
+        missed = self._bare_over_a_move(name, searched, missed, holes)
         logs = self._runs_of(found, owner, searched)
         if logs:
             entry["verdict"] = "ran"
@@ -8415,6 +8436,26 @@ class Rerun:
                 entry["reasons"].append({"code": "K19", "record": said})
             self.say(f"  {name}: {said}")
         return None, missed
+
+    def _bare_over_a_move(self, name: str, asking: W.Asking, missed: list, holes: dict) -> list:
+        """The harness's rnd14 costs (MT-aborting-late: a bare task ID over the DB proxy's logs from the abort on, 105 MB
+        and more): of *missed*, the asks no record answers, those of a shared log (:func:`shared_logs`) where *asking*
+        goes by the key alone -- its writer marks no run by it -- over a window that holds a move of the row (a
+        statuslog row's time) are not made: said, and the log is put in *holes* as not searched over the window, so
+        the reading's premise that it was searched whole fails and the writer is not ruled out.  What the records
+        answer is read as before.  Returns the asks left."""
+        if not missed or asking.strings or asking.window is None or not self.logs.needs_window:
+            return missed
+        lo, hi = asking.window
+        moves = [str(s["time"])[:19] for s in self.data.get("statuslog", {}).get("states", []) if lo <= str(s["time"])[:19] <= hi]
+        shared = set(shared_logs(sorted({ask.name for ask, _ in missed}))) if moves else set()
+        if not shared:
+            return missed
+        self.say(T.text(T.Said("shared-logs-not-asked-bare", {"func": name, "logs": sorted(shared), "move": moves[-1],
+                                                               "start": lo, "end": hi})))
+        for log in shared:
+            holes.setdefault(log, []).append(f"{lo} .. {hi}: not asked by the key alone (a shared log over the row's move)")
+        return [(ask, why) for ask, why in missed if ask.name not in shared]
 
     def _by_key_marks(self, owner: str, lines: list[int], asking: W.Asking | None, cls: str, key: str) -> W.Asking | None:
         """The harness's rnd14 (MT-aborting-late's bare task ID, 42161 records in 9 min of DBProxy): *asking* by the
@@ -14297,6 +14338,7 @@ class Rerun:
         # the caller hands in *subject* for (M3(a)-1's and P3's readings hand none)
         asking = cast(W.Asking, self._by_key_marks(j.owner, [b.line], asking, (subject or getattr(j, "subject", "") or "").partition(".")[0], key))
         runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
+        missed = self._bare_over_a_move(func.rpartition(".")[2], asking, missed, holes)
         self._keep_unanswered(missed)
         if missed_out is not None:
             missed_out += missed
@@ -14446,6 +14488,7 @@ class Rerun:
                     # (2): by the flush's marks holding the key, where it has them
                     asking = cast(W.Asking, self._by_key_marks(flush, [p.line], asking, subject.partition(".")[0], key))
                     runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
+                    missed = self._bare_over_a_move(name, asking, missed, holes)
                     self._keep_unanswered(missed)
                     whole = whole and bool(self._searched_whole(to_hand, asking, asking, missed, holes, None)["held"]) \
                         and bool(every_log_asked(flush, [p.line], to_hand)["held"])

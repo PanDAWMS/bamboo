@@ -1207,6 +1207,46 @@ def test_p70_a_mover_taking_the_row_in_brief_spans_is_read_from_just_after_the_t
     assert got["any"] == [[["10:00", "10:05"], ["10:30", "10:40"]], [["10:05", "10:30"], ["10:40", "11:00"]]], got
 
 
+def test_a_writer_marking_no_run_by_the_key_is_not_asked_bare_on_the_shared_logs_over_a_move(tmp_path):
+    """The harness's rnd14 costs: a task's bare ID over the DB proxy's logs from the abort on read 105 MB and more.  A
+    writer whose marks hold no key is not asked anew by the key alone on a log a hundred functions or more print into,
+    over a window holding the row's move (what the records answer is read); asked by its marks, or over no move, it is."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import windows as W
+
+            prints = [N(owner=f"p/db{i}.py::f{i}", statements=[N(log_files=["db.log"])]) for i in range(99)]
+            prints.append(N(owner="p/x.py::g", statements=[N(log_files=["x.log", "db.log"])]))
+            RR.mapdump._FRAGMENT[:] = [N(function_prints=prints)]
+            got = {"shared": RR.shared_logs(["db.log", "x.log"])}
+            r = RR.Rerun.__new__(RR.Rerun)
+            r.lines, r.opened, r.hop, r.hand, r.hand_used = [], [], "L2", {}, []
+            r.logs = N(needs_window=True)
+            r.data = {"statuslog": {"states": [{"status": "aborting", "time": "2026-10-31 17:36:49"}]}}
+            bare = W.Asking(("2026-10-31 17:27:30", "2026-10-31 17:36:50"), None, "w")
+            missed = [(N(name="db.log"), "w"), (N(name="x.log"), "w")]
+            holes = {}
+            got["over a move"] = [a.name for a, _ in r._bare_over_a_move("f", bare, list(missed), holes)]
+            got["holes"] = sorted(holes)
+            got["said"] = len([x for x in r.lines if "db.log not asked by the key alone" in x])
+            got["by marks"] = len(r._bare_over_a_move("f", W.Asking(bare.window, None, "w", ("f < jediTaskID=7 >",)), list(missed), {}))
+            got["no move"] = len(r._bare_over_a_move("f", W.Asking(("2026-10-31 18:00:00", "2026-10-31 19:00:00"), None, "w"), list(missed), {}))
+            got["answered"] = len(r._bare_over_a_move("f", bare, [], {}))
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    # the asks the records do not answer: the shared log's is not made, and the log is not searched there
+    assert got["shared"] == ["db.log"] and got["over a move"] == ["x.log"] and got["holes"] == ["db.log"], got
+    assert got["said"] == 1 and got["by marks"] == 2 and got["no move"] == 2 and got["answered"] == 0, got
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(

@@ -57,9 +57,11 @@ window holds no line of the key under such a mark stays unexamined (2026-11-04).
 only farther before its write than EDGE would need it; the map is to say which (not read yet).  Not past an end inside
 the window (a gap a new ask does not fill) nor past today's file's end (asking
 again only reads it later).  A second past the end is enough because the recording step is the other half of the
-rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again EDGE past each end of
-the window (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal), so the run
-is searched EDGE past the end it lay near.  A run, or a pass of one (``Run.part``), still that near an end is read as cut there
+rule: a file whose covers meet the window is read whole, and a string cut at 1 MB is asked again past each end of the
+window, at most EDGE (``bamboo.scripts.panda.fieldtest.record.CONTINUE_SLACK``, a copy of EDGE a test holds equal) and
+one page a side (the harness's a6a2c7c: in a dense log that page can end seconds past the window), so the run is
+searched past the end it lay near as far as ``searched`` says, and no farther.  A run, or a pass of one (``Run.part``),
+still that near what was searched is read as cut there
 (:attr:`Log.whole`; rule 8 reads no row missing from it): each by its own first and last record, and by what was
 searched for the strings that return its records -- the key's for a mark that holds it, its mark's own ask for one
 that does not, nothing for one not asked -- so the passes inside
