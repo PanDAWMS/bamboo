@@ -1145,7 +1145,8 @@ class ConditionAtom(BaseModel):
 class Accumulation(BaseModel):
     """One statement adding to the entry of a container a counter write takes its increment from
     (:attr:`Branch.accumulated`): propagateResultToJEDI's ``datasetContentsStat[datasetID]['nFilesFinished'] += 1``
-    for ``nFilesFinished=nFilesFinished+{}``."""
+    for ``nFilesFinished=nFilesFinished+{}``; or to the attribute a branch sets: setupper's
+    ``tmp_job.nInputDataFiles += 1`` after ``tmp_job.nInputDataFiles = 0``."""
 
     line: int = Field(description="The statement's line.")
     op: str = Field(description="``+`` or ``-``: the statement adds to the entry or takes from it.")
@@ -1156,6 +1157,14 @@ class Accumulation(BaseModel):
     )
     condition_atoms: list[ConditionAtom] = Field(
         default_factory=list, description="The comparisons of *path_condition* with constants (:class:`ConditionAtom`)."
+    )
+    per: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The loops around the statement that are not around the branch's own, outermost first, as ``target in "
+            "iterable``: ``tmp_file in tmp_job.Files``.  It runs once for each of their elements *path_condition* "
+            "admits, for each run of the branch."
+        ),
     )
 
 
@@ -1213,7 +1222,9 @@ class Branch(BaseModel):
             "Where the outcome is a column plus or less a value the statement takes from a container -- "
             "``runtime(nFilesFinished + {})``, the SQL built from datasetContentsStat's keys --: each statement of the "
             "function adding to or taking from the container's entry keyed by the column's name, with when it runs "
-            "(:class:`Accumulation`).  The count moves only where one of them ran."
+            "(:class:`Accumulation`).  The count moves only where one of them ran.  Where the branch sets an "
+            "attribute -- ``tmp_job.nInputDataFiles = 0`` --: each statement after it, in the block holding it, "
+            "adding to or taking from that attribute: the value the object carries on is the branch's plus theirs."
         ),
     )
     row_precondition: list[str] = Field(
@@ -2100,6 +2111,113 @@ class JunctionNode(BaseNode):
         }
         blob = json.dumps(payload, sort_keys=True, default=str)
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+#: The services whose processes write logs, by the package their code is under: the server's (its API and daemons)
+#: and JEDI's (its master and knights).
+SERVICE_SERVER = "server"
+SERVICE_JEDI = "jedi"
+
+
+class LogFileServices(BaseModel):
+    """Which services' processes write one log file (:attr:`MapFragment.log_file_services`).
+
+    A ``db_proxy_mods`` method's lines land in ``panda-DBProxy.log`` or ``panda-JediDBProxy.log``
+    (:attr:`JunctionNode.log_files` names both): ``OraDBProxy`` opens ``DBProxy`` as ``_logger``, and
+    ``JediDBProxy`` binds ``OraDBProxy._logger`` to its own logger when it is imported -- only JEDI's processes
+    import it.  So the server's processes write ``panda-DBProxy.log`` and JEDI's ``panda-JediDBProxy.log``.  A file
+    is written by a service's processes where the module declaring its logger is among the modules they import
+    (:func:`~bamboo.codemap.panda.recognizers.logfile.import_reach`) and no module they import binds that logger
+    again.
+    """
+
+    file: str = Field(description="The log file: ``panda-DBProxy.log``.")
+    services: list[str] = Field(
+        description=f"{SERVICE_SERVER!r} and / or {SERVICE_JEDI!r}, sorted; empty where neither imports the module."
+    )
+    declared_in: str = Field(description="The module declaring the logger, as the map spells a file.")
+    rebound_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The modules binding that logger's name again from outside (``OraDBProxy._logger = logger``), sorted: "
+            "a service importing one writes there instead."
+        ),
+    )
+
+
+class PluginFactory(BaseModel):
+    """One class whose objects load their plugins from a recorded configuration (:attr:`MapFragment.plugin_factories`).
+
+    ``WatchDog.__init__`` hands ``FactoryBase.__init__`` ``jedi_config.watchdog.modConfig``, and the object's
+    ``getImpl(vo, label, subType)`` returns the plugin that string names for them
+    (:attr:`MapFragment.plugin_choices`).  The string is the deployment's, so a row is read only where the
+    instance record holds it (:func:`~bamboo.codemap.calls.read_recorded`).
+    """
+
+    factory: str = Field(
+        description=(
+            "``<file>::<class>`` the factory object is: the class whose method hands the string to the factory "
+            "base's ``__init__``, or the base itself where an object of it is built with the string."
+        )
+    )
+    config: str = Field(description="``<file>::<name>`` of the recorded module name the string is read off.")
+    sites: list[str] = Field(description="``file:line`` of each call handing the string to the factory base, sorted.")
+
+
+class PluginChoice(BaseModel):
+    """One plugin a recorded configuration names for a vo, a label and a sub type (:attr:`MapFragment.plugin_choices`).
+
+    ``atlas:managed|test:pandajedi.jedidog.AtlasProdWatchDog:AtlasProdWatchDog`` is two rows, ``managed`` and
+    ``test``, sub type ``any``.  A factory's lookup takes the vo's entry, else ``any``'s; in it the label's, else
+    ``any``'s; in that the sub type's, else ``any``'s.  The factory sets the plugin's ``vo`` and
+    ``prodSourceLabel`` to the row's when it makes it.  A factory loads only the rows whose vo and label are among
+    those it was built for, or ``any`` / empty (:class:`ProcessItem` holds the processes' lists).
+    """
+
+    config: str = Field(description="``<file>::<name>`` of the recorded module name whose string names it.")
+    vo: str
+    label: str
+    sub_type: str = Field(description="The sub type; ``any`` where the item names none.")
+    plugin: str = Field(
+        description="``<file>::<class>`` of the corpus, or the dotted path the string names where the corpus has none."
+    )
+
+
+class ProcessField(BaseModel):
+    """One ``:``-separated field of a recorded process item (:class:`ProcessItem`)."""
+
+    index: int
+    name: str = Field(
+        description=(
+            "The name the loop binds ``items[index]`` to (``cloud``), or one call of it (``vos = "
+            "parse_init_params(items[0])``); empty where it binds none."
+        )
+    )
+    text: str = Field(
+        description=(
+            "The field as the record holds it.  ``JediMaster.convParams`` makes an empty field ``None``, one "
+            "holding ``,`` a list, and one ``int()`` reads an ``int``."
+        )
+    )
+
+
+class ProcessItem(BaseModel):
+    """One item of a recorded ``procConfig`` list, as one loop of the code reads it (:attr:`MapFragment.process_items`).
+
+    ``for itemStr in jedi_config.jobgen.procConfig.split(";")`` in ``JediMaster.start`` starts ``nProc`` processes of
+    ``JobGenerator`` for each item ``atlas:managed|test:2:WORLD:180``, handing them the fields the loop names
+    ``vo``, ``plabel``, ``nProc``, ``cloud`` and ``loop_cycle``.  Another loop may read the same list and start
+    nothing: ``jedi_post_processor_msg_processor`` builds a factory per item of ``postprocessor``'s, so an item is
+    one row per loop reading it, and :attr:`launches` says which loop starts processes.
+    """
+
+    config: str = Field(description="``<file>::<name>`` of the recorded module name whose list holds it.")
+    item: int = Field(description="Its position in the list.")
+    loop: str = Field(description="``file:line`` of the loop.")
+    launches: str = Field(
+        description="The dotted module the loop hands the launcher; empty where it names none -- it starts no process."
+    )
+    fields: list[ProcessField]
 
 
 class LogSiteNode(BaseNode):
@@ -5388,6 +5506,14 @@ class MapFragment(BaseModel):
     filter_stages: list["FilterStageNode"] = Field(default_factory=list)
     loop_cuts: list["LoopCutNode"] = Field(default_factory=list)
     log_sites: list[LogSiteNode] = Field(default_factory=list)
+    #: Which services' processes write each log file the map names (:class:`LogFileServices`), by file.
+    log_file_services: list[LogFileServices] = Field(default_factory=list)
+    #: The factories reading an instance's recorded plugin configuration (:class:`PluginFactory`), the plugins it
+    #: names for each vo, label and sub type (:class:`PluginChoice`), and the items of a recorded process list as each
+    #: loop reading it does (:class:`ProcessItem`); empty without an instance record.
+    plugin_factories: list["PluginFactory"] = Field(default_factory=list)
+    plugin_choices: list["PluginChoice"] = Field(default_factory=list)
+    process_items: list["ProcessItem"] = Field(default_factory=list)
     read_sites: list["ReadSiteNode"] = Field(default_factory=list)
     function_prints: list["FunctionPrintsNode"] = Field(default_factory=list)
     reach_graph: list["ReachNode"] = Field(default_factory=list)

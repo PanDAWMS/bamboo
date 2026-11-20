@@ -23683,6 +23683,102 @@ def test_a_counter_write_says_the_statements_adding_to_the_count_it_takes_and_wh
         (1, "JediFileSpec.status", "in", ["'finished'", "'lost'"], "fileStatus", True),
     ]
     assert [one.accumulated for one in written.branches] == [[], []]
+    assert accumulation.per == []
+
+
+_COUNTER_SPECS = """
+class FileSpec(object):
+    _attributes = ("lfn", "type", "dataset")
+
+class JobSpec(object):
+    _attributes = ("PandaID", "prodSourceLabel", "nInputDataFiles", "specialHandling")
+"""
+
+_ATTRIBUTE_COUNTER = """
+class Setupper:
+    def correct_lfn(self):
+        for tmp_job in self.jobs:
+            if tmp_job.prodSourceLabel not in ["managed", "user"]:
+                continue
+            tmp_job.nInputDataFiles = 0  # RESET
+            for tmp_file in tmp_job.Files:
+                if tmp_file.type == "input" and not tmp_file.lfn.endswith(".lib.tgz"):
+                    tmp_job.nInputDataFiles += 1  # COUNTED
+            tmp_job.nInputDataFiles = tmp_job.nInputDataFiles + 0  # AGAIN
+        other = self.jobs[0]
+        other.nInputDataFiles += 1  # OTHER
+        other.prodSourceLabel = "managed"  # FIRST
+        if other.nInputDataFiles == 0:
+            other.prodSourceLabel = "test"  # SECOND
+            other.prodSourceLabel += "_x"  # SUFFIX
+        if other.PandaID:
+            other.specialHandling = "lb:1"  # ALT
+        else:
+            other.specialHandling += ",lb:1"  # ELSE
+"""
+
+
+def test_an_attribute_a_branch_sets_says_the_statements_adding_to_it_after_and_per_what():
+    """setupper's ``tmp_job.nInputDataFiles = 0``, then ``+= 1`` for each input file of the job's ``Files`` that is
+    not its lib.tgz: the reset's branch says that statement, its path condition, atoms and the loop it runs once an
+    element of -- ``tmp_file in tmp_job.Files`` -- so a reader counts the job's file rows by those tests.  A set of the
+    attribute from itself is no start, and an add to another object's attribute (``other``) or before the reset is
+    not the reset's; nor is one a later set always runs before (event_picker's ``self.user_task_name += "/"`` is the
+    nearer set's), nor one in the ``else`` of the ``if`` whose body sets it (JobSpec.setLumiBlockNr)."""
+    rel = "pandaserver/dataservice/setupper.py"
+    modules = [_module(_COUNTER_SPECS, "pandaserver/taskbuffer/Specs.py"), _module(_ATTRIBUTE_COUNTER, rel)]
+
+    def line(marker: str) -> int:
+        (found,) = [
+            n for n, text in enumerate(_ATTRIBUTE_COUNTER.splitlines(), 1) if text.rstrip().endswith(f"# {marker}")
+        ]
+        return found
+
+    counter = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.nInputDataFiles", subject="JobSpec.nInputDataFiles",
+        owner=f"{rel}::Setupper.correct_lfn",
+        branches=[
+            Branch(outcome="0", line=line("RESET")),
+            Branch(outcome="runtime(tmp_job.nInputDataFiles + 1)", line=line("COUNTED")),
+            Branch(outcome="runtime(tmp_job.nInputDataFiles + 0)", line=line("AGAIN")),
+        ],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    declarations = progress.spec_attributes(modules)
+    progress.attach_condition_atoms([counter], modules, progress.equipped_attributor(modules, declarations), declarations)
+
+    reset, counted, again = counter.branches
+    (accumulation,) = reset.accumulated
+    assert (accumulation.line, accumulation.op, accumulation.amount) == (line("COUNTED"), "+", "1")
+    assert accumulation.path_condition == [
+        "tmp_file.type == 'input' and (not tmp_file.lfn.endswith('.lib.tgz'))",
+        "not (tmp_job.prodSourceLabel not in ['managed', 'user'])",
+    ]
+    assert accumulation.per == ["tmp_file in tmp_job.Files"]
+    assert [(a.entry, a.subject, a.op, a.values, a.object) for a in accumulation.condition_atoms] == [
+        (0, "FileSpec.type", "==", ["'input'"], "tmp_file"),
+        (1, "JobSpec.prodSourceLabel", "not in", ["'managed'", "'user'"], "tmp_job"),
+    ]
+    assert counted.accumulated == [] and again.accumulated == []
+
+    label = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.prodSourceLabel", subject="JobSpec.prodSourceLabel",
+        owner=f"{rel}::Setupper.correct_lfn",
+        branches=[Branch(outcome="managed", line=line("FIRST")), Branch(outcome="test", line=line("SECOND"))],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    progress.attach_condition_atoms([label], modules, progress.equipped_attributor(modules, declarations), declarations)
+    first, second = label.branches
+    assert first.accumulated == []
+    assert [(one.line, one.amount, one.per) for one in second.accumulated] == [(line("SUFFIX"), "'_x'", [])]
+
+    handling = JunctionNode(
+        map_id=MAP_ID, derived_from=VERSION, name="n:JobSpec.specialHandling", subject="JobSpec.specialHandling",
+        owner=f"{rel}::Setupper.correct_lfn", branches=[Branch(outcome="lb:1", line=line("ALT"))],
+        anchor=Anchor(package="p", file=rel, line_start=3),
+    )
+    progress.attach_condition_atoms([handling], modules, progress.equipped_attributor(modules, declarations), declarations)
+    assert handling.branches[0].accumulated == []
 
 
 def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_constants():
@@ -23730,3 +23826,66 @@ def test_a_branch_any_recognizer_makes_names_its_attributes_compared_with_consta
         ("JediTaskSpec.status", "==", ["'running'"], "taskSpec"),
     ]
     assert atoms["JediTaskSpec.status"] == [("JediTaskSpec.oldStatus", "is", ["None"], "taskSpec")]
+
+
+def test_a_log_file_is_written_by_the_services_whose_processes_import_its_logger_and_do_not_bind_it_again(tmp_path):
+    """``OraDBProxy`` opens ``DBProxy`` as ``_logger``; ``JediDBProxy``, which only JEDI's processes import, binds
+    ``OraDBProxy._logger`` to its own: the server writes ``panda-DBProxy.log`` and JEDI ``panda-JediDBProxy.log``.  A
+    module both import is both's; one only the server imports is the server's.  An import only a type checker runs
+    does not count, and ``importlib.import_module`` of a literal name does."""
+    from pathlib import Path as _Path
+
+    from bamboo.codemap import calls as calls_mod
+
+    sources = {
+        "pandaserver/__init__.py": "",
+        "pandaserver/taskbuffer/__init__.py": "",
+        "pandaserver/taskbuffer/OraDBProxy.py": (
+            "from typing import TYPE_CHECKING\n"
+            "if TYPE_CHECKING:\n"
+            "    from pandajedi.jedicore import JediDBProxy\n"
+            '_logger = PandaLogger().getLogger("DBProxy")\n'
+            "class DBProxy:\n    pass\n"
+        ),
+        "pandaserver/taskbuffer/TaskBuffer.py": (
+            'from pandaserver.taskbuffer import OraDBProxy\n_logger = PandaLogger().getLogger("TaskBuffer")\n'
+        ),
+        "pandaserver/daemons/__init__.py": "",
+        "pandaserver/daemons/datasetManager.py": (
+            'from pandaserver.taskbuffer import TaskBuffer\n_logger = PandaLogger().getLogger("datasetManager")\n'
+        ),
+        "pandaserver/workflow/__init__.py": "",
+        "pandaserver/workflow/workflow_core.py": (
+            'import importlib\ndef proxy():\n    return importlib.import_module("pandajedi.jediorder.JediMsgProcessor")\n'
+        ),
+        "pandajedi/__init__.py": "",
+        "pandajedi/jedicore/__init__.py": "",
+        "pandajedi/jedicore/JediDBProxy.py": (
+            "from pandaserver.taskbuffer import OraDBProxy\n"
+            'logger = PandaLogger().getLogger("JediDBProxy")\n'
+            "OraDBProxy._logger = logger\n"
+        ),
+        "pandajedi/jedicore/JediTaskBuffer.py": (
+            "from pandaserver.taskbuffer import TaskBuffer\nfrom pandajedi.jedicore import JediDBProxy\n"
+        ),
+        "pandajedi/jediorder/__init__.py": "",
+        "pandajedi/jediorder/JediMsgProcessor.py": '_logger = PandaLogger().getLogger("JediMsgProcessor")\n',
+    }
+    for rel, text in sources.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    roots = {package: _Path(tmp_path / package) for package in ("pandaserver", "pandajedi")}
+    types = calls_mod.Types(roots, {})
+    modules = [_module(text, rel) for rel, text in sources.items()]
+    declared = logfile.declared_files(modules)
+
+    found = {one.file: (one.services, one.declared_in, one.rebound_by) for one in logfile.file_services(modules, types, declared)}
+
+    assert found == {
+        "panda-DBProxy.log": (["server"], "pandaserver/taskbuffer/OraDBProxy.py", ["pandajedi/jedicore/JediDBProxy.py"]),
+        "panda-JediDBProxy.log": (["jedi"], "pandajedi/jedicore/JediDBProxy.py", []),
+        "panda-TaskBuffer.log": (["jedi", "server"], "pandaserver/taskbuffer/TaskBuffer.py", []),
+        "panda-datasetManager.log": (["server"], "pandaserver/daemons/datasetManager.py", []),
+        "panda-JediMsgProcessor.log": (["jedi", "server"], "pandajedi/jediorder/JediMsgProcessor.py", []),
+    }

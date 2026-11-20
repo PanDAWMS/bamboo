@@ -50,6 +50,7 @@ the values are the caller's, and each carries where it came from.
 from __future__ import annotations
 
 import ast
+import functools
 import itertools
 import json
 import math
@@ -427,12 +428,23 @@ class Solved:
     consistent: bool
 
 
-def solve(test: str, outcome: bool, env: Env) -> Solved:
-    """What *test* coming out *outcome* says of its unknown atoms."""
+@functools.lru_cache(maxsize=None)
+def _parsed_test(test: str) -> tuple[ast.expr, tuple[tuple[str, ast.AST], ...]]:
+    """*test* parsed, and its atoms by their text, first one first: read once per text, so that the nodes, and the
+    texts :func:`text_of` keeps on them, serve every :func:`solve` of it.  Nothing here writes a node but its
+    text."""
     tree = ast.parse(strip_annotation(test), mode="eval").body
     found: dict[str, ast.AST] = {}
     for atom in atoms(tree):
-        found.setdefault(ast.unparse(atom), atom)
+        found.setdefault(text_of(atom), atom)
+    return tree, tuple(found.items())
+
+
+def solve(test: str, outcome: bool, env: Env) -> Solved:
+    """What *test* coming out *outcome* says of its unknown atoms.  The test is parsed once per text
+    (:func:`_parsed_test`): the walk solves the same test on every path through it."""
+    tree, parsed = _parsed_test(test)
+    found: dict[str, ast.AST] = dict(parsed)
     known: dict[str, bool] = {}
     unknown: list[str] = []
     for text, atom in found.items():

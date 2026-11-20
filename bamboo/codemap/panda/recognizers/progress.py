@@ -1273,7 +1273,9 @@ def attach_condition_atoms(
             branch.condition_atoms = condition_atoms(
                 branch.path_condition, func, attributor, owner_class, declarations, bound
             )
-            branch.accumulated = accumulations(branch.outcome, func, attributor, owner_class, declarations, bound)
+            branch.accumulated = accumulations(
+                branch.outcome, func, attributor, owner_class, declarations, bound, branch.line or 0
+            )
             given += bool(branch.condition_atoms)
     return given
 
@@ -1334,24 +1336,49 @@ def accumulations(
     owner_class: Optional[str],
     declarations: dict[str, set[str]],
     bound: Optional[Callable[[str], Optional[str]]] = None,
+    line: int = 0,
 ) -> list[Accumulation]:
-    """:attr:`Branch.accumulated` of a branch of *func* whose outcome is *outcome*: where it is a column plus or less
-    a value taken from a container (:data:`_COUNTED`), each statement of *func* adding to or taking from an entry
-    keyed by the column's name -- ``datasetContentsStat[datasetID]['nFilesFinished'] += 1`` --, with its path
-    condition read as a write's branch's is (its tests, then the exits above it) and its atoms.  Not read: an entry
-    rebuilt whole (``C[k]['col'] = C[k]['col'] + 1``)."""
-    counted = _COUNTED.match(outcome)
-    if counted is None or func is None:
+    """:attr:`Branch.accumulated` of a branch of *func* at *line* whose outcome is *outcome*.
+
+    Where the outcome is a column plus or less a value taken from a container (:data:`_COUNTED`): each statement of
+    *func* adding to or taking from an entry keyed by the column's name --
+    ``datasetContentsStat[datasetID]['nFilesFinished'] += 1``.  Where the branch's statement sets an attribute of an
+    object (:func:`_set_attribute`) -- setupper's ``tmp_job.nInputDataFiles = 0`` --: each statement of *func* after
+    it adding to or taking from that attribute, spelled the same, inside the block that holds the branch's statement
+    (``tmp_job.nInputDataFiles += 1``), so that each run of the branch is followed by them -- less one a later set
+    of the attribute always runs before, the nearer set's (event_picker's ``self.user_task_name += "/"``).  Each
+    with its path condition read as a write's branch's is (its tests, then the exits above it), its atoms, and the
+    loops it runs once an element of that do not hold the branch's statement (*per*).  Not read: an entry rebuilt
+    whole (``C[k]['col'] = C[k]['col'] + 1``), an attribute set again from itself (``o.a = o.a + 1``)."""
+    if func is None:
         return []
-    column = counted.group(1).lower()
+    start = _statement_at(func, line)
+    counted = _COUNTED.match(outcome)
+    target = _set_attribute(start)
+    if counted is None and target is None:
+        return []
+    column = counted.group(1).lower() if counted is not None else ""
     found = []
     for node in walk(func):
-        if not (
-            isinstance(node, ast.AugAssign)
-            and isinstance(node.op, (ast.Add, ast.Sub))
-            and isinstance(node.target, ast.Subscript)
-            and isinstance(node.target.slice, ast.Constant)
-            and str(node.target.slice.value).lower() == column
+        if not (isinstance(node, ast.AugAssign) and isinstance(node.op, (ast.Add, ast.Sub))):
+            continue
+        if counted is not None:
+            if not (
+                isinstance(node.target, ast.Subscript)
+                and isinstance(node.target.slice, ast.Constant)
+                and str(node.target.slice.value).lower() == column
+            ):
+                continue
+        elif not (
+            start is not None
+            and ast.unparse(node.target) == target
+            and node.lineno > start.lineno
+            and _follows(start, node)
+            and not any(
+                start.lineno < other.lineno < node.lineno and _follows(other, node)
+                for other in walk(func)
+                if isinstance(other, ast.stmt) and other is not start and _set_attribute(other) == target
+            )
         ):
             continue
         tests = pathcond.path_condition(node)
@@ -1363,9 +1390,63 @@ def accumulations(
                 amount=ast.unparse(node.value),
                 path_condition=entries,
                 condition_atoms=condition_atoms(entries, func, attributor, owner_class, declarations, bound),
+                per=_loops_apart(node, start, func),
             )
         )
     return sorted(found, key=lambda one: one.line)
+
+
+def _statement_at(func: ast.FunctionDef | ast.AsyncFunctionDef, line: int) -> Optional[ast.stmt]:
+    """The first statement of *func* (its own, a nested function's left out) starting at *line*; ``None`` where none
+    does."""
+    found = [node for node in walk(func) if isinstance(node, ast.stmt) and node is not func and node.lineno == line]
+    return min(found, key=lambda node: node.col_offset) if found else None
+
+
+def _follows(statement: ast.stmt, node: ast.stmt) -> bool:
+    """Whether *node* is in a statement after *statement* in the block holding it, or is one: whenever *node* runs
+    there, *statement* ran before it (a loop's next pass aside).  The block, not its owner: the ``else`` of an
+    ``if`` whose body holds *statement* is the other way (JobSpec.setLumiBlockNr's ``specialHandling`` set and
+    ``+=``)."""
+    parent = getattr(statement, "parent", None)
+    for field in ("body", "orelse", "finalbody"):
+        block = getattr(parent, field, None)
+        if not isinstance(block, list):
+            continue
+        at = next((index for index, one in enumerate(block) if one is statement), None)
+        if at is None:
+            continue
+        later = {id(one) for one in block[at + 1:]}
+        return id(node) in later or any(id(one) in later for one in pathcond.ancestors(node))
+    return False
+
+
+def _set_attribute(statement: Optional[ast.stmt]) -> Optional[str]:
+    """``o.a`` where *statement* is ``o.a = value`` (one target), its value not read off ``o.a`` itself; else ``None``."""
+    if not (isinstance(statement, ast.Assign) and len(statement.targets) == 1):
+        return None
+    target = statement.targets[0]
+    if not isinstance(target, ast.Attribute):
+        return None
+    spelled = ast.unparse(target)
+    if any(isinstance(node, ast.Attribute) and ast.unparse(node) == spelled for node in walk(statement.value)):
+        return None
+    return spelled
+
+
+def _loops_apart(
+    node: ast.AST, start: Optional[ast.stmt], func: ast.FunctionDef | ast.AsyncFunctionDef
+) -> list[str]:
+    """The ``for`` loops of *func* around *node* that are not around *start*, outermost first, as ``target in
+    iterable``: *node* runs once for each element of them its condition admits, for each run of *start*."""
+    held = set(map(id, pathcond.ancestors(start))) if start is not None else set()
+    loops = []
+    for ancestor in pathcond.ancestors(node):
+        if ancestor is func:
+            break
+        if isinstance(ancestor, (ast.For, ast.AsyncFor)) and id(ancestor) not in held:
+            loops.append(f"{ast.unparse(ancestor.target)} in {ast.unparse(ancestor.iter)}")
+    return loops[::-1]
 
 
 def condition_atoms(

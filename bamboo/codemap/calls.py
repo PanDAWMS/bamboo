@@ -2741,7 +2741,7 @@ def _module_statements(body: list[ast.stmt]):
     return (node for node, _checking in _checked_statements(body))
 
 
-def _checking_test(test: ast.expr) -> Optional[bool]:
+def checking_test(test: ast.expr) -> Optional[bool]:
     """``True`` for the test of ``if TYPE_CHECKING:``, ``False`` for ``if not TYPE_CHECKING:``, ``None`` for any other."""
     negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
     inner = test.operand if isinstance(test, ast.UnaryOp) and negated else test
@@ -2755,7 +2755,7 @@ def _checked_statements(body: list[ast.stmt], checking: bool = False):
     for node in body:
         yield node, checking
         if isinstance(node, ast.If):
-            test = _checking_test(node.test)
+            test = checking_test(node.test)
             yield from _checked_statements(node.body, checking or test is True)
             yield from _checked_statements(node.orelse, checking or test is False)
         elif isinstance(node, ast.Try):
@@ -3974,6 +3974,14 @@ class Types:
             # the top of ``panda.py``, a module's caller (:class:`CallSite`).
             if isinstance(func, ast.Module):
                 return self._imported_instance(file, name, depth)
+            # A name a nested function reads and does not bind is its
+            # enclosing function's, as Python reads it (pathcond.closure_scope):
+            # record_response, in run_logged_task_command, calls
+            # task_buffer.set_task_command_response on run_logged_task_command's
+            # parameter, declared a TaskBuffer.
+            outer = None if name in pathcond.declared_names(func)[0] else pathcond.closure_scope(func, name, pathcond.holds)
+            if outer is not None:
+                return self._of_name(file, outer, name, depth + 1)
             return self._outside_instance(file, name, depth)
         found = {self.declared(file, func, value, depth + 1, bound) for value in assigned}
         found.update(one for one in others if one is not None)

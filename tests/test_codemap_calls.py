@@ -2546,6 +2546,35 @@ def f(tb: Buffer, ch: Child, ng: Negated, inh: Inherits):
     assert held is not None and held[1].name == "work" and held[0].endswith("proxy.py")
 
 
+def test_a_receiver_a_nested_function_reads_from_its_enclosing_function_is_declared_there(tmp_path):
+    """``record_response``, nested in ``run_logged_task_command``, calls ``task_buffer.set_task_command_response`` on
+    the enclosing function's parameter, declared a TaskBuffer: Python reads the name there, and so does the
+    placement.  A nested function declaring the name ``global`` reads the module's."""
+    roots = _tree(
+        tmp_path,
+        tb=_BUFFER,
+        m='''\
+from pkg.tb import JediTaskBuffer
+
+task_buffer = None
+
+def run(task_buffer: JediTaskBuffer):
+    def record():
+        task_buffer.getTask(1)
+
+    def elsewhere():
+        global task_buffer
+        task_buffer.getTask(2)
+
+    return record, elsewhere
+''',
+    )
+    calls = _calls(roots)
+
+    assert _where(_placed(calls, "m", "record", "task_buffer.getTask")) == [("JediTaskBuffer", "getTask")]
+    assert _placed(calls, "m", "elsewhere", "task_buffer.getTask").targets == ()
+
+
 def test_a_type_alias_names_the_class_it_quotes(tmp_path):
     """``TaskBufferLike: TypeAlias = "TaskBuffer"``, the class imported under ``TYPE_CHECKING``: a parameter declared
     the alias is a TaskBuffer.  A string bound without ``TypeAlias`` is a string."""

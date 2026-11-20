@@ -359,6 +359,22 @@ NOT_COMPARED_PARTS: dict[str, str] = {
         "records beside the nodes, not nodes: what each except handler prints when it is entered -- see "
         "HandlerMark; a dump's section compare reads them"
     ),
+    "log_file_services": (
+        "records beside the nodes, not nodes: which services' processes write each log file -- see "
+        "LogFileServices; a dump's section compare reads them"
+    ),
+    "plugin_factories": (
+        "records beside the nodes, not nodes: the classes reading an instance's recorded plugin configuration -- "
+        "see PluginFactory; a dump's section compare reads them"
+    ),
+    "plugin_choices": (
+        "records beside the nodes, not nodes: the plugin a recorded configuration names for each vo, label and sub "
+        "type -- see PluginChoice; a dump's section compare reads them"
+    ),
+    "process_items": (
+        "records beside the nodes, not nodes: the items of a recorded process list, per loop reading it -- see "
+        "ProcessItem; a dump's section compare reads them"
+    ),
     "row_key_sources": _REPORT,
     "key_froms": (
         "records beside the nodes, not nodes: where each row-naming bind of a write was filled from -- see KeyFrom; "

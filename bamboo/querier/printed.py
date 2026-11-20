@@ -568,6 +568,9 @@ class Hole:
     roots: frozenset[str]
     #: an attribute, an item, or a container: a call naming it can change it
     sensitive: bool
+    #: :meth:`valid_after`'s answers by the marks asked: the walker asks each hole on every path of every walk, the
+    #: same marks again and again (NJ-starting-late: 67 million ``affects`` under cProfile)
+    _valid: dict = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def make(cls, expr: str, value: str | None, source: str) -> "Hole":
@@ -581,6 +584,13 @@ class Hole:
         return cls(expr, value, source, cs, frozenset(root(c) for c in cs) - {""}, sensitive)
 
     def valid_after(self, marks: frozenset[str] | set[str]) -> bool:
+        key = marks if isinstance(marks, frozenset) else frozenset(marks)
+        got = self._valid.get(key)
+        if got is None:
+            got = self._valid[key] = self._valid_after(key)
+        return got
+
+    def _valid_after(self, marks: frozenset[str]) -> bool:
         for m in marks:
             if m.endswith("()"):
                 handed = m[:-2]

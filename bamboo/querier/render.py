@@ -157,7 +157,15 @@ TEMPLATES: dict[str, str] = {
     "a-run-that-shows-ran": "a run that shows {fn_name}:{chosen_line} ran ({why})",
     "left-by-elimination-no-pass": "left by elimination, no pass of it at the window",
     "no-pass-at-the-window": "no pass of it at the window; {left}",
-    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}",
+    "no-run-shows-the-line-ran": "{said} ({by_elimination}no run shows the line ran; {how}), {at}{holes}{store}{counted}{clock}",
+    "clock-writers": "; chosen over the other positive arms, each writing the clock: {others:join=; }",
+    "clock-writer-in": "{name} was last only where its write fell within {second} (its run {first} .. {last})",
+    "clock-writer-off": "{name}'s run ({first} .. {last}) holds no write at {second}",
+    "counted-over-linked": ("; the rows file's {cls} rows linked by {via} count it: {n} of {m} with {atoms:join= and } "
+                            "({per:join=, } read as those rows), {base} {op} {n} x {amount} = {total}, {match}; its "
+                            "condition as the map writes it, {rest:join=; }, read in those atoms alone"),
+    "the-observed-value": "the observed value",
+    "not-the-observed-value": "not the observed value {observed!r}",
     "by-elimination": "by elimination: ",
     "not-searched-there": "; not searched there: {holes:join=; }",
     "its-conditions": " (its conditions: {unread:join=, })",
@@ -468,6 +476,8 @@ TEMPLATES: dict[str, str] = {
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
     "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{before:join=}{kept:join=}{refused}{idle}; premises: {premises:join=; }{unknown:join=}",
+    "for-a-callee-by-a-linked-value": "for {callee}'s runs by the row's linked {column} values, from {start} to {end}",
+    "moved-by-the-caller-through-a-linked-callee": "{caller} moved it: its pass on {machine} ran {callee} (its call at {lines}) from {start}, its run marked by the row's linked {column}, and then {mover} at {at}; of the mover's callers only {caller}'s calls reach {callee} (the map's calls) -- next: what called {caller}; premises: {premises:join=; }",
     "for-the-worker-s-passes-before": "for {worker}'s passes on other rows on {machine}, by {head!r} (its run mark before the key)",
     "the-worker-s-passes-before": "; on {machine}, between the selection's return at {start} and that pass at {end}, {worker} ran on {n} other row(s){span}{how}",
     "the-worker-s-passes-before-asked": "; what ran on {machine} between the selection's return at {start} and that pass at {end} is asked",
@@ -635,7 +645,7 @@ TEMPLATES: dict[str, str] = {
     "reading-to-give-every-count-the-passes": "reading 2 to give every count the passes printed",
     "s-print-at-among-its-rows": "{func}'s print at {printed_line} among its rows",
     "said": "{what} = {found}",
-    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}{store}",
+    "shown-in-its-run": "{said} (shown in its run; {how}), {at}: {question_describe}{store}{counted}{clock}",
     # what an attribute's END leaves unread of its value reaching the row (KNOWN_ISSUES.md K41)
     "row-written-later-not-read": "; its row is written by a later statement or call, which is not read (KNOWN_ISSUES.md K41)",
     "failure-caught-not-read": "; its statement's failure is caught in {fn} (except at {line}) and the call returns: that it "
@@ -832,6 +842,12 @@ TEMPLATES: dict[str, str] = {
     "history-no-column-why": "its status history here holds no {attr}",
     "logs-not-asked-not-ruled-out": "its logs are not asked: a run not found would not rule it out ({failing:join=; }) (KNOWN_ISSUES.md K15)",
     "premise-why": "{premise}: {why}",
+    # the harness's rnd14 costs: a writer marking no run by the key, over a window holding the row's move
+    "shared-logs-not-asked-bare": "  {func}: {logs:join=, } not asked by the key alone from {start} to {end} (the records do not answer it): its marks hold no key, and the window holds the row's move at {move}, where every call of the key's object and of the rows tied to it prints the key there (the logs most functions print into); not searched there",
+    # P70: a mover read from its last take on
+    "the-last-take": "{where:join=, } surely held for the row in {n} span(s) from {first} to {end} before the one it was moved on in, and surely failed between them, on the writes the records show{premises}; the value stayed {observed!r} till {moved}: its passes are read from just after the take before the last ({prev}), the last at {end}",
+    "the-last-take-premises": ", where {premises:join= and }",
+    "passes-before-the-last-take": "{n} pass(es) ending before {begin} not read: {why}",
     "ran-followed-for-late": "ran: a run of the key in {logs} between {window:join= and }, and L1 names another mover: followed on its own, which way its passes in the stay went (KNOWN_ISSUES.md K15)",
     "no-pass-of-in-the-stay": "no pass of {func} with the key in the stay ({since} .. {moved}): its runs fall outside it, so it did not take the row there (KNOWN_ISSUES.md K15)",
     "mover-that-moved-it-label": "mover {owner}, which moved it on",
@@ -849,7 +865,10 @@ TEMPLATES: dict[str, str] = {
     "took-it-before-heads-uncut": "{func}{lines:join=, } took it before, at {at} on {machine}: its mark's records there from {first} to {last} hold no pass of it cut around the take: which way that pass went is not read",
     # bundle F, F-4: a take the row's value of a time column the mover's own arms alone wrote shows
     "took-it-by-the-row-value": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass on {machine} from {first} to {last}",
-    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on every machine from {first} to {last} ({n} ask(s))",
+    "took-it-by-the-row-value-asked": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is asked by its mark on {on} from {first} to {last} ({n} ask(s))",
+    "every-machine": "every machine",
+    "every-jedi-machine": "every JEDI machine",
+    "not-asked-off-jedi": "{func}'s passes are not asked of {logs:join=, }, machines the records name another service's: every route into it passes {entered:join=, }, in pandajedi, whose code runs in JEDI's processes alone (H-3)",
     "took-it-by-the-row-value-others": "{func}'s logs on {n} other machine-file(s) around {at} are not in the records and not asked: another pass of it there writing {column} then is not ruled out",
     "took-it-by-the-row-value-unread": "{func} took it before, at {at}, writing {column} by {arms:join= or } (the row's value): its pass then is not read",
     "unprinted-take": "and that pass printed no key at {line}, which {func} prints for a row it selects and keeps: its condition, {condition}, was false for the row then (read: {read:join=, }; open: {open:join=, }); premises: {premises:join=; }",
