@@ -33,7 +33,7 @@ import os
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import PrintRow
@@ -650,6 +650,58 @@ def _map_usable(pattern: str) -> bool:
     return len(_map_text(pattern).replace(" ", "")) >= MIN_SHAPE
 
 
+def hole_literals(capture: str, group: int) -> tuple[str, str] | None:
+    r"""The literal text right before and right after the *group*-th group of a map row's ``capture`` (every hole a
+    group, :attr:`SkeletonHole.group`), escapes undone: ``("update_job(", ", ")`` for pilot_api's update_job 516,
+    ``update_job\(([^,]*),\ ...``.  None where the group is not one of the pattern's own (inside another group) or
+    the capture has no such group."""
+    parts: list[tuple[str, str | int]] = []
+    i, depth, count = 0, 0, 0
+    while i < len(capture):
+        c = capture[i]
+        if c == "\\" and i + 1 < len(capture):
+            if depth == 0:
+                parts.append(("lit", capture[i + 1]))
+            i += 2
+        elif c == "[":
+            # a class, up to its closing bracket (a first ']' or one escaped is in it)
+            j = i + 1 + (capture[i + 1:i + 2] == "^")
+            j += capture[j:j + 1] == "]"
+            while j < len(capture) and capture[j] != "]":
+                j += 2 if capture[j] == "\\" else 1
+            if depth == 0:
+                parts.append(("other", ""))
+            i = j + 1
+        elif c == "(":
+            if not capture.startswith("(?", i) or capture.startswith("(?P<", i):
+                count += 1
+                if depth == 0:
+                    parts.append(("group", count))
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+        else:
+            if depth == 0:
+                parts.append(("other", "") if c in ".*+?{}|^$" else ("lit", c))
+            i += 1
+    at = next((k for k, p in enumerate(parts) if p == ("group", group)), None)
+    if at is None:
+        return None
+    before: list[str] = []
+    after: list[str] = []
+    for kind, text in reversed(parts[:at]):
+        if kind != "lit":
+            break
+        before.append(str(text))
+    for kind, text in parts[at + 1:]:
+        if kind != "lit":
+            break
+        after.append(str(text))
+    return "".join(reversed(before)), "".join(after)
+
+
 @dataclass
 class Row:
     rel: str
@@ -996,10 +1048,13 @@ def _found(writers: list, record: Record, log: str) -> list[tuple[str, PrintRow]
     ``f"{PandaID} skip since {scope}:{lfn} is missing with rule"`` was read by no function's row here, so
     :func:`whole_writers` named none for ActivatorThr's 863, which finds the record inside it (I-5, MJ-assigned-late)."""
     by_text = writers[2]
-    if record.text not in by_text:
-        by_text[record.text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(record.text)]
-    line = f"{record.token} {record.text}"
-    found = [(o, r) for o, p, logs, r in by_text[record.text] if (logs is None or log in logs) and (p is None or p.match(line))]
+    # the record's text once: it is a property, and the rows' patterns are thousands (NJ-starting-late: 650 million
+    # reads of it under cProfile, 104 thousand texts)
+    text = record.text
+    if text not in by_text:
+        by_text[text] = [(o, p, logs, r) for regex, o, p, logs, r in writers[1] if regex.search(text)]
+    line = f"{record.token} {text}"
+    found = [(o, r) for o, p, logs, r in by_text[text] if (logs is None or log in logs) and (p is None or p.match(line))]
     found += [(o, r) for regex, o, _, logs, r in writers[5].get(record.token, ())
               if (logs is None or log in logs) and regex.match(line) and (o, r) not in found]
     if record.token:
@@ -1319,7 +1374,27 @@ class Seen:
                        unambiguous={k: v for k, v in self.unambiguous.items() if k not in drop})
 
 
+#: :func:`seen`'s answers by the function's, the run's and the installed map's identity and the mode, each held with
+#: the three objects so no id is reused while the answer is kept.  L2's column timelines ask the same pair millions of
+#: times (NT-throttled-late: 3.7 million calls; 1020 s -> 701 s with this, the output the same, 11-19).
+_SEEN: dict[tuple[int, int, int, str], tuple[Function, Run, Any, Seen]] = {}
+
+
 def seen(fn: Function, run: Run, mode: str) -> Seen:
+    """*run*'s records as *fn*'s rows find them (``Seen``), computed once per function, run, map and mode: a Seen is
+    not changed by its readers (:meth:`Seen.without` makes a new one), and what it reads of the map (the rows reading
+    a record whole, :func:`_whole_first`) is the installed map's."""
+    frag = mapdump.fragment()
+    key = (id(fn), id(run), id(frag), mode)
+    held = _SEEN.get(key)
+    if held is not None and held[0] is fn and held[1] is run and held[2] is frag:
+        return held[3]
+    answer = _seen_of(fn, run, mode)
+    _SEEN[key] = (fn, run, frag, answer)
+    return answer
+
+
+def _seen_of(fn: Function, run: Run, mode: str) -> Seen:
     hits: dict[int, list[tuple[int, int, str]]] = {}
     owner = ""
     for i, record in enumerate(run.records):

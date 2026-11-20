@@ -71,6 +71,7 @@ from bamboo.codemap.models import (  # noqa: E402
 from bamboo.codemap.panda import changes as MC  # noqa: E402
 from bamboo.codemap.panda import fills, flow, sqltext  # noqa: E402
 from bamboo.querier import asked, mapdump, row_names  # noqa: E402
+from bamboo.querier import attr_time as AT  # noqa: E402
 from bamboo.querier import changed as CH  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import map_reach as MR  # noqa: E402
@@ -595,6 +596,11 @@ class Verdict:
     proven: list[int] = field(default_factory=list)
     #: D-4: why the call arm hands no element of the key's turn (:func:`turn_left_before_append`), empty otherwise
     unhanded: str = ""
+    #: P71: a positive shown by a print holding the observed value it wrote (P35's bind map, P1's printed local)
+    shown: bool = False
+    #: P71: where this was chosen over other positives writing the clock, each ``(arm, first, last, second, inside)``:
+    #: its run's span, the observed second, and whether the span holds that second (a premise of the choice)
+    clock_others: list = field(default_factory=list)
 
     def describe(self) -> str:
         return f"{self.kind:10s} {Path(self.candidate.rel).name}::{self.candidate.func}:{self.line}  " + "; ".join(self.reasons)
@@ -1767,9 +1773,47 @@ def printed_write_arms(fn: R.Function, sn: R.Seen, verdicts: list[Verdict], subj
         if len(left) == 1 and left[0].kind == "kept":
             out = sorted(v.line for v in mine if v is not left[0])
             left[0].kind = "positive"
+            left[0].shown = True
             left[0].reasons.append(
                 f"P35: row {shown.row.line} printed the map {wp.statement}'s statement ran with {shown.where}, "
                 f"{bind}={observed!r}; of its arms of {subject}, the others ({out}) did not give it there")
+
+
+def shown_over_clock(positives: list[Verdict], subject: str, observed: str, runs_of: dict) -> tuple[Verdict, str] | None:
+    """P71 (the harness's T check, NR-T-53639338-stateChangeTime, delegated design): of several positive arms of a time
+    column, one a print shows wrote the observed value (``Verdict.shown``) is the last writer where every other writes
+    the clock (``attr_time.NOW``, the map's arm): one of those last would have left its own second, so it was last only
+    where it wrote within the observed one -- said; and not at all where its pass holds no such second.  updateTask_JEDI
+    1467's print shows ``:stateChangeTime='2026-11-13 15:29:16'``; prepareTasksToBeFinished_JEDI 3840 writes
+    CURRENT_DATE in a pass from 15:28:26 to 15:29:40.  ``(chosen, how)``, or None: no such one arm, an other not a clock
+    write, or a value no time."""
+    try:
+        at = datetime.datetime.fromisoformat(observed.strip()[:19])
+    except ValueError:
+        return None
+    shown = [v for v in positives if v.shown]
+    if len(shown) != 1:
+        return None
+    words, facts = [], []
+    for v in positives:
+        if v is shown[0]:
+            continue
+        arms = branches_at(subject, v.candidate.owner, v.line)
+        if not arms or any(b.outcome not in AT.NOW for b in arms):
+            return None
+        run = runs_of.get(v.candidate.owner)
+        first, last = (getattr(run, "first", "") or "")[:19], (getattr(run, "last", "") or "")[:19]
+        name = f"{v.candidate.func}:{v.line}"
+        second = f"{at:%Y-%m-%d %H:%M:%S}"
+        inside = not (first and last and not first <= second <= last)
+        facts.append((name, first, last, second, inside))
+        if not inside:
+            words.append(f"{name} writes the clock and its pass ({first} .. {last}) holds no write at {second}")
+        else:
+            words.append(f"{name} writes the clock: it was last only where its write fell within {second}")
+    s = shown[0]
+    s.clock_others = facts
+    return s, f"P71: {s.candidate.func}:{s.line} shown writing {observed.strip()}; " + "; ".join(words)
 
 
 def branches_at(subject: str, owner: str, line: int, fragment: Any = None) -> list:
@@ -2857,6 +2901,7 @@ def judge(
             named, raised = R.raised_in(sn.fn, sn.run)
             if why := printed_local(sn.fn, sn, stmt, observed, env, raised if named else set()):
                 v.kind = "positive"
+                v.shown = True
                 v.reasons.append(why)
 
     # J on each kept candidate: the call ran the outermost if of its chain a print shows it ran, entered no handler
@@ -2898,6 +2943,9 @@ def judge(
         how = change.how
     elif len(positives) == 1 and (decide != "strict" or not unexamined):
         chosen, how = positives[0], "positive evidence"
+    elif len(positives) > 1 and (p71 := shown_over_clock(
+            positives, env.written if env is not None and env.written else subject, observed, runs_of)) is not None:
+        chosen, how = p71
     elif len(positives) > 1:
         how = f"{len(positives)} positive"
     elif complete and len(left) == 1 and (not unexamined or (holds_write and decide != "strict")):
