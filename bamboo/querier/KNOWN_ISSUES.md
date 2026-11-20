@@ -2015,6 +2015,13 @@ updateUnmergedDatasets' 'ready' 18 hours before the merge job was made.  Only th
 less EDGE, or the stay's start) are read now, as A2 reads its stay; none there says none.  The 18 hours between (the
 JobGenerator's brokerage failing to place the merge jobs) are P76, not read.
 
+*Changed (P76's first step, the investigator's u16, 2026-11-20):* where no waker wrote for the key in the span asked,
+the last such write the records show before it is said, with how long before the birth it was, and why the maker made
+the object only then is named as not read (P76): NJ-merging-late's updateUnmergedDatasets 'ready' on aipanda094 at
+11-14 09:07:42, 18.3 h before the merge job was made.  "The records show" is the day files asked: an earlier write in
+another day is not asked for.  *Not read yet (P76's rest):* the maker's passes on the key between that write and the
+birth (JobGenerator's brokerage finding no candidates, the task set pending about every 20 min).
+
 *Changed (speed, 2026-11-20, the map's and tmaeno's reading of the investigator's speed report):* judgement's P
 (`printed.prove`, inside which_ran.judge) walked each pass of a mover's runs for each arm, and a running job's
 heartbeats print the same lines call after call: NJ-starting-late's updateJobStatus, 72 passes on 9 machines, its

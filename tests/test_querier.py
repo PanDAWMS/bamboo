@@ -21124,7 +21124,12 @@ def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_b
     assert got["asked"]["kept"] == 2 and "are asked (2 ask(s))" in got["asked"]["said"][0], got
     assert got["none"]["said"] == ["its maker's selection _get_tasks_datasets_with_unprocessed_inputs@1872: no waker of it wrote "
                                    "for the key from 2026-11-14 17:35:57 to 2026-11-14 17:45:57"], got
-    assert got["before the span"]["said"] == got["none"]["said"], got
+    # P76: none in the span, the last the records show before it said, with how long before the birth
+    assert got["before the span"]["said"] == [
+        "its maker's selection _get_tasks_datasets_with_unprocessed_inputs@1872: no waker of it wrote for the key from "
+        "2026-11-14 17:35:57 to 2026-11-14 17:45:57; the last such write the records show before that was "
+        "updateUnmergedDatasets:1971's (ready) at 2026-11-13 23:07:42 on aipanda099, 18.6 h before the JobSpec was made: "
+        "why the maker made it only then is not read (P76)"], got
     # the INSERT's site reached from no selection's function: nothing said
     assert got["no maker reach"] == [], got
 

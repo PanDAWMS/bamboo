@@ -9409,6 +9409,15 @@ class Rerun:
         # investigator's u16: NJ-merging-late named a 'ready' 18 hours before the merge job was made)
         before = sorted((w for w in writes if W.when(since) <= w[0] <= born), key=lambda w: w[0])
         if not before:
+            # P76 (the investigator's u16): the last such write the records show before the span, where they hold one --
+            # the maker made the object only that long after it, and why is the next question
+            earlier = sorted((w for w in writes if w[0] < W.when(since)), key=lambda w: w[0])
+            if earlier:
+                at, p, owner, line, shown = earlier[-1]
+                return [T.Said("waited-trigger-earlier", {
+                    "where": where, "since": since, "until": until, "waker": owner.split("::")[-1].rpartition(".")[2],
+                    "line": line, "values": shown, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
+                    "hours": f"{(born - at).total_seconds() / 3600:.1f}", "cls": cls})]
             return [T.Said("waited-trigger-none", {"where": where, "since": since, "until": until})]
         at, p, owner, line, shown = before[-1]
         return [T.Said("waited-trigger", {"where": where, "waker": owner.split("::")[-1].rpartition(".")[2], "line": line,

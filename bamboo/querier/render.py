@@ -575,6 +575,7 @@ TEMPLATES: dict[str, str] = {
     "waited-trigger": "its maker's selection {where} takes rows its wakers write: the last such write for the key in the 10 minutes before the {cls} was made was {waker}:{line}'s ({values:join=, }) at {at} on {machine}",
     "waited-trigger-asked": "its maker's selection {where}: its wakers' writes for the key from {since} to {until} are asked ({n} ask(s))",
     "waited-trigger-unread": "its maker's selection {where}: its wakers' writes are not read ({why})",
+    "waited-trigger-earlier": "its maker's selection {where}: no waker of it wrote for the key from {since} to {until}; the last such write the records show before that was {waker}:{line}'s ({values:join=, }) at {at} on {machine}, {hours} h before the {cls} was made: why the maker made it only then is not read (P76)",
     "waited-trigger-none": "its maker's selection {where}: no waker of it wrote for the key from {since} to {until}",
     "waited-life": "{cls} {key}'s history: {life:join=, }",
     "h-next-late": "why {cls} {key}{made} held {held} from {since} to {until}, the longest of its {status} stays in that span",
