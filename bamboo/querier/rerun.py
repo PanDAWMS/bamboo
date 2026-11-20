@@ -9378,6 +9378,7 @@ class Rerun:
         wakers' marks is 32 asks (NT-scouting-late).  An ask the records lack kept; nothing said where no selection is
         found."""
         functions: set[str] = set()
+        maker_owners: set[str] = set()
         for k in makers:
             rel, _, line = str(getattr(k, "new_row_at", "") or "").rpartition(":")
             node = R.def_holding(rel, int(line)) if rel and line.isdigit() else None
@@ -9387,6 +9388,7 @@ class Rerun:
             record = MR.graph()
             for named in (MR.owners(owner, record) if record is not None else []) or [owner]:
                 functions |= {_plain(named), *(_plain(o) for o in MR.reaching(named, 2))}
+                maker_owners |= {named, *MR.reaching(named, 2)}
         if not functions:
             return []
         readers = [rs for rs in getattr(mapdump.fragment(), "read_sites", None) or []
@@ -9417,12 +9419,74 @@ class Rerun:
                 return [T.Said("waited-trigger-earlier", {
                     "where": where, "since": since, "until": until, "waker": owner.split("::")[-1].rpartition(".")[2],
                     "line": line, "values": shown, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
-                    "hours": f"{(born - at).total_seconds() / 3600:.1f}", "cls": cls})]
+                    "hours": f"{(born - at).total_seconds() / 3600:.1f}", "cls": cls}),
+                    *self._maker_passes(maker_owners, link_column.partition(".")[0], link, at, born)]
             return [T.Said("waited-trigger-none", {"where": where, "since": since, "until": until})]
         at, p, owner, line, shown = before[-1]
         return [T.Said("waited-trigger", {"where": where, "waker": owner.split("::")[-1].rpartition(".")[2], "line": line,
                                           "values": shown, "at": f"{at:%Y-%m-%d %H:%M:%S}", "machine": p.machine.split(".")[0],
                                           "cls": cls})]
+
+    def _maker_passes(self, owners: set[str], link_cls: str, link: str, since: datetime.datetime,
+                      born: datetime.datetime) -> list[T.Said]:
+        """P76's rest (out/gm/qk-design.md, the section on P76's rest, delegated design; the investigator's u16
+        NJ-merging-late 3): why the maker made the row only *born*, long after its waker's last write (*since*).  Of the
+        maker's functions *owners*, the one whose run's mark holds *link* (:func:`key_marks` for *link_cls*:
+        JobGeneratorThread.runImpl's ``<jediTaskID={} datasetID={}>``) is asked by its marks from *since* to *born*; its
+        passes there (:func:`cut_passes`) are grouped by the rows each printed beyond those every one printed
+        (JobGenerator's "done. took cycle_t=..." ends each), the larger groups first.  Why they went so is the next
+        question, not read.  Asks the records do not answer are kept and said; nothing where no maker marks its runs
+        by the key."""
+        lo, hi = f"{since:%Y-%m-%d %H:%M:%S}", f"{born:%Y-%m-%d %H:%M:%S}"
+        for owner in sorted(owners):
+            lines = R.print_lines(owner)
+            marks = key_marks(owner, lines[0], link_cls, link) if lines else ()
+            if not marks:
+                continue
+            rel, _, qual = owner.partition("::")
+            try:
+                fn = R.function(rel, qual.rpartition(".")[2], lines[:1])
+            except (LookupError, ValueError, SyntaxError):
+                continue
+            prints = R._prints_of(owner, lines[:1])
+            files = jedi_files(owner, sorted({f for st in prints.statements for f in st.log_files}) if prints else [])
+            names = self.logs.names(files)
+            maker = qual
+            if not names:
+                return [T.Said("maker-passes-unread", {"maker": maker, "why": T.Said("no-log-to-hand", {"files": files})})]
+            asking = W.Asking((lo, hi), None, T.Said("for-the-maker-s-passes", {"maker": maker, "start": lo, "end": hi}),
+                              strings=marks)
+            runs, missed, holes = self._ask(link, names, asking, {}, quiet=True)
+            if missed:
+                self._keep_unanswered(missed)
+                return [T.Said("maker-passes-asked", {"maker": maker, "since": lo, "until": hi,
+                                                      "n": len({a.key for a, _ in missed})})]
+            printed: list[frozenset[int]] = []
+            for rs in runs.values():
+                for run in rs:
+                    if not of_mover(run, _bare(owner)):
+                        continue
+                    for part in cut_passes(fn, run, self.mode)[0]:
+                        if not W.when(lo) <= W.when(part.first) <= born + CLOCKS_APART:
+                            continue
+                        sn = R.seen(fn, part, self.mode)
+                        lines_hit = frozenset(line for line, hs in sn.hits.items() if hs)
+                        if lines_hit:
+                            printed.append(lines_hit)
+            if not printed:
+                return [T.Said("maker-passes-none", {"maker": maker, "since": lo, "until": hi,
+                                                     "unsearched": T.Said("logs-not-all-searched", {"logs": sorted(holes)}) if holes else ""})]
+            text = {r.line: r.text for r in fn.rows}
+            common = frozenset.intersection(*printed)
+            groups = Counter(lines_hit - common for lines_hit in printed)
+            return [T.Said("maker-passes", {
+                "maker": maker, "since": lo, "until": hi, "n": len(printed),
+                "common": [T.Said("maker-row", {"line": line, "text": text.get(line, "")[:60]}) for line in sorted(common)],
+                "ends": [T.Said("maker-pass-group", {"n": n, "rows": [T.Said("maker-row", {"line": line, "text": text.get(line, "")[:60]})
+                                                                      for line in sorted(rows)] or ["no other row"]})
+                         for rows, n in sorted(groups.items(), key=lambda kv: (-kv[1], sorted(kv[0])))][:4],
+                "unsearched": T.Said("logs-not-all-searched", {"logs": sorted(holes)}) if holes else ""})]
+        return []
 
     def _count_turn(self, owner: str, subject: str, since: str, before: str | None, func: str) -> bool:
         """P25 (i) (the investigator's u3/u10; the map's AGC, codemap-xliv bbc723f, and ``Branch.condition_atoms``):

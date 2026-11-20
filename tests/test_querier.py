@@ -18239,6 +18239,62 @@ def test_p74_what_called_the_caller_is_read_by_the_linked_value_on_the_moving_pa
         "AtlasAnalWatchDog.doForWaitingJobs) are asked by the linked value (1 ask(s))"), got
 
 
+def test_p76_the_makers_passes_between_its_wakers_last_write_and_the_birth_are_grouped_by_the_rows_they_printed(tmp_path):
+    """P76's rest (rerun._maker_passes, the investigator's u16 NJ-merging-late 3): JobGeneratorThread.runImpl, whose
+    run's mark holds the task, is asked by its marks from the waker's last write to the merge job's birth; its passes
+    are grouped by the rows printed beyond those every pass printed -- 'brokerage failed' (700) in all but the one that
+    made the jobs (801).  A pass outside the span is not counted; an ask the records lack is kept and said."""
+    out = _ok(_run(tmp_path, """
+        import datetime, json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import render as T
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "U1", [], "outside"
+        gen = "pandajedi/jediorder/JobGenerator.py::JobGeneratorThread.runImpl"
+        rerun.R.print_lines = lambda owner: [627] if owner == gen else []
+        rerun.key_marks = lambda owner, line, cls, key: ("<jediTaskID=5 datasetID=",) if owner == gen and cls == "JediTaskSpec" else ()
+        rows = [N(line=627, text="run brokerage"), N(line=700, text="brokerage failed"), N(line=801, text="exec jobs"),
+                N(line=963, text="done")]
+        rerun.R.function = lambda rel, func, lines=(): N(rows=rows)
+        rerun.R._prints_of = lambda owner, lines=(): N(statements=[N(log_files=["panda-JobGenerator.log"])])
+        rerun.jedi_files = lambda owner, files: files
+        r.logs = N(names=lambda files: list(files))
+        hit = lambda *lines: {line: [(i, 0, 0)] for i, line in enumerate(lines)}
+        part = lambda first, *lines: N(first=first, machine="aipanda085.cern.ch", hits=hit(*lines))
+        parts = [part("2026-11-14 09:20:00,000", 627, 700, 963), part("2026-11-14 09:40:00,000", 627, 700, 963),
+                 part("2026-11-15 03:28:20,000", 627, 801, 963), part("2026-11-15 04:00:00,000", 627, 963)]
+        rerun.of_mover = lambda run, owner: True
+        rerun.cut_passes = lambda fn, run, mode: (parts, "")
+        rerun.R.seen = lambda fn, p, mode: N(hits=p.hits)
+        asked = []
+        state = {"miss": False}
+
+        def ask(key, names, asking, owners=None, whole=False, quiet=False):
+            asked.append([key, names, list(asking.window), list(asking.strings)])
+            if state["miss"]:
+                return {}, [(N(key="k"), "")], {}
+            return {"panda-JobGenerator.log": [N()]}, [], {}
+
+        r._ask = ask
+        r._keep_unanswered = lambda m: r.unanswered.extend(m)
+        since, born = datetime.datetime(2026, 11, 14, 9, 7, 42), datetime.datetime(2026, 11, 15, 3, 28, 25)
+        owners = {gen, "pandaserver/taskbuffer/TaskBuffer.py::TaskBuffer.storeJobs"}
+        said = [T.text(x) for x in r._maker_passes(owners, "JediTaskSpec", "5", since, born)]
+        state["miss"] = True
+        missed = [T.text(x) for x in r._maker_passes(owners, "JediTaskSpec", "5", since, born)]
+        print(json.dumps({"said": said, "asked": asked, "missed": missed, "kept": len(r.unanswered)}))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["asked"][0] == ["5", ["panda-JobGenerator.log"], ["2026-11-14 09:07:42", "2026-11-15 03:28:25"],
+                               ["<jediTaskID=5 datasetID="]], got
+    assert got["said"] == ["JobGeneratorThread.runImpl's passes on the key from 2026-11-14 09:07:42 to 2026-11-15 03:28:25: 3, "
+                           "each printing 627 (run brokerage), 963 (done); by the rows the rest printed: 2 printed 700 "
+                           "(brokerage failed); 1 printed 801 (exec jobs); why they went so is not read (P76)"], got
+    assert got["kept"] == 1 and got["missed"][0].startswith("JobGeneratorThread.runImpl's passes on the key from"), got
+
+
 def test_p_is_read_once_for_passes_whose_records_say_the_same(tmp_path):
     """printed.prove shares its answer between passes whose records say the same (marks and texts in order, one mark of
     one log on one machine), whatever their times: a running job's heartbeats (NJ-starting-late's updateJobStatus,
@@ -21088,6 +21144,7 @@ def test_p14_the_waited_rows_maker_is_read_for_the_last_waker_write_before_the_b
                  N(owner="panda:pandaserver/t.py::far", anchor=N(line_start=7), wakers=[waker], keys=["JediTaskSpec.jediTaskID"],
                    crosses_to=["pandajedi/x.py::elsewhere"])]
         rerun.mapdump.fragment = lambda: N(read_sites=sites)
+        r._maker_passes = lambda *a, **k: []  # P76's rest: its own test
         maker = N(owner="panda:pandaserver/j.py::J.insertNewJob", new_row=True, new_row_at="pandaserver/taskbuffer/TaskBuffer.py:358")
         born, start = datetime.datetime(2026, 11, 14, 17, 45, 57), datetime.datetime(2026, 11, 13, 20, 9, 7)
         calls = []
