@@ -8973,7 +8973,7 @@ class ReaderGap(BaseModel):
         description="What the read site on the line could not read (:attr:`ReadSiteNode.unresolved`).",
     )
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # pydantic's spelling; mypy reads no decorator above a property
     @property
     def hides_where(self) -> bool:
         """Whether the gap can hide where the rows go.

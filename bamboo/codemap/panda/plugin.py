@@ -21,7 +21,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from bamboo.codemap import callfacts, pathcond, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
@@ -247,7 +247,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._roots: dict[str, Path] = {}
         self._version: str = ""
         self._modules: list[SourceModule] = []
-        self._calls = None
+        self._calls: Optional[calls_mod.Calls] = None
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._keys: Optional[dict[str, frozenset[str]]] = None
@@ -1304,7 +1304,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     dist = Distribution.from_name(dist_name)
                 except PackageNotFoundError:
                     continue
-                pkg_dir = Path(dist.locate_file("")).resolve() / pkg
+                pkg_dir = Path(cast(Path, dist.locate_file(""))).resolve() / pkg  # an installed distribution's files
                 if pkg_dir.is_dir():
                     roots[pkg] = pkg_dir
                     break
