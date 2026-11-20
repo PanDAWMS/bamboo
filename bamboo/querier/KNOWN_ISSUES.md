@@ -2008,6 +2008,19 @@ Asking such a writer by its rows' own texts around the key was measured and left
 holding no key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39
 asks of up to 209 strings).
 
+*Changed (P47, 2026-11-20, the investigator's u1 NT-toabort-late 8, delegated design; the map's MSG, bf49753):* where
+the worker an agent's cycles hand their parts to is handed parts another way too (`agents.Selection.others`), a way in
+a message processor's file is read in the map's message receivers (`message_ways`, `MapFragment.message_receivers`):
+the plugin makes its worker and hands it its list where it starts (jedi_post_processor_msg_processor.py's initialize
+at 38) and its `process` fills the list as messages come, so the receivers of that file are its.  The premise then
+says what could send them: the sends in PanDA of the type, else the sends whose type is not read and could carry it,
+else an inbound boundary; a type with none of the three is said to bring no parts, and the premise is dropped.
+PostProcessorThread's: "no send in PanDA names jedi_post_processor; panda_callback_msg_processor.py::
+trigger_component_action:179 send(s) a type not read, which could carry it" -- that send's component is the callback
+plugin's component_action_map, a configuration the map does not read, so the way stays open (NT-breaking-late,
+NT-passed-late, NT-prepared-late, NT-toabort-late, MT-passed-late, MT-toabort-late, MT-tobroken-late; measured on the
+map's x17mss and x17mdd: the END's premise alone moves).  A dump before the map's receivers says it as before.
+
 *Changed (the narrow ask, 2026-11-20, the harness's finding on MT-aborting-late's withheld asks, delegated design):*
 where the rule above would withhold a mover's asks -- judgement 3's, and L2's reading of an arm's must prints
 (`_column_writes`) -- the shared log is asked again by the texts of the prints every run reaching the arm makes before

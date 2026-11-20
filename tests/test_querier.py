@@ -3074,6 +3074,46 @@ def test_a_writer_no_statement_gives_rows_takes_a_row_by_its_key(tmp_path):
     assert json.loads(out.splitlines()[-1]) == ["p/cmd.py::execCommand", "p/jobs.py::touch"]
 
 
+def test_p47_a_worker_s_other_way_in_by_a_message_is_read_in_the_maps_message_receivers(tmp_path):
+    """P47 (rerun.message_ways, the map's MSG): the other way PostProcessorThread is handed parts,
+    jedi_post_processor_msg_processor.py:38 (its plugin's initialize), is its receiver's, the file's; no send in PanDA names jedi_post_processor, and
+    the callback's trigger_component_action sends a type not read, which could carry it.  A receiver's row with no
+    sender, none open and no boundary says none come that way; without the map's receivers, as before."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import rerun
+        from bamboo.querier import render as T
+
+        cb = "pandajedi/jedimsgprocessor/panda_callback_msg_processor.py::trigger_component_action:179"
+        rows = [N(receiver="pandajedi/jedimsgprocessor/jedi_post_processor_msg_processor.py::process", key="msg_type",
+                  msg_type="jedi_post_processor", handled_by=[], senders=[], senders_open=[cb], boundary=""),
+                N(receiver="pandajedi/jedimsgprocessor/other_msg_processor.py::process", key="msg_type", msg_type="other",
+                  handled_by=[], senders=[], senders_open=[], boundary="")]
+        frag = {"f": N(message_receivers=rows)}
+        rerun.mapdump.fragment = lambda: frag["f"]
+        got = {
+            "post": [r.msg_type for r in rerun.message_ways("pandajedi/jedimsgprocessor/jedi_post_processor_msg_processor.py:38")],
+            "another file": rerun.message_ways("pandajedi/jediorder/PostProcessor.py:38"),
+            "other": [r.msg_type for r in rerun.message_ways("pandajedi/jedimsgprocessor/other_msg_processor.py:20")],
+        }
+        frag["f"] = N()
+        got["no receivers"] = rerun.message_ways("pandajedi/jedimsgprocessor/jedi_post_processor_msg_processor.py:38")
+        got["said"] = T.text(T.Said("another-way-in-by-a-message", {
+            "worker": "PostProcessorThread", "at": "pandajedi/jedimsgprocessor/jedi_post_processor_msg_processor.py:38",
+            "types": ["jedi_post_processor"], "how": [T.Said("message-sent-by-an-unread-type", {
+                "msg_type": "jedi_post_processor", "open": [rerun._short_site(cb)]})]}))
+        print(json.dumps(got, default=str))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["post"] == ["jedi_post_processor"] and got["other"] == ["other"], got
+    assert got["another file"] == [] and got["no receivers"] == [], got
+    assert got["said"] == ("PostProcessorThread's parts given at pandajedi/jedimsgprocessor/jedi_post_processor_msg_processor.py:38 "
+                           "by a message (jedi_post_processor) are not read: no send in PanDA names jedi_post_processor; "
+                           "panda_callback_msg_processor.py::trigger_component_action:179 send(s) a type not read, which could "
+                           "carry it (P47)"), got
+
+
 def test_a_mover_withheld_by_the_key_alone_is_asked_by_its_prints_texts_holding_the_key_before_its_arms(tmp_path):
     """The harness's narrow ask (rerun.key_texts, prints_naming's asked): getTasksToExecCommand_JEDI's must print
     'start jediTaskID=N command=' before its arm is asked by its text, the key in it; a text another function's row

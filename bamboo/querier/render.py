@@ -531,6 +531,12 @@ TEMPLATES: dict[str, str] = {
     "why-a-cycle-left-it": "; not known: why {machine}'s cycle did not hand the row on after taking it, which {files:join=, } on {machine} from {at} would say",
     "kept-off-by-the-lock": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} did not take it: {callee} skips a row locked less than {span} ago ({term}; {bound}) and its take locks it ({sets})",
     "one-process-a-label": "one process of {agent} selects for {label} on each of {machines:join=, } (no two of its cycles there overlap; two processes taking turns would not show)",
+    # P47 (rerun.message_ways): a way in by a message, read in the map's message receivers
+    "another-way-in-by-a-message": "{worker}'s parts given at {at} by a message ({types:join=, }) are not read: {how:join=; } (P47)",
+    "message-sent-at": "{msg_type} is sent at {senders:join=, }",
+    "message-sent-by-an-unread-type": "no send in PanDA names {msg_type}; {open:join=, } send(s) a type not read, which could carry it",
+    "message-from-outside": "{msg_type} comes from outside PanDA (the map's boundary at {boundary})",
+    "another-way-in-closed": "{worker}'s parts given at {at}: no send in PanDA names {types:join=, }, none of a type not read could carry it, and none comes from outside, by the map's message receivers: none come that way (P47)",
     "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
     # M3(a)-cap: the first selection below its cap after the statement's turn took the row
     "ran-when-the-first-selection-below-its-cap-took-it": "{caller} ran on the row when {agent}'s first selection below its cap took it: {where} returns at most {cap} row(s) and began to return the row at {turn}; from then {full} selection(s) on {machines} machine(s) returned {cap} (rows ahead of it) and {empty} none; {machine}'s cycle {mark} returned {count} at {at}, fewer than {cap}: every row selectable then, and the pass on it began at {first}; premises: {premises:join=; }",

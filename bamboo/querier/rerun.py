@@ -3334,6 +3334,28 @@ SHARED_LOG = 100
 _SHARED: list[Any] = [None, {}]
 
 
+def message_ways(at: str) -> list[Any]:
+    """P47 (the investigator's u1 NT-toabort-late 8, delegated design): the map's message receivers
+    (``MapFragment.message_receivers``, the map's MSG) of the file a worker is handed its parts in at *at*
+    (``file:line``): a message processor's plugin makes its worker and hands it its list where it starts
+    (jedi_post_processor_msg_processor.py's initialize at 38), and its ``process`` fills the list as messages come, so
+    the rows whose receiver, or a function handling its type, is in that file.  Each says the type the receiver takes,
+    the sends in PanDA of it (``senders``), the sends whose type is not read and could carry it (``senders_open``), and
+    an inbound boundary where its messages come from outside.  Empty without the map's receivers (a dump before them)
+    or where none is in the file."""
+    rel, _, line = at.rpartition(":")
+    rows = getattr(mapdump.fragment(), "message_receivers", None) or []
+    if not rows or not line.isdigit():
+        return []
+    return [r for r in rows if any(f.partition("::")[0] == rel for f in [r.receiver, *(getattr(r, "handled_by", None) or [])])]
+
+
+def _short_site(where: str) -> str:
+    """``file.py::func:line`` for a map's ``rel::func:line``: the file's name past its directories."""
+    rel, sep, rest = where.partition("::")
+    return f"{Path(rel).name}{sep}{rest}" if sep else where
+
+
 def shared_logs(names: list[str]) -> list[str]:
     """Of *names*, the logs at least ``SHARED_LOG`` functions print into, by the map's function prints."""
     fragment = mapdump.fragment()
@@ -11519,8 +11541,26 @@ class Rerun:
             if not absent:
                 premises.append(T.Said("no-pass-after-a-cycle-s-take", {"caller": func, "machine": w.machine}))
             not_known.append(T.Said("why-a-cycle-left-it", {"machine": w.machine, "files": files, "at": pick.at[:19]}))
-        if sel.others:
-            premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": list(sel.others)}))
+        # P47: a way in by a message is read in the map's message receivers: whether any send could hand it the parts
+        unread = []
+        for way_at in sel.others:
+            ways = message_ways(way_at)
+            if not ways:
+                unread.append(way_at)
+                continue
+            how = [T.Said("message-sent-at", {"msg_type": r.msg_type, "senders": [_short_site(x) for x in r.senders]}) if r.senders
+                   else T.Said("message-sent-by-an-unread-type", {"msg_type": r.msg_type, "open": [_short_site(x) for x in r.senders_open]})
+                   if r.senders_open else T.Said("message-from-outside", {"msg_type": r.msg_type, "boundary": _short_site(r.boundary)})
+                   if r.boundary else None for r in ways]
+            worker = sel.worker.split("::")[-1]
+            types = sorted({r.msg_type or "any" for r in ways})
+            if all(h is None for h in how):
+                self.say(T.text(T.Said("another-way-in-closed", {"worker": worker, "at": way_at, "types": types})))
+            else:
+                premises.append(T.Said("another-way-in-by-a-message", {"worker": worker, "at": way_at, "types": types,
+                                                                       "how": [h for h in how if h is not None]}))
+        if unread:
+            premises.append(T.Said("another-way-in-not-read", {"worker": sel.worker.split("::")[-1], "at": unread}))
         self.end(T.Said("ran-when-an-agent-s-cycle-took-it", {"caller": func, "agent": sel.agent_name, "takes": said,
                                                              "before": before, "kept": kept, "refused": refused,
                                                              "idle": idle_said, "premises": premises, "unknown": not_known}))
