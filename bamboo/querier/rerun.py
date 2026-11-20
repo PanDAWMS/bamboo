@@ -14199,9 +14199,9 @@ class Rerun:
         lo, hi = W._down(window[0]), W._down(window[1])
         asking = W.Asking((lo, hi), None, T.Said("for-the-column-s-writes", {
             "start": lo, "end": hi, "where": f"{func.rpartition('.')[2]}:{b.line}"}))
-        # (2): by the writer's marks holding the key, where it has them
-        if subject:
-            asking = cast(W.Asking, self._by_key_marks(j.owner, [b.line], asking, subject.partition(".")[0], key))
+        # (2): by the writer's marks holding the key, where it has them -- the writer's own subject's class, whatever
+        # the caller hands in *subject* for (M3(a)-1's and P3's readings hand none)
+        asking = cast(W.Asking, self._by_key_marks(j.owner, [b.line], asking, (subject or getattr(j, "subject", "") or "").partition(".")[0], key))
         runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
         self._keep_unanswered(missed)
         if missed_out is not None:
@@ -14349,6 +14349,8 @@ class Rerun:
                         continue
                     asking = W.Asking((lo, hi), None, T.Said("for-the-column-s-writes", {
                         "start": lo, "end": hi, "where": f"{name}:{p.line}"}))
+                    # (2): by the flush's marks holding the key, where it has them
+                    asking = cast(W.Asking, self._by_key_marks(flush, [p.line], asking, subject.partition(".")[0], key))
                     runs, missed, holes = self._ask(key, to_hand, asking, {}, quiet=True)
                     self._keep_unanswered(missed)
                     whole = whole and bool(self._searched_whole(to_hand, asking, asking, missed, holes, None)["held"]) \

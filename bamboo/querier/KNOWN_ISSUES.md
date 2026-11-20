@@ -1955,7 +1955,13 @@ can be read, the writer is asked by the key alone.  Measured: feed_contents_to_t
 jediTaskID=..." had been lost to the marks, and with it Tr's two passes that chose its arm 158 by positive evidence;
 asking such writers by the key alone instead made 13 cases ask pilot_api's logs by a bare PandaID over up to 21 h.  Over
 the map (x14ws) 6 functions print so: it, AtlasProdTaskBroker's runImpl, getTasksToBeProcessed_JEDI, pilot_api's
-update_job, resubmit_request and JobGenerator.start (a WorkQueue's).
+update_job, resubmit_request and JobGenerator.start (a WorkQueue's).  The column writes' asks go so at every call,
+by the writer's own subject's class (M3(a)-1's and P3's readings hand no subject), and so do P67's flush prints'.
+Still asked by the key alone: a writer whose marks hold no key (releaseThrottledTasks_JEDI, getTasksToExecCommand_JEDI,
+prepareTasksToBeFinished_JEDI's `< vo=... >`) -- MT-aborting-late's 4.5-h stay and its 9-min window.  Asking such a
+writer by its rows' own texts around the key was measured and left out: the rows found lie under marks holding no
+key, which the door then asks near the key's records (K60), a selection's whole cycle (NT-ready-stuck: 39 asks of up
+to 209 strings).
 
 *Changed (2026-11-20, the map's LFS, `MapFragment.log_file_services`):* `files_of` leaves out, for a function every
 route into which passes pandajedi, the files the map says no JEDI process writes (`jedi_files`): a proxy mixin's
