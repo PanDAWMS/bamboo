@@ -1868,6 +1868,19 @@ dispatch blocks (the records the hand cites hold 13:33:45,782 on aipanda082).  M
 jobs' PandaID (350 asks on NT-ready-late), a site looked up for its power, and a label's job statistics were each asked
 before the conditions were added.
 
+*Changed (P74, 2026-11-20, the investigator's u15 MJ-assigned-late 1, delegated design):* after that END, what called
+the caller is read (`Rerun._linked_caller_up`).  The value is the linked one whose ask found the callee's run in the
+moving pass (MJ-assigned-late's job has two dispatch blocks).  The caller's callers by the map's calls are each asked by
+that value on the pass's machine over EDGE either side of the pass's start.  One caller with a run there, of its own
+mark, printing the value and running when the pass began, started it: Activator.run's callers are DDMHandler.run
+(called by the DDM callback's process_dataset_callback alone), Closer.start_activator and AtlasAnalWatchDog's
+doForWaitingJobs; DDMHandler.run's mark `<vuid={} site={} name={}>` holds the dataset name.  A caller with no log to
+hand (Closer.start_activator prints nothing) is not ruled out, said.  Two callers with such runs, none, or asks the
+records do not answer (kept for the next round) leave "next: what called" open.  MJ-assigned-late asks
+panda-ddm_handler.log and panda-AtlasAnalWatchDog.log on aipanda082 by the dispatch block (two asks).  *Not read:*
+whether the message the callback processed came from outside PanDA (the map holds no inbound message boundary; asked of
+the map with P47).
+
 *Changed (P73, 2026-11-20, the harness's T check, 42 of the 115 held asks):* `_call_tied` took every function the
 caller's calls reach.  WorkerThread.run's `self.runImpl()` at 193 is a call to each of ten agents' runImpl in the map,
 so a TaskRefiner thread's caller asked JobGenerator's brokers', setuppers' and splitter's logs for the task over the

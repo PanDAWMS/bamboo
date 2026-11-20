@@ -10446,6 +10446,8 @@ class Rerun:
             missed += more
             for name, rs in got.items():
                 runs.setdefault(name, []).extend(rs)
+        # P74: each linked callee's run with the value it was found by
+        linked_runs: list[tuple[str, str, Any]] = []
         for bare, (column, values, texts) in linked.items():
             names = self.logs.names(sorted(printing[bare][2]))
             for value in values:
@@ -10456,6 +10458,7 @@ class Rerun:
                 missed += more
                 for name, rs in got.items():
                     runs.setdefault(name, []).extend(rs)
+                    linked_runs += [(value, bare, r) for r in rs]
         if missed:
             # a callee's log not in the records may hold a pass of the caller on the row: nothing is read without it
             # (NT-assigning-late's panda-AtlasProdTaskBroker.log); the asks are kept and U2 goes on its own way, whose
@@ -10524,9 +10527,15 @@ class Rerun:
                     self.say(f"{func}'s pass that moved it ran {q[3].rpartition('::')[2]} first, but other callers of the "
                              f"mover reach it too ({', '.join(others)}): whose pass it was is not told (P13)")
                 else:
+                    # P74: what called the caller, by the linked value the callee's run of the moving pass was found by
+                    values = sorted({v for v, b, r in linked_runs if b == q[3] and r.machine == q[2]
+                                     and any(x.stamp[:23] == q[0][:23] for x in r.found_by)})
+                    upper = (self._linked_caller_up(c, qual, values[0], q[2], q[0]) if len(values) == 1
+                             else T.Said("next-what-called", {"caller": func}))
                     self.end(T.Said("moved-by-the-caller-through-a-linked-callee", {
                         "caller": func, "machine": q[2].split(".")[0], "callee": q[3].rpartition("::")[2], "lines": sorted(q[4]),
                         "start": q[0][:23], "column": linked[q[3]][0], "mover": mover.rpartition("::")[2], "at": at[:23],
+                        "next": upper,
                         "premises": [T.Said("a-callee-run-is-the-caller-s", {
                             "caller": func, "callee": q[5].rpartition("::")[2].rpartition(".")[2],
                             "n": _others_reaching(q[5], {qual, *reached})})]}))
@@ -10780,6 +10789,59 @@ class Rerun:
             return None
         self.need(T.Said("why-the-caller-ran-on-the-row-only", {"caller": func, "start": start, "end": end, "mover": up.mover.split("::")[-1],
                                                                  "hop": c.hop}), None, "K55")
+
+    def _linked_caller_up(self, c: Caller, qual: str, value: str, machine: str, at: str) -> T.Said:
+        """P74 (out/gm/qk-design.md, the section on P74, delegated design; the investigator's u15 MJ-assigned-late 1): after Q1
+        part 2 read that the caller *c*'s pass moved the row through a callee marked by a linked row's *value*
+        (Activator.run's updateInFilesReturnPandaIDs on the job's dispatch block), what called the caller -- its callers
+        by the map's calls (:func:`map_reach.callers` of *qual*), each asked by that value on the pass's *machine* over
+        EDGE either side of the pass's start (*at*).  One caller with a run there printing the value, of its own mark,
+        and running when the pass began (its first record at or before *at*, its last at or after): that run started
+        the caller (DDMHandler.run's ``<vuid=... site=... name=...>``), said
+        with the functions the map says call it; a caller with no log to hand (Closer.start_activator prints nothing) is
+        not ruled out, said.  Several callers with such runs, none, or asks the records do not answer (kept, for the next
+        round): said, the next step left open."""
+        func = c.owner.split("::")[-1]
+        uppers = sorted(MR.callers(qual))
+        short = [u.rpartition("::")[2] for u in uppers]
+        if not uppers:
+            return T.Said("next-what-called", {"caller": func})
+        hi = W.when(at)
+        window = (f"{hi - EDGE:%Y-%m-%d %H:%M:%S}", f"{hi + EDGE:%Y-%m-%d %H:%M:%S}")
+        found: dict[str, list] = {}
+        missed: list = []
+        unread: list[str] = []
+        for upper in uppers:
+            prints = R._prints_of(upper)
+            files = jedi_files(upper, sorted({f for st in prints.statements for f in st.log_files}) if prints else [])
+            names = self.logs.names(files)
+            if not names:
+                unread.append(upper.rpartition("::")[2])
+                continue
+            asking = W.Asking(window, machine, T.Said("for-the-callers-of-the-caller", {
+                "caller": func, "start": window[0], "end": window[1], "machine": machine.split(".")[0]}), strings=(value,))
+            runs, more, _ = self._ask(value, names, asking, {}, quiet=True)
+            missed += more
+            for rs in runs.values():
+                for run in rs:
+                    if (of_mover(run, upper) and run.machine == machine
+                            and W.when(run.first) <= hi + CLOCKS_APART and W.when(run.last) >= hi - CLOCKS_APART):
+                        found.setdefault(upper, []).append(run)
+        if missed:
+            self._keep_unanswered(missed)
+            return T.Said("next-what-called-asked", {"caller": func, "uppers": short,
+                                                      "n": len({ask.key for ask, _ in missed})})
+        if len(found) != 1:
+            return T.Said("next-what-called-not-told", {
+                "caller": func, "uppers": short, "ran": sorted(u.rpartition("::")[2] for u in found) or ["none"],
+                "unread": f"; logs not to hand: {', '.join(unread)}" if unread else ""})
+        upper, covering = next(iter(found.items()))
+        last = max(covering, key=lambda r: W.when(r.first))
+        return T.Said("started-by-a-caller-of-the-caller", {
+            "caller": func, "upper": upper.rpartition("::")[2], "machine": machine.split(".")[0], "start": str(last.first)[:23],
+            "others": [s for s in short if s != upper.rpartition("::")[2] and s not in unread] or ["none"],
+            "callers": sorted(x.rpartition("::")[2] for x in MR.callers(upper)),
+            "unread": f"; no log of {', '.join(unread)} to hand: not ruled out" if unread else ""})
 
     def _calls_printing_key(self, c: Caller, keys: set[str]) -> list[int]:
         """P9: the call lines of *c* every way to which prints a hole the map names a column of *keys* by (a list of

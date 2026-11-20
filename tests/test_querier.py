@@ -17974,6 +17974,75 @@ def test_crossed_readers_take_the_key_the_callers_hand_from_a_table_whose_rows_r
     assert got["own"] is None and got["none"] is None and got["no_insert"] is None and got["only_helper"] is None, got
 
 
+def test_p74_what_called_the_caller_is_read_by_the_linked_value_on_the_moving_pass_machine(tmp_path):
+    """P74 (rerun._linked_caller_up, the investigator's u15 MJ-assigned-late 1): after a caller's pass moved the row
+    through a callee marked by a linked row's value (Activator.run's updateInFilesReturnPandaIDs), its callers by the
+    map's calls are asked by that value on the pass's machine over EDGE before the pass: one caller with such a run
+    (DDMHandler.run, called by the DDM callback's process_dataset_callback) started it.  A run on another machine is
+    not one; two callers with runs, or asks the records do not answer (kept), leave the next step open."""
+    out = _ok(_run(tmp_path, """
+        import json
+        from types import SimpleNamespace as N
+        from bamboo.querier import render as T
+        from bamboo.querier import rerun
+
+        r = object.__new__(rerun.Rerun)
+        r.lines, r.hop, r.unanswered, r.mode = [], "U2", [], "outside"
+        qual = "p/activator.py::Activator.run"
+        ddm, closer = "p/ddm_handler.py::DDMHandler.run", "p/closer.py::Closer.start_activator"
+        dog = "p/dog.py::AtlasAnalWatchDog.doForWaitingJobs"
+        graph = {qual: {ddm, closer, dog}, ddm: {"p/cb.py::PandaCallbackMsgProcPlugin.process_dataset_callback"}}
+        rerun.MR.callers = lambda o: graph.get(o, set())
+        rerun.R._prints_of = lambda o, lines=None: N(statements=[N(log_files=[o.split("/")[1].split(".")[0] + ".log"])])
+        rerun.jedi_files = lambda o, files: files
+        r.logs = N(names=lambda files: list(files))
+        asked, runs, missing = [], {}, set()
+
+        def ask(key, names, asking, owners, quiet=False):
+            asked.append([key, names, list(asking.window), asking.machine, list(asking.strings)])
+            if names[0] in missing:
+                return {}, [(N(key=(names[0], key)), "")], {}
+            return {n: runs.get(n, []) for n in names}, [], {}
+
+        r._ask = ask
+        r._keep_unanswered = lambda m: r.unanswered.extend(m)
+        c = N(owner="p/activator.py::run")
+        run = lambda machine, first, last="2026-10-29 13:33:50,000": N(token="<vuid=None site=S name=ds>", machine=machine,
+                                                                      first=first, last=last)
+        got = {}
+        for name, (rs, miss) in {
+                "one": ({"ddm_handler.log": [run("aipanda082.cern.ch", "2026-10-29 13:30:01,000", "2026-10-29 13:30:02,000"),
+                                             run("aipanda082.cern.ch", "2026-10-29 13:33:40,100")]}, set()),
+                "elsewhere": ({"ddm_handler.log": [run("aipanda081.cern.ch", "2026-10-29 13:33:40,100")]}, set()),
+                "two": ({"ddm_handler.log": [run("aipanda082.cern.ch", "2026-10-29 13:33:40,100")],
+                         "closer.log": [run("aipanda082.cern.ch", "2026-10-29 13:33:44,000")]}, set()),
+                "asked": ({}, {"ddm_handler.log"}),
+                "silent": ({"ddm_handler.log": [run("aipanda082.cern.ch", "2026-10-29 13:33:40,100")]}, set())}.items():
+            runs, missing, asked[:], r.unanswered = rs, miss, [], []
+            r.logs = N(names=lambda files: [] if name == "silent" and files == ["closer.log"] else list(files))
+            said = r._linked_caller_up(c, qual, "ds", "aipanda082.cern.ch", "2026-10-29 13:33:46,327")
+            got[name] = {"said": T.text(said), "asked": list(asked), "kept": len(r.unanswered)}
+        print(json.dumps(got))
+        """))
+    got = json.loads(out.splitlines()[-1])
+    assert got["one"]["asked"][0] == ["ds", ["closer.log"], ["2026-10-29 13:23:46", "2026-10-29 13:43:46"],
+                                      "aipanda082.cern.ch", ["ds"]], got
+    assert got["one"]["said"] == ("DDMHandler.run's run on aipanda082 from 2026-10-29 13:33:40,100, printing the linked value, "
+                                  "started run, running when its pass began (of its other callers, none of Closer.start_activator, "
+                                  "AtlasAnalWatchDog.doForWaitingJobs ran there so); DDMHandler.run is called by "
+                                  "PandaCallbackMsgProcPlugin.process_dataset_callback (the map's calls)"), got
+    assert got["silent"]["said"].endswith("ran there so; no log of Closer.start_activator to hand: not ruled out); "
+                                          "DDMHandler.run is called by PandaCallbackMsgProcPlugin.process_dataset_callback "
+                                          "(the map's calls)"), got
+    assert got["elsewhere"]["said"] == ("next: what called run -- of its callers (Closer.start_activator, DDMHandler.run, "
+                                        "AtlasAnalWatchDog.doForWaitingJobs), those with a run printing the linked value "
+                                        "there: none"), got
+    assert got["two"]["said"].endswith("there: Closer.start_activator, DDMHandler.run"), got
+    assert got["asked"]["kept"] == 1 and got["asked"]["said"] == (
+        "next: what called run -- its callers' logs (Closer.start_activator, DDMHandler.run, "
+        "AtlasAnalWatchDog.doForWaitingJobs) are asked by the linked value (1 ask(s))"), got
+
+
 def test_a_print_of_a_time_column_closes_its_clock_arms_and_a_key_print_tells_a_pass_reached_the_selection(tmp_path):
     """M3(a)-2: (1) a run of the row printing the time column at the stay's start says no arm wrote it before the
     print, where every arm that may write it in the stay writes the clock -- Watcher.run's lastmod at 78; another value
