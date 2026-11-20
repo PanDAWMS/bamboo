@@ -845,6 +845,10 @@ TEMPLATES: dict[str, str] = {
     "premise-why": "{premise}: {why}",
     # the harness's rnd14 costs: a writer marking no run by the key, over a window holding the row's move
     "shared-logs-not-asked-bare": "  {func}: {logs:join=, } not asked by the key alone from {start} to {end} (the records do not answer it): its marks hold no key, and the window holds the row's move at {move}, where every call of the key's object and of the rows tied to it prints the key there (the logs most functions print into); not searched there",
+    # P65: a guard on a parameter read with the one literal its ways hand
+    "guard-read-by-the-handed-value": "{guard!r} read {got}: every way of {name} hands {value} (the map's ParameterFrom; a caller leaving it hands its default)",
+    # P24: a selection whose rows key a write of a time column, read as having returned the row at that write
+    "took-it-by-its-writes": "took it at {at:join=, }: {arms:join=, } writes {column} on each row it returns, and the column's writes read in the stay show it then",
     # P56: a writer of the observed value alone
     "writes-only-the-value": "every write of {subject} the map reads in it writes {observed!r} (at {lines:join=, }): it moves no row off {observed!r}",
     # P70: a mover read from its last take on

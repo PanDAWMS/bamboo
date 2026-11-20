@@ -1275,6 +1275,71 @@ def test_p56_a_writer_of_the_observed_value_alone_moves_no_row_off_it(tmp_path):
     assert json.loads(out.splitlines()[-1]) == [[10, 11, 12], [], [], [], []]
 
 
+def test_p24_a_selection_whose_rows_key_a_clock_write_returned_the_row_at_that_write(tmp_path):
+    """lockJobsForActivator@946's rows key 941's prodDBUpdateTime=CURRENT_DATE: the row's value 13:20:49, last written
+    by 941, says the selection returned the row then (MJ-assigned-late)."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import datetime, json
+            from types import SimpleNamespace as N
+            import bamboo.querier.rerun as RR
+            from bamboo.querier import render as T
+
+            D = lambda s: datetime.datetime.fromisoformat("2026-10-29 " + s)
+            RR._bare = lambda o: o
+            src = N(kind="rows", site_owner="j.py::lockJobsForActivator", site_line=946)
+            kfs = [N(owner="j.py::lockJobsForActivator", sources=[src], writes={"JobSpec.prodDBUpdateTime": [941]}),
+                   N(owner="j.py::other", sources=[src], writes={"JobSpec.prodDBUpdateTime": [5]})]
+            RR.key_froms = lambda: kfs
+            r = RR.Rerun.__new__(RR.Rerun)
+            q = N(subject="JobSpec.jobStatus", since=D("09:06:09"), moved=D("13:33:46"))
+            st = N(owner="j.py::lockJobsForActivator", line=946, result="")
+            got = {}
+            for name, tl in (("value", N(writes=(), row_value=(D("13:20:49"), "x", ("lockJobsForActivator:941",), None))),
+                             ("a write", N(writes=(N(at=D("10:00:00"), arms=("lockJobsForActivator:941",)),), row_value=None)),
+                             ("before", N(writes=(), row_value=(D("09:00:00"), "x", ("lockJobsForActivator:941",), None))),
+                             ("none", None)):
+                r._timeline = lambda column, q, tl=tl: tl
+                said = r._took_by_its_writes(st, q)
+                got[name] = None if said is None else T.text(said)
+            got["other statement"] = r._took_by_its_writes(N(owner="j.py::lockJobsForActivator", line=999, result=""), q)
+            print(json.dumps(got))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got["value"].startswith("took it at 2026-10-29 13:20:49: lockJobsForActivator:941 writes JobSpec.prodDBUpdateTime"), got
+    assert got["a write"].startswith("took it at 2026-10-29 10:00:00"), got
+    assert got["before"] is None and got["none"] is None and got["other statement"] is None, got
+
+
+def test_p65_a_guard_on_a_parameter_is_read_with_the_one_literal_its_ways_hand(tmp_path):
+    """prepareTasksToBeFinished_JEDI's 'simTasks is None': every way of simTasks hands None (JediTaskBuffer's own
+    default), so H3 reads the guard true."""
+    out = _ok(
+        _run(
+            tmp_path,
+            """
+            import json
+            import bamboo.querier.rerun as RR
+
+            r = RR.Rerun.__new__(RR.Rerun)
+            handed = {"simTasks": "None", "label": "'managed'", "n": "3"}
+            r._handed_literal = lambda owner, name: handed.get(name)
+            guards = ["simTasks is None", "simTasks is not None", "not simTasks", "label == 'managed'", "label != 'user'",
+                      "n", "other is None", "simTasks in [None]", "f(simTasks)"]
+            print(json.dumps({g: (None if (got := r._guard_by_handed("o", g)) is None else got[0]) for g in guards}))
+            """,
+        )
+    )
+    got = json.loads(out.splitlines()[-1])
+    assert got == {"simTasks is None": True, "simTasks is not None": False, "not simTasks": True, "label == 'managed'": True,
+                   "label != 'user'": True, "n": True, "other is None": None, "simTasks in [None]": None,
+                   "f(simTasks)": None}, got
+
+
 def test_the_record_door_answers_an_ask_from_the_record_of_a_wider_one(tmp_path):
     out = _ok(
         _run(

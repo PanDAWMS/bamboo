@@ -5193,6 +5193,13 @@ class Rerun:
                     self.say(f"  {T.text(k)}")
                 if h.value is True or h.value is False:
                     read[g] = h.value
+            # P65: a guard on a parameter every way of which hands one literal -- the default the callers leave, too --
+            # is read with it (prepareTasksToBeFinished_JEDI's 'simTasks is None': every call hands None)
+            for g, got in list(read.items()):
+                if got is not True and got is not False and (by := self._guard_by_handed(chosen.candidate.owner, g)) is not None:
+                    read[g] = by[0]
+                    self.say(T.text(T.Said("guard-read-by-the-handed-value", {"guard": g, "name": by[1], "value": by[2],
+                                                                                "got": by[0]})))
             if branch and (false := [g for g, got in read.items() if got is False]):
                 # it did not write at this row: an older one it may have written at, else it is not among the arms
                 h = held.get(false[0])
@@ -12588,6 +12595,9 @@ class Rerun:
             # the call that moved the value on returned the row: a term the row fails was not in that build
             took = st.owner == q.mover and (took_by is None or st is took_by.statement)
             kind, said = self._passed_over(st, q, took)
+            if not took and kind == "not settled" and (taken := self._took_by_its_writes(st, q)) is not None:
+                # P24: a write keyed by the rows it returned shows it returned the row then
+                kind = T.text(taken)
             if took and took_by is not None and took_by.line is None:
                 # the P25 reader: the others handed no row on in that pass (their hand-ons' sure prints are absent)
                 kind = f"took it at {q.moved}, the mover's other selections ruled out in that pass: {took_by.text}"
@@ -12722,6 +12732,33 @@ class Rerun:
         return _when(as_of), "the statuslog was read", (
             f"the movers' statements at the statuslog's as_of {as_of}; the rows file {says} (a reading, not a drop: "
             f"KNOWN_ISSUES.md K17):")
+
+    def _took_by_its_writes(self, st, q: Missed) -> T.Said | None:
+        """P24 (the investigator's u3 MJ-assigned-late 4; the delegated design): a statement L2 leaves not settled whose
+        rows key a write of a time column of the row's class in its own function (the map's KeyFrom, a source of kind
+        rows at the statement) -- lockJobsForActivator@946, each row of which 941 stamps prodDBUpdateTime=CURRENT_DATE
+        -- returned the row at each write of it the column's timeline reads in the stay: one the records show, or the
+        row's value where every arm writes the clock (``Timeline.row_value``: 13:20:49).  None where none is read."""
+        cls = q.subject.partition(".")[0]
+        if st.result == RESULT_AGGREGATE:
+            return None  # a statement that takes no row, by the map
+        for kf in key_froms():
+            if _bare(kf.owner) != _bare(st.owner) or not any(
+                    getattr(src, "kind", "") == "rows" and _bare(getattr(src, "site_owner", "") or "") == _bare(st.owner)
+                    and getattr(src, "site_line", None) == st.line for src in getattr(kf, "sources", None) or []):
+                continue
+            func = _bare(kf.owner).rpartition("::")[2].rpartition(".")[2]
+            for column, lines in sorted((getattr(kf, "writes", None) or {}).items()):
+                if column.partition(".")[0] != cls or (tl := self._timeline(column, q)) is None:
+                    continue
+                arms = {f"{func}:{line}" for line in lines}
+                takes = {w.at for w in tl.writes if set(w.arms) & arms and q.since <= w.at <= q.moved}
+                if tl.row_value is not None and set(tl.row_value[2]) & arms and q.since <= tl.row_value[0] <= q.moved:
+                    takes.add(tl.row_value[0])
+                if takes:
+                    return T.Said("took-it-by-its-writes", {"at": list(dict.fromkeys(f"{t:%Y-%m-%d %H:%M:%S}" for t in sorted(takes))),
+                                                            "arms": sorted(arms), "column": column})
+        return None
 
     def _movers_in_window(self, q: Missed, kinds: dict) -> list[tuple[str, str]]:
         """M2, late: every mover in the window with what the map and the row's values alone say of it --
@@ -15338,6 +15375,41 @@ class Rerun:
                     text += held[1] + after
                 out.add(text)
         return tuple(sorted(out)), used
+
+    def _guard_by_handed(self, owner: str, guard: str) -> tuple[bool, str, str] | None:
+        """P65: *guard* read with the value every way of a parameter of *owner*'s hands (:meth:`_handed_literal`), where
+        it is that parameter alone, or it compared with a literal by ``is``, ``is not``, ``==`` or ``!=``, or ``not`` it:
+        ``(its truth, the name, the value)``; None for any other guard or where the ways hand no one literal."""
+        try:
+            node = ast.parse(guard.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+        negate = isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not)
+        if negate:
+            node = node.operand  # type: ignore[attr-defined]
+        name, test = None, None
+        if isinstance(node, ast.Name):
+            name, test = node.id, (lambda v: bool(v))
+        elif (isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.left, ast.Name)
+              and isinstance(node.comparators[0], ast.Constant)):
+            other = node.comparators[0].value
+            op = node.ops[0]
+            ops = {ast.Is: lambda v: v is other, ast.IsNot: lambda v: v is not other,
+                   ast.Eq: lambda v: v == other, ast.NotEq: lambda v: v != other}
+            if type(op) not in ops:
+                return None
+            name, test = node.left.id, ops[type(op)]
+        if name is None or test is None:
+            return None
+        handed = self._handed_literal(owner, name)
+        if handed is None:
+            return None
+        try:
+            value = ast.literal_eval(handed)
+        except (ValueError, SyntaxError):
+            return None
+        got = bool(test(value))
+        return (not got if negate else got), name, handed
 
     def _handed_literal(self, owner: str, parameter: str) -> str | None:
         """P72: the value every way of *owner*'s *parameter* (``RunKey.parameter``, ``function.name``) hands, as a mark

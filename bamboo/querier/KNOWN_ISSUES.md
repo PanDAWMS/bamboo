@@ -1979,6 +1979,17 @@ updateTaskStatusByContFeeder_JEDI went unasked.  A dump without the table change
 a JEDI-only function's proxy logs, x14 against x15, which differ by the table alone): no END or STOP moves; 17 asks go
 (NT-scouting-stuck 9, MT-aborting-late 7, MT-ready-late 1); NT-pending-late's END names 9 machines asked, not 18.
 
+*Changed (2026-11-20, the investigator's P24 and P65, the delegated design):* L2 says a not-settled selection took the
+row at each write the column's timeline reads of an arm its rows key (`_took_by_its_writes`, the map's KeyFrom of kind
+rows: lockJobsForActivator@946 at 13:20:49, by 941's prodDBUpdateTime=CURRENT_DATE); not for a statement the map reads
+as an aggregate.  H3 reads a guard on a parameter every way of which hands one literal with it (`_guard_by_handed`,
+the map's ParameterFrom: prepareTasksToBeFinished_JEDI's 'simTasks is None', every call handing None):
+NR-T-53646395-assessmentTime's STOP H3 ends.  Not taken: a file where no row of a function placed there holds the key
+read as one the records cannot speak to (the map's reading of rnd15's empty PilotRequests.log) -- by the map's holes
+alone it dropped files whose rows print the key under a logger the caller hands in (PostProcessor's doPostProcess) or
+in a hole the map ties to no column (datasetManager's main): four of 48 cases lost readings.  It waits on a fact the
+map gives of a hole: that it holds no row's key.
+
 *Changed (2026-11-20, the investigator's P46 and P56, the delegated design):* H2's window for a value the statuslog's
 rows hold beside the status (`windows.value_held`) says the rows after the stretch's first hold it too ("not changed at
 them": NR-J-7423807701-cloud, 'WORLD' at pending, defined and activated).  L2 leaves out, as "writes only it", a mover
