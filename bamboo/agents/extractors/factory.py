@@ -44,7 +44,7 @@ def register_extraction_strategy(name: str, strategy_class: Type[ExtractionStrat
     logger.debug("Registered extraction strategy: %s", name)
 
 
-def get_extraction_strategy(strategy: str = None) -> ExtractionStrategy:
+def get_extraction_strategy(strategy: str | None = None) -> ExtractionStrategy:
     """Return an instantiated :class:`ExtractionStrategy`.
 
     Resolution order:

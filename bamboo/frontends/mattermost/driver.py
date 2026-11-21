@@ -77,6 +77,7 @@ async def create_post(
     props: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create a post via the typed driver's grouped ``posts.create_post`` endpoint."""
-    return await driver.posts.create_post(
+    post: dict[str, Any] = await driver.posts.create_post(
         channel_id=channel_id, message=message, root_id=root_id, props=props
     )
+    return post

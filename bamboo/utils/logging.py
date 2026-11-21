@@ -83,7 +83,11 @@ class _Neo4jNotificationFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
-            arg = record.args[0] if record.args else None
+            arg = (
+                record.args[0]
+                if isinstance(record.args, tuple) and record.args
+                else None
+            )
             note = getattr(arg, "notification", None)
             if note is None:
                 return True  # not the expected shape — leave as-is
@@ -149,5 +153,5 @@ def setup_logging() -> None:
     for name in ("sentence_transformers", "transformers"):
         lg = logging.getLogger(name)
         lg.setLevel(logging.ERROR)
-        for handler in lg.handlers:
-            handler.setLevel(logging.ERROR)
+        for lg_handler in lg.handlers:
+            lg_handler.setLevel(logging.ERROR)

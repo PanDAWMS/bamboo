@@ -29,6 +29,7 @@ from bamboo.llm import (
     KNOWLEDGE_REVIEW_SYSTEM,
     KNOWLEDGE_REVIEW_USER,
     get_extraction_llm,
+    message_text,
 )
 from bamboo.llm.errors import log_llm_failure
 from bamboo.models.knowledge_entity import KnowledgeGraph
@@ -157,7 +158,7 @@ class KnowledgeReviewer:
                         HumanMessage(content=user_content),
                     ]
                 )
-            result = _parse_review_response(response.content)
+            result = _parse_review_response(message_text(response.content))
             if result.approved:
                 say(f"Graph approved (confidence {result.confidence:.0%}).")
             else:
@@ -280,7 +281,7 @@ async def summarise_email_investigations(email_text: str) -> str:
                 HumanMessage(content=EMAIL_INVESTIGATION_SUMMARY_USER.format(email_text=email_text)),
             ]
         )
-        return response.content.strip()
+        return message_text(response.content).strip()
     except Exception as exc:
         log_llm_failure(
             logger,

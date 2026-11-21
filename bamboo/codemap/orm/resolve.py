@@ -90,7 +90,8 @@ def settler(
                     return list(model_constants[name])
                 if name in constants:
                     return list(constants[name])
-        return shared(expression, func)  # type: ignore[arg-type]
+        found: list[str] = shared(expression, func)  # type: ignore[arg-type]
+        return found
 
     return settle
 
@@ -299,7 +300,9 @@ def resolve(
         and value.args
         and isinstance(value.args[0], ast.Constant)
     ):
-        return [Resolved(f"passthrough({model or '?'}.{value.args[0].value})", 2, [])]
+        return [
+            Resolved(f"passthrough({model or '?'}.{str(value.args[0].value)})", 2, [])
+        ]
     if isinstance(value, ast.Name):
         members = narrowed(value.id, at, func, settle, models)
         if members:

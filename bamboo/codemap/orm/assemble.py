@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field as dc_field  # a write's own attribute is named field
 from typing import Optional
 
 from bamboo.codemap import pathcond
@@ -30,7 +31,7 @@ class FieldWrite:
     attribution: str
     arms: list[Resolved]
     #: the write's own path condition: enclosing tests and the early exits above it
-    path_condition: list[str] = field(default_factory=list)
+    path_condition: list[str] = dc_field(default_factory=list)
     structural: Optional[str] = None
 
 

@@ -134,7 +134,7 @@ class ContextEnricher:
         # automatic, so it *reads* the validated source #1 index but never writes it.
         self._tool_selector = tool_selector
         self._tok = None
-        self._cfg_ns = None
+        self._cfg_ns: str | None = None
         self._tool_index_built = False
 
     @property

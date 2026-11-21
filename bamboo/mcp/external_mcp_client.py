@@ -3,7 +3,11 @@
 :class:`ExternalMcpClient`
     Wraps one external MCP server via StreamableHTTP transport.  The ``mcp``
     package is imported lazily — users who only use
-    :class:`~bamboo.mcp.PandaMcpClient` do not need it installed.
+    :class:`~bamboo.mcp.PandaMcpClient` do not need it installed.  Both SDK
+    majors are read: mcp 2.x (``streamable_http_client`` yielding two streams;
+    snake_case fields such as ``input_schema`` and ``is_error``) and mcp 1.x
+    (three items yielded, or ``streamablehttp_client`` before 1.26; camelCase
+    fields).
 
 :class:`StdioMcpClient`
     Wraps one external MCP server via stdio transport.  Spawns the server as a
@@ -23,12 +27,45 @@ import asyncio
 import json
 import logging
 import re
-from contextlib import AsyncExitStack
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from bamboo.mcp.base import McpClient, McpTool
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _streamable_http(url: str, headers: dict[str, str]) -> AsyncIterator[tuple[Any, Any]]:
+    """The StreamableHTTP transport's ``(read, write)`` streams, with *headers* on every request.
+
+    ``streamable_http_client`` takes no headers: they go on the HTTP client it is handed, made here by the SDK's
+    own ``create_mcp_http_client`` (an httpx client in mcp 1.x, an httpx2 one in 2.x, with the SDK's timeouts).
+    It yields ``(read, write)`` in mcp 2.x and a third item, the session id's getter, in mcp 1.x (1.26 has it
+    beside the older ``streamablehttp_client``).  An mcp 1.x without it gets ``streamablehttp_client(url,
+    headers=...)``, which mcp 2.x removed.
+    """
+    from mcp.client import streamable_http as transport  # noqa: PLC0415
+
+    # by name, as not every version has both
+    current = getattr(transport, "streamable_http_client", None)
+    if current is not None:
+        from mcp.shared._httpx_utils import create_mcp_http_client  # noqa: PLC0415
+
+        async with create_mcp_http_client(headers=headers) as http_client:
+            async with current(url, http_client=http_client) as streams:
+                yield streams[0], streams[1]
+        return
+    older = getattr(transport, "streamablehttp_client", None)
+    if older is None:
+        raise ImportError("mcp.client.streamable_http has no StreamableHTTP client this module knows")
+    async with older(url, headers=headers) as streams:
+        yield streams[0], streams[1]
+
+def _sdk_field(obj: Any, name: str, v1_name: str) -> Any:
+    """A field of an ``mcp`` SDK object: *name* as mcp 2.x spells it, else *v1_name* as mcp 1.x did."""
+    return getattr(obj, name) if hasattr(obj, name) else getattr(obj, v1_name)
 
 
 def _filter_tools(
@@ -115,7 +152,6 @@ class ExternalMcpClient(McpClient):
         """
         try:
             from mcp import ClientSession  # noqa: PLC0415
-            from mcp.client.streamable_http import streamablehttp_client  # noqa: PLC0415
         except ImportError:
             logger.warning(
                 "ExternalMcpClient(%s): 'mcp' package not installed — "
@@ -126,8 +162,8 @@ class ExternalMcpClient(McpClient):
 
         try:
             self._stack = AsyncExitStack()
-            read, write, _ = await self._stack.enter_async_context(
-                streamablehttp_client(self._url, headers=self._headers)
+            read, write = await self._stack.enter_async_context(
+                _streamable_http(self._url, self._headers)
             )
             self._session = await self._stack.enter_async_context(
                 ClientSession(read, write)
@@ -186,7 +222,7 @@ class ExternalMcpClient(McpClient):
                 f"ExternalMcpClient({self._name}): not connected — call connect() first"
             )
         result = await self._session.call_tool(tool_name, kwargs)
-        if result.isError:
+        if _sdk_field(result, "is_error", "isError"):
             raise RuntimeError(
                 f"ExternalMcpClient({self._name}): tool {tool_name!r} returned error: "
                 f"{result.content}"
@@ -200,7 +236,7 @@ class ExternalMcpClient(McpClient):
     @staticmethod
     def _convert_tool(t: Any) -> McpTool:
         """Convert an ``mcp`` SDK tool descriptor to a :class:`McpTool`."""
-        schema = t.inputSchema
+        schema = _sdk_field(t, "input_schema", "inputSchema")
         if not isinstance(schema, dict):
             schema = {"type": "object", "properties": {}}
         return McpTool(
@@ -271,7 +307,10 @@ class StdioMcpClient(McpClient):
         """Spawn the subprocess and initialise the MCP session."""
         try:
             from mcp import ClientSession  # noqa: PLC0415
-            from mcp.client.stdio import StdioServerParameters, stdio_client  # noqa: PLC0415
+            from mcp.client.stdio import (  # noqa: PLC0415
+                StdioServerParameters,
+                stdio_client,
+            )
         except ImportError:
             logger.warning(
                 "StdioMcpClient(%s): 'mcp' package not installed — "
@@ -350,7 +389,7 @@ class StdioMcpClient(McpClient):
                 f"StdioMcpClient({self._name}): not connected — call connect() first"
             )
         result = await self._session.call_tool(tool_name, kwargs)
-        if result.isError:
+        if _sdk_field(result, "is_error", "isError"):
             raise RuntimeError(
                 f"StdioMcpClient({self._name}): tool {tool_name!r} returned error: "
                 f"{result.content}"

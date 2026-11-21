@@ -63,7 +63,7 @@ async def prefetch_panda_docs(
     keyword_query_str = ""
     if plain_error or email_text:
         try:
-            from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm  # noqa: PLC0415
+            from bamboo.llm import DOC_SEARCH_KEYWORDS_SYSTEM, DOC_SEARCH_KEYWORDS_USER, get_extraction_llm, message_text  # noqa: PLC0415
             from langchain_core.messages import HumanMessage, SystemMessage  # noqa: PLC0415
 
             llm = get_extraction_llm()
@@ -78,7 +78,7 @@ async def prefetch_panda_docs(
                         HumanMessage(content=user_content),
                     ]
                 )
-            raw = response.content.strip()
+            raw = message_text(response.content).strip()
             if raw.startswith("```"):
                 raw = "\n".join(
                     line for line in raw.splitlines() if not line.startswith("```")

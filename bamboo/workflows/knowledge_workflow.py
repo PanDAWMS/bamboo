@@ -3,6 +3,7 @@
 from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from bamboo.agents.knowledge_accumulator import KnowledgeAccumulator
 from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -64,6 +65,7 @@ async def extract_knowledge_node(state: KnowledgeState) -> KnowledgeState:
         task_data = state.get("task_data") or {}
         raw_task_id = task_data.get("jediTaskID")
         task_status = task_data.get("status")
+        graph_id: str | None
         if raw_task_id and task_status:
             graph_id = f"{raw_task_id}:{task_status}"
         elif raw_task_id:
@@ -105,7 +107,7 @@ async def validate_extraction_node(state: KnowledgeState) -> KnowledgeState:
     }
 
 
-def create_knowledge_workflow() -> StateGraph:
+def create_knowledge_workflow() -> CompiledStateGraph:
     """Create and compile the knowledge-extraction LangGraph workflow."""
     workflow = StateGraph(KnowledgeState)
 

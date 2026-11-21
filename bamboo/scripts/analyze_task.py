@@ -285,8 +285,8 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
         from collections import Counter
         node_types: Counter = Counter()
         seen_nodes: set[str] = set()
-        for e in edges:
-            for name, ntype in ((e["src_name"], e["src_type"]), (e["tgt_name"], e["tgt_type"])):
+        for edge in edges:
+            for name, ntype in ((edge["src_name"], edge["src_type"]), (edge["tgt_name"], edge["tgt_type"])):
                 if name not in seen_nodes:
                     node_types[ntype] += 1
                     seen_nodes.add(name)
@@ -297,11 +297,11 @@ async def _find_pattern(task_ids: list[int], min_occurrences: int) -> None:
             echo(f"  {ntype:<30} {count}")
 
         echo("\nEdges (sorted by occurrence count):")
-        for e in edges:
-            conf = f"  [{e['confidence']:.2f}]" if e["confidence"] != 1.0 else ""
+        for edge in edges:
+            conf = f"  [{edge['confidence']:.2f}]" if edge["confidence"] != 1.0 else ""
             echo(
-                f"  {e['src_name']}  -[{e['rel_type']}]->  {e['tgt_name']}"
-                f"  (shared by {e['occurrence_count']}/{len(graph_ids)} tasks){conf}"
+                f"  {edge['src_name']}  -[{edge['rel_type']}]->  {edge['tgt_name']}"
+                f"  (shared by {edge['occurrence_count']}/{len(graph_ids)} tasks){conf}"
             )
         echo("\n" + "=" * 70)
 

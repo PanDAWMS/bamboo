@@ -27,7 +27,7 @@ def _get_pkg_roots() -> dict[str, Path]:
             for dist_name in pkg_to_dist.get(pkg, []):
                 try:
                     dist = Distribution.from_name(dist_name)
-                    pkg_dir = Path(dist.locate_file("")).resolve() / pkg
+                    pkg_dir = Path(str(dist.locate_file(""))).resolve() / pkg
                     if pkg_dir.is_dir():
                         _pkg_roots_cache[pkg] = pkg_dir
                         break
@@ -182,7 +182,8 @@ def _parse_nav_decision(text: str) -> dict[str, Any]:
     if not match:
         return {"action": "done"}
     try:
-        return json.loads(match.group())
+        parsed: dict[str, Any] = json.loads(match.group())
+        return parsed
     except json.JSONDecodeError:
         return {"action": "done"}
 
@@ -216,6 +217,7 @@ class PandaSourceNavigator:
     async def navigate(self, question: str) -> str:
         """Return a synthesized answer to a code question about panda-server/pandajedi."""
         from langchain_core.messages import HumanMessage, SystemMessage
+        from bamboo.llm import message_text
         from bamboo.llm.prompts import (
             PANDA_SOURCE_NAV_PROMPT,
             PANDA_SOURCE_SYNTHESIS_PROMPT,
@@ -397,4 +399,4 @@ class PandaSourceNavigator:
                 HumanMessage(content=prompt),
             ])
         show_block("source navigator result", response.content)
-        return response.content
+        return message_text(response.content)

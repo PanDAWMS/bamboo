@@ -249,12 +249,13 @@ def _read(
 
 
 def _statement(ask: dict, tables: Tables, sites: Sites) -> Plan:
-    found = [sites.at.get(s) for s in ask.get("site") or []]
-    if not found or None in found:
+    got = [sites.at.get(s) for s in ask.get("site") or []]
+    if not got or None in got:
         missing = [
-            s for s, r in zip(ask.get("site") or [], found, strict=True) if r is None
+            s for s, r in zip(ask.get("site") or [], got, strict=True) if r is None
         ]
         return Plan(ask, why=f"no read site in the dump at {missing or 'no site'}")
+    found: list[dict] = [r for r in got if r is not None]
     keys = sorted({k for r in found for k in r["keys"]})
     classes = {k.partition(".")[0] for k in keys}
     if len(classes) != 1:

@@ -89,7 +89,9 @@ async def _run(title_filter: str | None, concept_only: bool, show_summary: bool)
             )
         finally:
             await client.close()
-        summary = (points[0].payload.get("system_summary", "") if points else "")
+        payload = points[0].payload if points else {}
+        assert payload is not None  # every point is stored with a payload
+        summary = payload.get("system_summary", "")
         if not summary:
             click.echo("No system_summary in metadata (rebuild docs to regenerate).")
             return

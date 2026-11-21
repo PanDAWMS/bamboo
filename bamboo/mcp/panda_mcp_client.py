@@ -12,6 +12,7 @@ import asyncio
 import importlib.util
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -664,7 +665,7 @@ class PandaMcpClient(McpClient):
                 },
             ),
         ]
-        self._dispatch = {
+        self._dispatch: dict[str, Callable[..., Awaitable[Any]]] = {
             "fetch_linked_log_files": self._fetch_linked_log_files,
             "get_parent_task": self._get_parent_task,
             "get_retry_chain": self._get_retry_chain,
@@ -785,6 +786,8 @@ class PandaMcpClient(McpClient):
         # We need the retryID of the starting task, not the task itself.
         # Fetch it first to get its retryID.
         try:
+            if current_id is None:
+                raise ValueError("the task has no jediTaskID")
             current_task = await fetch_task_data(current_id)
         except Exception as exc:
             logger.warning(
@@ -996,7 +999,7 @@ class PandaMcpClient(McpClient):
             if not jobs:
                 return {"error": "no failed jobs found"}
             panda_id = jobs[0].get("PandaID") or jobs[0].get("jobID")
-            content = await get_job_log(panda_id) or ""
+            content = (await get_job_log(panda_id) if panda_id is not None else None) or ""
             summary = summarize_log_content(content)
             summary["pandaID"] = panda_id
             summary["filename"] = "payload.stdout"
@@ -1028,14 +1031,14 @@ class PandaMcpClient(McpClient):
             if not failed_jobs:
                 return {"error": "no failed jobs found for current task"}
             failed_pid = failed_jobs[0].get("PandaID") or failed_jobs[0].get("jobID")
-            failed_log = await get_job_log(failed_pid)
+            failed_log = await get_job_log(failed_pid) if failed_pid is not None else None
 
             ref_jobs = await get_job_descriptions(ref_id)
             finished = [j for j in ref_jobs if j.get("jobStatus") == "finished"]
             if not finished:
                 return {"error": f"no finished jobs found for reference task {ref_id}"}
             succ_pid = finished[0].get("PandaID") or finished[0].get("jobID")
-            successful_log = await get_job_log(succ_pid)
+            successful_log = await get_job_log(succ_pid) if succ_pid is not None else None
 
             result = compare_job_logs(failed_log or "", successful_log or "")
             result["failed_panda_id"] = failed_pid

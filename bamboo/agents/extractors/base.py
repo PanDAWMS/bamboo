@@ -29,10 +29,10 @@ class ExtractionStrategy(ABC):
     async def extract(
         self,
         email_text: str = "",
-        task_data: dict[str, Any] = None,
-        external_data: dict[str, Any] = None,
-        task_logs: dict[str, str] = None,
-        doc_hints: dict[str, str] = None,
+        task_data: dict[str, Any] | None = None,
+        external_data: dict[str, Any] | None = None,
+        task_logs: dict[str, str] | None = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> KnowledgeGraph:
         """Extract a knowledge graph from the provided input sources.
 
@@ -76,7 +76,7 @@ class ExtractionStrategy(ABC):
 
     async def prefetch_hints(
         self,
-        task_data: dict[str, Any] = None,
+        task_data: dict[str, Any] | None = None,
         email_text: str = "",
     ) -> dict[str, str]:
         """Optionally pre-fetch strategy-specific context hints before extraction.

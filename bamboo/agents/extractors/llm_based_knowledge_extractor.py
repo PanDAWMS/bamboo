@@ -39,10 +39,10 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
     async def extract(
         self,
         email_text: str = "",
-        task_data: dict[str, Any] = None,
-        external_data: dict[str, Any] = None,
-        task_logs: dict[str, str] = None,
-        doc_hints: dict[str, str] = None,
+        task_data: dict[str, Any] | None = None,
+        external_data: dict[str, Any] | None = None,
+        task_logs: dict[str, str] | None = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> KnowledgeGraph:
         """Extract using LLM-based approach."""
         # Combine all input sources
@@ -92,10 +92,10 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
     def _prepare_input(
         self,
         email_text: str,
-        task_data: dict[str, Any],
-        external_data: dict[str, Any],
-        task_logs: dict[str, str] = None,
-        doc_hints: dict[str, str] = None,
+        task_data: dict[str, Any] | None,
+        external_data: dict[str, Any] | None,
+        task_logs: dict[str, str] | None = None,
+        doc_hints: dict[str, str] | None = None,
     ) -> str:
         """Prepare combined input for the LLM."""
         sections = []
@@ -134,7 +134,8 @@ class LLMBasedKnowledgeExtractor(ExtractionStrategy):
                 end = response.find("```", start)
                 response = response[start:end].strip()
 
-            return json.loads(response)
+            parsed: dict[str, Any] = json.loads(response)
+            return parsed
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM response: {e}")
             logger.debug(f"Response: {response}")

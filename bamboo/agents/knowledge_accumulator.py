@@ -32,6 +32,7 @@ from bamboo.llm import (
     get_embeddings,
     get_llm,
     get_summary_llm,
+    message_text,
 )
 from bamboo.models.knowledge_entity import ExtractedKnowledge, KnowledgeGraph
 from bamboo.utils.narrator import say, show_block, thinking, warn
@@ -99,9 +100,9 @@ class KnowledgeAccumulator:
     async def process_knowledge(
         self,
         email_text: str = "",
-        task_data: dict[str, Any] = None,
-        external_data: dict[str, Any] = None,
-        task_logs: dict[str, str] = None,
+        task_data: dict[str, Any] | None = None,
+        external_data: dict[str, Any] | None = None,
+        task_logs: dict[str, str] | None = None,
         dry_run: bool = False,
         require_procedures: bool = False,
         debug_trace: dict[str, Any] | None = None,
@@ -570,7 +571,7 @@ class KnowledgeAccumulator:
                 HumanMessage(content=user_content),
             ]
         )
-        merged = response.content.strip()
+        merged = message_text(response.content).strip()
         logger.info(
             "KnowledgeAccumulator: merged description for procedure '%s'", name
         )
@@ -731,7 +732,7 @@ class KnowledgeAccumulator:
 
         with thinking("Generating graph summary"):
             response = await self.llm.ainvoke(messages)
-        return response.content
+        return message_text(response.content)
 
     async def _extract_key_insights(
         self, graph: KnowledgeGraph

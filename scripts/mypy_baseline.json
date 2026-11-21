@@ -1,0 +1,5 @@
+{
+ "mypy": "2.4.1",
+ "target": "bamboo/",
+ "counts": {}
+}

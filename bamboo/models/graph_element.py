@@ -23,7 +23,7 @@ Phase 1 to decide whether and how to run a Phase 2 investigation.
 """
 
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -145,6 +145,11 @@ class BaseNode(BaseModel):
         ),
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    if TYPE_CHECKING:
+        # every subclass sets its own; declared here for the type checker only, so
+        # the model's fields (and their order) stay as they were
+        node_type: NodeType
 
 
 class GraphRelationship(BaseModel):
@@ -298,7 +303,7 @@ class ResolutionNode(BaseNode):
 
     node_type: NodeType = NodeType.RESOLUTION
     steps: list[str] = Field(default_factory=list)
-    success_rate: Optional[float] = Field(None, ge=0.0, le=1.0)
+    success_rate: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     estimated_duration: Optional[str] = None
 
 

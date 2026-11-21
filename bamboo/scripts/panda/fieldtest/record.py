@@ -716,8 +716,8 @@ def chain(machine: str, log: str, m: Machine) -> tuple[list[File], list[str]]:
         days.setdefault(day, {})["gz" if d["gz"] else "plain"] = e
     dated = []
     for day, kinds in days.items():
-        plain, gz = kinds.get("plain"), kinds.get("gz")
-        e = plain or gz
+        plain = kinds.get("plain")
+        e = plain or kinds["gz"]  # one of the two is there
         name = f"{log}-{day:%Y%m%d}.gz"
         kind = "compressing" if plain else "rotated"
         dated.append(
@@ -735,12 +735,14 @@ def chain(machine: str, log: str, m: Machine) -> tuple[list[File], list[str]]:
             )
         )
     dated.sort(key=lambda f: f.mtime)
-    if [f.date for f in dated] != sorted(f.date for f in dated):
+    dates = [f.date for f in dated if f.date is not None]  # every one of them is dated
+    if dates != sorted(dates):
         notes.append(
             f"{machine}: the rotated files of {log} are not in their dates' order by mtime; read by mtime"
         )
     before = None
     for f in dated:
+        assert f.date is not None
         f.start = before
         f.end = max(rot.get(f.date, f.mtime), f.mtime) + MARGIN
         before = max(rot.get(f.date, f.mtime), f.mtime)
@@ -807,7 +809,9 @@ class Earlier:
     ) -> tuple[list[dict], set[str], dict[str, Stretches]]:
         """The leaves that held one of *strings*, the strings none of them held, and, by string some held only in
         part, what of the file they read for it."""
-        found, whole, part = [], set(), {}
+        found: list[dict] = []
+        whole: set[str] = set()
+        part: dict[str, Stretches] = {}
         for leaf in self.leaves.get((machine, file), []):
             mine = strings & set(leaf["strings"])
             if not mine:
@@ -854,7 +858,8 @@ class Grepper:
             job.seen = (f.size, f.mtime)
         if f.kind == "compressing" and not await self.compressed(job):
             return
-        reused, asking = [], job.strings
+        reused: list[dict] = []
+        asking = job.strings
         if f.kind != "current":
             reused, asking, part = self.earlier.cover(f.machine, f.name, job.strings)
             for leaf in reused:
@@ -963,7 +968,7 @@ class Grepper:
             if got.get("error") == TIMED_OUT and retries:
                 return await self.page(job, wanted, retries - 1)
             job.failed.update(
-                dict.fromkeys(wanted, got.get("error") or got.get("status"))
+                dict.fromkeys(wanted, str(got.get("error") or got.get("status")))
             )
             return
         records = (got.get("result") or {}).get("records") or []
@@ -1013,6 +1018,7 @@ class Grepper:
     async def compressed(self, job: Job) -> bool:
         """Wait for the file's day to be compressed; False when it is now unreadable (the job is settled)."""
         f = job.file
+        assert f.date is not None  # a compressing file is a dated one
         give_up = datetime.datetime.combine(
             f.date, datetime.time()
         ) + datetime.timedelta(days=2)
@@ -1131,7 +1137,7 @@ class Grepper:
                 # goes on from where the disk stopped it
                 return await self.leaf(job, strings, window, retries - 1, then)
             job.failed.update(
-                dict.fromkeys(strings, got.get("error") or got.get("status"))
+                dict.fromkeys(strings, str(got.get("error") or got.get("status")))
             )
             return "failed"
         result = got.get("result") or {}
@@ -1412,6 +1418,7 @@ def file_entry(
     before (the file goes on past it), when it was asked (it read to the file's end), or the list."""
     covers_from = "mtime"
     covers_to: str | None = "rotation"
+    covers: list[str | None] | None
     if f.kind != "current":
         covers = [text(f.start), text(f.end)]
     elif job and job.status == "answered":
@@ -1424,7 +1431,7 @@ def file_entry(
         )
     # a grep that failed is the ask's when it held one of the ask's strings; the file's other greps answer the rest
     failed = sorted({job.failed[s] for s in strings & job.failed.keys()}) if job else []
-    entry = {
+    entry: dict[str, Any] = {
         "file": f.name,
         "covers": covers,
         "covers_from": covers_from,
@@ -1588,10 +1595,10 @@ async def record_rounds(
                         "error": None,
                         "service": m.service,
                     }
-            for service, why in sorted(failed.items()):
+            for service, err in sorted(failed.items()):
                 plan[f"every {service} machine"] = {
                     "status": "list failed",
-                    "error": why,
+                    "error": err,
                     "service": service,
                 }
         plans.append(plan)
@@ -1613,9 +1620,9 @@ async def record_rounds(
         for job in jobs.values():
             at = (job.file.machine, job.file.log)
             if job.status == "answered" and at not in moves:
-                why = moved(job, sources[at][0], after.get(job.file.machine))
-                if why:
-                    moves[at] = why
+                moved_why = moved(job, sources[at][0], after.get(job.file.machine))
+                if moved_why:
+                    moves[at] = moved_why
         after_lists.append(
             {
                 "asked_at": text(after_at),
@@ -1628,11 +1635,11 @@ async def record_rounds(
         if tries == RELIST_TRIES:
             # still moving: its asks are asked again in a later round
             for job in jobs.values():
-                if why := moves.get((job.file.machine, job.file.log)):
+                if moved_why := moves.get((job.file.machine, job.file.log)):
                     job.failed.update(
                         dict.fromkeys(
                             job.strings,
-                            f"not known to be the file listed after the greps: {why}",
+                            f"not known to be the file listed after the greps: {moved_why}",
                         )
                     )
             break
@@ -1658,11 +1665,13 @@ async def record_rounds(
         for name, p in plan.items():
             files = []
             for f in p.get("files", []):
-                job = jobs.get((name, f.name))
+                got_job = jobs.get((name, f.name))
                 files.append(
-                    file_entry(job, f, strings, job.listed_at if job else listed_at)
+                    file_entry(
+                        got_job, f, strings, got_job.listed_at if got_job else listed_at
+                    )
                 )
-                requests.extend(job.requests if job else [])
+                requests.extend(got_job.requests if got_job else [])
             out_machines[name] = {
                 "service": p["service"],
                 "status": p["status"],
@@ -1700,16 +1709,16 @@ async def record_rounds(
     (kept_dir / "leaves.jsonl").write_text(
         "".join(json.dumps(leaf) + "\n" for leaf in grepper.leaves)
     )
-    out = []
+    out: list[tuple[Path | None, list[dict], list[dict]]] = []
     start = 0
     for (case_asks, directory), n in zip(cases, rounds, strict=True):
         mine = records[start : start + len(case_asks)]
         start += len(case_asks)
         # an ask a list or a grep failed for is asked again rather than recorded with a hole no round would fill
         deferred = [
-            {"ask": r["ask"], "why": why}
+            {"ask": r["ask"], "why": whys}
             for r in mine
-            if (why := failures(r["machines"]))
+            if (whys := failures(r["machines"]))
         ]
         mine = [r for r in mine if not failures(r["machines"])]
         round_dir = (
@@ -1826,7 +1835,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not settled, nothing written: {e}", file=sys.stderr)
         return 3
     written = 0
-    for (_, directory), (path, records, deferred) in zip(cases, out, strict=True):
+    for (_, directory), (path, written_records, deferred) in zip(
+        cases, out, strict=True
+    ):
         for d in deferred:
             print(f"deferred {key_of(d['ask'])}: {'; '.join(d['why'])}")
         if path is None:
@@ -1836,7 +1847,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
         written += 1
-        print(f"{path}: {len(records)} record(s), {len(deferred)} ask(s) deferred")
+        print(
+            f"{path}: {len(written_records)} record(s), {len(deferred)} ask(s) deferred"
+        )
     return 0 if written else 4
 
 

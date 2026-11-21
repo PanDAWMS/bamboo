@@ -143,8 +143,8 @@ class ReasoningNavigator:
     async def analyze_task(
         self,
         task_data: dict[str, Any],
-        external_data: dict[str, Any] = None,
-        task_logs: dict[str, str] = None,
+        external_data: dict[str, Any] | None = None,
+        task_logs: dict[str, str] | None = None,
         doc_hints: dict[str, str] | None = None,
         debug_trace: dict[str, Any] | None = None,
     ) -> AnalysisResult:
@@ -446,8 +446,8 @@ class ReasoningNavigator:
             lines = []
             for r in results:
                 resolutions = r.get("resolutions") or []
-                res_names = [
-                    x.get("name") for x in resolutions
+                res_names: list[str] = [
+                    x["name"] for x in resolutions
                     if isinstance(x, dict) and x.get("name")
                 ]
                 res_str = ", ".join(res_names) if res_names else "(none)"
@@ -616,7 +616,7 @@ class ReasoningNavigator:
     async def _identify_root_cause(
         self,
         task_data: dict[str, Any],
-        external_data: dict[str, Any],
+        external_data: dict[str, Any] | None,
         graph_results: list[dict[str, Any]],
         vector_results: list[dict[str, Any]],
         domain_hints: str = "(none)",
@@ -710,7 +710,8 @@ class ReasoningNavigator:
         elif "```" in text:
             text = text[text.find("```") + 3 : text.rfind("```")].strip()
         try:
-            return json.loads(text)
+            parsed: dict[str, Any] = json.loads(text)
+            return parsed
         except json.JSONDecodeError as exc:
             logger.error("ReasoningNavigator: failed to parse LLM response: %s", exc)
             return {
