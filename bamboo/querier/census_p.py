@@ -49,6 +49,7 @@ import re
 import sys
 import time
 from pathlib import Path
+from typing import cast
 
 from bamboo.querier import handlers as H  # noqa: E402
 from bamboo.querier import printed as P  # noqa: E402
@@ -105,7 +106,7 @@ def _apply_flags(calls_change_nothing: bool, call_values_known: bool) -> None:
         P.Walker.roots = lambda self, node: set()  # type: ignore[method-assign]
     if call_values_known:
         real_available = P.Walker.available
-        P.Walker.available = lambda w, p: real_available(w, p) | _call_bound(w.func)
+        P.Walker.available = lambda w, p: real_available(w, p) | _call_bound(w.func)  # type: ignore[method-assign,assignment]
         P.covered = _covered_with_calls
 
 
@@ -153,7 +154,7 @@ def _one(arm: dict, tag: str, record: bool) -> dict:
                 if "left" in p:
                     cls, line = H.leave_class(fn, p["left"])
                     p["class"] = cls
-                    p["after_arm"] = bool(line) and cls != "NOTEXC" and H.after_arm(fn, stmt, line)
+                    p["after_arm"] = bool(line) and cls != "NOTEXC" and H.after_arm(fn, cast(ast.stmt, stmt), cast(int, line))
                 if p.get("missing"):
                     p["missing"] = [[left, H.leave_class(fn, left)[0]] for left in p["missing"]]
         rec = {

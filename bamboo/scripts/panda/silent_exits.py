@@ -96,7 +96,7 @@ def scan(root: Path, kinds: set[str]) -> list[dict]:
                         reaching=True,
                         guards_above=False,
                     )
-                    reads = collections.OrderedDict()
+                    reads: collections.OrderedDict[str, int] = collections.OrderedDict()
                     for step in walked.steps:
                         if step.terminal in wanted:
                             reads.setdefault(f"{step.terminal} -- {step.detail}", step.line)

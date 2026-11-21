@@ -123,7 +123,8 @@ class _ThreadSession(ThreadTransport):
         self._outbox.put_nowait((text, props))
 
     async def next_reply(self) -> str:
-        return await self._inbox.get()
+        answer: str = await self._inbox.get()
+        return answer
 
     async def thread_messages(self) -> list[str]:
         return await self._bot.get_thread_messages(self.root_id)
@@ -196,13 +197,14 @@ class MattermostBot:
     ) -> dict[str, Any]:
         # Empty root_id = a new top-level post → no thread contention, no lock.
         if not root_id:
-            return await self.driver.posts.create_post(
+            post: dict[str, Any] = await self.driver.posts.create_post(
                 channel_id=channel_id,
                 message=message,
                 root_id=root_id,
                 props=props,
                 file_ids=file_ids,
             )
+            return post
         # Serialise creates to the SAME thread: Mattermost updates the thread's row
         # on every reply, so concurrent replies to one root can collide with
         # `app.post.save.app_error`. The three posters (outbox sender, narration
@@ -211,20 +213,22 @@ class MattermostBot:
         # single-threaded and there is no await between lookup and insert.
         lock = self._create_locks.setdefault(root_id, asyncio.Lock())
         async with lock:
-            return await self.driver.posts.create_post(
+            created: dict[str, Any] = await self.driver.posts.create_post(
                 channel_id=channel_id,
                 message=message,
                 root_id=root_id,
                 props=props,
                 file_ids=file_ids,
             )
+            return created
 
     async def open_direct_channel(self, user_id: str) -> str:
         """Return the id of the bot↔user direct-message channel (created if absent)."""
         channel = await self.driver.channels.create_direct_channel(
             [self.bot_user_id, user_id]
         )
-        return channel["id"]
+        answer: str = channel["id"]
+        return answer
 
     async def update_post(
         self,
@@ -235,9 +239,10 @@ class MattermostBot:
         props: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Patch an existing post's message, attachments, and/or props (in-place edit)."""
-        return await self.driver.posts.patch_post(
+        patched: dict[str, Any] = await self.driver.posts.patch_post(
             post_id, message=message, file_ids=file_ids, props=props
         )
+        return patched
 
     async def delete_post(self, post_id: str) -> Any:
         """Delete a post (used as a fallback when an attachment can't be detached)."""
@@ -252,7 +257,8 @@ class MattermostBot:
         resp = await self.driver.files.upload_file(
             files=(filename, data, "image/gif"), channel_id=channel_id
         )
-        return resp["file_infos"][0]["id"]
+        answer: str = resp["file_infos"][0]["id"]
+        return answer
 
     async def ensure_spinner_emoji(self) -> None:
         """Register the animated spinner as a custom emoji (best-effort, once).
@@ -430,6 +436,7 @@ class MattermostBot:
 
         # A reply within an existing session thread → feed it as the next turn.
         root_id = post.get("root_id") or post.get("id")
+        assert root_id is not None  # every post has an id
         sess = self._sessions.get(root_id)
         if sess is not None:
             sess.deliver(message)

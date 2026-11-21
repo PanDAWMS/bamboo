@@ -69,7 +69,8 @@ def _expand_env_vars(value: str) -> str:
     """
     def _replace(match: re.Match) -> str:
         var = match.group(1)
-        return os.environ.get(var, match.group(0))
+        answer: str = os.environ.get(var, match.group(0))
+        return answer
 
     return _ENV_VAR_RE.sub(_replace, value)
 

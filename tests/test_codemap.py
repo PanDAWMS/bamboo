@@ -11325,6 +11325,124 @@ def test_an_answer_takes_no_return_the_endpoint_s_constants_rule_out(tmp_path):
     assert [(read.site, read.returned) for read in endpoint.reads] == [(node.name, ["['data']"])]
 
 
+_PEEK = (
+    "class TaskModule:\n"
+    "    def peek(self, task_id):\n"
+    "        varMap = {':jediTaskID': task_id}\n"
+    "        sql = f'SELECT jediTaskID,status,oldStatus FROM {schema}.JEDI_Tasks WHERE jediTaskID=:jediTaskID '\n"
+    "        self.cur.execute(sql + comment, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return res\n\n"
+    "    def count_rows(self, inner):\n"
+    "        sql = f'SELECT COUNT(*) FROM ({inner}) t'\n"
+    "        self.cur.execute(sql, {})\n"
+    "        return self.cur.fetchone()[0]\n\n"
+    "    def params(self, task_id):\n"
+    "        sql = f'SELECT taskParams FROM {schema}.JEDI_TaskParams WHERE jediTaskID=:jediTaskID '\n"
+    "        _ok, rows = self.getClobObj(sql, {':jediTaskID': task_id})\n"
+    "        return rows[0][0]\n\n"
+    "    def getClobObj(self, sql, varMap):\n"
+    "        self.cur.execute(sql, varMap)\n"
+    "        res = self.cur.fetchall()\n"
+    "        return True, res\n"
+)
+
+
+def test_an_answer_says_which_columns_of_a_read_reach_it_and_a_statement_with_its_from_a_hole_is_an_open_hole(
+    tmp_path,
+):
+    """Each select item walked alone to an endpoint's answer (``sqlwrite.returned_columns``): ``status`` returns the
+    row's second column; ``row`` returns the rows whole, every column -- said by the table here, whose class this
+    corpus does not say; ``params`` returns ``getClobObj``'s rows, no item of which is placed alone.  A statement whose
+    ``FROM`` takes its tables through an interpolation reads rows no read says (``sql.FROM_IS_A_HOLE``, its reads
+    not known): an ``open`` hole of each endpoint whose closure holds it -- ``count``'s."""
+    from bamboo.codemap import reach
+    from bamboo.codemap.panda import endpoints, objects, plugin
+
+    server = (
+        "from pandaserver.api.v1 import task_api as task_api_v1\n\n\n"
+        "def module_mapping(version, api_module):\n"
+        "    mapping = {'v1': {'task': {'module': task_api_v1, 'allowed_methods': []}}}\n"
+        "    return mapping[version][api_module]\n"
+    )
+    api = (
+        "from pandaserver.x import TaskModule\n\n"
+        "task_module: TaskModule = None\n\n\n"
+        "def status(req, task_id):\n"
+        "    return {'data': task_module.peek(task_id)[0][1]}\n\n\n"
+        "def row(req, task_id):\n"
+        "    return {'data': task_module.peek(task_id)}\n\n\n"
+        "def count(req, inner):\n"
+        "    return {'data': task_module.count_rows(inner)}\n\n\n"
+        "def params(req, task_id):\n"
+        "    return {'data': task_module.params(task_id)}\n"
+    )
+    files = {
+        "pandaserver/taskbuffer/Specs.py": _SPECS,
+        "pandaserver/x.py": _PEEK,
+        "pandaserver/server/panda.py": server,
+        "pandaserver/api/v1/task_api.py": api,
+    }
+    modules = []
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        modules.append(_module(text, rel))
+    attributor = attribution.SpecAttributor(progress.spec_attributes(modules), attribution.class_bases(modules))
+    attributor.learn_table_classes(modules)
+    calls = sqlwrite.corpus_calls(modules, {"pandaserver": tmp_path / "pandaserver"})
+    api_file = "pandaserver/api/v1/task_api.py"
+    asked = frozenset(f"{api_file}::{name}" for name in ("status", "row", "count", "params"))
+    returned: dict = {}
+    with sql.across_calls(calls):
+        nodes = sqlwrite.read_site_nodes(sqlwrite.read_side(modules, attributor, calls).statements, MAP_ID, VERSION)
+        graph = reach.graph(calls, MAP_ID, VERSION, plugin._DatabaseLeaves(calls))
+        record = reach.ReachGraph(graph)
+        sqlwrite.attach_crossings(nodes, modules, [], calls, record, returned=returned, returning=asked)
+        stops = [
+            stop
+            for func, _cls in pathcond.functions_with_owner(modules[1].tree)
+            for stop in sqlwrite.statement_stops(func, "pandaserver/x.py")
+        ]
+        fragment = MapFragment(
+            map_id=MAP_ID, derived_from=VERSION, read_sites=nodes, reach_graph=graph, reading_stops=stops
+        )
+        objects.attach(fragment, modules, calls)
+        endpoints.attach(fragment, modules, calls, returned, attributor)
+
+    (unread,) = [stop for stop in stops if stop.reason == sql.FROM_IS_A_HOLE]
+    assert (unread.owner, unread.statement, unread.detail, unread.reads_known) == (
+        "pandaserver/x.py::count_rows",
+        11,
+        "FROM ({})",
+        False,
+    )
+    by_route = {one.route: one for one in fragment.endpoints}
+    (status,) = by_route["task/status"].reads
+    assert (status.returned_columns, status.returned_all, status.returned_columns_open) == (
+        ["jedi_tasks.status"],
+        False,
+        "",
+    )
+    (whole,) = by_route["task/row"].reads
+    assert (whole.returned_columns, whole.returned_all) == (
+        ["jedi_tasks.jeditaskid", "jedi_tasks.oldstatus", "jedi_tasks.status"],
+        True,
+    )
+    (clob,) = by_route["task/params"].reads
+    # getClobObj hands the rows back as the second of a pair: they reach the answer, no item is placed alone.
+    assert clob.returned and (clob.returned_columns, clob.returned_columns_open) == ([], sqlwrite.COLUMNS_UNPLACED)
+    counting = by_route["task/count"]
+    assert "pandaserver/x.py::TaskModule.count_rows:11" in counting.holes
+    assert [
+        (hole.at, hole.callee, hole.why, hole.bound)
+        for hole in counting.hole_bounds
+        if hole.why == sql.FROM_IS_A_HOLE
+    ] == [("pandaserver/x.py::TaskModule.count_rows:11", "FROM ({})", sql.FROM_IS_A_HOLE, "open")]
+    assert all(sql.FROM_IS_A_HOLE not in by_route[route].holes for route in ("task/status", "task/row"))
+
+
 @pytest.mark.parametrize(
     ("fill", "crosses"),
     [
@@ -23579,6 +23697,226 @@ class Proxy:
         if "lost" == jobSpec.jobStatus and other.state in ("a", "b") and jobSpec.PandaID > len(other.ids):
             fileSpec.status = "lost"
 '''
+
+
+#: Messages built four ways: a type handed in with the keywords merged (``make_message``), a type written in place, a
+#: type handed in with a dict merged; and a sender handing the type on.
+_MESSAGE_UTILS = '''
+import json
+
+
+def make_message(msg_type, **kwargs):
+    msg_dict: dict = {"msg_type": msg_type}
+    msg_dict.update(kwargs)
+    return json.dumps(msg_dict)
+
+
+def push_status(task_id, status):
+    msg = {"msg_type": "task_status", "taskid": task_id, "status": status}
+    return json.dumps(msg)
+
+
+def send_message(msg_type, data_dict=None):
+    msg_dict = {}
+    if data_dict:
+        msg_dict.update(data_dict)
+    msg_dict.update({"msg_type": msg_type, "timestamp": 0})
+    return json.dumps(msg_dict)
+
+
+def send_workflow(workflow_id):
+    return send_message("workflow", data_dict={"workflow_id": workflow_id})
+'''
+
+_MESSAGE_SENDS = '''
+from pkg.utils import make_message
+
+
+def send_job(task_id, job_id):
+    return make_message("get_job", taskid=task_id, jobid=job_id)
+
+
+def send_command(command, task_id):
+    return make_message(f"{command}_task", taskid=task_id)
+'''
+
+#: A send whose type is the configuration's.
+_MESSAGE_CONFIGURED = '''
+from pkg.utils import make_message
+
+
+class Relay:
+    def __init__(self, params):
+        self.component = params["component"]
+
+    def relay(self, task_id):
+        return make_message(self.component, taskid=task_id)
+'''
+
+_MESSAGE_PLUGINS = '''
+import json
+
+import yaml
+from pandacommon.pandamsgbkr.msg_processor import SimpleMsgProcPluginBase
+
+
+class Base(SimpleMsgProcPluginBase):
+    def process(self, msg_obj):
+        """Process the message."""
+        pass
+
+
+class Status(Base):
+    def process(self, msg_obj, decoded_data=None):
+        if decoded_data is None:
+            msg_dict = json.loads(msg_obj.data)
+        else:
+            msg_dict = decoded_data
+        msg_type = msg_dict["msg_type"]
+        if msg_type == "task_status":
+            self.on_task(msg_dict)
+        elif msg_type in ("workflow", "kill_task"):
+            self.on_other(msg_type)
+        if msg_type == "task_status" and msg_dict["relation"] in ["input"]:
+            pass
+
+    def on_task(self, msg_dict):
+        return msg_dict["taskid"]
+
+    def on_other(self, kind):
+        return kind
+
+
+class Steps(Base):
+    def process(self, msg_obj):
+        msg_dict = json.loads(msg_obj.data)
+        if msg_dict["msg_type"] not in ("wfstep", "wfdata"):
+            return None
+        return msg_dict["step_id"]
+
+
+class Callback(Base):
+    def process(self, msg_obj):
+        message_dict = yaml.safe_load(msg_obj.data)
+        event_type = message_dict["event_type"]
+        if self.enabled and event_type in ["datasetlock_ok"]:
+            self.on_lock(event_type, message_dict)
+
+    def on_lock(self, event_type, message_dict):
+        return message_dict["payload"]
+
+
+class Forward(Base):
+    def process(self, msg_obj):
+        return msg_obj.data
+'''
+
+
+def test_a_message_s_sends_are_read_however_its_type_is_spelled(tmp_path):
+    """``make_message`` puts its type in a dict and merges its ``**kwargs`` in: ``send_job``'s call sends
+    ``get_job`` with ``taskid`` and ``jobid``, ``send_command``'s an f-string, a pattern.  ``push_status`` writes its
+    type in place, a send of its own with the dict's other keys.  ``send_message`` merges a dict parameter: the
+    literal ``send_workflow`` hands it is the payload.  ``Relay`` hands a type its configuration holds: an open send.
+    The senders' own hand-ons send nothing.  The edges are unchanged by these: no receiver takes only one type."""
+    files = {
+        "pkg/utils.py": _MESSAGE_UTILS,
+        "pkg/sends.py": _MESSAGE_SENDS,
+        "pkg/relay.py": _MESSAGE_CONFIGURED,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    sent = messages.sends(modules, calls)
+
+    assert [
+        (one.place, one.literal, one.pattern.pattern if one.pattern else None, one.open, sorted(one.payload))
+        for one in sent
+    ] == [
+        (f"pkg/relay.py::relay:{_at('make_message(self.component', _MESSAGE_CONFIGURED)}", None, None, True, ["taskid"]),
+        (f"pkg/sends.py::send_job:{_at('get_job', _MESSAGE_SENDS)}", "get_job", None, False, ["jobid", "taskid"]),
+        (f"pkg/sends.py::send_command:{_at('_task', _MESSAGE_SENDS)}", None, ".+_task", False, ["taskid"]),
+        (f"pkg/utils.py::push_status:{_at('task_status', _MESSAGE_UTILS)}", "task_status", None, False, ["status", "taskid"]),
+        (f"pkg/utils.py::send_workflow:{_at('return send_message(', _MESSAGE_UTILS)}", "workflow", None, False, ["workflow_id"]),
+    ]
+    assert [one.carries("kill_task") for one in sent] == [False, False, True, False, False]
+    assert messages.edges(modules, calls, None, sent) == []
+
+
+def test_every_receiver_says_the_types_it_takes_their_sends_and_a_boundary_where_none_could_be_sent(tmp_path):
+    """Each override of the message processors' ``process`` is a receiver.  ``Status`` tells ``msg_type``
+    ``task_status`` -- handed to ``on_task`` -- from ``workflow`` and ``kill_task``; its test of ``relation`` chooses
+    within a type and is no type.  ``Steps`` takes ``wfstep`` and ``wfdata`` only.  ``Callback`` reads no
+    ``msg_type`` and tells ``event_type`` ``datasetlock_ok``, in an ``and``.  ``Forward`` tests nothing: one row, no
+    key.  The base's own passes and receives nothing.  Each type's sends are joined -- ``kill_task`` to the
+    f-string's -- and ``Relay``'s open send to every ``msg_type`` row; no send puts an ``event_type``, so the
+    callback's type crosses a boundary of its own.  Without the open send, a ``msg_type`` nothing sends does too."""
+    files = {
+        "pkg/utils.py": _MESSAGE_UTILS,
+        "pkg/sends.py": _MESSAGE_SENDS,
+        "pkg/relay.py": _MESSAGE_CONFIGURED,
+        "pkg/plugins.py": _MESSAGE_PLUGINS,
+    }
+    modules, calls, _record = _keyed_corpus(tmp_path, files)
+
+    rows, boundaries = messages.receivers(modules, calls, MAP_ID, VERSION)
+
+    relay = f"pkg/relay.py::relay:{_at('make_message(self.component', _MESSAGE_CONFIGURED)}"
+    callback = "pkg/plugins.py::Callback.process"
+    assert [(one.receiver, one.key, one.msg_type, one.handled_by, one.senders, one.senders_open, one.boundary) for one in rows] == [
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "kill_task",
+            [],
+            [f"pkg/sends.py::send_command:{_at('_task', _MESSAGE_SENDS)}"],
+            [relay],
+            "",
+        ),
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "task_status",
+            ["pkg/plugins.py::on_task"],
+            [f"pkg/utils.py::push_status:{_at('task_status', _MESSAGE_UTILS)}"],
+            [relay],
+            "",
+        ),
+        (
+            "pkg/plugins.py::Status.process",
+            "msg_type",
+            "workflow",
+            [],
+            [f"pkg/utils.py::send_workflow:{_at('return send_message(', _MESSAGE_UTILS)}"],
+            [relay],
+            "",
+        ),
+        ("pkg/plugins.py::Steps.process", "msg_type", "wfdata", [], [], [relay], ""),
+        ("pkg/plugins.py::Steps.process", "msg_type", "wfstep", [], [], [relay], ""),
+        (
+            callback,
+            "event_type",
+            "datasetlock_ok",
+            ["pkg/plugins.py::on_lock"],
+            [],
+            [],
+            BoundaryNode.make_name(MAP_ID, "", callback),
+        ),
+        ("pkg/plugins.py::Forward.process", "", "", [], [], [], ""),
+    ]
+    assert [
+        (one.interface, one.system, one.kind, one.transport, one.direction, one.carried_values) for one in boundaries
+    ] == [(callback, "", "transports_causation", "message", "inbound", ["event_type"])]
+
+    del files["pkg/relay.py"]
+    closed_modules, closed_calls, _record = _keyed_corpus(tmp_path / "closed", files)
+    rows, boundaries = messages.receivers(closed_modules, closed_calls, MAP_ID, VERSION)
+    steps = "pkg/plugins.py::Steps.process"
+    assert [(one.msg_type, one.boundary) for one in rows if one.receiver == steps] == [
+        ("wfdata", BoundaryNode.make_name(MAP_ID, "", steps)),
+        ("wfstep", BoundaryNode.make_name(MAP_ID, "", steps)),
+    ]
+    assert [one.interface for one in boundaries] == [steps, callback]
+    assert boundaries[0].carried_values == ["msg_type", "step_id"]
+
 
 
 def test_a_branch_names_each_attribute_its_path_condition_compares_with_constants_by_class():

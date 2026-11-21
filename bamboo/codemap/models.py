@@ -3627,11 +3627,12 @@ class BoundaryNode(BaseNode):
     transport: str = Field(
         default="http",
         description=(
-            "http | shared_table.  A separate axis from ``kind``: that one says "
+            "http | shared_table | message.  A separate axis from ``kind``: that one says "
             "whether evidence survives a failure to cross, this one says where "
             "to go looking.  An endpoint is investigated through the arrival "
             "log; a shared table is investigated by querying it, and the row "
-            "either exists or it does not."
+            "either exists or it does not; a message through the receiver's "
+            "log and the broker's (:class:`MessageReceiver`)."
         ),
     )
     interface: str = Field(
@@ -5140,6 +5141,27 @@ class EndpointRead(BaseModel):
             "*returned* says."
         ),
     )
+    returned_columns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Where *returned* is not empty: the columns of the rows that reach the answer, as subjects "
+            "(``JediTaskSpec.status``; ``table.column`` where the table has no spec class), each select item walked "
+            "alone from the statement to the answer as *returned*'s walk goes (:func:`bamboo.codemap.panda."
+            "recognizers.sqlwrite.returned_columns`).  ``task/get_status`` returns ``JediTaskSpec.status``."
+        ),
+    )
+    returned_all: bool = Field(
+        default=False,
+        description="Whether every item of the statement's select list reaches the answer: the rows go whole.",
+    )
+    returned_columns_open: str = Field(
+        default="",
+        description=(
+            "Why the select list was not walked item by item, so *returned_columns* is not all there is: none is "
+            "read, it takes columns through an interpolation (a spec's ``columnNames()``), it is ``*``, or no item is "
+            "placed where the rows arrive (``getClobObj``'s pair).  Empty where every item was walked."
+        ),
+    )
 
 
 class EndpointWrite(BaseModel):
@@ -5484,6 +5506,57 @@ class MessageEdge(BaseModel):
     )
 
 
+class MessageReceiver(BaseModel):
+    """A type of message a receiver takes, and the sends of it (:func:`bamboo.codemap.panda.messages.receivers`).
+
+    ``StatusReportMsgProcPlugin.process`` tells ``msg_type`` ``task_status`` from ``job_status``; the proxy's
+    ``base_module`` builds both (806, 1071).  ``AtlasIddsMsgProcPlugin.process`` takes ``file_stagein`` and eight
+    more, handing each to another plugin's ``process``; no send writes any of them, but the DDM callback's
+    ``trigger_component_action`` sends the type its configuration names (``component_name``), an open send, so the
+    code does not settle where they come from.  ``PandaCallbackMsgProcPlugin.process`` tells ``event_type``
+    ``datasetlock_ok`` from ``transfer-done``, and nothing in PanDA builds a message under that key: they come from
+    outside, through :attr:`boundary`.  Which receiver listens to which queue is the deployment's.
+    """
+
+    receiver: str = Field(description="The function a message thread hands a message to, ``file::Class.process``.")
+    key: str = Field(
+        default="",
+        description=(
+            "The key the receiver tells types by: ``msg_type``, under which PanDA's senders put a type; another "
+            "(``event_type``) where it reads none.  Empty where it tests none and takes whatever its queue holds."
+        ),
+    )
+    msg_type: str = Field(default="", description="A type its tests take, as written: ``task_status``.")
+    handled_by: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The functions, ``file::name``, a branch taking the type hands the message to "
+            "(``process_dataset_callback``); empty where the receiver handles it itself."
+        ),
+    )
+    senders: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file::name:line`` of each send in the corpus of this key and type "
+            "(:func:`bamboo.codemap.panda.messages.sends`): written out so, or an f-string it matches."
+        ),
+    )
+    senders_open: list[str] = Field(
+        default_factory=list,
+        description=(
+            "``file::name:line`` of each send under this key whose type is not read here: any of them may carry it.  "
+            "No send of the type in the corpus is a fact only where this is empty."
+        ),
+    )
+    boundary: str = Field(
+        default="",
+        description=(
+            "Where *senders* and *senders_open* are both empty, the inbound boundary the type crosses by "
+            "(``transport`` ``message``, ``kind`` ``transports_causation``, no system: the code names none)."
+        ),
+    )
+
+
 class MapFragment(BaseModel):
     """What one recognizer contributes to a build.
 
@@ -5593,6 +5666,13 @@ class MapFragment(BaseModel):
         description=(
             "Each send of a message of a literal type and the function taking only that type "
             "(:func:`bamboo.codemap.panda.messages.edges`): a run's hand-on to another run, beside reach."
+        ),
+    )
+    message_receivers: list[MessageReceiver] = Field(
+        default_factory=list,
+        description=(
+            "Each receiver of the message processors' plugins and each type it takes, with the sends of it and, "
+            "where none could be, the boundary (:func:`bamboo.codemap.panda.messages.receivers`)."
         ),
     )
     exit_keeps: list[ExitKeeps] = Field(
@@ -6757,7 +6837,7 @@ class FollowUp(BaseModel):
     # What ``attach_mover_gaps`` judges with, gathered while the map is open and
     # left out of what is printed or saved: it is the map's, not the answer's.
     mover_sites: dict[str, list["ReadSiteNode"]] = Field(default_factory=dict, exclude=True)
-    mover_files: dict[str, tuple[str, str]] = Field(default_factory=dict, exclude=True)
+    mover_files: dict[str, tuple[str, Optional[str]]] = Field(default_factory=dict, exclude=True)
     table_kinds: dict[str, Optional[str]] = Field(default_factory=dict, exclude=True)
     spec_class: str = Field(default="", exclude=True)
 
@@ -8914,7 +8994,7 @@ class ReaderGap(BaseModel):
         description="What the read site on the line could not read (:attr:`ReadSiteNode.unresolved`).",
     )
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]  # pydantic's spelling; mypy reads no decorator above a property
     @property
     def hides_where(self) -> bool:
         """Whether the gap can hide where the rows go.

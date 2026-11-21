@@ -19,10 +19,10 @@ from __future__ import annotations
 import ast
 import builtins
 import functools
-from typing import Callable, Iterator, NamedTuple, Optional, Sequence
+from typing import Callable, Iterator, NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import evaluate
-from bamboo.codemap.astwalk import walk
+from bamboo.codemap.astwalk import derived, walk
 from bamboo.codemap.reaching import reaching, reaching_exit
 
 
@@ -89,7 +89,12 @@ def enclosing_function(node: ast.AST) -> Optional[ast.FunctionDef | ast.AsyncFun
 
 def declared_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     """The names *scope*'s own statements declare ``global``, and those they declare ``nonlocal`` -- not a nested
-    function's or class's."""
+    function's or class's.  Held on *scope* (:func:`astwalk.derived`): a name read in a nested function asks it of
+    every scope out to the module, 19,054 times a build."""
+    return derived(scope, "_declared_names", lambda: _declared_names(scope))
+
+
+def _declared_names(scope: ast.AST) -> tuple[frozenset[str], frozenset[str]]:
     globals_: set[str] = set()
     nonlocals: set[str] = set()
     stack = list(ast.iter_child_nodes(scope))
@@ -230,9 +235,7 @@ def _assigned(
         _assigned(one, held, node, found)
 
 
-def single_definition(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str
-) -> Optional[ast.expr]:
+def single_definition(func: ast.AST, name: str) -> Optional[ast.expr]:
     """Return the expression assigned to *name*, when exactly one assigns it.
 
     A condition written as a bare local name says nothing on its own: ``if not
@@ -483,9 +486,7 @@ def _index(scope: ast.AST) -> _Index:
     return held
 
 
-def assigned_expressions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef,
-) -> dict[str, list[ast.expr]]:
+def assigned_expressions(func: ast.AST) -> dict[str, list[ast.expr]]:
     """Every expression bound to each local name in *func*, ``+=`` included.
 
     The unrestricted sibling of :func:`single_definition`, for the readers that
@@ -508,9 +509,7 @@ def assigned_expressions(
     return {name: list(values) for name, values in _index(func).assigned().items()}
 
 
-def attribute_expressions(
-    scope: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, field: str
-) -> list[ast.expr]:
+def attribute_expressions(scope: ast.AST, field: str) -> list[ast.expr]:
     """Every expression bound to ``self.<field>`` inside *scope*.
 
     The ``ast.Attribute`` sibling of :func:`assigned_expressions`, and a
@@ -1053,7 +1052,8 @@ def _tests_on(node: ast.AST, func: ast.AST) -> list[tuple[ast.expr, bool]]:
     """
     held = getattr(node, "_tests_on", None)
     if held is not None and held[0] is func:
-        return held[1]
+        kept: list[tuple[ast.expr, bool]] = held[1]
+        return kept
     found = [(guard.test, guard.runs_on) for guard in guards(node, func)]
     node._tests_on = (func, found)  # type: ignore[attr-defined]
     return found
@@ -1294,7 +1294,8 @@ def _rebinds(func: ast.AST) -> dict[str, list[ast.AST]]:
     """
     held = getattr(func, "_rebinds", None)
     if held is not None:
-        return held
+        kept: dict[str, list[ast.AST]] = held
+        return kept
     found: dict[str, list[ast.AST]] = {}
     for name, sites in _index(func).bindings().items():
         own = [binding.site for binding in sites if not binding.nested]
@@ -1633,9 +1634,7 @@ def _within(node: ast.AST, container: ast.AST) -> bool:
     return node is container or any(ancestor is container for ancestor in ancestors(node))
 
 
-def reaching_definitions(
-    func: ast.FunctionDef | ast.AsyncFunctionDef, name: str, target: ast.AST
-) -> list[ast.expr]:
+def reaching_definitions(func: ast.AST, name: str, target: ast.AST) -> list[ast.expr]:
     """The expressions bound to *name* that can still be what *target* reads.
 
     :func:`assigned_expressions` answers "everything this name ever holds",
@@ -1656,7 +1655,7 @@ def reaching_definitions(
     alive = {id(site) for site in kept}
     return sorted(
         (value for value in bound if id(site_of(value)) in alive),
-        key=lambda value: site_of(value).lineno,
+        key=lambda value: getattr(site_of(value), "lineno", 0),
     )
 
 
@@ -2234,7 +2233,7 @@ def tested_values(value: ast.expr, site: ast.AST, func: ast.AST) -> list[str]:
             if found:
                 inside = {id(node) for node in walk(ancestor)}
                 line = getattr(site, "lineno", 0)
-                again = any(id(one) in inside and one.lineno < line for one in rebound)
+                again = any(id(one) in inside and getattr(one, "lineno", 0) < line for one in rebound)
                 return [] if again else found
         previous = ancestor
     return []
@@ -2454,7 +2453,7 @@ def replacements(
         _replacement(write, other, func, reached, exits, sites, killers, keeping, place, kept, callee)
         for other in asked
     ]
-    cut = [held for one, held in found if one.why == SURELY]
+    cut = [cast(ast.AST, held) for one, held in found if one.why == SURELY]  # a sure replacement names its write
     cut += [one.site for one, _held in found if one.why == NO_TEST and isinstance(one.site, ast.AugAssign)]
     if cut:
         # Where the value always meets another write, it goes no further.
@@ -2826,7 +2825,7 @@ def _decided_with(test: ast.expr, place: str, kept: object) -> object:
     spelled = _AsKept(place).visit(fresh)
     if not any(isinstance(node, ast.Name) and node.id == _KEPT_NAME for node in walk(spelled)):
         return UNDECIDED
-    return decided(spelled, {_KEPT_NAME: kept})
+    return decided(cast(ast.expr, spelled), {_KEPT_NAME: kept})
 
 
 def _holding(write: ast.AST, statement: ast.AST, rereads: Sequence[ast.AST], killers: Sequence[ast.AST]) -> bool:
@@ -2969,7 +2968,7 @@ def ways_out(
                 continue
             if not isinstance(getattr(node, "ctx", None), ast.Load):
                 continue
-            root = node
+            root: ast.expr = node
             while isinstance(root, (ast.Attribute, ast.Subscript)):
                 root = root.value
             if not (isinstance(root, ast.Name) and root.id in roots) or ast.unparse(node) not in held:
@@ -3093,7 +3092,7 @@ def _field_held(
     attribute: str,
     callee: Optional[Callable[[ast.Call], Optional[Callee]]],
     memo: Optional[dict],
-) -> Optional[tuple[list[ast.stmt], list[ast.stmt], dict[int, Callee], list[ast.AST], list[ast.AST]]]:
+) -> Optional[tuple[list[ast.stmt], list[ast.stmt], dict[int, Callee], list[ast.stmt], list[ast.AST]]]:
     """``(writes, rereads, calls, ways out, renewals)`` of the field *write* writes, or ``None`` at module level or
     on a holder that is no chain of names, fields and items."""
     func = enclosing_function(write)

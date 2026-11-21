@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from typing import Collection, Iterator, Optional
+from typing import Collection, Iterator, Optional, cast
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -206,6 +206,8 @@ def _held_callables(cls: ast.ClassDef) -> Optional[tuple[str, int]]:
     parameters = [argument.arg for argument in init.args.args[1:]]
     kept: dict[str, str] = {}
     for node in walk(init):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other node
         targets = targets_of(node)
         if (
             len(targets) == 1
@@ -1071,8 +1073,8 @@ def reaching_modules(
     doors: dict[str, set[str]] = {}
     callers: dict[str, list[tuple[str, Optional[ast.Call], Optional[str]]]] = {}
     for module in modules:
-        for name, call in _outward_calls(module, forwarders, doors).items():
-            callers.setdefault(name, []).append((module.rel_path, call, None))
+        for name, outward in _outward_calls(module, forwarders, doors).items():
+            callers.setdefault(name, []).append((module.rel_path, outward, None))
 
     if through_doors:
         for door, forwarded in doors.items():
@@ -1275,6 +1277,8 @@ def _handover(
     )
     fields: dict[str, str] = {}
     for node in walk(init):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other node
         targets = targets_of(node)
         if len(targets) != 1:
             continue
@@ -1364,7 +1368,7 @@ def worker_uplinks(
             for name, call in built:
                 if name is None or name not in dispatched:
                     continue
-                where, methods, span, init = entered[call.func.id]
+                where, methods, span, init = entered[cast(ast.Name, call.func).id]  # built: calls of a class's name
                 handover = _handover(call, init)
                 for method in methods:
                     reach.setdefault((where, method), []).append(
@@ -1433,7 +1437,7 @@ def _classes_owning_a_junction(
     modules: list[SourceModule],
     junctions: list[JunctionNode],
     spec_classes: Collection[str],
-) -> dict[str, tuple[str, list[str], tuple[int, int], Optional[ast.AST]]]:
+) -> dict[str, tuple[str, list[str], tuple[int, int], Optional[ast.FunctionDef | ast.AsyncFunctionDef]]]:
     """``{class: (module, its methods, its span, its __init__)}``.
 
     Every method, not the ones a dispatch door reaches: without a door there
@@ -1447,7 +1451,7 @@ def _classes_owning_a_junction(
     construction site names the class and nothing else.
     """
     owners = {junction.owner for junction in junctions}
-    found: dict[str, list[tuple[str, list[str], tuple[int, int], Optional[ast.AST]]]] = {}
+    found: dict[str, list[tuple[str, list[str], tuple[int, int], Optional[ast.FunctionDef | ast.AsyncFunctionDef]]]] = {}
     for module in modules:
         for node in walk(module.tree):
             if not isinstance(node, ast.ClassDef) or node.name in spec_classes:
@@ -1562,6 +1566,8 @@ def _fanouts_in(
     body = list(walk(func))
     seen: set[tuple[str, str]] = set()
     for node in body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue  # targets_of reads no other node
         targets = targets_of(node)
         if not (targets and isinstance(node.value, ast.Call)):
             continue
@@ -1572,6 +1578,8 @@ def _fanouts_in(
             if not isinstance(guard, ast.If) or not _tests_none(guard.test, name):
                 continue
             for statement in walk(guard):
+                if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    continue  # targets_of reads no other node
                 inner = targets_of(statement)
                 if not (
                     inner
@@ -1643,7 +1651,7 @@ def _announces(func: ast.FunctionDef | ast.AsyncFunctionDef, name: str) -> str:
         if name not in names:
             continue
         literal = "".join(
-            part.value for part in node.values if isinstance(part, ast.Constant)
+            cast(str, part.value) for part in node.values if isinstance(part, ast.Constant)  # an f-string's text
         ).strip()
         if literal:
             return literal
@@ -1681,10 +1689,10 @@ def attach_dispatch(junctions: list[JunctionNode], modules: list[SourceModule]) 
                 )
     found = 0
     for junction in junctions:
-        module, _, _method = junction.owner.partition("::")
+        owner_file, _, _method = junction.owner.partition("::")
         if junction.anchor is None:
             continue
-        for _name, span, held in spans.get(module, ()):
+        for _name, span, held in spans.get(owner_file, ()):
             if span[0] <= junction.anchor.line_start <= span[1]:
                 junction.dispatch = list(held)
                 found += 1
@@ -1941,7 +1949,7 @@ def _consulted_targets(
                 f"{here}::{callee}" for callee in callees | unplaced[function]
             )
         for enclosing, method, call in _outward_call_sites(module):
-            if not enclosing or not _reaches_from_self(call.func.value):
+            if not enclosing or not _reaches_from_self(cast(ast.Attribute, call.func).value):  # an attribute call
                 continue
             for home in defined.get(method, ()):
                 if home == here:

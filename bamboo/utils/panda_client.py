@@ -27,7 +27,7 @@ import re
 import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional, cast
 
 from urllib3.exceptions import InsecureRequestWarning
 
@@ -240,7 +240,7 @@ async def fetch_task_data(task_id: int | str, verbose: bool = False) -> dict[str
 
     with thinking("Fetching task data from PanDA"):
         try:
-            data = await asyncio.to_thread(
+            data: dict[str, Any] = await asyncio.to_thread(
                 _call_api, "get", "task/get_detailed_info", {"task_id": task_id_int}
             )
         except RuntimeError as exc:
@@ -340,6 +340,10 @@ def _parse_panda_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+#: :func:`_parse_panda_datetime` as a sort key where every value parses
+_parse_known = cast(Callable[[Any], datetime], _parse_panda_datetime)
 
 
 async def get_similar_successful_tasks(
@@ -606,10 +610,11 @@ def _whole_span(answers: list[dict[str, Any]]) -> dict[str, Any]:
     retained = [a.get("retained_from") for a in answers]
     return {
         "rows": [row for a in answers for row in a["rows"]],
-        "as_of": min((a["as_of"] for a in answers), key=_parse_panda_datetime),
+        # every answer's times parse (a None would not compare, as before)
+        "as_of": min((a["as_of"] for a in answers), key=_parse_known),
         "retained_from": None
         if None in retained
-        else max(retained, key=_parse_panda_datetime),
+        else max(retained, key=_parse_known),
     }
 
 
@@ -935,9 +940,10 @@ LIST_MAX_NAMES = 100
 def _target(service: str | None, machine: str | None) -> dict[str, str]:
     if (service is None) == (machine is None):
         raise ValueError("name exactly one of service and machine")
-    return (
-        {"service_name": service} if service is not None else {"machine_name": machine}
-    )
+    if service is not None:
+        return {"service_name": service}
+    assert machine is not None  # exactly one of the two, checked above
+    return {"machine_name": machine}
 
 
 async def grep_log(
@@ -1055,7 +1061,7 @@ async def list_logs(
     Returns:
         As :func:`wait_per_machine`; a refused submit as it came.
     """
-    params = _target(service, machine)
+    params: dict[str, Any] = dict(_target(service, machine))
     if log_names is not None:
         names = list(dict.fromkeys(log_names))
         if not 1 <= len(names) <= LIST_MAX_NAMES:

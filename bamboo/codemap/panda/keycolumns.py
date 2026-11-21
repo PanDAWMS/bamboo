@@ -73,7 +73,7 @@ it where nothing else is named.
 from __future__ import annotations
 
 import ast
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, cast
 
 from bamboo.codemap import callfacts, objects, pathcond, reach
 from bamboo.codemap import calls as C
@@ -268,9 +268,15 @@ class Reader:
         """Whether *run* fills its bind *key* with the value *held* names in *func*: the binds read once per
         statement and bind, as every value read meets the same statements."""
         if (id(run), key) not in self._binds:
+            # A function with executions is a definition.
             binds = sql.bound_values(
-                func, run.varmap or "", key, run.window, across=True, at=run
-            )  # type: ignore[arg-type]
+                cast("ast.FunctionDef | ast.AsyncFunctionDef", func),
+                run.varmap or "",
+                key,
+                run.window,
+                across=True,
+                at=run,
+            )
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)
             self._binds[(id(run), key)] = frozenset(

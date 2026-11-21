@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Collection, Iterator, NamedTuple, Optional
+from typing import Collection, Iterator, NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import changing, walk
@@ -382,6 +382,7 @@ class SpecAttributor:
                     if not isinstance(call.func, ast.Attribute) or not call.args:
                         continue
                     receiver = call.func.value
+                    attribute: Optional[str]
                     if call.func.attr == "append" and isinstance(receiver, ast.Attribute):
                         holder, attribute = receiver.value, receiver.attr
                     else:
@@ -557,10 +558,12 @@ class SpecAttributor:
             return None
         found: list[ast.expr] = []
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             targets = targets_of(node)
             if len(targets) != 1:
                 continue
-            stated = self._stated_return(node.value)
+            stated = self._stated_return(cast(ast.expr, node.value))  # one target: an assignment with a value
             if stated is None:
                 continue
             target = targets[0]
@@ -842,16 +845,19 @@ class SpecAttributor:
         if isinstance(expression, ast.Name) and func is not None:
             sources: set[str] = set()
             for node in walk(func):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue  # targets_of reads no other node
                 if not any(
                     isinstance(t, ast.Name) and t.id == expression.id
                     for t in targets_of(node)
                 ):
                     continue
-                if self._container_read(node.value) is None and not (
-                    isinstance(node.value, ast.Attribute) and _rooted_at_self(node.value)
+                assigned = cast(ast.expr, node.value)  # it binds the name: an assignment with a value
+                if self._container_read(assigned) is None and not (
+                    isinstance(assigned, ast.Attribute) and _rooted_at_self(assigned)
                 ):
                     continue
-                held = self._annotated_receiver(node.value, func)
+                held = self._annotated_receiver(assigned, func)
                 if held is not None:
                     sources.add(held)
             return next(iter(sources)) if len(sources) == 1 else None
@@ -891,6 +897,7 @@ class SpecAttributor:
         away.  The answer happened to be right, which is worse than being wrong
         -- it is a guess that looks like a reading.
         """
+        scopes: Sequence[Optional[ast.AST]]
         if isinstance(expression, ast.Name):
             named, scopes = expression.id, [func]
         elif isinstance(expression, ast.Attribute) and _rooted_at_self(expression):
@@ -912,7 +919,8 @@ class SpecAttributor:
             args = getattr(scope, "args", None)
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs) if args else ():
                 if arg.arg == named and arg.annotation is not None:
-                    return arg.annotation
+                    annotation: ast.expr = arg.annotation
+                    return annotation
         return None
 
     def _stored_element_class(
@@ -953,7 +961,7 @@ class SpecAttributor:
             name = container.id
             scope: Scope = [(func, enclosing_class)]
         elif _rooted_at_self(container):
-            name = container.attr
+            name = cast(ast.Attribute, container).attr  # rooted at self: an attribute
             owner = self._enclosing_class(func)
             if owner is None:
                 return None
@@ -1286,12 +1294,14 @@ class SpecAttributor:
             return yielded
         constructors: set[str] = set()
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             if not any(
                 isinstance(target, ast.Name) and target.id == variable
                 for target in targets_of(node)
             ):
                 continue
-            built = self._constructed_class(node.value, func, seen | {variable})
+            built = self._constructed_class(cast(ast.expr, node.value), func, seen | {variable})
             if built is not None:
                 constructors.add(built)
         if len(constructors) == 1:
@@ -1358,6 +1368,8 @@ class SpecAttributor:
             return None
         built: set[str] = set()
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1413,6 +1425,7 @@ class SpecAttributor:
         reflected = {
             target.id
             for node in walk(func)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))  # targets_of reads no other node
             for target in targets_of(node)
             if isinstance(target, ast.Name)
             and isinstance(node.value, ast.Call)
@@ -1420,6 +1433,8 @@ class SpecAttributor:
             and node.value.func.id == "getattr"
         }
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1466,6 +1481,8 @@ class SpecAttributor:
         if variable in seen:
             return None
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             if not any(
                 isinstance(t, ast.Name) and t.id == variable for t in targets_of(node)
             ):
@@ -1574,8 +1591,9 @@ class SpecAttributor:
             if stated is not None:
                 found.add(stated)
             return found
-        holder = self.class_of(iterable.value, func, enclosing_class)
-        if holder is None and isinstance(iterable.value, ast.Name):
+        field = cast(ast.Attribute, iterable)  # what is left: a field of an object
+        holder = self.class_of(field.value, func, enclosing_class)
+        if holder is None and isinstance(field.value, ast.Name):
             # Nested loops, and the outer one already answered this.
             # ``class_of`` consults the loop rule only for a name loops alone
             # bind, so a container held by a loop variable bound otherwise too
@@ -1583,7 +1601,7 @@ class SpecAttributor:
             # ``for job in jobs`` then ``for file in job.Files`` in
             # ``update_failed_jobs``.
             holder = self._iterated_element_class(
-                iterable.value.id, func, enclosing_class, seen | {variable}
+                field.value.id, func, enclosing_class, seen | {variable}
             )
         if holder is None:
             # No adder taught us this container, but it may say so itself:
@@ -1596,7 +1614,7 @@ class SpecAttributor:
             if stated is not None:
                 found.add(stated)
             return found
-        found |= self._element_types.get((holder, iterable.attr), set())
+        found |= self._element_types.get((holder, field.attr), set())
         return found
 
     # -- per-site resolution --------------------------------------------- #
@@ -2073,7 +2091,7 @@ def spec_annotation_forms(
                 # instead of the class -- see ``explained_silence``.
                 explained = attributor.explained_silence(annotation)
                 read = f"{AMBIGUOUS_FORM}{explained}" if explained else None
-            forms[f"{module.rel_path}:{node.lineno}"] = read or ""
+            forms[f"{module.rel_path}:{getattr(node, 'lineno', 0)}"] = read or ""  # every position has its line
     return forms
 
 
@@ -2142,7 +2160,7 @@ def _trusted_annotations(
 
     for node, annotation, kind, name, on_self in _consumed_annotations(module):
         if kind == "yield":
-            yielded = attributor.yield_annotation(node)
+            yielded = attributor.yield_annotation(cast("ast.FunctionDef | ast.AsyncFunctionDef", node))  # a function's
             if yielded is not None and yielded in specs:
                 found.append((node, kind, name, yielded, scope_of(node, on_self)))
             continue
@@ -2191,7 +2209,7 @@ def annotation_readings(
             resolutions = _scope_resolutions(scope, attributor, spec_attribute_names)
             readings.append(
                 AnnotationReading(
-                    where=f"{module.rel_path}:{node.lineno}",
+                    where=f"{module.rel_path}:{getattr(node, 'lineno', 0)}",  # every position has its line
                     kind=kind,
                     container=name,
                     stated=stated,
@@ -2309,6 +2327,8 @@ def _classes_put_in(
     found: set[str] = set()
     for func, owner in scope:
         for node in walk(func):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue  # targets_of reads no other node
             targets = targets_of(node)
             if len(targets) != 1:
                 continue
@@ -2319,12 +2339,12 @@ def _classes_put_in(
             if isinstance(base, ast.Name):
                 holder = base.id
             elif _rooted_at_self(base):
-                holder = base.attr
+                holder = cast(ast.Attribute, base).attr  # rooted at self: an attribute
             else:
                 continue
             if holder != name:
                 continue
-            stored = attributor.class_of(node.value, func, owner)
+            stored = attributor.class_of(cast(ast.expr, node.value), func, owner)  # one target: a value
             if stored is not None:
                 found.add(stored)
     return frozenset(found)

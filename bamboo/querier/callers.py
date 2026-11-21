@@ -32,6 +32,7 @@ import ast
 import collections
 import functools
 import re
+from typing import Any, cast
 
 from bamboo.codemap import pathcond
 
@@ -143,7 +144,7 @@ def attr_loggers(func: ast.AST) -> dict[str, str]:
 def loggers_of(func: ast.AST) -> dict[str, ast.expr | str]:
     """The run's loggers of *func*: name -> its binding (``"param"`` for a parameter)."""
     out: dict[str, ast.expr | str] = {}
-    args = func.args
+    args = cast("ast.FunctionDef | ast.AsyncFunctionDef", func).args
     params = {a.arg for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]}
     for name in sorted(H.run_loggers(func)):
         if name in params:
@@ -173,7 +174,7 @@ def show_binding(b: ast.expr | str) -> str:
 
 def catching(func: ast.AST, node: ast.AST, loggers: frozenset[str]) -> list[tuple[str, ast.ExceptHandler | None]]:
     """The catching handlers from *node* outwards in *func*: ``cond`` ones, then the one that decides."""
-    out = []
+    out: list[tuple[str, ast.ExceptHandler | None]] = []
     chain = [node, *pathcond.ancestors(node)]
     for child, parent in zip(chain, chain[1:], strict=False):
         if parent is func:
@@ -232,8 +233,8 @@ def tie(origin: ast.AST, call: ast.Call | None, caller: ast.AST, lg: str) -> str
     line = call.lineno if call is not None else 10**9
     said = set()
     for n in R.own_nodes(caller):
-        if R.is_print(n) and H._logger_of(n.value) == lg and n.lineno < line:
-            said |= {k.lower() for k in re.findall(r"(\w+)=", ast.unparse(n.value))} & wanted
+        if R.is_print(n) and H._logger_of(cast(ast.Call, cast(ast.Expr, n).value)) == lg and cast(ast.Expr, n).lineno < line:
+            said |= {k.lower() for k in re.findall(r"(\w+)=", ast.unparse(cast(ast.Expr, n).value))} & wanted
     if said:
         return prefix + "msg " + ",".join(sorted(said))
     return prefix + "none" + (f" (caller token {sorted(keys(b)) or show_binding(b)[:50]})" if not mine else "")
@@ -242,8 +243,8 @@ def tie(origin: ast.AST, call: ast.Call | None, caller: ast.AST, lg: str) -> str
 def follow(func: ast.AST, depth: int, origin: ast.AST, seen: frozenset = frozenset()) -> list[dict]:
     """Every call site of *func*: ``where``, ``recv``, the handler ``chain`` (class, prints a traceback, tie),
     the caller (``rel``, ``caller``), and ``up``, the caller's own sites when the call leaves it too."""
-    out = []
-    for crel, call in calls_of(func.name):
+    out: list[dict[str, Any]] = []
+    for crel, call in calls_of(cast(Any, func).name):
         g = pathcond.enclosing_function(call)
         where = f"{crel.rsplit('/', 1)[-1]}:{call.lineno} {g.name if g else '<module>'}"
         recv = ast.unparse(call.func.value) if isinstance(call.func, ast.Attribute) else ""

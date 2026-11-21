@@ -165,7 +165,7 @@ def sha256(path: Path) -> str:
 
 
 def load_case(path: Path) -> dict:
-    case = json.loads(path.read_text())
+    case: dict = json.loads(path.read_text())
     lacking = [
         k for k in ("name", "question", "inputs", "modes", "pin") if k not in case
     ]
@@ -202,7 +202,9 @@ def pair_name(home: Home, case: dict, override: str = "") -> str:
     """The pair a case runs on: *override*, else the one ``pairs/current.json`` names for the case's pin."""
     if override:
         return override
-    current = json.loads((home.root / "pairs" / "current.json").read_text())
+    current: dict[str, str] = json.loads(
+        (home.root / "pairs" / "current.json").read_text()
+    )
     if case["pin"] not in current:
         raise FieldTestError(
             f"pairs/current.json names no pair for pin {case['pin']} (case {case['name']})"
@@ -238,7 +240,7 @@ def same_map_code(built: str, archived: str) -> bool:
 
 def load_pair(home: Home, name: str) -> dict:
     """The pair *name*, checked: the dump's sha256, the run tree it is read with, and the pin it was built from."""
-    pair = json.loads((home.root / "pairs" / f"{name}.json").read_text())
+    pair: dict = json.loads((home.root / "pairs" / f"{name}.json").read_text())
     dump = Path(pair["MAP_DUMP"])
     got = sha256(dump)
     if got != pair["MAP_DUMP_SHA256"]:

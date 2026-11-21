@@ -31,9 +31,10 @@ import functools
 import hashlib
 import os
 import re
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 from bamboo.codemap import pathcond, trace
 from bamboo.codemap.models import PrintRow
@@ -238,8 +239,9 @@ def completes(block: list) -> bool:
     if isinstance(last, ast.If):
         return completes(last.body) or completes(last.orelse)
     if isinstance(last, (ast.Try, getattr(ast, "TryStar", ast.Try))):
-        normal = completes(last.body) and completes(last.orelse)
-        return (normal or any(completes(h.body) for h in last.handlers)) and completes(last.finalbody)
+        tried = cast(ast.Try, last)
+        normal = completes(tried.body) and completes(tried.orelse)
+        return (normal or any(completes(h.body) for h in tried.handlers)) and completes(tried.finalbody)
     return True
 
 
@@ -277,11 +279,11 @@ def _direct_prints(block: list, stop: ast.AST | None = None) -> list[ast.stmt]:
     return out
 
 
-def _holds(stmt: ast.stmt, lines: set[int]) -> bool:
+def _holds(stmt: ast.stmt, lines: AbstractSet[int]) -> bool:
     return any(stmt.lineno <= line <= (stmt.end_lineno or stmt.lineno) for line in lines)
 
 
-def _raised_prefix(stmt: ast.stmt, raised_at: set[int]) -> list[ast.stmt]:
+def _raised_prefix(stmt: ast.stmt, raised_at: AbstractSet[int]) -> list[ast.stmt]:
     """Prints a ``try`` body ran before the line a traceback frame says raised."""
     if not isinstance(stmt, ast.Try):
         return []
@@ -291,7 +293,7 @@ def _raised_prefix(stmt: ast.stmt, raised_at: set[int]) -> list[ast.stmt]:
     return []
 
 
-def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozenset()) -> tuple[list, list]:
+def must_rows(func: ast.AST, site: ast.stmt, raised_at: AbstractSet[int] | None = frozenset()) -> tuple[list, list]:
     """``(before, after)``: the prints every path through *site* runs in one call.
 
     *raised_at* is where a traceback of the run shows the function left by an exception (:func:`raised_in`): a
@@ -347,7 +349,7 @@ def must_rows(func: ast.AST, site: ast.stmt, raised_at: set[int] | None = frozen
         if isinstance(parent, ast.ExceptHandler):
             # entered from anywhere in the try body: nothing there is implied,
             # so the next block read is the one the try itself sits in
-            node = parent.parent
+            node = parent.parent  # type: ignore[attr-defined]
             continue
         node = parent
     return before, after
@@ -451,11 +453,11 @@ Part = tuple[str, str]  # ("lit", text) | ("hole", expression)
 
 
 def _binding_sites(func: ast.AST, text: str, before: int) -> list[ast.stmt]:
-    found = []
+    found: list[ast.stmt] = []
     for node in own_nodes(func):
         if node.lineno < before if isinstance(node, ast.stmt) else False:
             if _binds(node, text):
-                found.append(node)
+                found.append(cast(ast.stmt, node))
     return sorted(found, key=lambda n: n.lineno)
 
 
@@ -485,7 +487,7 @@ def _dominating_binding(func: ast.AST, stmt: ast.stmt, text: str) -> ast.stmt | 
             _, block = placed
             for s in reversed(block[: block.index(node)]):
                 if _binds(s, text):
-                    return s
+                    return cast(ast.stmt, s)
                 inner = [n for n in own_nodes(s) if _binds(n, text)]
                 if inner and not all(isinstance(n, ast.AugAssign) for n in inner):
                     return None
@@ -518,13 +520,14 @@ def _alternatives(
             if isinstance(part, ast.Constant):
                 shapes = [s + [("lit", str(part.value))] for s in shapes]
             else:
+                held = cast(ast.FormattedValue, part)
                 inner = (
-                    _alternatives(part.value, func, stmt, depth + 1)
-                    if expand and part.format_spec is None
+                    _alternatives(held.value, func, stmt, depth + 1)
+                    if expand and held.format_spec is None
                     else None
                 )
                 if not inner or len(shapes) * len(inner) > 16:
-                    inner = [[("hole", ast.unparse(part.value))]]
+                    inner = [[("hole", ast.unparse(held.value))]]
                 shapes = [s + i for s in shapes for i in inner]
         return shapes
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
@@ -544,7 +547,7 @@ def _alternatives(
                 if base is None:
                     return [[("hole", text)]]
                 chosen = [base]
-            base_shapes = _alternatives(chosen[0].value, func, chosen[0], depth + 1, expand)
+            base_shapes = _alternatives(cast(Any, chosen[0]).value, func, chosen[0], depth + 1, expand)
             appended = [s + [("hole", f"{text} (appended)")] for s in base_shapes]
             if tail:
                 return appended
@@ -554,10 +557,10 @@ def _alternatives(
         if not plain:
             return [[("hole", text)]]
         shapes = []
-        appended = any(isinstance(s, ast.AugAssign) for s in sites)
+        any_appended = any(isinstance(s, ast.AugAssign) for s in sites)
         for s in plain:
-            for shape in _alternatives(s.value, func, s, depth + 1, expand):
-                shapes.append(shape + ([("hole", f"{text} (appended)")] if appended else []))
+            for shape in _alternatives(cast(Any, s).value, func, s, depth + 1, expand):
+                shapes.append(shape + ([("hole", f"{text} (appended)")] if any_appended else []))
         # a local every path binds is covered by its sites; anything else can
         # also hold what the function was handed
         if not isinstance(expr, ast.Name):
@@ -1146,13 +1149,13 @@ def _holding(found: list, arms: Iterable[int]) -> ast.FunctionDef | ast.AsyncFun
     # A repeated name the lines pick no def for stops -- taking the first read another def's rows without a word
     holding = [f for f in found if arms and all(f.lineno <= a <= (f.end_lineno or f.lineno) for a in arms)]
     if holding:
-        return min(holding, key=lambda f: (f.end_lineno or f.lineno) - f.lineno)
+        return cast("ast.FunctionDef | ast.AsyncFunctionDef", min(holding, key=lambda f: (f.end_lineno or f.lineno) - f.lineno))
     if len(found) > 1:
         raise LookupError(
             f"{found[0].name} is defined {len(found)} times (lines {[f.lineno for f in found]}) and lines "
             f"{sorted(arms) or 'none'} pick none of them"
         )
-    return found[0]
+    return cast("ast.FunctionDef | ast.AsyncFunctionDef", found[0])
 
 
 def def_at(rel: str, name: str, lines: Iterable[int]) -> ast.FunctionDef | ast.AsyncFunctionDef:
@@ -1191,7 +1194,8 @@ def _function(rel: str, name: str, arms: tuple[int, ...], within: tuple[int, ...
     for stmt in own_nodes(node):
         if not is_print(stmt):
             continue
-        call = stmt.value
+        stmt = cast(ast.Expr, stmt)
+        call: Any = stmt.value
         mapped = by_line.get(stmt.lineno, [])
         short = [f"map pattern too short: {m.pattern}" for m in mapped if m.pattern and not _map_usable(m.pattern)]
         rows.append(

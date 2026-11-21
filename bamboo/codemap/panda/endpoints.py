@@ -22,7 +22,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
-from typing import TYPE_CHECKING, Callable, Iterator, Optional
+from typing import TYPE_CHECKING, Callable, Iterator, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
@@ -51,6 +51,7 @@ from bamboo.codemap.models import (
     THROUGH_CONVERTED,
     THROUGH_DECODED,
     THROUGH_UNKNOWN,
+    Anchor,
     Endpoint,
     EndpointChange,
     EndpointFill,
@@ -68,6 +69,7 @@ from bamboo.codemap.models import (
 from bamboo.codemap.panda import objects, sql, sqltext
 
 if TYPE_CHECKING:
+    from bamboo.codemap.panda.attribution import SpecAttributor
     from bamboo.codemap.panda.recognizers import sqlwrite
 
 logger = logging.getLogger(__name__)
@@ -185,13 +187,18 @@ def attach(
     modules: list[SourceModule],
     calls: C.Calls,
     returned: Optional[dict[str, sqlwrite.Returned]] = None,
+    attributor: Optional["SpecAttributor"] = None,
 ) -> int:
     """Set *fragment*'s :attr:`MapFragment.endpoints` and :attr:`MapFragment.handlers`; returns how many statements
     the endpoints read, counted per endpoint.
 
     With *returned* -- :func:`~bamboo.codemap.panda.recognizers.sqlwrite.attach_crossings`' walks asked for every
     endpoint's answer -- each read says where its rows are in what the endpoint returns, and the holes on the way in
-    the endpoint's closure (:attr:`EndpointRead.returned`, :attr:`EndpointRead.returned_open`)."""
+    the endpoint's closure (:attr:`EndpointRead.returned`, :attr:`EndpointRead.returned_open`); with *attributor* too,
+    which of its columns they are (:attr:`EndpointRead.returned_columns`).
+
+    A statement of the closure whose ``FROM`` takes its tables through an interpolation reads rows no read says: it
+    is an ``open`` hole of the endpoint (:attr:`Endpoint.holes`) -- ``get_task_job_rows``' union of the job tables."""
     record = reach.ReachGraph(fragment.reach_graph)
     sites: dict[str, list[ReadSiteNode]] = {}
     for site in fragment.read_sites:
@@ -224,6 +231,23 @@ def attach(
             return walks.returned_under(calls, owners, record, func, site, owner, ruled)
 
         read.rewalk = rewalk
+        if attributor is not None:
+            held = attributor
+
+            def columns(
+                site: ReadSiteNode, owner: str, ruled: dict[int, frozenset[int]]
+            ) -> Optional[tuple[list[str], bool, str]]:
+                func = walks._site_function(trees, site)
+                if func is None:
+                    return None
+                return walks.returned_columns(calls, owners, record, func, site, owner, ruled, held)
+
+            read.columns = columns
+    for stop in fragment.reading_stops:
+        # By the reach record's function holding the statement, as the read sites are.
+        holder = record.function_at(stop.file, stop.statement) if stop.reason == sql.FROM_IS_A_HOLE else None
+        if holder is not None:
+            read.unread.setdefault(holder, []).append((stop.statement, stop.detail))
     fragment.endpoints = [
         one
         for version, route, owner in routes(modules)
@@ -263,6 +287,13 @@ class _Reader:
                 [ReadSiteNode, str, dict[int, frozenset[int]]], Optional[list[str]]
             ]
         ] = None
+        #: Which select items of a read reach the answer, each walked alone (:func:`sqlwrite.returned_columns`).
+        self.columns: Optional[
+            Callable[[ReadSiteNode, str, dict[int, frozenset[int]]], Optional[tuple[list[str], bool, str]]]
+        ] = None
+        #: Each function's statements whose ``FROM`` takes its tables through an interpolation
+        #: (:data:`sql.FROM_IS_A_HOLE`), by the reach record's owner: ``(line, the FROM as read)``.
+        self.unread: dict[str, list[tuple[int, str]]] = {}
 
     def _bounded(
         self,
@@ -302,10 +333,12 @@ class _Reader:
         shut, constants = _shut(record, code, came)
         ruled = _ruled_returns(code, came, constants)
         if shut:
-            came = record.closure(
-                [owner], cut=lambda node, call, shut=shut: (node, id(call)) in shut
-            )
-        holes = {}
+
+            def cut(node: Node, call: ReachCall, shut: frozenset[tuple[Node, int]] = shut) -> bool:
+                return (node, id(call)) in shut
+
+            came = record.closure([owner], cut=cut)
+        holes: dict[tuple[str, int, str], ReachHole] = {}
         held_in: dict[tuple[str, int, str], list[Node]] = {}
         reached: dict[str, tuple[ReadSiteNode, list[tuple[str, str]]]] = {}
         for node in came:
@@ -329,6 +362,7 @@ class _Reader:
                 # the read's own function, a caller on the way or a callee they are handed to.
                 again = self.rewalk(site, owner, ruled)
                 paths = paths if again is None else again
+            columns = self.columns(site, owner, ruled) if paths and self.columns is not None else None
             reads.append(
                 EndpointRead(
                     site=site.name,
@@ -354,9 +388,16 @@ class _Reader:
                     )
                     if answer is not None
                     else [],
+                    returned_columns=columns[0] if columns is not None else [],
+                    returned_all=columns[1] if columns is not None else False,
+                    returned_columns_open=columns[2] if columns is not None else "",
                 )
             )
         functions = list(dict.fromkeys(function for function, _cls in came))
+        # The closure's statements read with their FROM a hole: rows no read above says.
+        unread = [
+            (function, line, detail) for function in functions for line, detail in self.unread.get(function, ())
+        ]
         into = _into(record, came, shut)
         return Endpoint(
             route=route,
@@ -364,7 +405,12 @@ class _Reader:
             function=owner,
             closure=len(functions),
             holes=list(
-                dict.fromkeys(f"{function}:{line}" for function, line, _callee in holes)
+                dict.fromkeys(
+                    [
+                        *(f"{function}:{line}" for function, line, _callee in holes),
+                        *(f"{function}:{line}" for function, line, _detail in unread),
+                    ]
+                )
             ),
             shut=sorted(
                 {
@@ -383,9 +429,15 @@ class _Reader:
             ],
             changes=[one for function in functions for one in code.changes(function)],
             hole_bounds=[
-                self._bounded(function, hole, held_in[key], into)
-                for key, hole in holes.items()
-                for function in [key[0]]
+                *(
+                    self._bounded(function, hole, held_in[key], into)
+                    for key, hole in holes.items()
+                    for function in [key[0]]
+                ),
+                *(
+                    EndpointHole(at=f"{function}:{line}", callee=detail, why=sql.FROM_IS_A_HOLE, bound=HOLE_OPEN)
+                    for function, line, detail in unread
+                ),
             ],
         )
 
@@ -547,8 +599,8 @@ class _Code:
             found = self._changes[owner] = []
             file, func = self.funcs.get(owner, ("", None))
             for node in C.own_nodes(func) if func is not None else []:
-                if not isinstance(node, ast.Call):
-                    continue
+                if func is None or not isinstance(node, ast.Call):
+                    continue  # no node comes without a function
                 got = callfacts.change(self.types, file, func, node)
                 if got is not None:
                     kind, system, callee = got
@@ -732,7 +784,7 @@ class _Fills:
             try:
                 placed = self.code.calls.callees(file, func, value).targets
             except Exception:  # noqa: BLE001 -- the reach record has the hole
-                placed = []
+                placed = ()
             if placed:
                 return [EndpointFill(why=FILL_RESULT, at=at)]
             return [EndpointFill(why=FILL_VALUE, at=at)]
@@ -998,7 +1050,7 @@ def _constants(
     func = code.funcs[node[0]][1]
     found: dict[str, tuple[type, object]] = {}
     for name in sorted(_parameters(func) - {"self", "cls"}):
-        values = []
+        values: list[Optional[tuple[type, object]]] = []
         for caller, call in edges:
             runs = code.bound(caller[0], call, node[0]) if call.how == "call" else []
             if not runs:
@@ -1458,10 +1510,9 @@ def _handlers_in(
         and not table.generators[0].ifs
     ):
         loop = table.generators[0]
+        named = cast(ast.Name, loop.target).id  # a name, tested above
         for one in _texts(module.tree, loop.iter):
-            _handler(
-                module, imported, table.key, table.value, {loop.target.id: one}, found
-            )  # type: ignore[union-attr]
+            _handler(module, imported, table.key, table.value, {named: one}, found)
     else:
         logger.warning("endpoints: %s's %s is not read", file, HANDLERS)
 
@@ -1499,7 +1550,7 @@ def _bound_value(tree: ast.Module, name: str) -> Optional[ast.expr]:
             else []
         )
         if any(isinstance(one, ast.Name) and one.id == name for one in targets):
-            value = node.value  # type: ignore[union-attr]
+            value = cast("ast.Assign | ast.AnnAssign", node).value  # only these have targets above
     return value
 
 
@@ -1587,7 +1638,7 @@ MAX_STEPS = 12
 
 
 def _line(site: ReadSiteNode) -> int:
-    return site.anchor.line_start  # type: ignore[union-attr] -- only sites with an anchor are placed
+    return cast(Anchor, site.anchor).line_start  # only sites with an anchor are placed
 
 
 def _split(path: str) -> tuple[str, str]:

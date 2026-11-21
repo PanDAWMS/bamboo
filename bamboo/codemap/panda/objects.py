@@ -106,7 +106,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond, reach
 from bamboo.codemap import calls as C
@@ -793,14 +793,15 @@ class _Versions:
         base = expr
         while isinstance(base, (ast.Attribute, ast.Subscript)):
             base = base.value
-        name = base.id  # type: ignore[union-attr]
+        root = cast(ast.Name, base)  # a path's root is a name (_path)
+        name = root.id
         sites = self.sites.get(name)
         if not sites:
             return [held]
         rest = held[len(name) :]
-        if base is expr and isinstance(base.ctx, ast.Store):  # type: ignore[union-attr]
-            return [f"{name}@{self._site(sites, base)}{rest}"]
-        return [one + rest for one in self.reaching(name, base)]
+        if root is expr and isinstance(root.ctx, ast.Store):
+            return [f"{name}@{self._site(sites, root)}{rest}"]
+        return [one + rest for one in self.reaching(name, root)]
 
     def reaching(self, name: str, node: ast.AST) -> list[str]:
         key = (name, id(node))
@@ -823,14 +824,13 @@ class _Versions:
     def _site(sites: list[ast.AST], node: ast.AST) -> int:
         """The line of the binding statement *node*, a target, is in: the innermost holding it."""
         line = getattr(node, "lineno", 0)
-        holding = [
-            site.lineno  # type: ignore[attr-defined]
-            for site in sites
-            if not isinstance(site, ast.arguments)
-            and site.lineno
-            <= line
-            <= (getattr(site, "end_lineno", None) or site.lineno)  # type: ignore[attr-defined]
-        ]
+        holding: list[int] = []
+        for site in sites:
+            if isinstance(site, ast.arguments):
+                continue
+            at = cast(ast.stmt, site)  # a binding's statement: it has its lines
+            if at.lineno <= line <= (getattr(at, "end_lineno", None) or at.lineno):
+                holding.append(at.lineno)
         return max(holding, default=line)
 
 
@@ -1160,12 +1160,12 @@ class _Values:
                 continue
             key = side.binds[0]
             binds = sql.bound_values(
-                self.func,
+                cast("ast.FunctionDef | ast.AsyncFunctionDef", self.func),  # a function with executions is a definition
                 run.varmap or "",
                 key,
                 run.window,
                 across=True,
-                at=run,  # type: ignore[arg-type]
+                at=run,
             )
             if not run.varmap:
                 binds = binds + sql.inline_binds(run.call, key)
@@ -1434,7 +1434,7 @@ class _Values:
                         self.file, self.func, value, ()
                     )
                 except Exception:  # noqa: BLE001 -- reach has the hole
-                    landed = []
+                    landed = ()
                 for target in landed:
                     if (to := reader.names.of(target.func)) is not None:
                         _add(

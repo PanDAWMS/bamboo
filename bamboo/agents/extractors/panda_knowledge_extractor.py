@@ -68,6 +68,7 @@ from bamboo.llm import (
     LOG_EXTRACTION_USER,
     get_embeddings,
     get_extraction_llm,
+    message_text,
 )
 from bamboo.llm.errors import log_llm_failure
 from bamboo.llm.prompts import (
@@ -285,7 +286,7 @@ CONTINUOUS_TASK_KEYS: frozenset[str] = frozenset(
 # splitRule sub-keys that are job-split mechanism nodes are tagged "split"
 # (reviewer explicitly excludes them as mechanism nodes).
 # ---------------------------------------------------------------------------
-FEATURE_CONCEPT: dict[str, str] = {
+FEATURE_CONCEPT: dict[str, str | list[str]] = {
     # CPU / core-count
     "coreCount": "cpu",
     "nCore": "cpu",
@@ -767,7 +768,7 @@ async def _generate_category_label(error_message: str) -> str:
                 HumanMessage(content=TASK_ERROR_CATEGORY_LABEL_USER.format(error_message=error_message)),
             ]
         )
-    label = re.sub(r"[^A-Za-z]", "", response.content.strip())
+    label = re.sub(r"[^A-Za-z]", "", message_text(response.content).strip())
     if not label:
         raise ValueError(
             f"LLM returned an empty or non-alphabetic label for message: {error_message!r}"
@@ -796,7 +797,7 @@ def _make_cause_resolution_label_fn(node_type: str):
                     HumanMessage(content=user_content),
                 ]
             )
-        canonical = response.content.strip().strip('"').strip("'")
+        canonical = message_text(response.content).strip().strip('"').strip("'")
         if not canonical:
             raise ValueError(
                 f"LLM returned an empty canonical name for {node_type} {raw_name!r}"
@@ -827,7 +828,7 @@ async def _validate_error_category_match(error_message: str, category: str) -> b
                     HumanMessage(content=user_content),
                 ]
             )
-        answer = response.content.strip().lower()
+        answer = message_text(response.content).strip().lower()
         match = answer.startswith("yes")
         if not match:
             say(f'Category "{category}" rejected for this error — creating new category')
@@ -1055,7 +1056,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
 
     async def prefetch_hints(
         self,
-        task_data: dict[str, Any] = None,
+        task_data: dict[str, Any] | None = None,
         email_text: str = "",
     ) -> dict[str, str]:
         from bamboo.agents.helpers.context_prefetch import prefetch_panda_context  # noqa: PLC0415
@@ -1483,7 +1484,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
                     HumanMessage(content=user_template.format(log_text=filtered_log)),
                 ]
             )
-        raw = self._parse_log_response(response.content)
+        raw = self._parse_log_response(message_text(response.content))
 
         nodes = []
         name_to_node: dict[str, Any] = {}
@@ -1557,7 +1558,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         elif "```" in text:
             text = text[text.find("```") + 3 : text.rfind("```")].strip()
         try:
-            return json.loads(text)
+            parsed: dict[str, Any] = json.loads(text)
+            return parsed
         except json.JSONDecodeError as exc:
             logger.error(
                 "PandaKnowledgeExtractor: failed to parse log LLM response: %s", exc
@@ -1635,9 +1637,9 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
             )
         show_block(
             "LLM response: email extraction (raw)",
-            response.content,
+            message_text(response.content),
         )
-        raw = self._parse_email_response(response.content)
+        raw = self._parse_email_response(message_text(response.content))
 
         _store_for_type = {
             "Cause": self._cause_store,
@@ -1814,7 +1816,8 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         elif "```" in text:
             text = text[text.find("```") + 3 : text.rfind("```")].strip()
         try:
-            return json.loads(text)
+            parsed: dict[str, Any] = json.loads(text)
+            return parsed
         except json.JSONDecodeError as exc:
             logger.error(
                 "PandaKnowledgeExtractor: failed to parse email LLM response: %s", exc
@@ -1871,7 +1874,7 @@ class PandaKnowledgeExtractor(ExtractionStrategy):
         description: str,
         source: str,
         extra_metadata: Optional[dict[str, Any]] = None,
-        concept: Optional[str] = None,
+        concept: str | list[str] | None = None,
     ) -> TaskFeatureNode:
         metadata: dict[str, Any] = {
             "attribute": attribute,

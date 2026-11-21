@@ -182,7 +182,8 @@ def _parse_json(text: str, default: dict) -> dict:
     elif "```" in text:
         text = text[text.find("```") + 3 : text.rfind("```")].strip()
     try:
-        return json.loads(text)
+        parsed: dict = json.loads(text)
+        return parsed
     except json.JSONDecodeError as exc:
         logger.error("PrescriptionComposer: failed to parse LLM response: %s", exc)
         return default

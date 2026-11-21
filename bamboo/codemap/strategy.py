@@ -72,7 +72,7 @@ import logging
 import math
 import re
 from collections import Counter
-from typing import NamedTuple, Optional, Sequence
+from typing import NamedTuple, Optional, Sequence, cast
 
 from bamboo.codemap import evidence, trace
 from bamboo.codemap.astwalk import walk
@@ -814,7 +814,7 @@ def _follow_up(
     if not named or any(owner in changing for owner in named):
         reader_acts = ACTS
     elif all(
-        isinstance(by_owner.get(owner), LogSiteNode) and by_owner[owner].triggers
+        isinstance(site := by_owner.get(owner), LogSiteNode) and site.triggers
         for owner in named
     ):
         reader_acts = READS_ONLY_AT_TOP
@@ -1047,6 +1047,8 @@ def _rows_observations(rows: Optional[str], files: list[str]) -> list[Observatio
     gate now: the map records the line, and the symptom names a task the prefix
     can scope.
     """
+    if not rows:
+        return []
     return [
         Observation(
             log_file=filename,
@@ -1057,7 +1059,7 @@ def _rows_observations(rows: Optional[str], files: list[str]) -> list[Observatio
             # which of the candidates moved it.
             settles=[],
         )
-        for filename in (files if rows else [])
+        for filename in files
     ]
 
 
@@ -1213,7 +1215,7 @@ async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
     # The tag is written per rejected site by production and the funnel label
     # per count, which is what makes this a lookup rather than a search.
     emitting = await code_map.stages_named(symptom.focus) if symptom.focus else []
-    named = sorted((_cut(stage) for stage in emitting), key=lambda c: (c.owner, c.order))
+    emitted = sorted((_cut(stage) for stage in emitting), key=lambda c: (c.owner, c.order))
 
     return Strategy(
         symptom=symptom,
@@ -1224,8 +1226,8 @@ async def localize(code_map: CodeMap, symptom: Symptom) -> Strategy:
             chain=leading,
             log_files=files,
             cuts=cuts,
-            describes=symptom.focus if named else "",
-            emitted_by=named,
+            describes=symptom.focus if emitted else "",
+            emitted_by=emitted,
         ),
         leads=_deduped(ambiguous),
         findings=findings,
@@ -2053,7 +2055,7 @@ def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localizat
     name that file; where none does, every stage carrying it is named and the
     ambiguity is reported rather than resolved.
     """
-    settled = strategy.localization.model_copy(deep=True)
+    settled = cast(Localization, strategy.localization).model_copy(deep=True)  # a brokerage strategy has one
     rejections, whole_cuts = evidence.observed_rejections(ev, strategy.symptom.task_id)
     survivors, whole_funnel = evidence.observed_survivors(ev, strategy.symptom.task_id)
     settled.sample = "complete" if whole_cuts and whole_funnel else "partial"
@@ -2110,10 +2112,10 @@ def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localizat
             cut.because = "the sample is partial, so nothing follows from not seeing it"
     settled.cuts.sort(key=lambda c: (-len(c.sites), c.owner, c.order))
 
-    weight: Counter = Counter()
+    weight: Counter[str] = Counter()
     for cut in settled.cuts:
         weight[cut.owner] += len(cut.sites)
-    if weight and max(weight.values()):
+    if weight and max(weight.values()) != 0:
         settled.chain = weight.most_common(1)[0][0]
     settled.chains_sharing_the_file = sorted({c.owner for c in settled.cuts} - {settled.chain})
 
@@ -2121,7 +2123,7 @@ def _settle_localization(strategy: Strategy, ev: evidence.Evidence) -> Localizat
     counts: dict[str, list[int]] = {}
     for row in survivors:
         if row.log_file in here or not here:
-            counts.setdefault(row.label, []).append(row.count)
+            counts.setdefault(row.label, []).append(row.survived)
     settled.funnel = sorted(
         (
             FunnelStep(
@@ -2287,6 +2289,10 @@ def discrimination(sentences: Sequence[Sentence]) -> Counter:
     return counted
 
 
+#: A row naming no arm is read once, under no arm's line.
+_NO_ARM: list[Optional[int]] = [None]
+
+
 def skeleton_sentences(readings: list[Reading]) -> list[Sentence]:
     """The skeleton's side of the comparison, one entry per (line, arm) pair.
 
@@ -2302,7 +2308,7 @@ def skeleton_sentences(readings: list[Reading]) -> list[Sentence]:
         for entry in readings
         for row in entry.skeleton
         if row.kind == SKELETON_PRINT and row.pattern
-        for arm in (row.arms or [None])
+        for arm in (row.arms or _NO_ARM)
     ]
 
 
@@ -2485,7 +2491,7 @@ async def _hold_what_the_movers_are_judged_with(
 
     sites = await code_map.read_sites(owners)
     follow.mover_sites = {owner: list(found) for owner, found in sites.items()}
-    files: dict[str, tuple[str, str]] = {}
+    files: dict[str, tuple[str, Optional[str]]] = {}
     for junction, _branches, _terms in guarded:
         if junction.anchor is not None:
             files.setdefault(junction.owner, (junction.anchor.file, junction.anchor.blob_sha))
@@ -2556,9 +2562,9 @@ def _mover_gaps(owner: str, follow: FollowUp, roots: dict) -> list[ReaderGap]:
     name = owner.rpartition("::")[2]
     # Read through the calls the build read through, or a statement the build
     # followed into a callee reads here as one that stopped.
-    calls = Calls(Types(roots, {file: (sha, tree)}))
+    calls = Calls(Types(roots, {file: (sha or "", tree)}))  # "" an unknown sha, as above; Types reads only the tree
     stops = []
-    verbs: dict[int, set[tuple[str, str]]] = {}
+    verbs: dict[Optional[int], set[tuple[str, str]]] = {}
     with sql.across_calls(calls):
         for func, _cls in functions_with_owner(tree):
             if func.name != name and not spells(func, name):
@@ -2666,7 +2672,7 @@ def attach_reader_traces(
     for entry in strategy.follow_up.reader_statements if strategy.follow_up else []:
         if not entry.file:
             continue
-        region = tuple(entry.region) if len(entry.region) == 2 else None
+        region = (entry.region[0], entry.region[1]) if len(entry.region) == 2 else None
         lines = condition_seeds(entry.conditions)
         if lines:
             walked = trace.walk(
@@ -2717,10 +2723,12 @@ def _where_its_names_are_filled(entry) -> Optional[tuple[int, int]]:
     """
     region = entry.region if len(entry.region) >= 2 else None
     handled = entry.rows_handled if len(entry.rows_handled) >= 2 else None
-    if region is None and handled is None:
-        return None
-    low = region[0] if region else handled[0]
-    high = handled[1] if handled else region[1]
+    if region is None:
+        if handled is None:
+            return None
+        low, high = handled[0], handled[1]
+    else:
+        low, high = region[0], (handled[1] if handled else region[1])
     return (low, max(low, high))
 
 

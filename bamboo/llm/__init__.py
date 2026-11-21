@@ -17,7 +17,7 @@ single-import access across the rest of the package.
 """
 
 from .errors import describe_llm_failure, is_llm_connection_error, llm_endpoint, log_llm_failure
-from .llm_client import get_embeddings, get_extraction_llm, get_llm, get_summary_llm, get_reranker
+from .llm_client import get_embeddings, get_extraction_llm, get_llm, get_summary_llm, get_reranker, message_text
 from .prompts import (
     BROKERAGE_LOG_EXTRACTION_SYSTEM,
     BROKERAGE_LOG_EXTRACTION_USER,
@@ -74,6 +74,7 @@ from .prompts import (
 )
 
 __all__ = [
+    "message_text",
     "get_llm",
     "get_extraction_llm",
     "get_summary_llm",

@@ -84,7 +84,7 @@ import logging
 import random
 from collections import Counter
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import click
 
@@ -238,7 +238,7 @@ async def _draw(
                 file=junction.anchor.file,
                 owner=junction.owner,
                 lines=[line],
-                observed=(by_line.get(line).outcome if by_line.get(line) else ""),
+                observed=(branch.outcome if (branch := by_line.get(line)) else ""),
                 handovers=_handovers(junction),
                 classify=provenance.classify,
                 budget=budget,
@@ -348,14 +348,14 @@ def main(
     if (scan or draw) and dump is None:
         raise click.UsageError("--scan and --draw read the map: give --dump, as build-map --dump wrote it")
     if scan:
-        asyncio.run(_scan(map_id, source_root, trace_mod.Budget(depth=depth), top, dump))
+        asyncio.run(_scan(map_id, source_root, trace_mod.Budget(depth=depth), top, cast(Path, dump)))  # given (above)
         return
     if draw:
         if seed is None:
             raise click.UsageError("--draw needs --seed: a draw nobody can repeat is a guess")
         asyncio.run(
             _draw(
-                map_id, source_root, trace_mod.Budget(depth=depth), seed, per_stratum, out, dump
+                map_id, source_root, trace_mod.Budget(depth=depth), seed, per_stratum, out, cast(Path, dump)
             )
         )
         return
@@ -1221,15 +1221,15 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
         f"\nnot run: {len(not_run)} case(s)"
         "   -- outside all four ratios above rather than counted against them"
     )
-    for line in not_run:
-        click.echo(f"    {line}")
+    for text in not_run:
+        click.echo(f"    {text}")
     click.echo(
         f"\nkinds moved: {len(kinds_moved)} case(s)"
         "   -- the walk no longer produces what the case was recorded with;"
         " re-stamp only after reading why"
     )
-    for line in kinds_moved:
-        click.echo(f"    {line}")
+    for text in kinds_moved:
+        click.echo(f"    {text}")
     click.echo(
         f"  ({stratum_outgrown} case(s) carry a stratum their walk has outgrown"
         " -- a record of the draw, not a mismatch)"
@@ -1239,8 +1239,8 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
         "   -- an unread crossing is the one-hop rule, not a failure;"
         " the count is what a stale freeze moves"
     )
-    for line in read_moved:
-        click.echo(f"    {line}")
+    for text in read_moved:
+        click.echo(f"    {text}")
     if read_moved:
         click.echo(
             "    re-stamp the sample's handovers from a built fragment"
@@ -1250,11 +1250,11 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
         f"\nbelow the arm and in no loop it is in: {len(below)} step(s)"
         "   -- a position, not a verdict"
     )
-    for line in below:
-        click.echo(f"    {line}")
+    for text in below:
+        click.echo(f"    {text}")
     click.echo(f"\nbelow it but inside a loop it is in too: {len(in_a_shared_loop)} step(s)")
-    for line in in_a_shared_loop:
-        click.echo(f"    {line}")
+    for text in in_a_shared_loop:
+        click.echo(f"    {text}")
     for label, rows_ in (
         ("missing", missing),
         ("fabricated", ghost),
@@ -1262,8 +1262,8 @@ def _audit(cases: list[dict], roots: dict, budget: trace_mod.Budget, seal: str) 
         ("unsaid", unsaid_rows),
     ):
         click.echo(f"\n{label}: {len(rows_)}")
-        for line in rows_:
-            click.echo(f"    {line}")
+        for text in rows_:
+            click.echo(f"    {text}")
 
 
 if __name__ == "__main__":

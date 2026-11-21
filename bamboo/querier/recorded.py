@@ -519,6 +519,13 @@ class RecordedLogs:
     def names(self, wanted: list[str]) -> list[str]:
         return list(dict.fromkeys(wanted))
 
+    def service_of(self, machine: str) -> str | None:
+        """The service the records name *machine*'s, where every record naming it names one and the same (the
+        harness's ``machines.<m>.service``); None where none does, or two differ."""
+        named = {str(got["service"]) for record in self._records.values()
+                 for m, got in (record.get("machines") or {}).items() if m == machine and got.get("service")}
+        return named.pop() if len(named) == 1 else None
+
     def marks_seen(self, names: list[str], head: str) -> dict[str, int]:
         """The marks beginning with *head* (``prepareTasksToBeFinished_JEDI < vo=``) the records of the logs *names*
         hold, each up to its closing ``>``, with how many lines hold it -- every record read, whatever it was asked

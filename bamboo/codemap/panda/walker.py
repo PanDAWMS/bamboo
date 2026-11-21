@@ -804,11 +804,24 @@ class Path:
         q.state = dict(self.state)
         q.since = dict(self.since)
         q.facts = dict(self.facts)
+        q.__dict__.pop("_left_key", None)
         return q
 
     def key(self) -> str:
-        """Equal for equal paths (:func:`merge`)."""
-        return repr(self.key_parts())
+        """Equal for equal paths (:func:`merge`).  A path that has left is walked no more, and :func:`merge` reads it
+        again after every statement the others take -- of NJ-starting-late's 12.2 million keys, 9.9 million were of
+        left paths: its key is kept while each of its fields still holds the object it held when read
+        (:meth:`Walker.drop_unread` gives it new facts).  No reader changes a left path's fields in place."""
+        if not self.left:
+            return repr(self.key_parts())
+        fields = tuple(v for k, v in self.__dict__.items() if k != "_left_key")
+        held = self.__dict__.get("_left_key")
+        if held is not None and len(held[0]) == len(fields) and all(a is b for a, b in zip(held[0], fields, strict=True)):
+            kept: str = held[1]
+            return kept
+        key = repr(self.key_parts())
+        self.__dict__["_left_key"] = (fields, key)
+        return key
 
     def key_parts(self) -> tuple:
         # since's sets are sorted: a set prints in an order that depends on the hash seed and on how it was
@@ -898,8 +911,15 @@ def canon(v: Any) -> str:
     return repr(v)
 
 
+#: :func:`value_key` of :data:`~bamboo.codemap.evaluate.UNKNOWN`, the value a path's state holds most: its ``repr``
+#: is a Python method, and NJ-starting-late's keys called it 212 million times (cProfile)
+_UNKNOWN_KEY = repr(evaluate.UNKNOWN)
+
+
 def value_key(v: Any) -> str:
     """``repr`` of a value, through :func:`canon` only when it is a container (one may hold a set)."""
+    if v is evaluate.UNKNOWN:
+        return _UNKNOWN_KEY
     return canon(v) if isinstance(v, (set, frozenset, dict, list, tuple)) else repr(v)
 
 
@@ -1155,11 +1175,14 @@ class Walker:
         texts, handed = self.read_after(s)
         for q in paths:
             if any(k not in texts for k in q.facts):
-                q.facts = {
+                kept = {
                     k: v
                     for k, v in q.facts.items()
                     if k in texts or self.witness_asked(k, v, handed, q)
                 }
+                # facts all kept stay the path's own dict, so a left path keeps its key (:meth:`Path.key`)
+                if len(kept) != len(q.facts):
+                    q.facts = kept
 
     def witness_asked(self, atom: str, truth: bool, handed: set[str], q: Path) -> bool:
         """Whether *atom* holding *truth*, a witness of a name (:func:`witnessed`), can still be asked on *q*: a

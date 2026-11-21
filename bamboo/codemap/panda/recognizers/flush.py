@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, cast
 
 from bamboo.codemap import calls as calls_mod
 from bamboo.codemap import pathcond, values
@@ -850,20 +850,20 @@ def _rerooted(value: ast.expr, parameter: str, argument: ast.expr) -> Optional[a
     *argument* the call hands it (``jobSpec.PandaID``) -- the argument's elements, where the part is the whole of a
     list written into the call (``oldStatus=["assigning"]``, opened into an ``IN`` list) -- or ``None`` where
     *value* is no part of *parameter*."""
-    steps: list[ast.expr] = []
+    steps: list[ast.Attribute | ast.Subscript] = []
     node: ast.expr = value
     while isinstance(node, (ast.Attribute, ast.Subscript)):
         steps.append(node)
         node = node.value
     if not (isinstance(node, ast.Name) and node.id == parameter):
         return None
-    built = argument
+    built: ast.expr = argument
     for step in reversed(steps):
         if isinstance(step, ast.Attribute):
             built = ast.copy_location(ast.Attribute(value=built, attr=step.attr, ctx=ast.Load()), argument)
         else:
             built = ast.copy_location(ast.Subscript(value=built, slice=step.slice, ctx=ast.Load()), argument)
-        built.parent = getattr(argument, "parent", None)  # type: ignore[attr-defined]
+        built.parent = getattr(argument, "parent", None)  # type: ignore[union-attr]
     return built
 
 
@@ -905,12 +905,13 @@ def _call_key_froms(
             record._binds = (func, rel_path, [])
             record._object = (spelled, spec, [call], flush.excluded)
             record._runs = (func, [call])
-        record._binds[2].extend(binds)
-        record.unread = "" if record._binds[2] else unread
+        held = cast(tuple, record._binds)  # set above, where the record was made
+        held[2].extend(binds)
+        record.unread = "" if held[2] else unread
         record.each_element = record.each_element and each
         record.flushed_lines = sorted({*record.flushed_lines, line})
 
-    at = site_of(call)
+    at = cast(ast.stmt, site_of(call))  # a call in a function sits in a statement
     for spec in sorted(flush.spec_classes):
         statements = sorted((line, table) for one, line, table in flush.flushed if one == spec)
         for obj in (
@@ -935,10 +936,10 @@ def _call_key_froms(
                 if not isinstance(given, ast.Dict):
                     put(
                         table,
-                        f"{flush.criteria}={ast.unparse(given)}",
+                        f"{flush.criteria}={ast.unparse(cast(ast.expr, given))}",  # the loop runs with one given
                         spelled,
                         spec,
-                        [sql.Bind(given, at)],
+                        [sql.Bind(cast(ast.expr, given), at)],
                         "",
                         first,
                         False,
@@ -974,7 +975,8 @@ def _call_key_froms(
                     )
                     if ways is not None and _carried_at(call, flush, ways) is None:
                         continue
-                    binds, own, split = [], False, False
+                    binds: list[sql.Bind] = []
+                    own, split = False, False
                     for bind in (record._binds or (None, None, []))[2]:
                         root = sqlwrite._root(bind.value)
                         handed = (
@@ -1019,9 +1021,10 @@ def _row_key_source(
     )
     # The key's value itself, as the records hold it: a field of the spec handed in (``jobSpec.PandaID``), a value of
     # the criteria (``taskSpec.jediTaskID``).
+    # every record of mine has its binds (put)
     source._filled = (
-        mine[0]._binds[0] if mine else func,
+        cast(tuple, mine[0]._binds)[0] if mine else func,
         module.rel_path,
-        [(bind.value, call, frozenset()) for record in mine for bind in record._binds[2]],
+        [(bind.value, call, frozenset()) for record in mine for bind in cast(tuple, record._binds)[2]],
     )
     return source

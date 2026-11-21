@@ -38,7 +38,7 @@ import ast
 import builtins
 import re
 from collections import Counter, deque
-from typing import Callable, Iterable, Iterator, Optional
+from typing import Callable, Iterable, Iterator, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap import calls as C
@@ -288,7 +288,7 @@ class _Receivers:
         self._operators: dict[type, Optional[tuple[str, str]]] = {}
         self._held: dict[
             tuple[int, str, tuple[Optional[str], ...]],
-            Optional[list[tuple[str, ast.AST, ast.expr, int]]],
+            Optional[list[tuple[str, ast.AST, ast.expr, _Path]]],
         ] = {}
         self._scopes: dict[int, _Scope] = {}
         self._as_values: Optional[set[str]] = None
@@ -887,9 +887,9 @@ class _Receivers:
             return _NOTHING
         if owner[0] == _OUTSIDE or (owner[0] == _BUILTIN and owner[1] in _SCALARS):
             return owner[0], f"an attribute of {owner[1]}"
-        declared = self._declared_field(file, func, root, expression.attr)
-        if declared is not None:
-            return declared
+        field_kind = self._declared_field(file, func, root, expression.attr)
+        if field_kind is not None:
+            return field_kind
         return _UNKNOWN, f"an attribute of another object ({owner[1]})"
 
     def _declared_field(
@@ -1157,7 +1157,7 @@ class _Holders:
     there holds, at any time -- more than the code may put there, never less.
     """
 
-    def __init__(self, receivers: _Receivers, keys: tuple[ast.expr, ...]):
+    def __init__(self, receivers: _Receivers, keys: _Path):
         self.receivers = receivers
         self.calls = receivers.calls
         self.keys: _Path = keys
@@ -2050,7 +2050,8 @@ def _key_texts(func: ast.AST, key: ast.expr, holders: set[str]) -> Optional[set[
     ):
         return None
     texts: set[str] = set()
-    for node in stores:
+    for store in stores:
+        node: ast.expr = store
         parent = getattr(node, "parent", None)
         if isinstance(parent, (ast.Assign, ast.AnnAssign)) and node is not parent.value:
             value = parent.value
@@ -2654,10 +2655,11 @@ class _Row:
     ) -> None:
         key = (to, how, tuple(for_classes), tuple(runs_as), thread)
         held = self.calls.get(key)
+        line = cast("ast.stmt | ast.expr", call).lineno  # a call, a store or a with: each has its line
         if held is None:
             self.calls[key] = ReachCall(
-                line=call.lineno,
-                lines=[call.lineno],
+                line=line,
+                lines=[line],
                 callee=_cut(callee),
                 to=to,
                 how=how,
@@ -2665,8 +2667,8 @@ class _Row:
                 runs_as=runs_as,
                 thread=thread,
             )
-        elif call.lineno not in held.lines:
-            held.lines.append(call.lineno)
+        elif line not in held.lines:
+            held.lines.append(line)
             held.lines.sort()
 
     def hole(self, call: ast.Call, why: str, for_classes: list[str]) -> None:
@@ -2791,8 +2793,8 @@ def graph(
         # the object can be a class of the corpus that has one; a class taking
         # ``object``'s, or an object no reading says anything of, has no edge
         # and no hole (:data:`IMPLICIT_DUNDERS`).
-        for store, name, value in _stores_in(func):
-            implicit = calls.stored(store, name, value)
+        for store, name, stored_value in _stores_in(func):
+            implicit = calls.stored(store, name, stored_value)
             for for_classes, bound in _groups(objects, classes, C._reads_self(implicit)):
                 try:
                     placed = calls.callees(file, func, implicit, bound)
@@ -3011,7 +3013,7 @@ def _close(
         asked = _asked(receivers.calls, file, func, call, selfs)
         types = receivers.types
         if (
-            called.attr == callfacts.START
+            cast(ast.Attribute, called).attr == callfacts.START  # no method of the name: a method call
             and any(types.method(*one, callfacts.RUN) is not None for one in asked)
             and any(types.built_outside(*one) for one in asked)
         ):
@@ -3238,7 +3240,7 @@ class ReachGraph:
         for owner in owners:
             assumptions.update(self.rows[owner].settled)
         closed: list[str] = []
-        writes = []
+        writes: list[ReachWrite] = []
         for node in came:
             owner = node[0]
             if owner in destination.arms and all(
@@ -3257,9 +3259,9 @@ class ReachGraph:
                 held = self._closers[id(destination)] = (destination, _ByName(self, destination))
             names = held[1]
             kept: list[str] = []
-            for hole in holes:
-                called = _named_call(hole)
-                (closed if called is not None and not names.can(called) else kept).append(hole)
+            for named_hole in holes:
+                called = _named_call(named_hole)
+                (closed if called is not None and not names.can(called) else kept).append(named_hole)
             holes = kept
             if closed:
                 assumptions["closed_by_name"] += len(closed)

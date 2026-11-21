@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import Iterator, Optional
+from typing import Iterator, Optional, cast
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -70,7 +70,7 @@ _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
-def _innermost_loop(node: ast.AST) -> Optional[ast.AST]:
+def _innermost_loop(node: ast.AST) -> Optional[ast.For | ast.AsyncFor | ast.While]:
     """The loop whose iteration *node* would skip, or ``None`` outside one."""
     parent = getattr(node, "parent", None)
     while parent is not None:
@@ -134,9 +134,9 @@ def _logging_calls(statement: ast.stmt) -> Iterator[ast.Call]:
 
 def _last_assignment(
     name: str, func: ast.FunctionDef | ast.AsyncFunctionDef, before: int
-) -> Optional[ast.stmt]:
+) -> Optional[ast.Assign | ast.AugAssign | ast.AnnAssign]:
     """The last statement above *before* that assigns *name*."""
-    found: Optional[ast.stmt] = None
+    found: Optional[ast.Assign | ast.AugAssign | ast.AnnAssign] = None
     for node in walk(func):
         if not isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
             continue
@@ -323,7 +323,8 @@ def extract(
                     continue
                 cut = found.get(message)
                 if cut is None:
-                    cut = _Cut(message, node.lineno, loop.lineno, callfacts.LOG_LEVELS[call.func.attr])
+                    level = callfacts.LOG_LEVELS[cast(ast.Attribute, call.func).attr]  # a logging call's (_logging_calls)
+                    cut = _Cut(message, node.lineno, loop.lineno, level)
                     found[message] = cut
                 cut.add(path_condition(node), _scope_prefix(call, func))
 

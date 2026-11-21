@@ -345,6 +345,7 @@ def scan_function(
             m.name for m in models.values() if not m.abstract and attrs <= set(m.fields)
         )
         structural = classes[0] if len(classes) == 1 else None
+        model: str | None
         if at_bind is not None:
             model, how = at_bind, "certain"
         elif structural is not None:

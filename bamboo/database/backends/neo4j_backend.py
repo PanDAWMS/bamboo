@@ -218,7 +218,8 @@ class Neo4jBackend(GraphDatabaseBackend):
                 properties=properties,
             )
             record = await result.single()
-            return record["id"]
+            node_id: str = record["id"]
+            return node_id
 
     async def get_or_create_canonical_node(
         self, node: BaseNode, canonical_name: str
@@ -245,7 +246,8 @@ class Neo4jBackend(GraphDatabaseBackend):
             )
             record = await result.single()
             if record:
-                return record["id"]
+                found_id: str = record["id"]
+                return found_id
             node.name = canonical_name
             return await self.create_node(node)
 
@@ -429,10 +431,10 @@ class Neo4jBackend(GraphDatabaseBackend):
 
     async def find_causes(
         self,
-        symptoms: list[str] = None,
-        task_features: list[str] = None,
-        environment_factors: list[str] = None,
-        components: list[str] = None,
+        symptoms: list[str] | None = None,
+        task_features: list[str] | None = None,
+        environment_factors: list[str] | None = None,
+        components: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Find possible causes ranked by total evidence across all clue types.

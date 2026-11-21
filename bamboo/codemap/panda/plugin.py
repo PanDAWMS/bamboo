@@ -21,7 +21,7 @@ import hashlib
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from bamboo.codemap import callfacts, pathcond, reach, reading, trace
 from bamboo.codemap import calls as calls_mod
@@ -247,7 +247,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         self._roots: dict[str, Path] = {}
         self._version: str = ""
         self._modules: list[SourceModule] = []
-        self._calls = None
+        self._calls: Optional[calls_mod.Calls] = None
         self._stop_disagreements: list[str] = []
         self._schema: Optional[dict[str, frozenset[str]]] = None
         self._keys: Optional[dict[str, frozenset[str]]] = None
@@ -880,10 +880,24 @@ class PandaCodeMapPlugin(CodeMapPlugin):
         printed_writes = sqlwrite.attach_write_arms(fragment.write_prints, fragment.key_froms)
         logger.info("PandaCodeMapPlugin: %d write statement(s) print their text and bind map", printed_writes)
         # Each message a run sends and the function another run takes it with: beside reach, not in it.
-        fragment.message_edges = messages.edges(self._modules, self._calls, values)
+        sent = messages.sends(self._modules, self._calls)
+        fragment.message_edges = messages.edges(self._modules, self._calls, values, sent)
         # And which column each payload key names rows by in the receiver's run, read from the key and parameter
         # records.
         messages.attach_received_as(fragment.message_edges, fragment.key_froms, fragment.parameter_froms)
+        # Every receiver and each type it takes, with the sends of it; a type nothing in PanDA sends came from
+        # outside, through a boundary of its own.
+        fragment.message_receivers, message_boundaries = messages.receivers(
+            self._modules, self._calls, self.map_id, self._version, {messages.TYPE_KEY: sent}
+        )
+        fragment.boundaries.extend(message_boundaries)
+        logger.info(
+            "PandaCodeMapPlugin: %d send(s), %d message edge(s), %d receiver type(s), %d message boundary/boundaries",
+            len(sent),
+            len(fragment.message_edges),
+            len(fragment.message_receivers),
+            len(message_boundaries),
+        )
         # Which definitions a reader may run with a run's values: the ones the arms' path conditions call, and the
         # hooks and decoders the guards' ways go through.
         fragment.runnables = runnable.runnables(
@@ -1017,7 +1031,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
             made = aftermade.attach(fragment, self._modules, self._calls, record)
             logger.info("PandaCodeMapPlugin: %d branch(es) read for a row made before them", made)
             # The statements each API endpoint's calls reach, on the reach record and the read terms.
-            read = endpoints.attach(fragment, self._modules, self._calls, returned)
+            read = endpoints.attach(fragment, self._modules, self._calls, returned, attributor)
             logger.info(
                 "PandaCodeMapPlugin: %d endpoint(s), %d statement(s) they read", len(fragment.endpoints), read
             )
@@ -1290,7 +1304,7 @@ class PandaCodeMapPlugin(CodeMapPlugin):
                     dist = Distribution.from_name(dist_name)
                 except PackageNotFoundError:
                     continue
-                pkg_dir = Path(dist.locate_file("")).resolve() / pkg
+                pkg_dir = Path(cast(Path, dist.locate_file(""))).resolve() / pkg  # an installed distribution's files
                 if pkg_dir.is_dir():
                     roots[pkg] = pkg_dir
                     break

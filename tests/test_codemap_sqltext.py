@@ -1466,6 +1466,20 @@ def test_a_term_ends_at_the_subquery_it_closes_and_a_condition_interpolated_whol
     assert [stop.reason for stop in sql._hole_stops("SELECT x FROM t WHERE {}=:{}", 7)] == [sql.COLUMN_IS_A_HOLE]
 
 
+def test_a_from_taking_its_table_through_a_hole_is_a_stop_and_a_schema_hole_is_not():
+    """``get_task_job_rows`` reads ``FROM ({}) tmp_union``, a union of the job tables a nested function builds;
+    ``insertDataset`` ``FROM {} WHERE vuid=:vuid``, a table a name holds: the rows read are not said by the text
+    (``sql.FROM_IS_A_HOLE``).  The schema's hole, ``{}.JEDI_Tasks``, is not one, nor is a derived table spelled out."""
+    unioned = "SELECT {} FROM ({}) tmp_union ORDER BY PandaID"
+    assert [(stop.source, stop.reason) for stop in sql._from_stops(unioned, 7)] == [("FROM ({})", sql.FROM_IS_A_HOLE)]
+    assert [stop.source for stop in sql._from_stops("SELECT name FROM {} WHERE vuid=:vuid", 7)] == ["FROM {}"]
+    assert [stop.source for stop in sql._from_stops("SELECT a FROM {}.JEDI_Tasks t JOIN {} d ON t.x=d.x", 7)] == [
+        "JOIN {}"
+    ]
+    assert sql._from_stops("SELECT {} FROM {}.data_carousel_requests ORDER BY request_id", 7) == ()
+    assert sql._from_stops("SELECT x FROM (SELECT level FROM dual CONNECT BY level<=:n)", 7) == ()
+
+
 def test_a_column_a_write_names_at_run_time_is_said_not_passed_over():
     """``updateJobStatus`` appends ``,{key}=:{key}`` for each key of the pilot's ``param``: the pairing read the
     columns it could and passed over the rest with ``continue``, so the pilot's update wrote ``jobStatus`` alone in

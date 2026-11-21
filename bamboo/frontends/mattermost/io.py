@@ -403,7 +403,7 @@ class MattermostInteractionIO(InteractionIO):
         """
         attachments = []
         for c in cards:
-            att = {
+            att: dict[str, Any] = {
                 "title": c.title or "",
                 "text": to_markdown(c.body),
                 "color": _style_color(c.style),

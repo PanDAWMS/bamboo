@@ -188,8 +188,10 @@ def read_models(
                         if isinstance(m, ast.Assign) and isinstance(
                             m.targets[0], ast.Name
                         ):
-                            if m.targets[0].id == "db_table" and isinstance(
-                                m.value, ast.Constant
+                            if (
+                                m.targets[0].id == "db_table"
+                                and isinstance(m.value, ast.Constant)
+                                and isinstance(m.value.value, str)
                             ):
                                 info.db_table = m.value.value
                             if m.targets[0].id == "abstract" and isinstance(

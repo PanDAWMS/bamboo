@@ -237,7 +237,7 @@ class _Return(NamedTuple):
     bound: dict[str, Optional[ast.expr]]
     file: str
     caller: ast.AST
-    at: ast.AST
+    at: Optional[ast.AST]
     way: "_Way"
 
 
@@ -437,7 +437,8 @@ class LoggerFiles:
         placed = self.calls.callees(file, func, call) if func is not None and not _opens(name) else None
         # One definition, placed closed: a call placed open may return
         # another function's file.
-        if placed is None or len(placed.targets) != 1 or placed.unplaced or placed.returns_none:
+        # placed is None wherever func is.
+        if func is None or placed is None or len(placed.targets) != 1 or placed.unplaced or placed.returns_none:
             trail.open = True
             return
         (target,) = placed.targets

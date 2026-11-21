@@ -101,8 +101,12 @@ def value_held(states: list[dict], column: str, value: str, created: str | None)
     else:
         return Asking(None, None, T.Said("first-row-no-creation", {"status": first["status"], "time": first["time"],
                                                                     "column": column, "value": value}))
+    # P46: the rows after the first of the stretch hold it too -- it was not written again with another value at them
+    kept = (T.Said("held-at-the-rows-after", {"n": len(states) - 1 - k, "status": states[-1]["status"],
+                                               "time": states[-1]["time"]}) if k < len(states) - 1 else "")
     return Asking((lo, first["time"]), None, T.Said("value-held", {"column": column, "value": value, "since": since,
-                                                                    "status": first["status"], "time": first["time"]}))
+                                                                    "status": first["status"], "time": first["time"],
+                                                                    "kept": kept}))
 
 
 def value_now(column: str, value: str) -> Asking:

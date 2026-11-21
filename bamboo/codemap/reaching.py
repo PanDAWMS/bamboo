@@ -507,7 +507,7 @@ def _runs_exactly_once(node: ast.For | ast.AsyncFor) -> bool:
                 )
             )
         )
-        node._reaching_once = held  # type: ignore[attr-defined]
+        node._reaching_once = held  # type: ignore[union-attr]
     return held
 
 
@@ -772,7 +772,8 @@ class _Flow:
         method = None if passing else getattr(self, "_" + type(node).__name__, None)
         if method is None:
             return self._gen(state, node)
-        return method(node, state)
+        handled: Optional[int] = method(node, state)
+        return handled
 
     # -- leaving a block ------------------------------------------------------
     def _Return(self, node: ast.Return, state: Optional[int]) -> Optional[int]:

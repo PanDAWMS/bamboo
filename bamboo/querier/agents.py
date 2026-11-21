@@ -673,6 +673,29 @@ def crossed_readers(key_froms: list, read_sites: list, reach_graph: list, row_ta
     return (readers, wakers, sorted(via)) if readers and wakers else None
 
 
+def rows_handing(read_sites: list, ways: list) -> tuple[list[tuple[Any, str]], list, list[str]] | None:
+    """P20's rest (out/gm/qk-design.md, the section on rebuilding P20's rest, delegated design): of the ways a caller's
+    key comes in (``sources.Way``, :func:`sources.field_ways` and :func:`sources.param_ways`), the selections whose rows
+    end them (a way ending at the database's ``rows`` of a read site, by its name), with the inserts their ``wakers``
+    name, and the ways ending at a parameter no corpus call is placed to hand (an API's request: ``pilot_api.update_job``
+    711's for AdderGen's ``job_id``), named by their last hop: ``(readers, wakers, outside)``.  None where a way ends
+    anywhere else -- a constant, a field, a call not read -- or no such selection has an inserting waker: the key may
+    come another way, and the rows' wakers say nothing of when the caller ran."""
+    by_name = {getattr(r, "name", ""): r for r in read_sites}
+    readers: list[tuple[Any, str]] = []
+    outside: list[str] = []
+    for w in ways:
+        if w.end == "database" and w.why == "rows" and w.site in by_name:
+            if all(r is not by_name[w.site] for r, _ in readers):
+                readers.append((by_name[w.site], ""))
+        elif w.end in ("api", "stop") and w.why and set(w.why.split(",")) <= {"no_caller", "missed"} and "no_caller" in w.why:
+            outside.append(w.route[-1] if w.route else "")
+        else:
+            return None
+    wakers = _inserting(readers)
+    return (readers, wakers, sorted(set(outside))) if readers and wakers else None
+
+
 def cap_rows(limits: list[str]) -> int | None:
     """The most rows a statement returns by the map's ``limits`` (``< 1000``: 999, ``<= 50``: 50), the least where it
     has several; None where none is a number (``< nTasks``)."""

@@ -47,7 +47,7 @@ from __future__ import annotations
 import ast
 import itertools
 import operator
-from typing import Iterator, NamedTuple, Optional
+from typing import Iterator, NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
@@ -138,6 +138,11 @@ def write_at(
     ``None`` where it makes none."""
     write = _write_of(node, _first_parameter(func))
     return _read(types, file, func, write) if write is not None else None
+
+
+def _definition(func: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """*func*, which a write is read in: a definition."""
+    return cast("ast.FunctionDef | ast.AsyncFunctionDef", func)
 
 
 def _first_parameter(func: ast.AST) -> Optional[str]:
@@ -343,7 +348,7 @@ def _source(
             ):
                 return name.id, called.value, ("keys", "values")[at]
         return None, None, ""
-    bound = pathcond.assigned_expressions(func).get(name.id, [])
+    bound = pathcond.assigned_expressions(_definition(func)).get(name.id, [])
     if len(bound) == 1 and isinstance(bound[0], ast.Subscript):
         # ``attr = self._attributes[i]``, or ``attr_wq = mapping[attr]``.
         return name.id, bound[0].value, "subscript"
@@ -409,7 +414,7 @@ def _sequence(
 
 def _literal(
     types: Types, file: str, func: ast.AST, node: ast.expr
-) -> Optional[ast.expr]:
+) -> Optional[ast.Tuple | ast.List | ast.Set | ast.Dict]:
     """The literal tuple, list, set or dict *node* is: written here, or a class attribute of ``self``."""
     if isinstance(node, (ast.Tuple, ast.List, ast.Set, ast.Dict)):
         return node
@@ -432,7 +437,7 @@ def _literal(
                         else None
                     )
     if isinstance(node, ast.Name):
-        bound = pathcond.assigned_expressions(func).get(node.id, [])
+        bound = pathcond.assigned_expressions(_definition(func)).get(node.id, [])
         if len(bound) == 1 and isinstance(
             bound[0], (ast.Tuple, ast.List, ast.Set, ast.Dict)
         ):
@@ -552,7 +557,8 @@ def _holds(test: ast.expr, bound: dict[str, object]) -> Optional[bool]:
     ):
         subject, argument = _known(test.func.value, bound), _known(test.args[0], bound)
         if isinstance(subject, str) and isinstance(argument, (str, tuple)):
-            return getattr(subject, test.func.attr)(argument)
+            held: bool = getattr(subject, test.func.attr)(argument)
+            return held
     return None
 
 
@@ -571,7 +577,7 @@ def _copied_from(func: ast.AST, value: Optional[ast.expr]) -> bool:
     } - {"self", "cls"}
     values = [value]
     if isinstance(value, ast.Name):
-        values = list(pathcond.assigned_expressions(func).get(value.id, []))
+        values = list(pathcond.assigned_expressions(_definition(func)).get(value.id, []))
     return bool(values) and all(
         isinstance(one, ast.Call)
         and isinstance(one.func, ast.Name)

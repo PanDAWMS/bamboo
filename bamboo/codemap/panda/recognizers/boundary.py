@@ -251,7 +251,7 @@ def schema_names(modules: list[SourceModule]) -> dict[str, str]:
                 if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
                     continue
                 if key.value.startswith(_SCHEMA_ATTRIBUTE) and key.value != _SCHEMA_ATTRIBUTE:
-                    found[key.value[len(_SCHEMA_ATTRIBUTE) :]] = node.value.value
+                    found[key.value[len(_SCHEMA_ATTRIBUTE) :]] = value.value
     return found
 
 

@@ -32,7 +32,7 @@ class VectorDatabaseClient:
     documentation of each operation.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._backend = get_vector_backend()
 
     async def connect(self):

@@ -52,6 +52,17 @@ jobs:
           LLM_API_KEY: not-a-real-key-nothing-is-called
         run: pytest -q -m "not timing"
 
+      - name: mypy, no file with more errors than its baseline
+        # The package held about 1300 mypy errors that nothing checked. Each file is
+        # held to its count in scripts/mypy_baseline.json: a rise fails with the new
+        # errors printed, and a fall fails until the commit lowers the baseline
+        # (`python scripts/mypy_ratchet.py update`). The counts depend on mypy's
+        # version and on the installed packages, so mypy is pinned to the version the
+        # baseline names and the environment is this job's: the dev extra only.
+        run: |
+          pip install "mypy==$(python -c 'import json; print(json.load(open("scripts/mypy_baseline.json"))["mypy"])')"
+          python scripts/mypy_ratchet.py check
+
       - name: Timing-sensitive tests (not a gate)
         # These assert on how fast a child process delivers output, so a shared
         # runner loses races a laptop wins. Reported, never merged on — see the

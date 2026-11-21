@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, Optional, Type, TypeVar, cast
 
 from bamboo.codemap.models import (
     MAP_NODE_GROUPS,
@@ -94,10 +94,11 @@ def _fragment_nodes(fragment: MapFragment, node_type: NodeType) -> list[tuple[Ba
                 version = getattr(node, "derived_from", None)
                 by_key[key] = (node, seen + [version] if version is not None and version not in seen else seen)
         index: dict[NodeType, list[tuple[BaseNode, list[str]]]] = {}
-        for node, seen in by_key.values():
-            index.setdefault(node.node_type, []).append((node, seen))
+        for (kind, _map_id, _name), (node, seen) in by_key.items():
+            index.setdefault(kind, []).append((node, seen))
         _FRAGMENT_NODES[:] = [fragment, index]
-    return _FRAGMENT_NODES[1].get(node_type, [])
+    nodes: list[tuple[BaseNode, list[str]]] = _FRAGMENT_NODES[1].get(node_type, [])
+    return nodes
 
 
 #: An outcome that names where the value came from rather than what it is.
@@ -177,7 +178,11 @@ class CodeMap:
             node
             for node, seen in _fragment_nodes(self._fragment, _MODELS[model])
             if getattr(node, "map_id", None) == self.map_id
-            and (self.version is None or self.version in (seen or [getattr(node, "derived_from", None)]))
+            and (
+                self.version is None
+                or self.version in seen
+                or (not seen and self.version == getattr(node, "derived_from", None))
+            )
             and all(getattr(node, k, None) == v for k, v in wanted.items())
         ]
         if self.version is not None:
@@ -195,7 +200,7 @@ class CodeMap:
                     "so their content is that build's",
                     elsewhere, len(found), _MODELS[model].value, self.version,
                 )
-        return found
+        return cast("list[NodeT]", found)
 
     async def versions(self) -> list[str]:
         """Every source version the dump holds for this map, newest name last.
@@ -203,8 +208,9 @@ class CodeMap:
         Several coexist on purpose: an incident from months ago has to be read
         against the code that was running then, not the code on disk now.
         """
-        return sorted({node.derived_from for node, _ in _fragment_nodes(self._fragment, NodeType.SUBJECT)
-                       if getattr(node, "map_id", None) == self.map_id and node.derived_from})
+        return sorted({version for node, _ in _fragment_nodes(self._fragment, NodeType.SUBJECT)
+                       if getattr(node, "map_id", None) == self.map_id
+                       and (version := cast(SubjectNode, node).derived_from)})
 
     async def subject(self, name: str) -> Optional[SubjectNode]:
         """One subject by its qualified name, e.g. ``JediTaskSpec.status``.

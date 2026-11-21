@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import ast
 import re
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Union, cast
 
 from bamboo.codemap import callfacts, pathcond
 from bamboo.codemap.astwalk import walk
@@ -270,9 +270,9 @@ def _frames(node: ast.expr, func, at: ast.AST, hops: int, cuts: Optional[list[in
         parts = []
         for part in node.values:
             if isinstance(part, ast.Constant):
-                parts.append([_literal(part.value)])
-            elif part.conversion == -1 and part.format_spec is None:
-                parts.append(_frames(part.value, func, at, hops))
+                parts.append([_literal(cast(str, part.value))])  # an f-string's text
+            elif (formatted := cast(ast.FormattedValue, part)).conversion == -1 and formatted.format_spec is None:
+                parts.append(_frames(formatted.value, func, at, hops))
             else:
                 # ``{x!r}`` quotes it and ``{x:>8}`` pads it: not the text it holds.
                 parts.append([_HOLE])
@@ -464,7 +464,7 @@ def _held_by_name(name: str, func, at: ast.AST, hops: int, cuts: Optional[list[i
             return [_HOLE]
         if binding.kind in (pathcond.BIND_ASSIGN, pathcond.BIND_ANNOTATED, pathcond.BIND_WALRUS):
             found += _frames(binding.value, func, binding.site, hops - 1, cuts)
-        elif binding.kind == pathcond.BIND_AUGMENTED and isinstance(binding.site.op, ast.Add):
+        elif binding.kind == pathcond.BIND_AUGMENTED and isinstance(cast(ast.AugAssign, binding.site).op, ast.Add):
             # What was there, then this.  The head is a hole rather than the
             # earlier texts: which of them it was is a second question.
             found += [_HOLE + frame for frame in _frames(binding.value, func, binding.site, hops - 1)]
@@ -771,18 +771,18 @@ def mapping_values(
         level = [entry for mapping in iterated for entry in mapping.values()]
 
     for key in reversed(keys):
-        stated = isinstance(key, ast.Constant) and isinstance(key.value, str)
-        leaves = None if stated else _keys_the_way_leaves(key, level, expression, func)
+        stated = key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
+        leaves = None if stated is not None else _keys_the_way_leaves(key, level, expression, func)
         if leaves is not None and not leaves:
             return []
         stepped: list[Union[str, Mapping]] = []
         for entry in level:
             if not isinstance(entry, dict):
                 return []
-            if stated:
-                if key.value not in entry:
+            if stated is not None:
+                if stated not in entry:
                     return []
-                stepped.append(entry[key.value])
+                stepped.append(entry[stated])
             else:
                 stepped.extend(value for name, value in entry.items() if leaves is None or name in leaves)
         level = stepped
@@ -947,8 +947,10 @@ def bind_settler(calls: Optional["Calls"]):
     def settle(expression: ast.expr, func: Optional[ast.FunctionDef | ast.AsyncFunctionDef]) -> list[str]:
         file = calls.types.file_of(func) if calls is not None and func is not None else None
         if file is None:
-            return plain(expression, func)
-        return sorted({one.value for one in known(handing(expression, func, file))})
+            unsettled: list[str] = plain(expression, func)
+            return unsettled
+        settled: list[str] = sorted({one.value for one in known(handing(expression, func, file))})
+        return settled
 
     return settle
 
@@ -1117,7 +1119,7 @@ def handed(resolve, calls: Optional["Calls"]):
         if isinstance(expression, (ast.List, ast.Tuple, ast.Set)):
             # As for a name's writes below: one element unsettled -- or
             # spread in with ``*`` -- and the rest are not every value.
-            found = []
+            found: list[Handed] = []
             for element in expression.elts:
                 settled = [] if isinstance(element, ast.Starred) else settle(element, func, file, depth, seen)
                 if not _any_value(settled):
@@ -1154,7 +1156,7 @@ def handed(resolve, calls: Optional["Calls"]):
         written = bindings(func, expression.id)
         if written is None:
             return []
-        found: list[Handed] = []
+        found = []
         for value in written:
             settled = settle(value, func, file, depth, seen)
             if not _any_value(settled):
@@ -1265,13 +1267,13 @@ def handed(resolve, calls: Optional["Calls"]):
                 found.extend(settled)
             return found
         if isinstance(expression, ast.Name) and expression.id not in parameters(func):
-            key = (file, getattr(func, "lineno", 0), expression.id, "<keys>")
-            written = bindings(func, expression.id) if key not in seen else None
+            memo_key = (file, getattr(func, "lineno", 0), expression.id, "<keys>")
+            written = bindings(func, expression.id) if memo_key not in seen else None
             if not written:
                 return []
             found = []
             for value in written:
-                settled = keys_of(value, func, file, depth, seen | {key})
+                settled = keys_of(value, func, file, depth, seen | {memo_key})
                 if not _any_value(settled):
                     return []
                 found.extend(settled)
@@ -1282,11 +1284,11 @@ def handed(resolve, calls: Optional["Calls"]):
                 return []
             found = []
             for target in placed.targets:
-                key = (target.file, target.func.lineno, "<return keys>")  # type: ignore[attr-defined]
-                if key in seen:
+                returns_key = (target.file, target.func.lineno, "<return keys>")  # type: ignore[attr-defined]
+                if returns_key in seen:
                     return []
                 for value in calls_returns(target.func):
-                    settled = keys_of(value, target.func, target.file, depth + 1, seen | {key})
+                    settled = keys_of(value, target.func, target.file, depth + 1, seen | {returns_key})
                     if not _any_value(settled):
                         return []
                     found.extend(settled)
@@ -1345,9 +1347,10 @@ _TIMEDELTA_POSITIONS = ("days", "seconds", "microseconds", "milliseconds", "minu
 
 
 def _module_of(node: ast.AST) -> Optional[ast.Module]:
-    while node is not None and not isinstance(node, ast.Module):
-        node = getattr(node, "parent", None)
-    return node
+    held: Optional[ast.AST] = node
+    while held is not None and not isinstance(held, ast.Module):
+        held = getattr(held, "parent", None)
+    return held
 
 
 def _resolved(expression: ast.expr) -> str:
@@ -1513,7 +1516,8 @@ def _scaled(left: Stated, right: Stated, op: ast.operator, node: ast.AST) -> Sta
 def _timedelta(call: ast.Call, func, at: ast.AST, depth: int, handed) -> Stated:
     """``datetime.timedelta(...)`` as seconds, or the parameters its amounts wait for."""
     amounts = [*zip(_TIMEDELTA_POSITIONS, call.args, strict=False), *((one.arg, one.value) for one in call.keywords)]
-    total, needs = 0.0, ()
+    total = 0.0
+    needs: tuple[str, ...] = ()
     unsettled: list[tuple[str, Stated]] = []
     for unit, amount in amounts:
         if unit not in TIMEDELTA_UNITS:

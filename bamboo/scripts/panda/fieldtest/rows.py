@@ -320,6 +320,7 @@ def key_row(laid: Laid, cls: str, key: str) -> tuple[dict | None, dict, str]:
     found, why = job_of(response, key) if cls == "JobSpec" else task_of(response)
     if found is None:
         return None, {}, why
+    assert response is not None  # the row was read from it
     if cls == "JediTaskSpec":
         found = {k: v for k, v in found.items() if k != SPLIT_RULE_RAW} | {
             "splitRule": found.get(SPLIT_RULE_RAW)
@@ -351,7 +352,7 @@ def task_params(raw: dict, read: dict) -> tuple[dict | None, str]:
     }, ""
 
 
-def states_of(response: dict, kind: str) -> tuple[list[dict] | None, str]:
+def states_of(response: dict | None, kind: str) -> tuple[list[dict] | None, str]:
     """The history's rows as the querier reads them, and the source; None when the call did not succeed."""
     if not response or not response.get("success"):
         data = (response or {}).get("data") or {}
@@ -411,6 +412,7 @@ def bounds_of(response: dict) -> dict[str, str | None]:
     """
     data = response if "as_of" in response else response["data"]
     upper = when(data["as_of"])
+    assert upper is not None, f"as_of {data['as_of']!r} is not a time the API wrote"
     until = when(data.get("until"))
     if until is not None:
         upper = min(upper, until - datetime.timedelta(microseconds=1))
@@ -838,6 +840,7 @@ def linked(
             values = sorted(values_by(link, got, key_class, key, tables))
             if not values or (link.held and not got):
                 continue
+            answers: list[tuple[str | None, dict, set | None, list[dict]]] | None
             if link.held:
                 spelling = spellings[link.dst_class]
                 answers = [

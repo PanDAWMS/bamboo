@@ -99,7 +99,9 @@ def key_for(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-def containing_function(tree: ast.Module, line: int, owner: str) -> Optional[ast.AST]:
+def containing_function(
+    tree: ast.Module, line: int, owner: str
+) -> Optional[ast.FunctionDef | ast.AsyncFunctionDef]:
     """The function definition *line* falls in.
 
     Where definitions nest, the one whose name the map already recorded wins

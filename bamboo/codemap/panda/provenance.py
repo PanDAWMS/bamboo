@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import ast
 import builtins
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts
 from bamboo.codemap.astwalk import walk
@@ -142,7 +142,9 @@ def _config_key(call: ast.Call) -> str:
         elif isinstance(argument, ast.JoinedStr):
             parts.append(
                 "".join(
-                    piece.value if isinstance(piece, ast.Constant) else "{" + _text(piece.value) + "}"
+                    piece.value
+                    if isinstance(piece, ast.Constant) and isinstance(piece.value, str)
+                    else "{" + _text(cast(ast.FormattedValue, piece).value) + "}"
                     for piece in argument.values
                 )
             )
@@ -418,7 +420,7 @@ def facade_calls(types: Types, method: str) -> list[FacadeCall]:
             key=lambda node: (node.lineno, node.col_offset),
         )
         for call in made:
-            runs = types.method(proxy_file, proxy_cls, call.func.attr)  # type: ignore[union-attr]
+            runs = types.method(proxy_file, proxy_cls, cast(ast.Attribute, call.func).attr)
             if runs is None or id(call) in seen:
                 continue
             seen.add(id(call))

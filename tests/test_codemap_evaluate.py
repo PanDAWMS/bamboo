@@ -175,6 +175,20 @@ def test_a_printed_value_is_read_as_python_reads_its_repr_and_a_stale_one_is_unk
     assert env.used["job.altStgOutFileList()"] == "unknown: written after the decision"
 
 
+def test_a_printed_text_is_read_once_and_only_a_value_no_one_can_change_is_handed_out_again() -> None:
+    """:meth:`Env.put_printed` reads a text once: a value no one can change is handed to every env, and a list, a dict
+    or a set is read anew for each, as one env's reader may change it."""
+    one, other = Env(), Env()
+    for env in (one, other):
+        env.put_printed("ids", "[1, 2]", "line 3")
+        env.put_printed("pair", "(1, 'a')", "line 4")
+        env.put_printed("name", "not a literal", "line 5")
+    assert one.lookup("ids") == other.lookup("ids") == [1, 2]
+    assert one.lookup("ids") is not other.lookup("ids")
+    assert one.lookup("pair") is other.lookup("pair")
+    assert one.lookup("name") == other.lookup("name") == "not a literal"
+
+
 def test_a_known_outcome_settles_the_atoms_it_leaves_no_choice_for() -> None:
     """``a and b`` taken settles both; a settled equality hands the known side's value to the other."""
     solved = evaluate.solve("isOK and not toSkip", True, Env())

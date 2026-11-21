@@ -32,7 +32,7 @@ class GraphDatabaseClient:
     documentation of each operation.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._backend = get_graph_backend()
 
     async def connect(self):
@@ -59,10 +59,10 @@ class GraphDatabaseClient:
 
     async def find_causes(
         self,
-        symptoms: list[str] = None,
-        task_features: list[str] = None,
-        environment_factors: list[str] = None,
-        components: list[str] = None,
+        symptoms: list[str] | None = None,
+        task_features: list[str] | None = None,
+        environment_factors: list[str] | None = None,
+        components: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Find candidate causes ranked by evidence breadth across all clue types."""

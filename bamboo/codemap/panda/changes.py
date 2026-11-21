@@ -91,9 +91,10 @@ import ast
 import builtins
 import weakref
 from collections import deque
-from typing import TYPE_CHECKING, Callable, NamedTuple, Optional
+from typing import TYPE_CHECKING, Callable, NamedTuple, Optional, cast
 
 from bamboo.codemap import callfacts, pathcond
+from bamboo.codemap.astwalk import derived, of_kinds
 from bamboo.codemap.calls import BUILTIN as BUILTIN_CLASS
 from bamboo.codemap.calls import (
     UNPLACED_FORWARDED,
@@ -1037,6 +1038,13 @@ class _Reading:
 
         held |= self._aliases(file, func, nodes, holds, bound)
         holding = _Holds(holds, dict(_part_aliases(func, nodes, holds)))
+        # What a node must spell to read as the object anywhere in it -- a name held, the name a held field is of, a
+        # name bound to a part, the field asked as an attribute: every way below reads it through holding() or
+        # _as_part() of a node inside the one it is at, so a node spelling none of these changes nothing.
+        asked = {name.split(".", 1)[0] for name in held} | set(holding.parts)
+        if field is not None:
+            asked.add("." + field[0])
+        spelled = _spelled(func)
         found: list[tuple[Optional[ast.stmt], ObjectChange]] = []
 
         def add(node: ast.AST, change: ObjectChange) -> None:
@@ -1047,6 +1055,9 @@ class _Reading:
             add(node, ObjectChange(file, line, CHANGE_ESCAPED, EVERY, what, func=func))
 
         for node in nodes:
+            words = spelled.get(id(node))
+            if words is None or words.isdisjoint(asked):
+                continue
             line = getattr(node, "lineno", 0)
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete)):
                 direct: list[ast.expr] = (
@@ -1100,10 +1111,10 @@ class _Reading:
                             file, func, inner, holding, bound
                         ):
                             add(node, change)
-        for inner in ast.walk(func):
+        for inner in cast(tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...], of_kinds(func, _DEFS)):
             if (
                 inner is not func
-                and isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not _spelled_in(inner).isdisjoint(asked)
                 and any(holding(one) or _as_part(one, holding) is not None for one in ast.walk(inner))
             ):
                 escaped(inner, f"read in {inner.name}")
@@ -1704,6 +1715,36 @@ class _Reading:
                     }:
                         self._attributes.setdefault(name, []).append(target)
         return self._attributes
+
+
+#: The nodes :meth:`_Reading._own_changes` reads a change at, and the definitions it reads an escape into.
+_CHANGING = (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Delete, ast.Call, ast.Yield, ast.YieldFrom, ast.Lambda)
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef)
+
+
+def _words(node: ast.AST) -> frozenset[str]:
+    """Each name *node* spells anywhere in it, and each attribute as ``.attr``."""
+    return frozenset(
+        one.id if isinstance(one, ast.Name) else "." + one.attr
+        for one in ast.walk(node)
+        if isinstance(one, (ast.Name, ast.Attribute))
+    )
+
+
+def _spelled(func: ast.AST) -> dict[int, frozenset[str]]:
+    """:func:`_words` of each node of *func*'s own body :meth:`_Reading._own_changes` reads, by its id: read once for
+    each function, where the reading asked each of them again for every object it followed there -- 2 million calls
+    a build, nearly all handed nothing it held."""
+    return derived(
+        func,
+        "_change_words",
+        lambda: {id(node): _words(node) for node in own_nodes(func) if isinstance(node, _CHANGING)},
+    )
+
+
+def _spelled_in(inner: ast.AST) -> frozenset[str]:
+    """:func:`_words` of a definition nested in a function, held on it."""
+    return derived(inner, "_change_words_in", lambda: _words(inner))
 
 
 def _on_driver(placed: "Placed") -> bool:

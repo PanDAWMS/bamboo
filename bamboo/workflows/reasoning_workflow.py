@@ -3,6 +3,7 @@
 from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from bamboo.agents.reasoning_navigator import ReasoningNavigator
 from bamboo.database.graph_database_client import GraphDatabaseClient
@@ -117,7 +118,7 @@ def should_send_email(state: ReasoningState) -> str:
         return "review"
 
 
-def create_reasoning_workflow() -> StateGraph:
+def create_reasoning_workflow() -> CompiledStateGraph:
     """Create and compile the reasoning LangGraph workflow with human-in-the-loop."""
     workflow = StateGraph(ReasoningState)
 

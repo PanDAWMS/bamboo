@@ -70,7 +70,7 @@ async def _run(url: str, title_filter: str | None, show_prompt: bool) -> None:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     from bamboo.agents.panda_doc_navigator import PandaDocNavigator
-    from bamboo.llm import PANDA_DOC_SUMMARIZE_SYSTEM, PANDA_DOC_SUMMARIZE_USER, get_extraction_llm
+    from bamboo.llm import PANDA_DOC_SUMMARIZE_SYSTEM, PANDA_DOC_SUMMARIZE_USER, get_extraction_llm, message_text
 
     click.echo(f"Fetching {url}")
     async with httpx.AsyncClient(timeout=30) as client:
@@ -92,7 +92,8 @@ async def _run(url: str, title_filter: str | None, show_prompt: bool) -> None:
             if parent is None:
                 break
             current = parent
-        return current.title
+        title: str = current.title
+        return title
 
     if title_filter:
         nodes = [n for n in nodes if title_filter.lower() in n.title.lower()]
@@ -122,13 +123,13 @@ async def _run(url: str, title_filter: str | None, show_prompt: bool) -> None:
         if show_prompt:
             click.echo(f"\n--- SYSTEM ---\n{PANDA_DOC_SUMMARIZE_SYSTEM}\n--- USER ---\n{user_content}\n--- END PROMPT ---")
 
-        resp = await llm.ainvoke(
+        answer = await llm.ainvoke(
             [
                 SystemMessage(content=PANDA_DOC_SUMMARIZE_SYSTEM),
                 HumanMessage(content=user_content),
             ]
         )
-        raw = resp.content.strip()
+        raw = message_text(answer.content).strip()
         click.echo(f"\nRaw LLM response:\n{raw}")
 
         stripped = raw

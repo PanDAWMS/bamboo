@@ -88,11 +88,11 @@ def records(
 
     for table in sorted(spellings):
         cls = rows_of(columns.get(table, frozenset()), lowered)
-        spelled = {n.lower(): n for n in classes.get(cls, ())}
+        attr_of = {n.lower(): n for n in classes.get(cls, ())}
         key = sorted(keys.get(table, ()))
         identity = sorted(sqltext.table_identity(table))
         kind, by = partitions.get(table, ("", ()))
-        entity = by_entity.get(table)
+        held = by_entity.get(table)
         found.append(
             TableRecord(
                 name=table,
@@ -101,18 +101,18 @@ def records(
                 key=key,
                 identity=identity,
                 identity_attrs=[
-                    f"{cls}.{spelled[c]}" for c in identity if c in spelled
+                    f"{cls}.{attr_of[c]}" for c in identity if c in attr_of
                 ],
                 partition_kind=kind,
                 partitioned_by=list(by),
                 partitioned_by_attrs=[
-                    f"{cls}.{spelled[c]}" for c in by if c in spelled
+                    f"{cls}.{attr_of[c]}" for c in by if c in attr_of
                 ],
                 rows_of=cls,
-                spec_class=(entity.spec_class if entity is not None else None)
+                spec_class=(held.spec_class if held is not None else None)
                 or table_class(table)
                 or "",
-                inserted=bool(entity is not None and entity.created_by),
+                inserted=bool(held is not None and held.created_by),
                 family=sorted(families.get(table, set()) - {table}),
                 creation=created.get(cls, []) if cls else [],
                 history_of=HISTORY_TABLES.get(table, ""),
@@ -155,7 +155,7 @@ def _families(
 ) -> dict[str, set[str]]:
     """``{table: its family}``: the tables a read site's texts' ``UNION`` arms read in one place
     (:func:`sqltext.union_places`), joined across statements."""
-    functions: dict[tuple[str, str], list[ast.AST]] = {}
+    functions: dict[tuple[str, str], list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     for module in modules:
         for func, _owner in functions_with_owner(module.tree):
             functions.setdefault((module.rel_path, def_name(func)), []).append(func)
@@ -181,7 +181,7 @@ def _families(
             continue
         texts = {
             run.reading for run in sql.executions(owned[-1]) if run.call.lineno == line
-        }  # type: ignore[arg-type]
+        }
         for text in texts:
             for a, b in sqltext.union_places(text):
                 parent[root(a)] = root(b)

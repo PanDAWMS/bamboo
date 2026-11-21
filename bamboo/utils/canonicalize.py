@@ -53,7 +53,7 @@ async def canonicalize_descriptions(
     """
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    from bamboo.llm import DESCRIPTION_CANONICALIZE_SYSTEM, DESCRIPTION_CANONICALIZE_USER, get_extraction_llm
+    from bamboo.llm import DESCRIPTION_CANONICALIZE_SYSTEM, DESCRIPTION_CANONICALIZE_USER, get_extraction_llm, message_text
     from bamboo.llm.errors import log_llm_failure
     from bamboo.utils.narrator import say
 
@@ -101,7 +101,7 @@ async def canonicalize_descriptions(
                         HumanMessage(content=user_content),
                     ]
                 )
-            raw = response.content.strip()
+            raw = message_text(response.content).strip()
             if raw.startswith("```"):
                 raw = "\n".join(
                     line for line in raw.splitlines() if not line.startswith("```")
@@ -112,7 +112,7 @@ async def canonicalize_descriptions(
                     f"Expected {len(batch)} items, got {len(rewritten)}"
                 )
             for node, orig, new_desc in zip(batch, original_descs, rewritten):
-                if new_desc:
+                if new_desc and orig is not None:  # every node here has a description
                     _cache[orig] = new_desc
                     if new_desc != node.description:
                         node.description = new_desc

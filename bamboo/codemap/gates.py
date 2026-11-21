@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -42,9 +42,12 @@ from bamboo.codemap.models import (
     KEY_SELF_FIELD,
     RUN_CONDITION,
     RUN_KEY_TIME,
+    CallBinding,
     FunctionPrintsNode,
     HistoryPair,
     MapFragment,
+    PathAssign,
+    PathBinding,
     ReachNode,
     ReaderGap,
     required_values,
@@ -736,7 +739,7 @@ def mover_reason(
     sites: list,
     stops: list,
     kind_of_table: dict[str, Optional[str]],
-    row_keys: list = (),
+    row_keys: Sequence = (),
     column: str = "",
 ) -> tuple[str, str]:
     """``(reason, where)`` for one function, about rows of class *spec*.
@@ -1546,12 +1549,12 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                 if not pair.writes:
                     failures.append(f"{at}: leads to no history write")
                 for write in pair.writes:
-                    owner, _sep, line = write.rpartition(":")
+                    owner, _sep, written = write.rpartition(":")
                     target = rows.get(owner)
-                    if target is None or not any(str(held.line) == line for held in target.history):
+                    if target is None or not any(str(held.line) == written for held in target.history):
                         failures.append(f"{at}: write {write} is no history call of a reach row")
-                node = prints.get(pair.runs_in or pair.caller)
-                started = [run.line for run in node.runs] if node is not None else []
+                printing = prints.get(pair.runs_in or pair.caller)
+                started = [run.line for run in printing.runs] if printing is not None else []
                 for line in pair.runs:
                     if line not in started:
                         failures.append(f"{at}: run {line} is not one of {pair.runs_in or 'the caller'}'s runs")
@@ -1559,10 +1562,10 @@ def history_pairs_resolve(fragment: MapFragment) -> GateResult:
                     failures.append(f"{at}: no run, and no reason given")
                 if not pair.row and not pair.row_why:
                     failures.append(f"{at}: row not read, and no reason given")
-                key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
+                history_key = HISTORY_KEYS.get(junction.subject.rpartition(".")[0], "")
                 if pair.row == HISTORY_ROW_CAN:
-                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, key)]
-                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, prints, key)]
+                    failures += [f"{at}: {why}" for why in _row_via_unresolved(pair, rows, history_key)]
+                failures += [f"{at}: {why}" for why in _rekeyed_unresolved(pair, rows, prints, history_key)]
                 if pair.carries and pair.row not in (HISTORY_ROW_SAME, HISTORY_ROW_CAN):
                     failures.append(f"{at}: carries on a {pair.row or 'unread'} row")
                 failures += [
@@ -1701,12 +1704,12 @@ def _row_step(step: str, here: str, held: set[str], rows: dict[str, ReachNode]) 
             return "the call takes no path held", here, held
         return "", here, {back}
     how, path = " ".join(words[1:-1]), words[-1]
-    kind, back = how.removesuffix(" back"), how.endswith(" back")
+    kind, backward = how.removesuffix(" back"), how.endswith(" back")
     bindings = [binding for binding in row.bindings if binding.line == at and binding.how == kind]
     if kind not in STEPPED or not bindings:
         return f"no {kind} binding of the line", here, held
     for binding in bindings:
-        frm, to = (binding.name, binding.path) if back else (binding.path, binding.name)
+        frm, to = (binding.name, binding.path) if backward else (binding.path, binding.name)
         if any((rest := _under(frm, one)) is not None and to + rest == path for one in held):
             return "", here, {path}
     return "the binding takes no path held to it", here, held
@@ -1731,7 +1734,8 @@ def object_records_resolve(fragment: MapFragment) -> GateResult:
         first = anchor.line_start if anchor is not None else None
         last = (anchor.line_end or anchor.line_start) if anchor is not None else None
         hole_lines = {hole.line for hole in row.holes}
-        for record in [*row.assigns, *row.bindings, *row.call_bindings]:
+        records: list[PathAssign | PathBinding | CallBinding] = [*row.assigns, *row.bindings, *row.call_bindings]
+        for record in records:
             checked += 1
             where = f"{row.owner}:{record.line}"
             if first is not None and not first <= record.line <= (last or first):
@@ -2690,7 +2694,7 @@ def _step_names(fragment: MapFragment) -> set[str]:
     return {s.funnel_label for s in fragment.filter_stages if s.funnel_label}
 
 
-def _as_mapped(observed: str, names) -> Optional[str]:
+def _as_mapped(observed: str, names: set[str]) -> Optional[str]:
     """The map's name for a step production called *observed*, if it has one.
 
     Exact first, then the templates: ``AtlasProdTaskBroker`` names one of its

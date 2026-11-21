@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -491,7 +492,7 @@ def parse_brokerage_summary(
 # Add new entries here when a new specialised filter is introduced.
 # The value must be a callable with the same signature as
 # ``filter_analysis_job_brokerage_log``: ``(log_text: str, **kwargs) -> str | None``.
-SOURCE_FILTER_REGISTRY: dict[str, object] = {
+SOURCE_FILTER_REGISTRY: dict[str, Callable[[str], str | None]] = {
     "analysis_job_brokerage_log": filter_analysis_job_brokerage_log,
     "prod_job_brokerage_log": filter_prod_job_brokerage_log,
 }

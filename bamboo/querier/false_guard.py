@@ -31,12 +31,17 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from itertools import pairwise
+from typing import TYPE_CHECKING, cast
 
 from bamboo.querier import asked as A  # noqa: E402
 from bamboo.querier import evaluate as E  # noqa: E402
 from bamboo.querier import rows as R  # noqa: E402
+
+if TYPE_CHECKING:
+    from bamboo.codemap.models import TraceStep
 
 
 def _at(env: E.Env, step) -> E.Env:
@@ -63,7 +68,7 @@ class Element:
 class Origin:
     """One way a value reached a name or a container's key: a binding, the row it ran for, its value there."""
 
-    step: object  # the TraceStep
+    step: TraceStep
     expr: str  # what was bound (the key for a container write)
     element: Element | None
     value: object
@@ -103,7 +108,7 @@ class Walk:
     """The map's walk from a line, read with this instance's values."""
 
     def __init__(
-        self, steps: list, env: E.Env, collections: dict[str, dict], rows: dict[str, list[dict]], ran: list[tuple[str, int]] = (),
+        self, steps: list, env: E.Env, collections: dict[str, dict], rows: dict[str, list[dict]], ran: Sequence[tuple[str, int]] = (),
         ask=None,
     ) -> None:
         self.steps = steps
@@ -159,7 +164,7 @@ class Walk:
                 self.ask(canonical, step, self.env)
             return None
         entity = found["entity"]
-        out = []
+        out: list[Element | None] = []
         for row in self.rows[found["rows"]]:
             ident = next((row[k]["value"] for k in ("lfn", "name", "PandaID") if k in row), "?")
             out.append(Element(var.strip(), entity, row, f"{entity} {ident}"))
@@ -481,7 +486,7 @@ def _setdefault_alone(step) -> bool:
 
 def flat(origins: list[Origin]) -> list[tuple[Origin, Origin]]:
     """``(outer, leaf)`` pairs: a key written as a name, with each binding that name had for the same row."""
-    out = []
+    out: list[tuple[Origin, Origin]] = []
     for o in origins:
         if o.via:
             out.extend((o, leaf) for leaf in o.via)
@@ -502,7 +507,8 @@ class Part:
 
 def part(printed: object, key_side: list[Origin], keys: Keys, walk: Walk) -> tuple[list[str], list[Part]]:
     """Choose the origin of the printed key by value; find the alternatives that were in the key set."""
-    lines, parts = [], []
+    lines: list[str] = []
+    parts: list[Part] = []
     matched = [(o, leaf) for o, leaf in flat(key_side) if leaf.value == printed]
     for o, leaf in flat(key_side):
         mark = "  <- the message's value" if leaf.value == printed else ""
@@ -514,7 +520,7 @@ def part(printed: object, key_side: list[Origin], keys: Keys, walk: Walk) -> tup
         if got.reached is False:
             # the value came out of this write, so it was reached: a row value the test
             # read is not the one the code saw (fetched after the decision)
-            walk.stale.add((got.step.owner, *got.failed))
+            walk.stale.add((got.step.owner, *cast("tuple[str, str]", got.failed)))
             lines.append(f"    {got.where()} reads as not reached ({got.why}), but the message's value came out of it:"
                          " a value that test reads is not what the code saw")
     for alt in o.via:
@@ -531,7 +537,8 @@ def part(printed: object, key_side: list[Origin], keys: Keys, walk: Walk) -> tup
 
 def inputs(guard: str, element: Element | None) -> tuple[list[str], list[str]]:
     """The operands of the guard's atoms, split into the loop's own row (context) and the rest."""
-    context, rest = [], []
+    context: list[str] = []
+    rest: list[str] = []
     for atom in E.atoms(ast.parse(E.strip_annotation(guard), mode="eval").body):
         operands = [atom.left, *atom.comparators] if isinstance(atom, ast.Compare) else [atom]
         for n in operands:
