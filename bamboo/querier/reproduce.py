@@ -33,7 +33,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 TIMEOUT = 30
 UNSAFE = {"open", "__import__", "exec", "eval", "compile", "input", "breakpoint", "exit", "quit"}
@@ -123,7 +123,7 @@ def _stripped(node: ast.FunctionDef) -> ast.FunctionDef:
                 return ast.copy_location(ast.Pass(), n)
             return ast.copy_location(ast.Assign(targets=[n.target], value=n.value), n)
 
-    return ast.fix_missing_locations(Strip().visit(node))
+    return cast(ast.FunctionDef, ast.fix_missing_locations(Strip().visit(node)))
 
 
 # ---------------------------------------------------------------- the child side
@@ -197,7 +197,7 @@ def _child() -> None:
     tree = ast.parse(Path(spec["path"]).read_text())
     node = next(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and n.name == spec["func"] and n.lineno == spec["line"])
-    module = ast.Module(body=[_stripped(node)], type_ignores=[])
+    module = ast.Module(body=[_stripped(cast(ast.FunctionDef, node))], type_ignores=[])
     namespace: dict[str, Any] = {"__builtins__": safe, "__name__": "reproduction"}
 
     class Globals(dict):
@@ -232,7 +232,7 @@ def _line(e: BaseException, filename: str) -> int:
     import traceback
 
     frames = [f for f in traceback.extract_tb(e.__traceback__) if f.filename == filename]
-    return frames[-1].lineno if frames else 0
+    return cast(int, frames[-1].lineno) if frames else 0
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--child"]:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any, cast
 
 #: an arm's outcome that is the time the write runs
 NOW = frozenset({"runtime(CURRENT_DATE)", "runtime(naive_utcnow())"})
@@ -56,7 +57,7 @@ def arms(fragment, subject: str, readings: list, born: Callable[[str, object], b
     """Each line of *readings* (H1's writers of *subject*) with the junction branch the map has for it.  A reading's
     owner is ``file::function``, a junction's ``file::Class.function``: they are matched by the file, the function's
     name and the line.  *born* says whether a junction's branch (its owner, the branch) makes the row."""
-    branches: dict[tuple[str, str, int], tuple[str, object]] = {}
+    branches: dict[tuple[str, str, int], tuple[str, Any]] = {}
     for j in (fragment.junctions if fragment else []):
         if j.subject != subject:
             continue
@@ -74,7 +75,7 @@ def arms(fragment, subject: str, readings: list, born: Callable[[str, object], b
             pairs = b.history or []
             placed = tuple(p for p in pairs if p.row in ON_THE_ROW)
             why = "" if placed else _unplaced(pairs, b.history_hole)
-            out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(owner, b)),
+            out.append(Arm(r.owner, line, b.outcome, placed, why, bool(born and born(cast(str, owner), b)),
                            tuple(getattr(b, "after_prints", None) or ()), getattr(b, "amount", None),
                            getattr(b, "taken_back", None)))
     return out

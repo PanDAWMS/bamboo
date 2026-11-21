@@ -344,7 +344,8 @@ TEMPLATES: dict[str, str] = {
     "rows-carry-no": "the statuslog rows carry no {column}",
     "last-row-holds-another": "the last statuslog row ({status!r} at {time}) holds {column}={value!r}: written after it, and no row closes the window",
     "first-row-no-creation": "the first statuslog row ({status!r} at {time}) holds {column}={value!r} and the row's creation time is not known",
-    "value-held": "{column}={value!r} {since} to the statuslog's {status!r} at {time}, on every machine (no row says which run wrote it)",
+    "value-held": "{column}={value!r} {since} to the statuslog's {status!r} at {time}{kept}, on every machine (no row says which run wrote it)",
+    "held-at-the-rows-after": " (and at its {n} row(s) after it, to {status!r} at {time}: not changed at them)",
     "after-the-row-holding": "after the statuslog's {status!r} at {time} ({column}={value!r})",
     "from-the-creation": "from the row's creation at {created}",
     "value-not-a-time": "{column}={value!r}, which its writers set to the time they run, is not a time",
@@ -473,11 +474,27 @@ TEMPLATES: dict[str, str] = {
     "passes-ran-no-arm": "its {n} pass(es) in the stay ran none of its arms, leaving by one of {left_by} or running on past them",
     "passes-took-none": "its {n} pass(es) in the stay took none of its candidates",
     "a-pass-of-the-caller-on-the-row": "a pass of {caller} on the row from {start} to {end}: none found, and not ruled out: {failing:join=; } (KNOWN_ISSUES.md K55)",
+    # the narrow ask (rerun._by_row_texts, prints_naming's asked)
+    "asked-by-its-row-texts": "  {func}: asked by {n} text(s) of its prints holding the key before its arms (rows {lines:join=, }), not by the key alone over {logs:join=, } across a move of the row",
+    "prints-of-the-key-not-asked": "the arm(s) at {lines:join=, } print the key before the write in no print whose text was asked (rows {asked:join=, })",
+    # P25 (rerun._writer_caller_take)
+    "writer-called-in-a-pass-whose-selection-took-it": "{writer}'s run was called in {caller}'s pass on {machine}, in which its selection {site} handed the row on: its row {line} printed at {at}: {text!r} (P25)",
+    "writer-caller-asked": "what called {writer}'s run: {callers:join=, }'s logs on {machine} before it are asked ({n} ask(s)) (P25)",
+    "writer-caller-not-read": "what called {writer}'s run: no record of a sure row of {callers:join=, } by the key on {machine} from {start} to {end}, so it is not read here (P25)",
+    "for-the-writer-s-caller": "for what called {writer}'s run, from {start} to {end} on {machine}",
+    # H-3 at an H2 row (rerun._jedi_only_off)
+    "not-its-row-a-jedi-writer": "it runs in JEDI's processes alone (every route into it passes {sites:join=, }), and the row was recorded on {host}, a {service} machine as the records say (H-3)",
     "why-the-caller-ran-on-the-row-only": "what made {caller} run on the row: none of its passes from {start} to {end} took it, and what makes it run on the row -- its own selection, or a caller past hop {hop} of the map's two -- is not read here (KNOWN_ISSUES.md K55)",
     "for-an-agent-s-cycles": "for {agent}'s cycles around its call to {callee}, by {strings:rjoin=, } (its lines hold no key), on every machine",
     "ran-when-an-agent-s-cycle-took-it": "{caller} ran on the row when {agent}'s cycles took it: {takes:join=; }{before:join=}{kept:join=}{refused}{idle}; premises: {premises:join=; }{unknown:join=}",
     "for-a-callee-by-a-linked-value": "for {callee}'s runs by the row's linked {column} values, from {start} to {end}",
-    "moved-by-the-caller-through-a-linked-callee": "{caller} moved it: its pass on {machine} ran {callee} (its call at {lines}) from {start}, its run marked by the row's linked {column}, and then {mover} at {at}; of the mover's callers only {caller}'s calls reach {callee} (the map's calls) -- next: what called {caller}; premises: {premises:join=; }",
+    "moved-by-the-caller-through-a-linked-callee": "{caller} moved it: its pass on {machine} ran {callee} (its call at {lines}) from {start}, its run marked by the row's linked {column}, and then {mover} at {at}; of the mover's callers only {caller}'s calls reach {callee} (the map's calls) -- {next}; premises: {premises:join=; }",
+    # P74: what called the caller (rerun._linked_caller_up)
+    "next-what-called": "next: what called {caller}",
+    "next-what-called-asked": "next: what called {caller} -- its callers' logs ({uppers:join=, }) are asked by the linked value ({n} ask(s))",
+    "next-what-called-not-told": "next: what called {caller} -- of its callers ({uppers:join=, }), those with a run printing the linked value there: {ran:join=, }{unread}",
+    "started-by-a-caller-of-the-caller": "{upper}'s run on {machine} from {start}, printing the linked value, started {caller}, running when its pass began (of its other callers, none of {others:join=, } ran there so{unread}); {upper} is called by {callers:join=, } (the map's calls)",
+    "for-the-callers-of-the-caller": "for the callers of {caller} by the linked value, from {start} to {end} on {machine}",
     "for-the-worker-s-passes-before": "for {worker}'s passes on other rows on {machine}, by {head!r} (its run mark before the key)",
     "the-worker-s-passes-before": "; on {machine}, between the selection's return at {start} and that pass at {end}, {worker} ran on {n} other row(s){span}{how}",
     "the-worker-s-passes-before-asked": "; what ran on {machine} between the selection's return at {start} and that pass at {end} is asked",
@@ -514,6 +531,12 @@ TEMPLATES: dict[str, str] = {
     "why-a-cycle-left-it": "; not known: why {machine}'s cycle did not hand the row on after taking it, which {files:join=, } on {machine} from {at} would say",
     "kept-off-by-the-lock": "; the {n} selection(s) on {machines} machine(s) from {start} to {end} did not take it: {callee} skips a row locked less than {span} ago ({term}; {bound}) and its take locks it ({sets})",
     "one-process-a-label": "one process of {agent} selects for {label} on each of {machines:join=, } (no two of its cycles there overlap; two processes taking turns would not show)",
+    # P47 (rerun.message_ways): a way in by a message, read in the map's message receivers
+    "another-way-in-by-a-message": "{worker}'s parts given at {at} by a message ({types:join=, }) are not read: {how:join=; } (P47)",
+    "message-sent-at": "{msg_type} is sent at {senders:join=, }",
+    "message-sent-by-an-unread-type": "no send in PanDA names {msg_type}; {open:join=, } send(s) a type not read, which could carry it",
+    "message-from-outside": "{msg_type} comes from outside PanDA (the map's boundary at {boundary})",
+    "another-way-in-closed": "{worker}'s parts given at {at}: no send in PanDA names {types:join=, }, none of a type not read could carry it, and none comes from outside, by the map's message receivers: none come that way (P47)",
     "another-way-in-not-read": "{worker}'s parts given at {at:join=, } (another way in, a message processor's) are not read",
     # M3(a)-cap: the first selection below its cap after the statement's turn took the row
     "ran-when-the-first-selection-below-its-cap-took-it": "{caller} ran on the row when {agent}'s first selection below its cap took it: {where} returns at most {cap} row(s) and began to return the row at {turn}; from then {full} selection(s) on {machines} machine(s) returned {cap} (rows ahead of it) and {empty} none; {machine}'s cycle {mark} returned {count} at {at}, fewer than {cap}: every row selectable then, and the pass on it began at {first}; premises: {premises:join=; }",
@@ -537,6 +560,10 @@ TEMPLATES: dict[str, str] = {
     "through-no-one-entry": "",
     "no-earlier-write-in-the-stay": "no waker wrote one for its key earlier in the stay (from {since}; their logs searched whole on every machine)",
     "earlier-writes-in-the-stay": "its wakers wrote {n} more for its key earlier in the stay ({at:join=, }), each refused or of another value (not read)",
+    # P20's rest: a caller's moving pass on the object a selection's rows hand it (rerun._caller_waker_turn)
+    "caller-ran-on-a-row-its-wakers-wrote": "{caller} moved it on {after} s after {waker}:{line} wrote {what} at {at} on {machine}{through}, for the {cls} its moving pass ran on ({key}): {caller} is handed a {cls} by the rows {reader} selects, and ran on this one in the stay only in that pass (U2); {earlier}; premises: {premises:join=; }",
+    "the-caller-s-key-from-the-rows": "{caller}'s {name} comes from the rows {reader} selects by the map's ways of it{outside}",
+    "and-an-api-s-request": ", and from {ways:join=, } (an API caller's request, not read)",
     "its-first-pass-after-the-write": "{mover}'s first pass after the write took it (its passes print no key: not read)",
     "h-ran-after-other-rows-moved-on": "{mover} moved it on {delta} s after {where}'s {polarity} term on {inner} began to hold at {at}: the last of the row's {n} {cls} row(s) by {via} to reach one of {values:join=, } was {key}, {value} at {at} on {machine}; the stay from {since} waited on them{later} -- next: {next}; premises: {premises:join=; }",
     "h-made-later": " ({n} {cls} row(s) made after the move not read)",
@@ -548,6 +575,17 @@ TEMPLATES: dict[str, str] = {
     "waited-trigger": "its maker's selection {where} takes rows its wakers write: the last such write for the key in the 10 minutes before the {cls} was made was {waker}:{line}'s ({values:join=, }) at {at} on {machine}",
     "waited-trigger-asked": "its maker's selection {where}: its wakers' writes for the key from {since} to {until} are asked ({n} ask(s))",
     "waited-trigger-unread": "its maker's selection {where}: its wakers' writes are not read ({why})",
+    "waited-trigger-earlier": "its maker's selection {where}: no waker of it wrote for the key from {since} to {until}; the last such write the records show before that was {waker}:{line}'s ({values:join=, }) at {at} on {machine}, {hours} h before the {cls} was made: why the maker made it only then is not read (P76)",
+    # P76's rest (rerun._maker_passes)
+    "for-the-maker-s-passes": "for {maker}'s passes on the key from {start} to {end}, by its marks",
+    "maker-passes": "{maker}'s passes on the key from {since} to {until}: {n}, each printing {common:join=, }; by the rows the rest printed: {ends:join=; }{unsearched}; why they went so is not read (P76)",
+    "maker-pass-group": "{n} printed {rows:join=, }",
+    "maker-row": "{line} ({text})",
+    "maker-passes-asked": "{maker}'s passes on the key from {since} to {until} are asked ({n} ask(s)) (P76)",
+    "maker-passes-none": "{maker}: no pass on the key found from {since} to {until}{unsearched} (P76)",
+    "maker-passes-unread": "{maker}'s passes on the key are not read: {why} (P76)",
+    "no-log-to-hand": "no log of {files:join=, } to hand",
+    "logs-not-all-searched": "; {logs:join=, } not searched over all of it",
     "waited-trigger-none": "its maker's selection {where}: no waker of it wrote for the key from {since} to {until}",
     "waited-life": "{cls} {key}'s history: {life:join=, }",
     "h-next-late": "why {cls} {key}{made} held {held} from {since} to {until}, the longest of its {status} stays in that span",
@@ -564,10 +602,11 @@ TEMPLATES: dict[str, str] = {
     "h-rows-stand-for-the-term-s": "the {inner} rows the term counts are the row's; its {cls} rows by {via} stand for them (which of them hold those rows is not read)",
     "h-a-later-write-not-read": "a write of the term's columns later than its row's move (a queued update) is not read: the move came {delta} s after it",
     "an-outside-writer-of-the-table": "{system} writes {table} too, with no log here",
-    "a-waker-s-write-in-the-stay": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {before}, before {mover} moved it on: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
+    "a-waker-s-write-in-the-stay": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {before}, before {mover} moved it on: none shown in PanDA's logs, searched whole{unshown}{outside} (KNOWN_ISSUES.md K55)",
     "no-row-its-wakers-wrote-in-the-window": "{mover} takes the row only by the rows {reader} selects ({column}), and its wakers ({wakers:join=, }) wrote none for the key from {since} to {until}, the window's end, every one's log searched whole and the table written here alone: no row it takes came for the key (A2s); premises: {premises:join=; }",
     "the-wakers-write-every-row-it-takes": "the map's wakers of {reader} are every writer of the rows it selects",
-    "a-waker-s-write-in-the-window": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {until}, the window's end, with {mover} not having taken it: none in PanDA's logs, searched whole{outside} (KNOWN_ISSUES.md K55)",
+    "a-waker-s-write-in-the-window": "a row {reader} selects written for the key by its wakers ({wakers:join=, }) from {since} to {until}, the window's end, with {mover} not having taken it: none shown in PanDA's logs, searched whole{unshown}{outside} (KNOWN_ISSUES.md K55)",
+    "wakers-unshown-clause": "; of the wakers, {writes:join=, } print no row a run would show their write by, so a write of theirs is not shown absent",
     # M3(a)-2: a time column closed by a run of the row printing it; a pass reaching a selection told by its key line
     "held-as-printed": "{column} held {value} until {at}: {where} printed it then on {machine}, of the row by its key, and the arms that may write it in the stay ({arms:join=, }) write the clock",
     "for-a-print-of-the-column": "from {start} to {end}, for the key: {where}'s print of {column}",
@@ -844,6 +883,12 @@ TEMPLATES: dict[str, str] = {
     "premise-why": "{premise}: {why}",
     # the harness's rnd14 costs: a writer marking no run by the key, over a window holding the row's move
     "shared-logs-not-asked-bare": "  {func}: {logs:join=, } not asked by the key alone from {start} to {end} (the records do not answer it): its marks hold no key, and the window holds the row's move at {move}, where every call of the key's object and of the rows tied to it prints the key there (the logs most functions print into); not searched there",
+    # P65: a guard on a parameter read with the one literal its ways hand
+    "guard-read-by-the-handed-value": "{guard!r} read {got}: every way of {name} hands {value} (the map's ParameterFrom; a caller leaving it hands its default)",
+    # P24: a selection whose rows key a write of a time column, read as having returned the row at that write
+    "took-it-by-its-writes": "took it at {at:join=, }: {arms:join=, } writes {column} on each row it returns, and the column's writes read in the stay show it then",
+    # P56: a writer of the observed value alone
+    "writes-only-the-value": "every write of {subject} the map reads in it writes {observed!r} (at {lines:join=, }): it moves no row off {observed!r}",
     # P70: a mover read from its last take on
     "the-last-take": "{where:join=, } surely held for the row in {n} span(s) from {first} to {end} before the one it was moved on in, and surely failed between them, on the writes the records show{premises}; the value stayed {observed!r} till {moved}: its passes are read from just after the take before the last ({prev}), the last at {end}",
     "the-last-take-premises": ", where {premises:join= and }",
