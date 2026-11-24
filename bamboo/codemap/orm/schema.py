@@ -44,6 +44,9 @@ class DjangoModel:
     defaults: dict[str, str] = field(default_factory=dict)
     db_table: Optional[str] = None
     abstract: bool = False
+    #: declared in a module this corpus does not read (:func:`models_declared_elsewhere`): the class is
+    #: known by the import that names it, its fields and table are not
+    elsewhere: bool = False
 
     def state_fields(self) -> set[str]:
         return {f for f in self.fields if is_state_field(f, f in self.has_choices)}
@@ -153,6 +156,37 @@ def module_constants(tree: ast.Module) -> dict[str, list[str]]:
 
     visit(tree.body, "")
     return constants
+
+
+def models_declared_elsewhere(
+    tree: ast.Module, packages: Iterable[str]
+) -> dict[str, DjangoModel]:
+    """The model classes *tree* imports from another code base's models module, by the name it uses them under.
+
+    ``from monitor_app.models import PandaQueue`` -- at module level or inside a function -- where
+    ``monitor_app`` is one of *packages* names a class whose rows this code can write although another corpus
+    declares it.  A models module is one whose last name is ``models`` or ends ``_models``; a class is a name
+    that starts with a capital and is not all capitals (a constant).  The model holds the module and the class's
+    own name; its fields are not known here.
+    """
+    packages = set(packages)
+    found: dict[str, DjangoModel] = {}
+    if not packages:
+        return found
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        parts = node.module.split(".")
+        if parts[0] not in packages or not (
+            parts[-1] == "models" or parts[-1].endswith("_models")
+        ):
+            continue
+        for alias in node.names:
+            if alias.name[:1].isupper() and not alias.name.isupper():
+                found[alias.asname or alias.name] = DjangoModel(
+                    alias.name, node.module, "", [], elsewhere=True
+                )
+    return found
 
 
 def _is_field_call(func: str) -> bool:

@@ -19,6 +19,9 @@ base calls
 * :func:`~bamboo.codemap.orm.assemble.assemble` for the subjects, entities and
   junctions of its :class:`~bamboo.codemap.models.MapFragment`.
 
-What stays in the plugin is what is project-specific: which packages are read,
-raw-SQL forms, boundaries to other systems.
+The walk over a checkout that makes those calls, with raw ``UPDATE`` text
+mapped to a model by its table, is
+:class:`~bamboo.codemap.orm.plugin.DjangoCodeMapPlugin`.  What stays in a
+plugin is what is project-specific: which packages are read and the boundaries
+to other systems.
 """
