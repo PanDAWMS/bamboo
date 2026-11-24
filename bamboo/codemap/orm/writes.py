@@ -17,6 +17,10 @@ Recognised:
 * A create that leaves a field with a literal ``default=`` out --
   ``.objects.create`` / ``get_or_create`` / ``update_or_create`` or
   ``Model(...)`` -- writes the default (form ``orm.<method>(default)``).
+* A model another code base declares (``DjangoModel.elsewhere``, known by the
+  import that names it) is written through the same forms; its fields are not
+  known, so only a field named like a state is taken, and only where the class
+  is ``certain``.
 * ``F('other')`` as a value is kept as the expression; :mod:`.resolve` reads it
   as a copy of another column.
 
@@ -165,6 +169,10 @@ def scan_function(
     pending: list[tuple[str, str, ast.expr, ast.stmt, Optional[str]]] = []
 
     def wanted(model: DjangoModel, name: str) -> bool:
+        if (
+            model.elsewhere
+        ):  # its fields are not known here: a state is told by its name alone
+            return is_state_field(name, False)
         return name in model.fields and (not state_only or name in model.state_fields())
 
     if cls in models:
