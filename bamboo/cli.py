@@ -941,6 +941,9 @@ cli.add_command(_check_map_main, "check-map")
 from bamboo.scripts.diff_map import main as _diff_map_main
 cli.add_command(_diff_map_main, "diff-map")
 
+from bamboo.scripts.bind_maps import main as _bind_maps_main
+cli.add_command(_bind_maps_main, "bind-maps")
+
 from bamboo.scripts.verify import cmd as _verify_cmd
 cli.add_command(_verify_cmd, "verify")
 
