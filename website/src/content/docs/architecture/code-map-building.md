@@ -211,3 +211,47 @@ There is one condition on adopting a new map, and it is not about the extraction
 **a new map must come with machine-checkable gates against its own system's output.** A
 system that does not emit enough to verify a map about itself should stay a `boundary`.
 See [Verifying the map](/bamboo/architecture/code-map-verification/).
+
+## Binding maps to one another
+
+A map states its boundaries from its own code and leaves the far side unsaid. `bind-maps`
+reads two or more dumps together and says what each crossing reaches:
+
+```bash
+bamboo build-map --dump panda.json
+bamboo build-map --map-id <other> --source-root <checkout> --dump other.json
+bamboo bind-maps panda.json other.json --dump bindings.json
+```
+
+Binding knows nothing of the plugins that built the maps. It reads the fields every map is
+made of, as *ports*: what a map **uses** of another system and what it **offers**. A use
+binds to an offer of the same kind and key.
+
+| Kind | A use is | An offer is | Key |
+|---|---|---|---|
+| `http` | an outbound boundary whose far side is a URL path | an endpoint (`MapFragment.endpoints`), with its inbound boundary | `/api/v1/job/kill` |
+| `call` | an outbound boundary whose far side is a callable of a package | any function the map names | `pandaclient.Client.submitJobs` |
+| `table` | a `shared_table` boundary: `schema.table`, or the model class the code imports | an entity's tables, a table record, and each subject as a column | `jedi_tasks`, or `ai.models.Proposal` |
+| `message` | an outbound `message` boundary and the types sent to it (`message_edges`) | each type a receiver takes (`message_receivers`) | the type, at a destination |
+
+So a plugin for another system needs no binding code: it fills `BoundaryNode`'s
+`interface`, `calls_out`, `carried_values`, `handed_over` and `operations`, and for
+messages `MessageEdge` and `MessageReceiver`. In an outbound boundary a name spelled
+`file::name` is the map's own function and any other name is the far side's, whichever of
+`interface` and `calls_out` holds it.
+
+Three things follow from binding by key rather than by map:
+
+- **A client library is a map like any other.** Code calls `pandaclient.Client.submitJobs`,
+  the library posts to `/api/v1/job/submit`, the server runs a function for that URL. Three
+  maps, two bindings, and no map has to know the other two.
+- **A schema is the deployment's.** `ATLAS_PANDA.JEDI_Tasks` in one installation is
+  `doma_panda.jedi_tasks` in another, so a table binds by its own name and the binding notes
+  both spellings.
+- **What is not connected is listed with the reason** — no map given covers the system, the
+  map that covers it has no such node, the receiver has no handler for the type — and a
+  message type a receiver takes that no map sends is listed apart.
+
+The bindings are an artifact of their own (`--dump`), stamped with each map's version. A
+binding holds between two versions and a dump is one version's, so the maps are not changed.
+A new kind of crossing is a reader of ports (`bamboo.codemap.bind.register_reader`).
