@@ -343,3 +343,34 @@ def test_generic_gates_pass(fragment):
         "structural-attribution-agrees",
     ):
         assert results[name].passed, results[name].failures
+
+
+def test_a_plugin_package_declares_itself(tmp_path, monkeypatch):
+    import sys
+
+    import bamboo.codemap as codemap
+    from bamboo.codemap import factory
+
+    package = tmp_path / "shopmap"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        'CODE_MAP_PLUGIN = ("Shop", "bamboo.codemap.shopmap.plugin:ShopPlugin")\n'
+    )
+    (package / "plugin.py").write_text(
+        "from bamboo.codemap.orm.plugin import DjangoCodeMapPlugin\n\n\n"
+        "class ShopPlugin(DjangoCodeMapPlugin):\n"
+        "    MAP_ID = 'shop'\n"
+    )
+    monkeypatch.setattr(codemap, "__path__", [*codemap.__path__, str(tmp_path)])
+    monkeypatch.setattr(factory, "_discovered", False)
+    monkeypatch.setattr(factory, "_declared", {})
+    monkeypatch.setattr(factory, "_plugins", dict(factory._plugins))
+    try:
+        assert "shop" in factory.available_map_ids()
+        # declared, and its module not imported until the map is asked for
+        assert "bamboo.codemap.shopmap.plugin" not in sys.modules
+        assert factory.get_code_map_plugin("shop").map_id == "shop"
+        assert "panda" in factory.available_map_ids()
+    finally:
+        for name in [m for m in sys.modules if m.startswith("bamboo.codemap.shopmap")]:
+            del sys.modules[name]
