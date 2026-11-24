@@ -44,22 +44,24 @@ def _report(found: Bindings, top: int) -> None:
             f"  {source} -> {target} [{kind}]: {len(whole)} bound"
             + (f", {len(parts)} column(s)" if parts else "")
         )
-        for b in sorted(whole, key=lambda b: (b.key, b.target_node))[:top]:
+        # one row per key and node reached, whichever boundaries of the source cross to it
+        rows: dict[tuple[str, str], list[Binding]] = {}
+        for b in whole:
+            rows.setdefault((b.key, b.target_node), []).append(b)
+        for (key, target), of_row in sorted(rows.items())[:top]:
+            functions = {f for b in of_row for f in b.source_functions}
+            nodes = {b.source_node for b in of_row}
             columns = sorted(
-                {
-                    p.part
-                    for p in parts
-                    if p.key == b.key and p.source_node == b.source_node
-                }
+                {p.part for p in parts if p.key == key and p.source_node in nodes}
             )
             click.echo(
-                f"      {b.key}: {len(b.source_functions)} function(s) -> {b.target_node}"
+                f"      {key}: {len(functions)} function(s) -> {target}"
                 + (f"  [{', '.join(columns)}]" if columns else "")
             )
-            for note in b.notes:
+            for note in sorted({n for b in of_row for n in b.notes}):
                 click.echo(f"          note: {note}")
-        if len(whole) > top:
-            click.echo(f"      … {len(whole) - top} more")
+        if len(rows) > top:
+            click.echo(f"      … {len(rows) - top} more")
         for note, count in sorted(
             Counter(n for p in parts for n in p.notes if "here" not in n).items()
         ):
@@ -70,15 +72,15 @@ def _report(found: Bindings, top: int) -> None:
         Counter((u.map_id, u.reason) for u in found.unbound).items()
     ):
         click.echo(f"  {map_id}: {count} × {reason}")
-        rows = [u for u in found.unbound if (u.map_id, u.reason) == (map_id, reason)]
-        for u in rows[:top]:
+        left = [u for u in found.unbound if (u.map_id, u.reason) == (map_id, reason)]
+        for u in left[:top]:
             detail = u.key or u.part
             click.echo(
                 f"      {u.node}"
                 + (f"  [{detail}]" if detail and detail not in u.node else "")
             )
-        if len(rows) > top:
-            click.echo(f"      … {len(rows) - top} more")
+        if len(left) > top:
+            click.echo(f"      … {len(left) - top} more")
 
     click.echo(f"\ntaken and sent by no map given: {len(found.unreached)}")
     for node, count in sorted(Counter(u.node for u in found.unreached).items()):

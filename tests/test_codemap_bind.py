@@ -71,7 +71,7 @@ def server() -> MapFragment:
         entities=[
             EntityNode(
                 name="server::TaskSpec", map_id="server", derived_from="server 1", spec_class="TaskSpec",
-                tables=["ATLAS_PANDA.JEDI_Tasks"], updated_by=["srv/db.py::set_status"],
+                tables=["ATLAS_PANDA.JEDI_Tasks", "jedi_tasks"], updated_by=["srv/db.py::set_status"],
             ),
         ],
         subjects=[_subject("server", "TaskSpec", "status", vocabulary=["running", "done"])],
@@ -287,6 +287,11 @@ def test_a_call_binds_to_the_library_and_the_library_to_the_server(found):
 
 def test_a_table_binds_by_its_own_name_whatever_the_schema(found):
     tables = {b.key: b for b in _bound(found, B.TABLE) if not b.part}
+    # the server's code spells the table two ways; it is one table and one binding
+    assert (
+        len([b for b in _bound(found, B.TABLE) if b.key == "jedi_tasks" and not b.part])
+        == 1
+    )
     tasks = tables["jedi_tasks"]
     assert tasks.target_node == "server::TaskSpec"
     assert tasks.target_functions == ["srv/db.py::set_status"]

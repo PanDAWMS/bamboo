@@ -354,13 +354,15 @@ def _table_offers(fragment: MapFragment) -> Iterator[Port]:
     path, which is how code of another distribution names the table: by importing the model.
     """
     tables: dict[str, set[str]] = defaultdict(set)  # class -> its tables, as keys
-    spelled: dict[str, str] = {}
     for entity in fragment.entities:
+        offered: set[str] = set()
         for table in entity.tables:
             key, schema = table_key(table)
-            spelled.setdefault(key, table)
             if entity.spec_class:
                 tables[entity.spec_class].add(key)
+            if key in offered:
+                continue  # one table the corpus spells two ways: jedi_tasks, JEDI_Tasks
+            offered.add(key)
             yield Port(
                 map_id=fragment.map_id, role=OFFERS, kind=TABLE, key=key, spelling=table, qualifier=schema,
                 node=entity.name, functions=sorted({*entity.created_by, *entity.updated_by}),
